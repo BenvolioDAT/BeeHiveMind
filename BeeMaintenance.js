@@ -83,7 +83,6 @@ const BeeMaintenance = {
     // Define repair priority (lower number = higher priority)
     const priorityOrder = {
         [STRUCTURE_CONTAINER]: 1,
-        [STRUCTURE_ROAD]: 2,
         [STRUCTURE_RAMPART]: 3,
         [STRUCTURE_WALL]: 4,
         [STRUCTURE_STORAGE]: 5,
@@ -100,6 +99,8 @@ const BeeMaintenance = {
     // Find structures that need repair
     const structuresToRepair = room.find(FIND_STRUCTURES, {
         filter: (structure) => {
+            if (structure.structureType === STRUCTURE_ROAD)
+                return false; //Ignore Roads!
             if (structure.structureType === STRUCTURE_RAMPART)
                 return structure.hits < Math.min(structure.hitsMax, MAX_RAMPART_HEALTH);
             if (structure.structureType === STRUCTURE_WALL)
