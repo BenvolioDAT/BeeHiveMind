@@ -1,9 +1,7 @@
-var roleBuilder_Bee = require('role.Builder_Bee');
-const BeeToolbox = require('BeeToolbox');
-  // Logging Levels
-  const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
-  //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
-  const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
+// Logging Levels
+const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
+//if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
+const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
   
 var roleRepair = {
   run: function (creep) {
@@ -58,7 +56,6 @@ var roleRepair = {
         }
       } else {
         // No repair targets, log a message
-        roleBuilder_Bee.run(creep);
       }
     } else {
       // Find energy on the ground

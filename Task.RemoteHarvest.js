@@ -1,10 +1,9 @@
 var BeeToolbox = require('BeeToolbox');
 const TaskRemoteHarvest = {
     run: function (creep) {
-        if (creep.spawning) return;
         // Try to assign if memory is missing
         if (!creep.memory.targetRoom || !creep.memory.sourceId) {
-        roleForager_Bee.initializeAndAssign(creep);
+        TaskRemoteHarvest.initializeAndAssign(creep);
         // If it still fails, return early to avoid crashy-crash
         if (!creep.memory.targetRoom || !creep.memory.sourceId) {
             console.log(`🚫 Forager ${creep.name} could not be assigned a room/source.`);
@@ -32,25 +31,25 @@ const TaskRemoteHarvest = {
         return;
         }
         // All good, now go on with your bee business
-        roleForager_Bee.updateReturnState(creep);
+        TaskRemoteHarvest.updateReturnState(creep);
         if (!creep.memory.returning) {
-        roleForager_Bee.harvestSource(creep);
+        TaskRemoteHarvest.harvestSource(creep);
         } else {
-        roleForager_Bee.returnToStorage(creep);
+        TaskRemoteHarvest.returnToStorage(creep);
         }
     },
     initializeAndAssign: function (creep) {
-        const targetRooms = roleForager_Bee.getNearbyRoomsWithSources(creep.room.name);
+        const targetRooms = TaskRemoteHarvest.getNearbyRoomsWithSources(creep.room.name);
        //Find least assigned room + assign a fresh source    
         if (!creep.memory.targetRoom || !creep.memory.sourceId) {
-            const leastAssignedRoom = roleForager_Bee.findRoomWithLeastForagers(targetRooms);
+            const leastAssignedRoom = TaskRemoteHarvest.findRoomWithLeastForagers(targetRooms);
             if (!leastAssignedRoom) {
                 console.log(`🚫 Forager ${creep.name} found no suitable room with unclaimed sources.`);
                 return;
             }
             creep.memory.targetRoom = leastAssignedRoom;
             const roomMemory = Memory.rooms[creep.memory.targetRoom];
-            const assignedSource = roleForager_Bee.assignSource(creep, roomMemory);
+            const assignedSource = TaskRemoteHarvest.assignSource(creep, roomMemory);
             if (assignedSource) {
                 creep.memory.sourceId = assignedSource;
                 console.log(`Forager ${creep.name} assigned to source: ${assignedSource} in room: ${creep.memory.targetRoom}`);

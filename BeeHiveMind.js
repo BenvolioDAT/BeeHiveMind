@@ -65,15 +65,18 @@ const BeeHiveMind = {
     // Example: Assign default tasks based on role
         if (!creep.memory.task) {
             if (creep.memory.role === 'Nurse_Bee') {
-            creep.memory.task = 'baseharvest';
-            }// else if (creep.memory.role === 'Forager_Bee') {
-           // creep.memory.task = 'harvest';
-            //} else if (creep.memory.role === 'Courier_Bee') {
-           // creep.memory.task = 'pickup';
-            //} else {
-            // Default fallback
-            //creep.memory.task = 'idle';
-           // }
+                creep.memory.task = 'baseharvest';
+            } else if (creep.memory.role === 'Forager_Bee') {
+                creep.memory.task = 'remoteharvest';
+            } else if (creep.memory.role === 'Builder_Bee') {
+                creep.memory.task = 'builder';
+            } else if (creep.memory.role === 'Courier_Bee') {
+                creep.memory.task = 'courier';         
+            } else if (creep.memory.role === 'Queen') {
+                creep.memory.task = 'queen';
+            } else if (creep.memory.role === 'Scout') {
+                creep.memory.task = 'scout';
+            }
         }
     },
 

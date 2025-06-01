@@ -11,8 +11,12 @@
 //  /tasks/build.js
 //  /tasks/repair.js
 // -------------------------------------------
-const BaseHarvest = require('./Task.BaseHarvest');
-const RemoteHarvest = require ('./Task.RemoteHarvest');
+const TaskBaseHarvest = require('./Task.BaseHarvest');
+const TaskRemoteHarvest = require ('./Task.RemoteHarvest');
+const TaskBuilder = require ('./Task.Builder');
+const TaskCourier = require ('./Task.Courier');
+const TaskQueen = require ('./Task.Queen');
+const TaskScout = require ('./Task.Scout');
 // -------------------------------------------
 // The task registry: A central lookup table
 // Maps task names (as strings) to their corresponding task modules
@@ -20,8 +24,12 @@ const RemoteHarvest = require ('./Task.RemoteHarvest');
 // For example, if you set `creep.memory.task = 'harvest'`, this will call the harvest module
 // -------------------------------------------
 const tasks = {
-  'baseharvest': BaseHarvest,
-  'remoteharvest': RemoteHarvest,
+  'baseharvest': TaskBaseHarvest,
+  'remoteharvest': TaskRemoteHarvest,
+  'builder': TaskBuilder,
+  'courier': TaskCourier,
+  'queen': TaskQueen,
+  'scout': TaskScout,
   // You can add more tasks here as you create new modules
   // For example: 'upgrade': upgradeModule,
 };
