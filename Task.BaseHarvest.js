@@ -1,7 +1,7 @@
 var BeeToolbox = require('BeeToolbox');
 const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
 const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
-const BaseHarvest = {
+const TaskBaseHarvest = {
     run: function(creep) { 
           // Handle harvesting logic
           if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
@@ -177,4 +177,4 @@ function assignSource(creep) {
     return assignedSource.id; // Return the ID of the assigned source
 }
 
-module.exports = BaseHarvest;
+module.exports = TaskBaseHarvest;

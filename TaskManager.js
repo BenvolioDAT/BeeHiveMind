@@ -11,7 +11,8 @@
 //  /tasks/build.js
 //  /tasks/repair.js
 // -------------------------------------------
-const BaseHarvest = require('./BaseHarvest');
+const BaseHarvest = require('./Task.BaseHarvest');
+const RemoteHarvest = require ('./Task.RemoteHarvest');
 // -------------------------------------------
 // The task registry: A central lookup table
 // Maps task names (as strings) to their corresponding task modules
@@ -20,6 +21,7 @@ const BaseHarvest = require('./BaseHarvest');
 // -------------------------------------------
 const tasks = {
   'baseharvest': BaseHarvest,
+  'remoteharvest': RemoteHarvest,
   // You can add more tasks here as you create new modules
   // For example: 'upgrade': upgradeModule,
 };
