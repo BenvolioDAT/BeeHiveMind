@@ -1,0 +1,87 @@
+var BeeToolbox = require('BeeToolbox'); // Import utility functions for bees
+
+const roleCourier_Bee = {
+  // Main logic loop for the Courier_Bee role
+  run: function (creep) {
+    if (creep.spawning) return; // Skip logic if creep is still spawning
+    BeeToolbox.assignContainerFromMemory(creep); // Assign a nearby container to the courier if none assigned
+    // Update transfer state based on energy storage
+    if (creep.memory.transferring && creep.store[RESOURCE_ENERGY] === 0) {
+      creep.memory.transferring = false; // Switch to collecting if out of energy
+    }
+    if (!creep.memory.transferring && creep.store.getFreeCapacity() === 0) {
+      creep.memory.transferring = true; // Switch to transferring when full
+    }
+    // Run collect or deliver logic based on state
+    if (creep.memory.transferring) {
+      roleCourier_Bee.deliverEnergy(creep);
+    } else {
+      roleCourier_Bee.collectEnergy(creep);
+    }
+  },
+
+  // 🐝 Energy collection logic: from containers, dropped energy, or fallback
+  collectEnergy: function (creep) {
+    // If no container assigned, attempt to assign one
+    if (!creep.memory.assignedContainer) {
+      const containers = creep.room.find(FIND_STRUCTURES, {filter: (s) => s.structureType === STRUCTURE_CONTAINER && s.pos.findInRange(FIND_SOURCES, 1).length > 0});
+
+      if (containers.length > 0) {
+        // Count how many Couriers are already assigned to each container
+        const containerUsage = _.countBy(
+          _.filter(Game.creeps, c => c.memory.role === 'Courier_Bee' && c.memory.assignedContainer),
+          c => c.memory.assignedContainer
+        );
+        // Sort containers by fewest Couriers assigned (balance load)
+        containers.sort((a, b) =>
+          (containerUsage[a.id] || 0) - (containerUsage[b.id] || 0)
+        );
+
+        // Assign the least-used container to this Courier
+        creep.memory.assignedContainer = containers[0].id;
+        console.log(`🐝 Courier ${creep.name} assigned to container ${containers[0].id}`);
+      }
+    }
+    // If a container is assigned, interact with it
+    if (creep.memory.assignedContainer) {
+      const container = Game.getObjectById(creep.memory.assignedContainer);
+      if (container) {
+        // Look for dropped energy near the container (within 1 tile)
+        const dropped = container.pos.findInRange(FIND_DROPPED_RESOURCES, 1, {
+          filter: r => r.resourceType === RESOURCE_ENERGY
+        });
+        if (dropped.length > 0) {
+          // Pick up the largest dropped energy pile
+          const target = _.max(dropped, r => r.amount);
+          if (creep.pickup(target) === ERR_NOT_IN_RANGE) {
+            BeeToolbox.BeeTravel(creep, target);
+            //creep.moveTo(target, {reusePath: 10, visualizePathStyle:{opacity: .8 ,stroke: '#00d4f5',lineStyle: 'dashed'}});
+          }
+          return; // Skip to next tick
+        }
+        // If no dropped energy, try withdrawing from the container itself
+        if (container.store[RESOURCE_ENERGY] > 0) {
+          if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            BeeToolbox.BeeTravel(creep, container)
+            //creep.moveTo(container, {reusePath: 10, visualizePathStyle:{opacity: .8 ,stroke: '#00d4f5',lineStyle: 'dashed'}});
+          }
+          return; // Done for this tick
+        }
+      }
+    }
+    // If no container/dropped energy, fallback to general energy collection
+    BeeToolbox.collectEnergy(creep);
+  }, 
+  // 📦 Deliver energy to structures based on priority
+  deliverEnergy: function (creep) {
+    BeeToolbox.deliverEnergy(creep, [
+      STRUCTURE_EXTENSION,
+      STRUCTURE_SPAWN,
+      STRUCTURE_TOWER,
+      STRUCTURE_STORAGE,
+      STRUCTURE_CONTAINER
+    ]);
+  }
+};
+
+module.exports = roleCourier_Bee; // Export the role for use in the HiveMind
