@@ -37,7 +37,7 @@ module.exports.loop = function () {
     roleLinkManager.run();
     // Draw visuals such as CPU usage, creep data, and repair info
     BeeVisuals.drawVisuals();
-    BeeVisuals.drawEnergyBar('W39S47');
+    BeeVisuals.drawEnergyBar();
     // Handle repair target list updates every 5 ticks
     if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
     Memory.GameTickRepairCounter++;

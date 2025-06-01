@@ -5,6 +5,7 @@ var roleBuilder_Bee = require('role.Builder_Bee'); // Import Builder Bee role fo
   const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
   //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
   const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs  
+
 const BeeVisuals = {
     // Main function to draw visuals on the screen each tick
     drawVisuals: function () {
@@ -65,9 +66,10 @@ const BeeVisuals = {
         }
         ////////////////////////////////////////////
     },
-        drawEnergyBar: function(roomName) {
-        const room = Game.rooms[roomName];
-        if (!room) return;
+        drawEnergyBar: function() {
+        const roomName = Memory.firstSpawnRoom; // The room used for displaying visuals (likely the "main" room)
+        if (!roomName || !Game.rooms[roomName]) return; // If no valid room, skip drawing
+        const room = Game.rooms[roomName]; // Get the room object    
 
         const visuals = new RoomVisual(roomName);
         const energy = room.energyAvailable;
@@ -102,8 +104,6 @@ const BeeVisuals = {
             valign: 'middle'
         });
     },
-
-
 };
 // Export the BeeVisuals module so other files can use it
 module.exports = BeeVisuals;

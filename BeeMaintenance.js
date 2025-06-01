@@ -147,54 +147,6 @@ const BeeMaintenance = {
     return Memory.rooms[room.name].repairTargets;
 }
 
-
-    // Finds structures in a room that need repair, within custom hitpoint limits
-    /*findStructuresNeedingRepair: function (room) {
-        if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {}; // Ensure room memory exists
-
-        const repairTargets = Memory.rooms[room.name].repairTargets || []; // Get existing repair targets
-        const MAX_RAMPART_HEALTH = 30000; // Cap for rampart repairs
-        const MAX_WALL_HEALTH = 30000; // Cap for wall repairs
-
-        // Find structures that need repair, respecting caps for walls/ramparts
-        const structuresToRepair = room.find(FIND_STRUCTURES, {
-            filter: (structure) => {
-                if (structure.structureType === STRUCTURE_RAMPART)
-                    return structure.hits < Math.min(structure.hitsMax, MAX_RAMPART_HEALTH);
-                if (structure.structureType === STRUCTURE_WALL)
-                    return structure.hits < Math.min(structure.hitsMax, MAX_WALL_HEALTH);
-                return structure.hits < structure.hitsMax; // For other structures, repair if damaged
-            }
-        });
-
-        // Update or add targets to the memory list
-        structuresToRepair.forEach(structure => {
-            const existing = repairTargets.find(t => t.id === structure.id);
-            if (existing) {
-                existing.hits = structure.hits; // Update hitpoints
-            } else {
-                repairTargets.push({
-                    id: structure.id,
-                    hits: structure.hits,
-                    hitsMax: structure.hitsMax,
-                    type: structure.structureType
-                });
-            }
-        });
-
-        // Filter out structures that no longer need repairs (fully repaired or gone)
-        Memory.rooms[room.name].repairTargets = repairTargets.filter(t => {
-            const structure = Game.getObjectById(t.id);
-            if (!structure) return false; // Remove if no longer exists
-            if ([STRUCTURE_WALL, STRUCTURE_RAMPART].includes(structure.structureType)) {
-                const max = structure.structureType === STRUCTURE_WALL ? MAX_WALL_HEALTH : MAX_RAMPART_HEALTH;
-                return structure.hits < Math.min(structure.hitsMax, max);
-            }
-            return structure.hits < structure.hitsMax;
-        });
-
-        return Memory.rooms[room.name].repairTargets; // Return filtered list
-    }*/
 };
 
 module.exports = BeeMaintenance; // Export the module for use in main.js
