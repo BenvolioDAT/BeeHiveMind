@@ -143,11 +143,19 @@ var BeeToolbox = {
         // Find nearest hostile creep
         const target = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
         if (target) return target;
-        // If no hostile creeps, look for structures that block progress (walls, enemy ramparts)
-       // const barrier = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-       //     filter: s => (s.structureType === STRUCTURE_WALL || (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic)) && s.hits > 0
-       // });
-        //return barrier;
+
+        //Next, target invader core if present
+        const invaderCore = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+            filter: s => s.structureType === STRUCTURE_INVADER_CORE && s.hits > 0
+        });
+        if (invaderCore) return invaderCore;
+
+        
+         //If no hostile creeps, look for structures that block progress (walls, enemy ramparts)
+        const barrier = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+            filter: s => (s.structureType === STRUCTURE_WALL || (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic)) && s.hits > 0
+        });
+        return barrier;
     },
 
     // Determines if an attacker should wait for a medic to catch up
