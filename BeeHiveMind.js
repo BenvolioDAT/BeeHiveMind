@@ -117,9 +117,9 @@ const BeeHiveMind = {
             { name: 'Queen', limit: limits.Queen_Number_Limit, Body: spawnLogic.Generate_Queen_Body },
             { name: 'Winged_Archer', limit: limits.Winged_Archer_Number_Limit, Body: spawnLogic.Generate_Winged_Archer_Body },
             { name: 'Apiary_Medics', limit: limits.Apiary_Medics_Number_Limit, Body: spawnLogic.Generate_Apiary_Medic_Body },
-            { name: 'Builder_Bee', limit: limits.Builder_Bee_Number_Limit, Body: spawnLogic.Generate_Builder_Bee_Body },
-            { name: 'Nectar_Bee', limit: limits.Nectar_Bee_Number_Limit, Body: spawnLogic.Generate_Nectar_Bee_Body },
-            { name: 'repair', limit: limits.Repair_Number_Limit, Body: spawnLogic.Generate_Repair_Body },
+            //{ name: 'Builder_Bee', limit: limits.Builder_Bee_Number_Limit, Body: spawnLogic.Generate_Builder_Bee_Body },
+            //{ name: 'Nectar_Bee', limit: limits.Nectar_Bee_Number_Limit, Body: spawnLogic.Generate_Nectar_Bee_Body },
+            //{ name: 'repair', limit: limits.Repair_Number_Limit, Body: spawnLogic.Generate_Repair_Body },
             { name: 'Scout', limit: limits.Scout_Number_Limit, Body: spawnLogic.Generate_Scout_Body },
             { name: 'HoneyGuard', limit: limits.HoneyGuard_Number_Limit, Body: spawnLogic.Generate_HoneyGuard_Body },
             { name: 'Siege_Bee', limit: limits.Siege_Bee_Number_Limit, Body: spawnLogic.Generate_Siege_Bee_Body },
@@ -152,7 +152,7 @@ const BeeHiveMind = {
         // Configurable quotas for each task type
         const workerTaskLimits = {
             harvest: 0,
-            builder: 1,
+            builder: 2,
             nectar: 1,
             repair: 0,
             courier: 0

@@ -72,6 +72,79 @@ const TaskCourier = {
     // If no container/dropped energy, fallback to general energy collection
     BeeToolbox.collectEnergy(creep);
   }, 
+/////WIP collectEnergy new format not yet change added 2 as placeholder
+  collectEnergy2: function (creep) {
+    if (!creep.memory.state) {
+        creep.memory.state = 'pickup';
+    }
+
+    if (creep.memory.state === 'pickup') {
+        // If no container assigned, find one
+        if (!creep.memory.assignedContainer) {
+            // [Insert your balanced container assignment code here]
+        }
+
+        // Go to assigned container and withdraw/pickup
+        const container = Game.getObjectById(creep.memory.assignedContainer);
+        if (container) {
+            // (Optional) Draw current container energy
+            creep.room.visual.text(
+                `${container.store[RESOURCE_ENERGY]}/${container.store.getCapacity(RESOURCE_ENERGY)}`,
+                container.pos.x, container.pos.y - 0.7,
+                {align: 'center', color: '#ffaa00'}
+            );
+
+            if (creep.store.getFreeCapacity() === 0 || container.store[RESOURCE_ENERGY] === 0) {
+                // Switch to delivery when full or nothing left
+                creep.memory.state = 'deliver';
+                creep.memory.assignedContainer = undefined; // Release for others
+            } else if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                BeeToolbox.BeeTravel(creep, container);
+            }
+            return;
+        } else {
+            // Lost the container? Reset to try again
+            creep.memory.assignedContainer = undefined;
+        }
+    }
+
+    if (creep.memory.state === 'deliver') {
+        // Find storage or target (e.g., Spawn, Storage, etc.)
+        let target = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+            filter: s =>
+                (s.structureType === STRUCTURE_SPAWN ||
+                 s.structureType === STRUCTURE_EXTENSION ||
+                 s.structureType === STRUCTURE_STORAGE) &&
+                s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+        });
+        if (target) {
+            if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                BeeToolbox.BeeTravel(creep, target);
+            }
+            if (creep.store[RESOURCE_ENERGY] === 0) {
+                creep.memory.state = 'pickup'; // Go get more!
+            }
+        } else {
+            // Nowhere to deliver? Idle
+            creep.memory.state = 'idle';
+        }
+    }
+},
+/////WIP
+    deliverEnergy2: function(creep) {
+        if (creep.memory.state === 'deliver') {
+        BeeToolbox.deliverEnergy(creep, [
+            STRUCTURE_EXTENSION,
+            STRUCTURE_SPAWN,
+            STRUCTURE_TOWER,
+            STRUCTURE_STORAGE,
+            STRUCTURE_CONTAINER
+        ]);
+        if (creep.store[RESOURCE_ENERGY] === 0) {
+            creep.memory.state = 'pickup'; // Ready for more!
+        }
+    }
+    },
   // 📦 Deliver energy to structures based on priority
   deliverEnergy: function (creep) {
     BeeToolbox.deliverEnergy(creep, [
