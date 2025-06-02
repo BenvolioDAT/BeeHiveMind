@@ -76,6 +76,10 @@ const BeeHiveMind = {
                 creep.memory.task = 'queen';
             } else if (creep.memory.role === 'Scout') {
                 creep.memory.task = 'scout';
+            } else if (creep.memory.role === 'repair') {
+                creep.memory.task = 'repair';
+            } else if (creep.memory.role === 'Nectar_Bee') {
+                creep.memory.task = 'nectar';
             }
         }
     },

@@ -4,7 +4,6 @@ const roleHoneyGuard = {
   // Main function executed each tick
   run: function (creep) {
     if (creep.spawning) return; // Skip logic if creep is still spawning
-
     // Prioritize self-healing if injured
     if (creep.hits < creep.hitsMax) {
       creep.heal(creep);

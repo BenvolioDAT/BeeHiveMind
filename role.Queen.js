@@ -1,5 +1,4 @@
 const TaskManager = require('TaskManager');
-var BeeToolbox = require('BeeToolbox');
 const roleQueen = {
   run: function (creep) {
     // Skip execution if the creep is still spawning

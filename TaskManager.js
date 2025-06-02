@@ -17,6 +17,8 @@ const TaskBuilder = require ('./Task.Builder');
 const TaskCourier = require ('./Task.Courier');
 const TaskQueen = require ('./Task.Queen');
 const TaskScout = require ('./Task.Scout');
+const TaskRepair = require ('./Task.Repair');
+const TaskNectar = require ('./Task.Nectar');
 // -------------------------------------------
 // The task registry: A central lookup table
 // Maps task names (as strings) to their corresponding task modules
@@ -30,6 +32,8 @@ const tasks = {
   'courier': TaskCourier,
   'queen': TaskQueen,
   'scout': TaskScout,
+  'repair': TaskRepair,
+  'nectar': TaskNectar,
   // You can add more tasks here as you create new modules
   // For example: 'upgrade': upgradeModule,
 };
