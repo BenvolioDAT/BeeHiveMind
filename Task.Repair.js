@@ -51,6 +51,7 @@ var TaskRepair = {
           Memory.rooms[creep.room.name].repairTargets.shift();
         }
       } else {
+        creep.memory.task = undefined;
         // No repair targets, log a message
       }
     } else {

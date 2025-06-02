@@ -38,6 +38,26 @@ const tasks = {
   // For example: 'upgrade': upgradeModule,
 };
 
+function colonyNeeds() {
+    // Count up all jobs for the colony this tick (simple version)
+    let need = {
+        harvest: 0,
+        builder: 2,
+        repair: 0,
+        courier: 0,
+        nectar: 2,
+        // Add more tasks as needed
+    };
+    let counts = _.countBy(Game.creeps, c => c.memory.task);
+    let shortage = {};
+    for (let key in need) {
+        if ((counts[key] || 0) < need[key]) {
+            shortage[key] = need[key] - (counts[key] || 0);
+        }
+    }
+    return shortage;
+}
+
 // -------------------------------------------
 // Export the TaskManager object as a module
 // The TaskManager has a single method: `run(creep)`
@@ -60,5 +80,19 @@ module.exports = {
       // This is useful for debugging: you know the creep's task was not recognized
       creep.say('No task!');
     }
-  }
+  },
+    isTaskNeeded(taskName) {
+        // Only keep working if there are still needs for your task
+        let needs = colonyNeeds();
+        return (needs[taskName] || 0) > 0;
+    },
+
+    getHighestPriorityTask(creep) {
+        // Return the most needed task, or 'harvest' if all else fails
+        let needs = colonyNeeds();
+        for (let t of ['harvest', 'repair', 'builder', 'courier', 'nectar']) {
+            if (needs[t] && needs[t] > 0) return t;
+        }
+        return 'idle';
+    }
 };

@@ -12,6 +12,7 @@ var roleWinged_Archer = require('role.Winged_Archer');
 var roleApiary_Medics = require('role.Apiary_Medics');
 var spawnLogic = require('spawn.logic');
 var roleSiege_Bee = require('role.Siege_Bee');
+var roleWorker_Bee = require('role.Worker_Bee');
 
 // Creep role function mappings, wrapping their run methods for easier execution
 var creepRoles = {
@@ -27,6 +28,7 @@ var creepRoles = {
     Winged_Archer: roleWinged_Archer.run,
     Apiary_Medics: roleApiary_Medics.run,
     Siege_Bee: roleSiege_Bee.run,
+    Worker_Bee: roleWorker_Bee.run,
 };
 
 // Core BeeHiveMind object to manage creeps, rooms, and spawning
@@ -49,6 +51,7 @@ const BeeHiveMind = {
 
         // Handle spawning logic across rooms
         BeeHiveMind.manageSpawns();
+        BeeHiveMind.manageSpawns2();
 
         // Placeholder for managing remote operations (scouting, remote mining, claiming)
         BeeHiveMind.manageRemoteOps();
@@ -144,6 +147,40 @@ const BeeHiveMind = {
             }
         }
     },
+
+    manageSpawns2() {
+        // Configurable quotas for each task type
+        const workerTaskLimits = {
+            harvest: 0,
+            builder: 1,
+            nectar: 1,
+            repair: 0,
+            courier: 0
+        };
+
+        // Count how many creeps are assigned to each task (across all rooms)
+        const roleCounts = _.countBy(Game.creeps, c => c.memory.task);
+
+        // Loop through your spawns and fill missing task slots
+        for (const spawnName in Game.spawns) {
+            const spawner = Game.spawns[spawnName];
+            if (spawner.spawning) continue; // Skip if already spawning
+
+            // Try to find a missing task to fill
+            for (const [task, limit] of Object.entries(workerTaskLimits)) {
+                const count = roleCounts[task] || 0;
+                if (count < limit) {
+                    const spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
+                    const didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+                    if (didSpawn) {
+                        // Only try to spawn one creep per tick per spawn
+                        break;
+                    }
+                }
+            }
+        }
+    },
+    
 
     // Placeholder for remote operations like foraging, scouting, claiming
     manageRemoteOps() {

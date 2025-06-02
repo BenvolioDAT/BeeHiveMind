@@ -15,7 +15,7 @@ var BODYPART_COST = {
   };
   function getBodyForTask (task, Calculate_Spawn_Resource) {
     switch (task) {
-      case 'build':
+      case 'builder':
         return Generate_Builder_Bee_Body(Calculate_Spawn_Resource);
       case 'repair':
         return Generate_Repair_Body(Calculate_Spawn_Resource);
