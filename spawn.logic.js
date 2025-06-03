@@ -16,15 +16,17 @@ var BODYPART_COST = {
   function getBodyForTask (task, Calculate_Spawn_Resource) {
     switch (task) {
       case 'builder':
-        return Generate_Builder_Bee_Body(Calculate_Spawn_Resource);
+        return Generate_Builder_Body(Calculate_Spawn_Resource);
       case 'repair':
         return Generate_Repair_Body(Calculate_Spawn_Resource);
-      case 'harvest':
-        return Generate_Forager_Bee_Body(Calculate_Spawn_Resource);
-      case 'upgrade':
-        return Generate_Nectar_Bee_Body(Calculate_Spawn_Resource);
+      case 'baseharvest':
+        return Generate_BaseHarvest_Body(Calculate_Spawn_Resource);
+      case 'upgrader':
+        return Generate_Upgrader_Body(Calculate_Spawn_Resource);
       case 'courier':
-        return Generate_Courier_Bee_Body(Calculate_Spawn_Resource);
+        return Generate_Courier_Body(Calculate_Spawn_Resource);
+      case 'remoteharvest':
+        return Generate_RemoteHarvest_Body(Calculate_Spawn_Resource);
     }
     
   }
@@ -71,10 +73,10 @@ function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
 if (currentLogLevel >= LOG_LEVEL.DEBUG) {
 console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
 }
-// 🧱 Body configurations per role
-// Each role has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
+// 🧱 Body configurations per task
+// Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
 // Role-specific configurations
-const Nurse_Bee_Config = [
+const BaseHarvest_Config = [
   [WORK, WORK, WORK, WORK, WORK, WORK, WORK, MOVE,  MOVE, MOVE, MOVE, MOVE, CARRY],
   [WORK, WORK, WORK, WORK, WORK, WORK,  MOVE, MOVE, MOVE, MOVE, CARRY],
   [WORK, WORK, WORK, WORK, WORK, MOVE, MOVE, MOVE, CARRY],
@@ -85,7 +87,7 @@ const Nurse_Bee_Config = [
   [WORK, MOVE, CARRY],
 ];
 // Role-specific configurations
-const Courier_Bee_Config = [
+const Courier_Config = [
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
@@ -104,7 +106,7 @@ const Courier_Bee_Config = [
   [CARRY, MOVE],
 ];
 // Role-specific configurations
-const Builder_Bee_Config = [
+const Builder_Config = [
   [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
   [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
   [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
@@ -117,7 +119,7 @@ const Builder_Bee_Config = [
   [WORK, CARRY, MOVE],
 ];
 // Role-specific configurations
-const Nectar_Bee_Config = [
+const Upgrader_Config = [
   [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
   [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
   [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
@@ -153,7 +155,7 @@ const Queen_Config = [
   [CARRY, MOVE],
 ];
 // Role-specific configurations
-const Forager_Bee_Config = [
+const RemoteHarvest_Config = [
   //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
   //[WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
   //[WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE],
@@ -209,24 +211,24 @@ const Apiary_Medic_Config = [
 const Siege_Bee_Config = [
   [WORK, MOVE],
 ];
-// Array containing all role configurations
+// Array containing all task configurations
 const configurations = [
-  { role: 'Nurse_Bee', body: Nurse_Bee_Config },
-  { role: 'Courier_Bee', body: Courier_Bee_Config },
-  { role: 'Builder_Bee', body: Builder_Bee_Config },
-  { role: 'Nectar_Bee', body: Nectar_Bee_Config },
-  { role: 'Forager_Bee', body: Forager_Bee_Config },
-  { role: 'Queen', body: Queen_Config },
-  { role: 'repair', body: Repair_Config },
-  { role: 'Scout', body: Scout_Config },
-  { role: 'HoneyGuard' , body: HoneyGuard_Config },
-  { role: 'Winged_Archer' , body: Winged_Archer_Config },
-  { role: 'Apiary_Medic' , body: Apiary_Medic_Config },
-  { role: 'Siege_Bee' , body: Siege_Bee_Config },
+  { task: 'baseharvest', body: BaseHarvest_Config },
+  { task: 'courier', body: Courier_Config },
+  { task: 'builder', body: Builder_Config },
+  { task: 'upgrader', body: Upgrader_Config },
+  { task: 'remoteharvest', body: RemoteHarvest_Config },
+  { task: 'Queen', body: Queen_Config },
+  { task: 'repair', body: Repair_Config },
+  { task: 'Scout', body: Scout_Config },
+  { task: 'HoneyGuard' , body: HoneyGuard_Config },
+  { task: 'Winged_Archer' , body: Winged_Archer_Config },
+  { task: 'Apiary_Medic' , body: Apiary_Medic_Config },
+  { task: 'Siege_Bee' , body: Siege_Bee_Config },
 ];
 // 🔍 Selects the largest body config that fits within current available energy
-function Generate_Body_From_Config(role,Calculate_Spawn_Resource) {
-  const config = configurations.find(entry => entry.role === role);
+function Generate_Body_From_Config(task,Calculate_Spawn_Resource) {
+  const config = configurations.find(entry => entry.task === task);
   if (config) {
     let selectedConfig;
     let bodyCost; // Declare bodyCost here
@@ -242,31 +244,31 @@ function Generate_Body_From_Config(role,Calculate_Spawn_Resource) {
     }
     if (selectedConfig) {
       if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`Available energy for ${role}: ${Calculate_Spawn_Resource}`);
+        console.log(`Available energy for ${task}: ${Calculate_Spawn_Resource}`);
       }
       return selectedConfig;
     } else {
       if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`Insufficient energy to spawn ${role}.`);
+      console.log(`Insufficient energy to spawn ${task}.`);
       }
     }
   } else {
     if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`Configuration not found for role: ${role}`);
+    console.log(`Configuration not found for task: ${task}`);
     }
   }
   return [];
 }
 // Function to generate creep bodys form configs
 // 🔧 Role-specific body generators, used by main loop
-function Generate_Courier_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Courier_Bee',Calculate_Spawn_Resource);
+function Generate_Courier_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('courier',Calculate_Spawn_Resource);
 }
-function Generate_Nurse_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Nurse_Bee',Calculate_Spawn_Resource);
+function Generate_BaseHarvest_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('baseharvest',Calculate_Spawn_Resource);
 }
-function Generate_Builder_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Builder_Bee',Calculate_Spawn_Resource);
+function Generate_Builder_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('builder',Calculate_Spawn_Resource);
 }
 function Generate_Repair_Body(Calculate_Spawn_Resource) {
   return Generate_Body_From_Config('repair',Calculate_Spawn_Resource);
@@ -274,11 +276,11 @@ function Generate_Repair_Body(Calculate_Spawn_Resource) {
 function Generate_Queen_Body(Calculate_Spawn_Resource) {
   return Generate_Body_From_Config('Queen',Calculate_Spawn_Resource);
 }
-function Generate_Forager_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Forager_Bee',Calculate_Spawn_Resource);
+function Generate_RemoteHarvest_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('remoteharvest',Calculate_Spawn_Resource);
 }
-function Generate_Nectar_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Nectar_Bee',Calculate_Spawn_Resource);
+function Generate_Upgrader_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('upgrader',Calculate_Spawn_Resource);
 }
 function Generate_Scout_Body(Calculate_Spawn_Resource) {
   return Generate_Body_From_Config('Scout', Calculate_Spawn_Resource);
@@ -351,13 +353,13 @@ function Spawn_Creep_Role(spawn, role_name, generateBodyFunction, Spawn_Resource
     configurations,
     Generate_Body_From_Config,
     Spawn_Creep_Role,
-    Generate_Courier_Bee_Body,
-    Generate_Nurse_Bee_Body,
-    Generate_Nectar_Bee_Body,
-    Generate_Builder_Bee_Body,
+    Generate_Courier_Body,
+    Generate_BaseHarvest_Body,
+    Generate_Upgrader_Body,
+    Generate_Builder_Body,
     Generate_Repair_Body,
     Generate_Queen_Body,
-    Generate_Forager_Bee_Body,
+    Generate_RemoteHarvest_Body,
     Generate_Scout_Body,
     Generate_HoneyGuard_Body,
     Generate_Winged_Archer_Body,

@@ -1,7 +1,7 @@
 var BeeToolbox = require('BeeToolbox'); // Import utility functions for bees
 
 const TaskCourier = {
-  // Main logic loop for the Courier_Bee role
+  // Main logic loop for the TaskCourier
   run: function (creep) {
      // Skip logic if creep is still spawning
     BeeToolbox.assignContainerFromMemory(creep); // Assign a nearby container to the courier if none assigned
@@ -29,7 +29,7 @@ const TaskCourier = {
       if (containers.length > 0) {
         // Count how many Couriers are already assigned to each container
         const containerUsage = _.countBy(
-          _.filter(Game.creeps, c => c.memory.role === 'Courier_Bee' && c.memory.assignedContainer),
+          _.filter(Game.creeps, c => c.memory.task === 'courier' && c.memory.assignedContainer),
           c => c.memory.assignedContainer
         );
         // Sort containers by fewest Couriers assigned (balance load)

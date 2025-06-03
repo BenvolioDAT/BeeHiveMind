@@ -11,7 +11,7 @@ const TaskBaseHarvest = {
             creep.memory.harvesting = false;
           }
           if (creep.memory.harvesting) {
-            // If the Nurse_Bee is in harvesting state
+            // If the baseharvest is in harvesting state
             const assignedSourceId = assignSource(creep);
             const targetSource = Game.getObjectById(assignedSourceId);
             if (targetSource) {
@@ -129,9 +129,9 @@ function assignSource(creep) {
       if (!roomMemory.sources[source.id]) {
         roomMemory.sources[source.id] = [];
       }
-      // Log the current count of Nurse_Bees assigned to this source for debugging
+      // Log the current count of baseharvests assigned to this source for debugging
       if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`Source ${source.id} has ${roomMemory.sources[source.id].length} assigned Nurse_Bee(s)`);
+      console.log(`Source ${source.id} has ${roomMemory.sources[source.id].length} assigned baseharvest(s)`);
       }
     });
     // Sort the sources based on the number of assigned creeps, from the least to the most
@@ -162,7 +162,7 @@ function assignSource(creep) {
       // Add this creep's ID to the array of assigned creeps for this source
       roomMemory.sources[assignedSource.id].push(creep.id);
       if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`Nurse_Bee ${creep.name} assigned to source ${assignedSource.id}. Creep ID ${creep.id} added.`);
+      console.log(`baseharvest ${creep.name} assigned to source ${assignedSource.id}. Creep ID ${creep.id} added.`);
       }
     } else {
       // Log a message if the creep doesn't have a valid ID (which may indicate an issue)

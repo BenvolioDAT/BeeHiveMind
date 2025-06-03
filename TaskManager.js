@@ -18,7 +18,7 @@ const TaskCourier = require ('./Task.Courier');
 const TaskQueen = require ('./Task.Queen');
 const TaskScout = require ('./Task.Scout');
 const TaskRepair = require ('./Task.Repair');
-const TaskNectar = require ('./Task.Nectar');
+const TaskUpgrader = require ('./Task.Upgrader');
 // -------------------------------------------
 // The task registry: A central lookup table
 // Maps task names (as strings) to their corresponding task modules
@@ -33,7 +33,7 @@ const tasks = {
   'queen': TaskQueen,
   'scout': TaskScout,
   'repair': TaskRepair,
-  'nectar': TaskNectar,
+  'upgrader': TaskUpgrader,
   // You can add more tasks here as you create new modules
   // For example: 'upgrade': upgradeModule,
 };
@@ -43,9 +43,9 @@ function colonyNeeds() {
     let need = {
         harvest: 0,
         builder: 2,
-        repair: 0,
-        courier: 0,
-        nectar: 2,
+        repair: 1,
+        courier: 2,
+        upgrader: 2,
         // Add more tasks as needed
     };
     let counts = _.countBy(Game.creeps, c => c.memory.task);

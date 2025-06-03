@@ -82,7 +82,7 @@ const TaskRemoteHarvest = {
             if (sources.length === 0) return;
 
             const foragersInRoom = _.filter(Game.creeps, creep =>
-                creep.memory.role === 'Forager_Bee' &&
+                creep.memory.task === 'remoteharvest' &&
                 creep.memory.targetRoom === roomName
             ).length;
 
@@ -107,7 +107,7 @@ const TaskRemoteHarvest = {
 
         for (const sourceId of sources) {
             const count = _.filter(Game.creeps, c =>
-                c.memory.role === 'Forager_Bee' &&
+                c.memory.task === 'remoteharvest' &&
                 c.memory.targetRoom === creep.memory.targetRoom &&
                 c.memory.sourceId === sourceId
             ).length;

@@ -1,5 +1,5 @@
 // BeeVisuals.js 🎨🐝
-var roleBuilder_Bee = require('role.Builder_Bee'); // Import Builder Bee role for building tasks
+var TaskBuilder = require('./Task.Builder'); // Import Builder Bee role for building tasks
 // Handles RoomVisual overlays for displaying debug information and creep data
   // Logging Levels
   const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
@@ -49,14 +49,14 @@ const BeeVisuals = {
         });
         /////////////////////////////////////////////
         if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        // Draw a visual for the Builder Bee role
+        // Draw a visual for the TaskBuilder
         const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
             if (spawn) {
                 const visual = new RoomVisual(spawn.room.name);
                 const baseX = spawn.pos.x;
                 const baseY = spawn.pos.y;
 
-                for (const placement of roleBuilder_Bee.structurePlacements) {
+                for (const placement of TaskBuilder.structurePlacements) {
                     const posX = baseX + placement.x;
                     const posY = baseY + placement.y;
                     visual.circle(posX, posY, { radius: 0.4,opacity: .1, stroke: 'cyan' });
