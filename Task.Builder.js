@@ -125,7 +125,7 @@ var TaskBuilder = {
     // If the creep is not building
     else {
       // Try to get energy from tombstones first
-      var tombstonesWithEnergy = creep.room.find(FIND_RUINS, {
+      var tombstonesWithEnergy = creep.room.find(FIND_TOMBSTONES, {
         filter: (tombstone) => tombstone.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
       });
 
