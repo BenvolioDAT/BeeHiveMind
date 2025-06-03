@@ -50,7 +50,7 @@ function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
 
   // Function to generate a creep name based on the set number value
   function Generate_Creep_Name(role) {
-    for (var i = 1; i <= 10; i++) {
+    for (var i = 1; i <= 70; i++) {
       var newName = role + '_' + i;
       if (!_.some(Game.creeps, (creep) => creep.name === newName)) {
         return newName;

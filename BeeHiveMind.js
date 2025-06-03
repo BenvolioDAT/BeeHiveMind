@@ -125,10 +125,11 @@ const BeeHiveMind = {
         const workerTaskLimits = {
             baseharvest: 2,
             builder: 2,
-            upgrader: 1,
+            upgrader: 2,
             repair: 0,
             courier: 2,
-            remoteharvest: 5,
+            remoteharvest: 10,
+            scout: 0,
         };
 
         // Count how many creeps are assigned to each task (across all rooms)
