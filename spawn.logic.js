@@ -29,17 +29,22 @@ var BODYPART_COST = {
     
   }
 
-  function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
+function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
     let body = getBodyForTask(neededTask, Calculate_Spawn_Resource);
     let name = Generate_Creep_Name('Worker_Bee');
-    let memory = { role: 'Worker_Bee', task: neededTask };
+    let memory = { 
+        role: 'Worker_Bee',           // Current role/behavior
+        task: neededTask,             // Current task
+        bornTask: neededTask,       // The "birth role"
+        birthBody: body.slice(),      // The original body config (optional, but cool)
+    };
     let result = spawn.spawnCreep(body, name, { memory: memory }); 
-    if (result === OK ) {
-      console.log(`🟢 Spawned Worker_Bee: ${name} for task ${neededTask}`);
-      return true;
+    if (result === OK) {
+        console.log(`🟢 Spawned Worker_Bee: ${name} for task ${neededTask}`);
+        return true;
     }
     return false; // If spawning failed, return false
-  }
+}
 
   // Function to generate a creep name based on the set number value
   function Generate_Creep_Name(role) {
