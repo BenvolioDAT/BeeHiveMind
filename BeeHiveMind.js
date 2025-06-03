@@ -1,3 +1,7 @@
+  // Logging Levels
+  const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
+  //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
+  const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
 // Importing all role modules - These are the logic files for each creep role
 var roleQueen = require('role.Queen');
 var roleScout = require('role.Scout');
@@ -134,7 +138,9 @@ const BeeHiveMind = {
 
         // Count how many creeps are assigned to each task (across all rooms)
         const roleCounts = _.countBy(Game.creeps, c => c.memory.task);
+        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
         console.log('🐝 Task count snapshot:', JSON.stringify(roleCounts));
+            }
 
 
         // Loop through your spawns and fill missing task slots
