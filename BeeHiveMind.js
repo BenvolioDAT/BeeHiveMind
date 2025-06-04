@@ -97,7 +97,6 @@ const BeeHiveMind = {
             { name: 'Queen', limit: limits.Queen_Number_Limit, Body: spawnLogic.Generate_Queen_Body },
             { name: 'Winged_Archer', limit: limits.Winged_Archer_Number_Limit, Body: spawnLogic.Generate_Winged_Archer_Body },
             { name: 'Apiary_Medics', limit: limits.Apiary_Medics_Number_Limit, Body: spawnLogic.Generate_Apiary_Medic_Body },
-            { name: 'Scout', limit: limits.Scout_Number_Limit, Body: spawnLogic.Generate_Scout_Body },
             { name: 'HoneyGuard', limit: limits.HoneyGuard_Number_Limit, Body: spawnLogic.Generate_HoneyGuard_Body },
             { name: 'Siege_Bee', limit: limits.Siege_Bee_Number_Limit, Body: spawnLogic.Generate_Siege_Bee_Body },
         ];
@@ -180,7 +179,6 @@ const BeeHiveMind = {
             // Set default creep limits if missing
             if (!Memory.rooms[roomName].creepLimits) {
                 Memory.rooms[roomName].creepLimits = {
-                    Scout_Number_Limit: 0,
                     Queen_Number_Limit: 1,
                     HoneyGuard_Number_Limit: 0,
                     Apiary_Medics_Number_Limit: 0,
