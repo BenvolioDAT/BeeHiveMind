@@ -157,4 +157,4 @@ const TaskCourier = {
   }
 };
 
-module.exports = TaskCourier; // Export the role for use in the HiveMind
+module.exports = TaskCourier;
