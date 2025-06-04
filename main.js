@@ -36,7 +36,7 @@ module.exports.loop = function () {
     // Run link management logic for transferring energy
     roleLinkManager.run();
     // Draw visuals such as CPU usage, creep data, and repair info
-    //BeeVisuals.drawVisuals();
+    BeeVisuals.drawVisuals();
     BeeVisuals.drawEnergyBar();
     BeeVisuals.drawWorkerBeeTaskTable()
 

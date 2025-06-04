@@ -115,7 +115,7 @@ drawWorkerBeeTaskTable: function() {
     // Gather bees and tasks (same as before)
     const workerBees = _.filter(Game.creeps, c => c.memory.role === 'Worker_Bee');
     const totalCount = workerBees.length;
-    const maxTotal = 50;
+    //const maxTotal = 50;
 
     const maxTasks = {
         baseharvest: 2,
@@ -126,6 +126,8 @@ drawWorkerBeeTaskTable: function() {
         remoteharvest: 10,
         scout: 1,
     };
+    
+    const maxTotal = Object.values(maxTasks).reduce((sum, count) => sum + count, 0);
 
     const tasks = {};
     for (const creep of workerBees) {
