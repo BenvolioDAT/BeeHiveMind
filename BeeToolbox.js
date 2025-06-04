@@ -273,9 +273,6 @@ var BeeToolbox = {
             }  
         },
 
-
-
-
         // 🐝 Travel function for Bee creeps with path visualization
         BeeTravel: function(creep, target, range, reuse) {
             range = (range !== undefined) ? range : 1;

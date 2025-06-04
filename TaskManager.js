@@ -58,6 +58,8 @@ function colonyNeeds() {
     return shortage;
 }
 
+
+
 // -------------------------------------------
 // Export the TaskManager object as a module
 // The TaskManager has a single method: `run(creep)`
@@ -94,5 +96,12 @@ module.exports = {
             if (needs[t] && needs[t] > 0) return t;
         }
         return 'idle';
-    }
+    },
+
+    clearTaskMemory: function (creep) {
+      // Add all task-specific fields here
+      delete creep.memory.assignedSource;
+      delete creep.memory.targetRoom;
+      // etc.
+  },
 };

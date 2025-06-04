@@ -50,8 +50,8 @@ const TaskBaseHarvest = {
               }
             }
             // Drop energy if no Couriers are available
-            const Courier_Bees = _.filter(Game.creeps, (creep) => creep.memory.role === 'Courier_Bee');
-            if (Courier_Bees.length > 0) {
+            const Courier = _.filter(Game.creeps, (creep) => creep.memory.task === 'courier');
+            if (Courier.length > 0) {
               creep.drop(RESOURCE_ENERGY);
               return;
             }
@@ -103,7 +103,44 @@ function getAdjacentContainer(source) {
     });
     return containers.length > 0 ? containers[0] : null;  
 }
+
 function assignSource(creep) {
+    if (creep.spawning) return;
+
+    // Already assigned? Just return it.
+    if (creep.memory.assignedSource) {
+        return creep.memory.assignedSource;
+    }
+
+    // Count living harvesters per source (using ONLY Game.creeps)
+    const sources = creep.room.find(FIND_SOURCES);
+    const counts = {};
+    for (const source of sources) {
+        counts[source.id] = _.filter(Game.creeps, c =>
+            c.memory.task === 'baseharvest' &&
+            c.memory.assignedSource === source.id &&
+            c.room.name === creep.room.name // Only this room
+        ).length;
+    }
+
+    // Pick the least-occupied source
+    let min = Infinity, chosen = null;
+    for (const source of sources) {
+        if (counts[source.id] < min) {
+            min = counts[source.id];
+            chosen = source;
+        }
+    }
+
+    if (chosen) {
+        creep.memory.assignedSource = chosen.id;
+        return chosen.id;
+    }
+
+    return null;
+}
+
+/*function assignSource(creep) {
     // Check if creep is spawning before proceeding
     if (creep.spawning) {
       return; // Exit the function if the creep is still spawning
@@ -175,6 +212,6 @@ function assignSource(creep) {
     console.log(`Updated sources for room ${creep.room.name}:`, JSON.stringify(roomMemory.sources, null, 2));
     }
     return assignedSource.id; // Return the ID of the assigned source
-}
+}*/
 
 module.exports = TaskBaseHarvest;
