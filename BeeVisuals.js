@@ -119,7 +119,7 @@ drawWorkerBeeTaskTable: function() {
 
     const maxTasks = {
         baseharvest: 2,
-        builder: 1,
+        builder: 4,
         upgrader: 1,
         repair: 1,
         courier: 2,
