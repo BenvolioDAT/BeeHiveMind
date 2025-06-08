@@ -90,6 +90,14 @@ var TaskBuilder = {
     { type: STRUCTURE_TOWER,     x: 5, y:-5 },//4
     //{ type: STRUCTURE_TOWER,     x:-1, y: 0 },//5
     //{ type: STRUCTURE_TOWER,     x: 1, y: 0 },//6
+    { type: STRUCTURE_ROAD,      x: 1, y: 1 },
+    { type: STRUCTURE_ROAD,      x: 0, y: 1 },
+    { type: STRUCTURE_ROAD,      x:-1, y: 1 },
+    { type: STRUCTURE_ROAD,      x:-1, y: 0 },
+    { type: STRUCTURE_ROAD,      x:-1, y:-1 },
+    { type: STRUCTURE_ROAD,      x: 0, y:-1 },
+    { type: STRUCTURE_ROAD,      x: 1, y:-1 },
+    { type: STRUCTURE_ROAD,      x: 1, y: 0 },
     // Add more structures with their positions
   ],
   // Main function to control the Builder_Bee creep
