@@ -14,6 +14,7 @@ const BeeVisuals = {
         const room = Game.rooms[roomName]; // Get the room object
         let yOffset = 1; // Start vertical position for text stacking
         // Iterate over all creeps to display their info
+        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
         for (const creepName in Game.creeps) {
             const creep = Game.creeps[creepName];
             const text = [
@@ -28,6 +29,7 @@ const BeeVisuals = {
             new RoomVisual(room.name).text(text, 0, yOffset++, {
                 color: 'white', font: 0.5, opacity: 1, align: 'Left'
             });
+            }
         }
         // Draw the CPU bucket value (how much CPU reserve you have)
         new RoomVisual(room.name).text(`CPU Bucket: ${Game.cpu.bucket}`, 20, 1, {
