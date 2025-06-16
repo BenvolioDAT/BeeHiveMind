@@ -123,7 +123,7 @@ drawWorkerBeeTaskTable: function() {
         baseharvest: 2,
         builder: 1,
         upgrader: 1,
-        repair: 1,
+        repair: 0,
         courier: 2,
         remoteharvest: 10,
         scout: 1,
