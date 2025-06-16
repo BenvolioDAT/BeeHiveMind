@@ -7,7 +7,7 @@ var TaskBuilder = require('./Task.Builder'); // Import Builder Bee role for buil
   const currentLogLevel = LOG_LEVEL.DEBUG;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs  
 
 const BeeVisuals = {
-    // Main function to draw visuals on the screen each tick
+    // Main function to draw visuals on the screen 0000000000000000000000000000each tick
     drawVisuals: function () {
         const roomName = Memory.firstSpawnRoom; // The room used for displaying visuals (likely the "main" room)
         if (!roomName || !Game.rooms[roomName]) return; // If no valid room, skip drawing
@@ -121,7 +121,7 @@ drawWorkerBeeTaskTable: function() {
 
     const maxTasks = {
         baseharvest: 2,
-        builder: 4,
+        builder: 1,
         upgrader: 1,
         repair: 1,
         courier: 2,

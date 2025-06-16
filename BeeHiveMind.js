@@ -127,7 +127,7 @@ const BeeHiveMind = {
         // Configurable quotas for each task type
         const workerTaskLimits = {
             baseharvest: 2,
-            builder: 4,
+            builder: 1,
             upgrader: 1,
             repair: 0,
             courier: 2,
