@@ -131,7 +131,7 @@ const BeeHiveMind = {
             upgrader: 1,
             repair: 0,
             courier: 2,
-            remoteharvest: 10,
+            remoteharvest: 0,
             scout: 0,
         };
 
