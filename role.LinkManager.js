@@ -1,8 +1,11 @@
 const roleLinkManager = {
     run: function () {
         // Get the room's spawn and controller
-        const room = Game.spawns['Spawn1'].room;
-        const spawn = Game.spawns['Spawn1'];
+        //const room = Game.spawns['Spawn1'].room;
+        //const spawn = Game.spawns['Spawn1'];
+        for ( const spawnName in Game.spawns) {
+            const spawn = Game.spawns[spawnName];
+            const room = spawn.room;
         const controller = room.controller;
         // Find the link closest to the spawn (sending link)
         const sendingLink = spawn.pos.findClosestByRange(FIND_STRUCTURES, {
@@ -24,5 +27,6 @@ const roleLinkManager = {
             //console.log(`No valid links found or link is on cooldown.`);
         }
     }
+}
 };
 module.exports = roleLinkManager;
