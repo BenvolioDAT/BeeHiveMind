@@ -1,5 +1,5 @@
 // TaskManager.js
-
+const TaskIdle = require('./Task.Idle');
 // -------------------------------------------
 // Importing task logic from other files
 // Each file exports an object with a `.run(creep)` method
@@ -34,6 +34,7 @@ const tasks = {
   'scout': TaskScout,
   'repair': TaskRepair,
   'upgrader': TaskUpgrader,
+  'idle': TaskIdle,
   // You can add more tasks here as you create new modules
   // For example: 'upgrade': upgradeModule,
 };
@@ -92,7 +93,7 @@ module.exports = {
     getHighestPriorityTask(creep) {
         // Return the most needed task, or 'harvest' if all else fails
         let needs = colonyNeeds();
-        for (let t of ['harvest', 'repair', 'builder', 'courier', 'nectar']) {
+        for (let t of ['baseharvest','repair','builder','courier','upgrader']) {
             if (needs[t] && needs[t] > 0) return t;
         }
         return 'idle';
