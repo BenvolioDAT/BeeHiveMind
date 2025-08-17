@@ -47,6 +47,7 @@ function colonyNeeds() {
         repair: 1,
         courier: 2,
         upgrader: 2,
+        scout: 1,
         // Add more tasks as needed
     };
     let counts = _.countBy(Game.creeps, c => c.memory.task);

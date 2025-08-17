@@ -27,6 +27,8 @@ var BODYPART_COST = {
         return Generate_Courier_Body(Calculate_Spawn_Resource);
       case 'remoteharvest':
         return Generate_RemoteHarvest_Body(Calculate_Spawn_Resource);
+      case 'scout':
+        return Generate_Scout_Body(Calculate_Spawn_Resource);
     }
     
   }
