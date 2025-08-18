@@ -77,7 +77,7 @@ console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
 }
 // 🧱 Body configurations per task
 const B = (w,c,m)=>[...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
-const H = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
+const H = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 const WiPnotReady = (t,b,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(b).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 // Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
 // Role-specific configurations
