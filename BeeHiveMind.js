@@ -131,8 +131,8 @@ const BeeHiveMind = {
             upgrader: 1,
             repair: 0,
             courier: 2,
-            remoteharvest: 4,
-            scout: 1,
+            remoteharvest: 2,
+            scout: 0,
         };
 
         // Count how many creeps are assigned to each task (across all rooms)
