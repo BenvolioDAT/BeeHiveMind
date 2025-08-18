@@ -123,16 +123,18 @@ const Builder_Config = [
 ];
 // Role-specific configurations
 const Upgrader_Config = [
-  B(6,3,9),   // 18
-  B(5,2,7),   // 14
-  B(4,1,5),   // 10
-  B(2,1,3),   // 6
+  B(9,4,13),// 26
+  B(8,3,11),// 22
+  B(6,3,9), // 18
+  B(5,2,7), // 14
+  B(4,1,5), // 10
+  B(2,1,3), // 6
 ];
 // Role-specific configurations
 const Repair_Config = [
-  B(5,2,7),   // 14
-  B(4,1,5),   // 10
-  B(2,1,3),   // 6
+  B(5,2,7),// 14
+  B(4,1,5),// 10
+  B(2,1,3),// 6
 ];
 // Role-specific configurations
 const Queen_Config = [
