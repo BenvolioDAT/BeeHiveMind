@@ -148,63 +148,50 @@ var TaskBuilder = {
     }
     // If the creep is not building
     else {
-      // Try to get energy from tombstones first
-      var tombstonesWithEnergy = creep.room.find(FIND_TOMBSTONES, {
-        filter: (tombstone) => tombstone.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
+      // If no tombstones, prioritize storage for energy withdrawal
+      var storageWithEnergy = creep.room.find(FIND_STRUCTURES, {
+        filter: (structure) => structure.structureType == STRUCTURE_STORAGE && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
       });
-
-      if (tombstonesWithEnergy.length > 0) {
-        var closestTombstone = creep.pos.findClosestByPath(tombstonesWithEnergy);
-        if (closestTombstone && creep.withdraw(closestTombstone, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
-          BeeToolbox.BeeTravel(creep, closestTombstone);
-          //creep.moveTo(closestTombstone, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
-        }
+      var closestStorage = creep.pos.findClosestByPath(storageWithEnergy);
+      if (closestStorage && creep.withdraw(closestStorage, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
+        BeeToolbox.BeeTravel(creep, closestStorage);
+        //creep.moveTo(closestStorage, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
       } else {
-        // If no tombstones, prioritize storage for energy withdrawal
-        var storageWithEnergy = creep.room.find(FIND_STRUCTURES, {
-          filter: (structure) => structure.structureType == STRUCTURE_STORAGE && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
+        // Find containers in the room with available energy
+        var containersWithEnergy = creep.room.find(FIND_STRUCTURES, {
+          filter: (structure) => structure.structureType == STRUCTURE_CONTAINER && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
         });
-        var closestStorage = creep.pos.findClosestByPath(storageWithEnergy);
-        if (closestStorage && creep.withdraw(closestStorage, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
-          BeeToolbox.BeeTravel(creep, closestStorage);
-          //creep.moveTo(closestStorage, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
+        var closestContainer = creep.pos.findClosestByPath(containersWithEnergy);
+        if (closestContainer && creep.withdraw(closestContainer, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
+          BeeToolbox.BeeTravel(creep, closestContainer);
+          //creep.moveTo(closestContainer, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
         } else {
-          // Find containers in the room with available energy
-          var containersWithEnergy = creep.room.find(FIND_STRUCTURES, {
-            filter: (structure) => structure.structureType == STRUCTURE_CONTAINER && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
+          // If no containers with energy, find dropped energy
+          var droppedEnergy = creep.room.find(FIND_DROPPED_RESOURCES, {
+            filter: (resource) => resource.resourceType == RESOURCE_ENERGY && resource.amount >= 1,
           });
-          var closestContainer = creep.pos.findClosestByPath(containersWithEnergy);
-          if (closestContainer && creep.withdraw(closestContainer, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
-            BeeToolbox.BeeTravel(creep, closestContainer);
-            //creep.moveTo(closestContainer, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
+          if (droppedEnergy.length > 0) {
+            var closestDroppedEnergy = creep.pos.findClosestByPath(droppedEnergy);
+            if (creep.pickup(closestDroppedEnergy) == ERR_NOT_IN_RANGE) {
+              BeeToolbox.BeeTravel(creep, closestDroppedEnergy);
+              //creep.moveTo(closestDroppedEnergy, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
+            }
           } else {
-            // If no containers with energy, find dropped energy
-            var droppedEnergy = creep.room.find(FIND_DROPPED_RESOURCES, {
-              filter: (resource) => resource.resourceType == RESOURCE_ENERGY && resource.amount >= 1,
+            // If no containers/extensions, find extensions
+            var extensionsWithEnergy = creep.room.find(FIND_STRUCTURES, {
+              filter: (structure) => structure.structureType == STRUCTURE_EXTENSION && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
             });
-            if (droppedEnergy.length > 0) {
-              var closestDroppedEnergy = creep.pos.findClosestByPath(droppedEnergy);
-              if (creep.pickup(closestDroppedEnergy) == ERR_NOT_IN_RANGE) {
-                BeeToolbox.BeeTravel(creep, closestDroppedEnergy);
-                //creep.moveTo(closestDroppedEnergy, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
-              }
+            var closestExtension = creep.pos.findClosestByPath(extensionsWithEnergy);
+            if (closestExtension && creep.withdraw(closestExtension, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
+              BeeToolbox.BeeTravel(creep, closestExtension);
+              //creep.moveTo(closestExtension, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
             } else {
-              // If no containers/extensions, find extensions
-              var extensionsWithEnergy = creep.room.find(FIND_STRUCTURES, {
-                filter: (structure) => structure.structureType == STRUCTURE_EXTENSION && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
-              });
-              var closestExtension = creep.pos.findClosestByPath(extensionsWithEnergy);
-              if (closestExtension && creep.withdraw(closestExtension, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
-                BeeToolbox.BeeTravel(creep, closestExtension);
-                //creep.moveTo(closestExtension, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
-              } else {
-                  TaskBuilder.upgradeController(creep);
-                }
+                TaskBuilder.upgradeController(creep);
               }
             }
           }
-        }    
-    }
+        }
+      }    
   },
   // Function to upgrade the controller when there are no construction sites
   upgradeController: function (creep) {
