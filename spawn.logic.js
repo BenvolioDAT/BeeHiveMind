@@ -93,7 +93,7 @@ const BaseHarvest_Config = [
 ];
 // Role-specific configurations
 const Courier_Config = [
-  H(15,15),
+  H(13,13),
   H(10,10),
   H(9,9),
   H(8,8),
@@ -151,13 +151,20 @@ const Queen_Config = [
 ];
 // Role-specific configurations
 const RemoteHarvest_Config = [
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE],
-  //[WORK, CARRY, CARRY, MOVE, MOVE, MOVE],
-  [WORK, WORK, CARRY, CARRY, MOVE, MOVE],
-  [WORK, CARRY, CARRY, MOVE, MOVE],
-  [WORK, CARRY, MOVE, MOVE],
+  //B(5,20,25), // 50 parts: 5W 20C 25M  (1,000 carry cap)
+  //B(5,18,23), // 46 parts
+  //B(5,16,21), // 42
+  //B(5,14,19), // 38
+  //B(5,12,17), // 34
+  //B(5,10,15), // 30
+  B(5,8,13),  // 26
+  B(5,6,11),  // 22
+  B(5,4,9),  // 18
+  B(5,2,7),  // 14
+  B(4,2,6),  // 12 (can’t fully saturate source, but cheaper)
+  B(3,2,5),  // 10
+  B(2,2,4),  // 8
+  B(1,1,2),
 ];
 const Scout_Config = [
 [MOVE],
