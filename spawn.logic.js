@@ -76,6 +76,8 @@ if (currentLogLevel >= LOG_LEVEL.DEBUG) {
 console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
 }
 // 🧱 Body configurations per task
+const B = (w,c,m)=>[...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
+const WiPnotReady = (t,b,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(b).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 // Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
 // Role-specific configurations
 const BaseHarvest_Config = [
@@ -108,7 +110,23 @@ const Courier_Config = [
   [CARRY, MOVE],
 ];
 // Role-specific configurations
+// BIG ➜ small (no roads; MOVE = WORK + CARRY); ~2:1 WORK:CARRY
 const Builder_Config = [
+  B(17,8,25), // 50 parts
+  B(16,7,23), // 46
+  B(14,7,21), // 42
+  B(13,6,19), // 38
+  B(12,5,17), // 34
+  B(10,5,15), // 30
+  B(9,4,13),  // 26
+  B(8,3,11),  // 22
+  B(6,3,9),   // 18
+  B(5,2,7),   // 14
+  B(4,1,5),   // 10
+  B(2,1,3),   // 6
+];
+// Role-specific configurations
+/*const Builder_Config = [
     [ // 27 WORK, 6 CARRY, 17 MOVE = 50
     WORK,WORK,WORK,WORK,WORK,WORK,WORK,WORK,WORK,WORK,
     WORK,WORK,WORK,WORK,WORK,WORK,WORK,WORK,WORK,WORK,
@@ -138,7 +156,7 @@ const Builder_Config = [
   [WORK, WORK, CARRY, CARRY, MOVE, MOVE],                // 6
   [WORK, WORK, CARRY, MOVE, MOVE],                       // 5
   [WORK, CARRY, MOVE],                                   // 3
-];
+]; */
 // Role-specific configurations
 const Upgrader_Config = [
   //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
