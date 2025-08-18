@@ -82,14 +82,12 @@ const WiPnotReady = (t,b,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(b).fill(A
 // Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
 // Role-specific configurations
 const BaseHarvest_Config = [
-  [WORK, WORK, WORK, WORK, WORK, WORK, WORK, MOVE,  MOVE, MOVE, MOVE, MOVE, CARRY],
-  [WORK, WORK, WORK, WORK, WORK, WORK,  MOVE, MOVE, MOVE, MOVE, CARRY],
-  [WORK, WORK, WORK, WORK, WORK, MOVE, MOVE, MOVE, CARRY],
-  [WORK, WORK, WORK, WORK, MOVE, MOVE, CARRY],
-  [WORK, WORK, WORK, MOVE, MOVE, CARRY],
-  [WORK, WORK, MOVE, MOVE, CARRY],
-  [WORK, WORK, MOVE, CARRY],
-  [WORK, MOVE, CARRY],
+ B(6,1,6),
+ B(5,1,5),
+ B(4,1,4),
+ B(3,1,3),
+ B(2,1,2),
+ B(1,1,1), 
 ];
 // Role-specific configurations
 const Courier_Config = [
