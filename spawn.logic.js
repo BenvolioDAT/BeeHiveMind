@@ -77,6 +77,7 @@ console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
 }
 // 🧱 Body configurations per task
 const B = (w,c,m)=>[...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
+const H = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
 const WiPnotReady = (t,b,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(b).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 // Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
 // Role-specific configurations
@@ -92,7 +93,20 @@ const BaseHarvest_Config = [
 ];
 // Role-specific configurations
 const Courier_Config = [
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
+  //H(25,25),
+  //H(20,20),
+  H(15,15),
+  H(10,10),
+  H(9,9),
+  H(8,8),
+  H(7,7),
+  H(6,6),
+  H(5,5),
+  H(4,4),
+  H(3,3),
+  H(2,2),
+  H(1,1),
+  /*[CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
@@ -107,7 +121,7 @@ const Courier_Config = [
   [CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, MOVE, MOVE, MOVE],
   [CARRY, CARRY, MOVE, MOVE],
-  [CARRY, MOVE],
+  [CARRY, MOVE],*/
 ];
 // Role-specific configurations
 // BIG ➜ small (no roads; MOVE = WORK + CARRY); ~2:1 WORK:CARRY
@@ -182,7 +196,20 @@ const Repair_Config = [
 ];
 // Role-specific configurations
 const Queen_Config = [
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
+  //H(25,25),
+  //H(20,20),
+  //H(15,15),
+  H(10,10),
+  H(9,9),
+  H(8,8),
+  H(7,7),
+  H(6,6),
+  H(5,5),
+  H(4,4),
+  H(3,3),
+  H(2,2),
+  H(1,1),
+  /*[CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
   [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
@@ -191,7 +218,7 @@ const Queen_Config = [
   [CARRY, CARRY, CARRY, CARRY, MOVE, MOVE],
   [CARRY, CARRY, CARRY, MOVE, MOVE],
   [CARRY, CARRY, MOVE],
-  [CARRY, MOVE],
+  [CARRY, MOVE],*/
 ];
 // Role-specific configurations
 const RemoteHarvest_Config = [
