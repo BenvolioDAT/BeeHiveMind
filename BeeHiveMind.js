@@ -154,6 +154,8 @@ const BeeHiveMind = {
                     const spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
                     const didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
                     if (didSpawn) {
+                        // 🔧 NEW: make the snapshot reflect the scheduled spawn
+                        roleCounts[task] = (roleCounts[task] || 0) + 1;
                         // Only try to spawn one creep per tick per spawn
                         break;
                     }
