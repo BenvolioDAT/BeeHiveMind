@@ -123,26 +123,16 @@ const Builder_Config = [
 ];
 // Role-specific configurations
 const Upgrader_Config = [
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE],
-  [WORK, WORK, CARRY, MOVE, MOVE,],
-  [WORK, WORK, CARRY, MOVE],
-  [WORK, CARRY, MOVE],
+  B(6,3,9),   // 18
+  B(5,2,7),   // 14
+  B(4,1,5),   // 10
+  B(2,1,3),   // 6
 ];
 // Role-specific configurations
 const Repair_Config = [
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],//700E
-  //[WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE],//550
-  //[WORK, WORK, CARRY, MOVE, MOVE,],//350E
-  //[WORK, WORK, CARRY, MOVE],//300E
-  [WORK, CARRY, MOVE],//200E
+  B(5,2,7),   // 14
+  B(4,1,5),   // 10
+  B(2,1,3),   // 6
 ];
 // Role-specific configurations
 const Queen_Config = [
