@@ -190,6 +190,23 @@ const TaskRemoteHarvest = {
         return;
     }
 
+    
+//////////////////////////////////////////////
+    const rm = Memory.rooms[creep.memory.targetRoom];
+    rm.sources = rm.sources || {};
+    const sid = creep.memory.sourceId;
+    const src = Game.getObjectById(sid);
+
+    if (src && rm.sources[sid] && rm.sources[sid].entrySteps == null) {
+    const res = PathFinder.search(
+        creep.pos,
+        { pos: src.pos, range: 1 },
+        { plainCost: 2, swampCost: 10, maxOps: 4000 }
+    );
+    rm.sources[sid].entrySteps = res.path.length;
+    }
+///////////////////////////////////////////////////////
+
     const source = Game.getObjectById(creep.memory.sourceId);
     if (!source) {
         console.log(`Source not found for creep: ${creep.name}`);

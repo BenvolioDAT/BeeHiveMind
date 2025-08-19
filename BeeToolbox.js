@@ -23,7 +23,13 @@ var BeeToolbox = {
         sources.forEach(source => {
             // If no array exists for this source, create it
             if (!Array.isArray(Memory.rooms[room.name].sources[source.id])) {
-                Memory.rooms[room.name].sources[source.id] = {};
+                // Old Memory.rooms[room.name].sources[source.id] = {};
+                //New
+                Memory.rooms[room.name].sources[source.id] = Memory.rooms[room.name].sources[source.id] || {
+                    entrySteps: null,     // we’ll fill this the first time a creep enters and measures it
+                    reservedBy: null,     // soft lock (see part C)
+                    reservedAt: 0
+                    };
                 console.log(`[BeeToolbox] Logged source ${source.id} in room ${room.name}`);
             }
         });
@@ -192,7 +198,7 @@ var BeeToolbox = {
                  [STRUCTURE_STORAGE]:    4,
                  [STRUCTURE_CONTAINER]:  5
                 };
-                
+
         const sources = creep.room.find(FIND_SOURCES); // Get sources once
         const targets = creep.room.find(FIND_STRUCTURES, {
             filter: (s) => {
