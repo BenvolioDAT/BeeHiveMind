@@ -94,22 +94,22 @@ const BaseHarvest_Config = [
 ];
 // Role-specific configurations
 const Courier_Config = [
-  //H(16,16),
-  //H(15,15),
-  //H(14,14),
-  //H(13,13),
-  CM(12,12),
-  CM(11,11),
-  CM(10,10),
-  CM(9,9),
-  CM(8,8),
-  CM(7,7),
-  CM(6,6),
-  CM(5,5),
-  CM(4,4),
-  CM(3,3),
-  CM(2,2),
-  CM(1,1),
+  //H(16,16), //800
+  //H(15,15), //750
+  //H(14,14), //700
+  //H(13,13), //650
+  CM(12,12), //600
+  CM(11,11), //550
+  CM(10,10), //500
+  CM(9,9),   //450
+  CM(8,8),   //400
+  CM(7,7),   //350
+  CM(6,6),   //300
+  CM(5,5),   //250
+  CM(4,4),   //200
+  CM(3,3),   //150
+  CM(2,2),   //100
+  CM(1,1),   //50
 ];
 // Role-specific configurations
 // BIG ➜ small (no roads; MOVE = WORK + CARRY); ~2:1 WORK:CARRY
@@ -144,16 +144,16 @@ const Repair_Config = [
 ];
 // Role-specific configurations
 const Queen_Config = [
-  H(10,10),
-  H(9,9),
-  H(8,8),
-  H(7,7),
-  H(6,6),
-  H(5,5),
-  H(4,4),
-  H(3,3),
-  H(2,2),
-  H(1,1),
+  CM(10,10),
+  CM(9,9),
+  CM(8,8),
+  CM(7,7),
+  CM(6,6),
+  CM(5,5),
+  CM(4,4),
+  CM(3,3),
+  CM(2,2),
+  CM(1,1),
 ];
 // Role-specific configurations
 const RemoteHarvest_Config = [
