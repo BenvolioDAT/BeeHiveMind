@@ -5,9 +5,9 @@ const roleHoneyGuard = {
   run: function (creep) {
     if (creep.spawning) return; // Skip logic if creep is still spawning
     // Prioritize self-healing if injured
-    if (creep.hits < creep.hitsMax) {
+    /*if (creep.hits < creep.hitsMax) {
       creep.heal(creep);
-      creep.say('SH'); // Visual indicator for self-heal
+      creep.say('⚕️'); // Visual indicator for self-heal
     }
 
     // Scan for nearby injured allies and heal them
@@ -21,7 +21,7 @@ const roleHoneyGuard = {
       } else if (creep.pos.inRangeTo(nearbyAlly, 3)) {
         creep.rangedHeal(nearbyAlly); // Ranged heal if within 3 tiles
       }
-    }
+    }*/
 
     // If not healing, focus on attack logic
     const attackTarget = BeeToolbox.findAttackTarget(creep);
@@ -33,7 +33,7 @@ const roleHoneyGuard = {
       }
     } else {
       // No valid attack target, return to flag for regroup
-      const rallyFlag = Game.flags['HoneyGuardRally'];
+      const rallyFlag = Game.flags.Attack || Game.flags.Rally;
       if (rallyFlag) {
         creep.moveTo(rallyFlag); // Move to rally point
       }

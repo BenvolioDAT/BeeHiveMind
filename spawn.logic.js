@@ -78,6 +78,9 @@ console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
 // 🧱 Body configurations per task
 const B = (w,c,m)=>[...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
 const H = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+const WM = (w,m)=>[...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
+const MH = (m,h)=>[...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
+const TAM = (t,a,m)=>[...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
 const WiPnotReady = (t,b,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(b).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 // Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
 // Role-specific configurations
@@ -106,13 +109,13 @@ const Courier_Config = [
 // Role-specific configurations
 // BIG ➜ small (no roads; MOVE = WORK + CARRY); ~2:1 WORK:CARRY
 const Builder_Config = [
-  B(17,8,25), // 50 parts
-  B(16,7,23), // 46
-  B(14,7,21), // 42
-  B(13,6,19), // 38
-  B(12,5,17), // 34
-  B(10,5,15), // 30
-  B(9,4,13),  // 26
+  //B(17,8,25), // 50 parts
+  //B(16,7,23), // 46
+  //B(14,7,21), // 42
+  //B(13,6,19), // 38
+  //B(12,5,17), // 34
+  //B(10,5,15), // 30
+  //B(9,4,13),  // 26
   B(8,3,11),  // 22
   B(6,3,9),   // 18
   B(5,2,7),   // 14
@@ -168,10 +171,8 @@ const Scout_Config = [
 [MOVE],
 ];
 const HoneyGuard_Config = [
-  [TOUGH, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [TOUGH, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE],
-  [TOUGH, ATTACK, ATTACK, MOVE, MOVE, MOVE],
-  [TOUGH, ATTACK, MOVE],
+  TAM(20,5,25),
+  TAM(1,1,1),
 ];
 const Winged_Archer_Config = [
   [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
@@ -180,13 +181,18 @@ const Winged_Archer_Config = [
   [TOUGH, RANGED_ATTACK, MOVE],
 ];
 const Apiary_Medic_Config = [
-  [MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL],
-  [MOVE, MOVE, MOVE, HEAL, HEAL, HEAL],
-  [MOVE, MOVE, HEAL, HEAL],
-  [MOVE, HEAL,],
+  MH(7,7),
+  MH(6,6),
+  MH(5,5),
+  MH(4,4),
+  MH(3,3),
+  MH(2,2),
+  MH(1,1),
 ];
 const Siege_Bee_Config = [
-  [WORK, MOVE],
+  WM(25,25),
+  WM(20,20),
+  WM(15,15),
 ];
 // Array containing all task configurations
 const configurations = [
