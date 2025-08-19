@@ -134,10 +134,10 @@ const TaskCourier = {
     deliverEnergy2: function(creep) {
         if (creep.memory.state === 'deliver') {
         BeeToolbox.deliverEnergy(creep, [
+            STRUCTURE_STORAGE,
             STRUCTURE_EXTENSION,
             STRUCTURE_SPAWN,
             STRUCTURE_TOWER,
-            STRUCTURE_STORAGE,
             STRUCTURE_CONTAINER
         ]);
         if (creep.store[RESOURCE_ENERGY] === 0) {
@@ -148,10 +148,10 @@ const TaskCourier = {
   // 📦 Deliver energy to structures based on priority
   deliverEnergy: function (creep) {
     BeeToolbox.deliverEnergy(creep, [
+      STRUCTURE_STORAGE,
       STRUCTURE_EXTENSION,
       STRUCTURE_SPAWN,
       STRUCTURE_TOWER,
-      STRUCTURE_STORAGE,
       STRUCTURE_CONTAINER
     ]);
   }

@@ -192,10 +192,10 @@ var BeeToolbox = {
 
     deliverEnergy: function(creep, structureTypes = []) {
             const STRUCTURE_PRIORITY = {
-                 [STRUCTURE_EXTENSION]:  1,
-                 [STRUCTURE_SPAWN]:      2,
-                 [STRUCTURE_TOWER]:      3,
-                 [STRUCTURE_STORAGE]:    4,
+                 [STRUCTURE_EXTENSION]:  2,
+                 [STRUCTURE_SPAWN]:      3,
+                 [STRUCTURE_TOWER]:      4,
+                 [STRUCTURE_STORAGE]:    1,
                  [STRUCTURE_CONTAINER]:  5
                 };
 
