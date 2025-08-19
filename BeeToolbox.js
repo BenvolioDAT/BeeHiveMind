@@ -186,12 +186,13 @@ var BeeToolbox = {
 
     deliverEnergy: function(creep, structureTypes = []) {
             const STRUCTURE_PRIORITY = {
-            [STRUCTURE_EXTENSION]: 1,
-            [STRUCTURE_SPAWN]: 2,
-            [STRUCTURE_TOWER]: 5,
-            [STRUCTURE_STORAGE]: 3,
-            [STRUCTURE_CONTAINER]: 4
-        };
+                 [STRUCTURE_EXTENSION]:  1,
+                 [STRUCTURE_SPAWN]:      2,
+                 [STRUCTURE_TOWER]:      3,
+                 [STRUCTURE_STORAGE]:    4,
+                 [STRUCTURE_CONTAINER]:  5
+                };
+                
         const sources = creep.room.find(FIND_SOURCES); // Get sources once
         const targets = creep.room.find(FIND_STRUCTURES, {
             filter: (s) => {
