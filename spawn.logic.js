@@ -77,7 +77,7 @@ console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
 }
 // 🧱 Body configurations per task
 const B = (w,c,m)=>[...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
-const H = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+const CM = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 const WM = (w,m)=>[...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
 const MH = (m,h)=>[...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
 const TAM = (t,a,m)=>[...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
@@ -94,20 +94,22 @@ const BaseHarvest_Config = [
 ];
 // Role-specific configurations
 const Courier_Config = [
-  H(16,16),
-  H(15,15),
-  H(14,14),
-  H(13,13),
-  H(10,10),
-  H(9,9),
-  H(8,8),
-  H(7,7),
-  H(6,6),
-  H(5,5),
-  H(4,4),
-  H(3,3),
-  H(2,2),
-  H(1,1),
+  //H(16,16),
+  //H(15,15),
+  //H(14,14),
+  //H(13,13),
+  CM(12,12),
+  CM(11,11),
+  CM(10,10),
+  CM(9,9),
+  CM(8,8),
+  CM(7,7),
+  CM(6,6),
+  CM(5,5),
+  CM(4,4),
+  CM(3,3),
+  CM(2,2),
+  CM(1,1),
 ];
 // Role-specific configurations
 // BIG ➜ small (no roads; MOVE = WORK + CARRY); ~2:1 WORK:CARRY
