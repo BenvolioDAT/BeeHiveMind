@@ -144,16 +144,16 @@ const Repair_Config = [
 ];
 // Role-specific configurations
 const Queen_Config = [
-  CM(10,10),
-  CM(9,9),
-  CM(8,8),
-  CM(7,7),
-  CM(6,6),
-  CM(5,5),
-  CM(4,4),
-  CM(3,3),
-  CM(2,2),
-  CM(1,1),
+  B(1,10,10),
+  B(1,9,9),
+  B(1,8,8),
+  B(1,7,7),
+  B(1,6,6),
+  B(1,5,5),
+  B(1,4,4),
+  B(1,3,3),
+  B(1,2,2),
+  B(1,1,1),
 ];
 // Role-specific configurations
 const RemoteHarvest_Config = [
