@@ -68,7 +68,7 @@ const BeeVisuals = {
         }
         ////////////////////////////////////////////
     },
-        drawEnergyBar: function() {
+    drawEnergyBar: function() {
         const roomName = Memory.firstSpawnRoom; // The room used for displaying visuals (likely the "main" room)
         if (!roomName || !Game.rooms[roomName]) return; // If no valid room, skip drawing
         const room = Game.rooms[roomName]; // Get the room object    
@@ -109,87 +109,87 @@ const BeeVisuals = {
         });
     },
 
-drawWorkerBeeTaskTable: function() {
-    const roomName = Memory.firstSpawnRoom;
-    if (!roomName || !Game.rooms[roomName]) return;
-    const visual = new RoomVisual(roomName);
+    drawWorkerBeeTaskTable: function() {
+        const roomName = Memory.firstSpawnRoom;
+        if (!roomName || !Game.rooms[roomName]) return;
+        const visual = new RoomVisual(roomName);
 
-    // Gather bees and tasks (same as before)
-    const workerBees = _.filter(Game.creeps, c => c.memory.role === 'Worker_Bee');
-    const totalCount = workerBees.length;
-    //const maxTotal = 50;
+        // Gather bees and tasks (same as before)
+        const workerBees = _.filter(Game.creeps, c => c.memory.role === 'Worker_Bee');
+        const totalCount = workerBees.length;
+        //const maxTotal = 50;
 
-    const maxTasks = {
-        baseharvest: 2,
-        builder: 1,
-        upgrader: 1,
-        repair: 0,
-        courier: 2,
-        remoteharvest: 0,
-        scout: 1,
+        const maxTasks = {
+            baseharvest: 2,
+            builder: 1,
+            upgrader: 1,
+            repair: 0,
+            courier: 2,
+            remoteharvest: 0,
+            scout: 1,
+        };
+        
+        const maxTotal = Object.values(maxTasks).reduce((sum, count) => sum + count, 0);
+
+        const tasks = {};
+        for (const creep of workerBees) {
+            const task = creep.memory.task || 'idle';
+            if (!tasks[task]) tasks[task] = 0;
+            tasks[task]++;
+        }
+        for (let t in maxTasks) if (!tasks[t]) tasks[t] = 0;
+        const taskNames = Object.keys(maxTasks);
+        const nRows = 1 + taskNames.length;
+
+        // **Customizable column widths!**
+        const x0 = 0, y0 = 20;
+        const nameW = 6;   // Left (task name) cell width
+        const valueW = 2.5;  // Right (count/max) cell width
+        const cellH = 1;
+        const font = 0.7;
+        const fillColor = "#ffffff";
+        const strokeColor = "#000000";
+
+        for (let i = 0; i < nRows; i++) {
+            const name = (i === 0) ? "Worker_Bee" : taskNames[i-1];
+            const value = (i === 0)
+                ? `${totalCount}/${maxTotal}`
+                : `${tasks[taskNames[i-1]]}/${maxTasks[taskNames[i-1]]}`;
+
+            // Draw left cell (task name)
+            visual.rect(x0, y0 + i*cellH, nameW, cellH, {
+                fill: fillColor, 
+                stroke: strokeColor, 
+                opacity: 0.1, 
+                radius: 0.05
+            });
+            // Draw right cell (count/max)
+            visual.rect(x0 + nameW, y0 + i*cellH, valueW, cellH, {
+                fill: fillColor, 
+                stroke: strokeColor, 
+                opacity: 0.1, 
+                radius: 0.05
+            });
+
+            // Name text (left cell, left-aligned)
+            visual.text(name, x0 + 0.3, y0 + i*cellH + cellH/2 + 0.15, {
+                font, 
+                color: "#000000", 
+                align: 'left', 
+                valign: 'middle', 
+                opacity: 0.7
+            });
+            // Value text (right cell, right-aligned)
+            visual.text(value, x0 + nameW + valueW - 0.3, y0 + i*cellH + cellH/2 + 0.15, {
+                font, 
+                color: "#000000ff", 
+                align: 'right', 
+                valign: 'middle', 
+                opacity: 0.7
+            });
+        }
+    },
+
     };
-    
-    const maxTotal = Object.values(maxTasks).reduce((sum, count) => sum + count, 0);
-
-    const tasks = {};
-    for (const creep of workerBees) {
-        const task = creep.memory.task || 'idle';
-        if (!tasks[task]) tasks[task] = 0;
-        tasks[task]++;
-    }
-    for (let t in maxTasks) if (!tasks[t]) tasks[t] = 0;
-    const taskNames = Object.keys(maxTasks);
-    const nRows = 1 + taskNames.length;
-
-    // **Customizable column widths!**
-    const x0 = 0, y0 = 20;
-    const nameW = 6;   // Left (task name) cell width
-    const valueW = 2.5;  // Right (count/max) cell width
-    const cellH = 1;
-    const font = 0.7;
-    const fillColor = "#ffffff";
-    const strokeColor = "#000000";
-
-    for (let i = 0; i < nRows; i++) {
-        const name = (i === 0) ? "Worker_Bee" : taskNames[i-1];
-        const value = (i === 0)
-            ? `${totalCount}/${maxTotal}`
-            : `${tasks[taskNames[i-1]]}/${maxTasks[taskNames[i-1]]}`;
-
-        // Draw left cell (task name)
-        visual.rect(x0, y0 + i*cellH, nameW, cellH, {
-            fill: fillColor, 
-            stroke: strokeColor, 
-            opacity: 0.1, 
-            radius: 0.05
-        });
-        // Draw right cell (count/max)
-        visual.rect(x0 + nameW, y0 + i*cellH, valueW, cellH, {
-            fill: fillColor, 
-            stroke: strokeColor, 
-            opacity: 0.1, 
-            radius: 0.05
-        });
-
-        // Name text (left cell, left-aligned)
-        visual.text(name, x0 + 0.3, y0 + i*cellH + cellH/2 + 0.15, {
-            font, 
-            color: "#000000", 
-            align: 'left', 
-            valign: 'middle', 
-            opacity: 0.7
-        });
-        // Value text (right cell, right-aligned)
-        visual.text(value, x0 + nameW + valueW - 0.3, y0 + i*cellH + cellH/2 + 0.15, {
-            font, 
-            color: "#000000", 
-            align: 'right', 
-            valign: 'middle', 
-            opacity: 0.7
-        });
-    }
-},
-
-};
 // Export the BeeVisuals module so other files can use it
 module.exports = BeeVisuals;

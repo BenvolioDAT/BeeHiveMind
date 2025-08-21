@@ -30,7 +30,6 @@ var BODYPART_COST = {
       case 'scout':
         return Generate_Scout_Body(Calculate_Spawn_Resource);
     }
-    
   }
 
 function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
@@ -173,7 +172,7 @@ const RemoteHarvest_Config = [
   B(1,1,2),  // 4 50 carry cap
 ];
 const Scout_Config = [
-[MOVE],
+B(0,0,1),  // 4 50 carry cap
 ];
 const HoneyGuard_Config = [
   TAM(20,5,25),

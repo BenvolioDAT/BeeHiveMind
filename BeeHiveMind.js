@@ -4,7 +4,6 @@ const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
 const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
 // Importing all role modules - These are the logic files for each creep role
 var roleQueen = require('role.Queen');
-var roleScout = require('role.Scout');
 var roleHoneyGuard = require('role.HoneyGuard');
 var roleWinged_Archer = require('role.Winged_Archer');
 var roleApiary_Medics = require('role.Apiary_Medics');
@@ -15,7 +14,6 @@ var roleWorker_Bee = require('role.Worker_Bee');
 // Creep role function mappings, wrapping their run methods for easier execution
 var creepRoles = {
     Queen: roleQueen.run,
-    Scout: roleScout.run,
     HoneyGuard: roleHoneyGuard.run,
     Winged_Archer: roleWinged_Archer.run,
     Apiary_Medics: roleApiary_Medics.run,
@@ -132,7 +130,7 @@ const BeeHiveMind = {
             repair: 0,
             courier: 2,
             remoteharvest: 4,
-            scout: 0,
+            scout: 1,
         };
 
         // Count how many creeps are assigned to each task (across all rooms)

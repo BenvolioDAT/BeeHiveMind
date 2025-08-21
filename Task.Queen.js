@@ -1,8 +1,6 @@
 var BeeToolbox = require('BeeToolbox');
 const TaskQueen = {
   run: function (creep) {
-
-    
     const hasSourceContainers = creep.room.find(FIND_STRUCTURES, {
       filter: s => s.structureType === STRUCTURE_CONTAINER && s.pos.findInRange(FIND_SOURCES,1).length
     }).length > 0;
