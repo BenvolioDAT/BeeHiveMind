@@ -74,7 +74,7 @@ function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
 if (currentLogLevel >= LOG_LEVEL.DEBUG) {
 console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
 }
-// 🧱 Body configurations per task
+// ---------- Shorthand Body Config --------------------
 const B = (w,c,m)=>[...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
 const CM = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 const WM = (w,m)=>[...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
@@ -91,7 +91,6 @@ const BaseHarvest_Config = [
  B(2,1,2),
  B(1,1,1), 
 ];
-// Role-specific configurations
 const Courier_Config = [
   //H(16,16), //800
   //H(15,15), //750
@@ -110,38 +109,37 @@ const Courier_Config = [
   CM(2,2),   //100
   CM(1,1),   //50
 ];
-// Role-specific configurations
-// BIG ➜ small (no roads; MOVE = WORK + CARRY); ~2:1 WORK:CARRY
+
 const Builder_Config = [
   //B(17,8,25), // 50 parts
   //B(16,7,23), // 46
   //B(14,7,21), // 42
-  //B(13,6,19), // 38
-  //B(12,5,17), // 34
-  //B(10,5,15), // 30
-  //B(9,4,13),  // 26
+  B(13,6,19), // 38
+  B(12,5,17), // 34
+  B(10,5,15), // 30
+  B(9,4,13),  // 26
   B(8,3,11),  // 22
   B(6,3,9),   // 18
   B(5,2,7),   // 14
   B(4,1,5),   // 10
   B(2,1,3),   // 6
 ];
-// Role-specific configurations
+
 const Upgrader_Config = [
-  B(9,4,13),// 26
-  B(8,3,11),// 22
-  B(6,3,9), // 18
-  B(5,2,7), // 14
+  //B(9,4,13),// 26
+  //B(8,3,11),// 22
+  //B(6,3,9), // 18
+  //B(5,2,7), // 14
   B(4,1,5), // 10
   B(2,1,3), // 6
 ];
-// Role-specific configurations
+
 const Repair_Config = [
   B(5,2,7),// 14
   B(4,1,5),// 10
   B(2,1,3),// 6
 ];
-// Role-specific configurations
+
 const Queen_Config = [
   B(1,10,10),
   B(1,9,9),
@@ -154,7 +152,7 @@ const Queen_Config = [
   B(1,2,2),
   B(1,1,1),
 ];
-// Role-specific configurations
+
 const RemoteHarvest_Config = [
   //B(5,20,25), // 50 parts: 5W 20C 25M  (1,000 carry cap)
   //B(5,18,23), // 46 900 carry cap
@@ -171,19 +169,23 @@ const RemoteHarvest_Config = [
   B(2,2,4),  // 8 100 carry cap
   B(1,1,2),  // 4 50 carry cap
 ];
+
 const Scout_Config = [
 B(0,0,1),  // 4 50 carry cap
 ];
+
 const HoneyGuard_Config = [
   TAM(20,5,25),
   TAM(1,1,1),
 ];
+
 const Winged_Archer_Config = [
   [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
   [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE],
   [TOUGH, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE],
   [TOUGH, RANGED_ATTACK, MOVE],
 ];
+
 const Apiary_Medic_Config = [
   MH(7,7),
   MH(6,6),
@@ -193,11 +195,13 @@ const Apiary_Medic_Config = [
   MH(2,2),
   MH(1,1),
 ];
+
 const Siege_Bee_Config = [
   WM(25,25),
   WM(20,20),
   WM(15,15),
 ];
+
 // Array containing all task configurations
 const configurations = [
   { task: 'baseharvest', body: BaseHarvest_Config },
@@ -213,6 +217,8 @@ const configurations = [
   { task: 'Apiary_Medic' , body: Apiary_Medic_Config },
   { task: 'Siege_Bee' , body: Siege_Bee_Config },
 ];
+
+
 // 🔍 Selects the largest body config that fits within current available energy
 function Generate_Body_From_Config(task,Calculate_Spawn_Resource) {
   const config = configurations.find(entry => entry.task === task);
