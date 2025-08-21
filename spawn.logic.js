@@ -34,7 +34,7 @@ var BODYPART_COST = {
 
 function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
     let body = getBodyForTask(neededTask, Calculate_Spawn_Resource);
-    let name = Generate_Creep_Name('Worker_Bee');
+    let name = Generate_Creep_Name(neededTask);
     let memory = { 
         role: 'Worker_Bee',           // Current role/behavior
         task: neededTask,             // Current task
@@ -114,11 +114,11 @@ const Builder_Config = [
   //B(17,8,25), // 50 parts
   //B(16,7,23), // 46
   //B(14,7,21), // 42
-  B(13,6,19), // 38
-  B(12,5,17), // 34
-  B(10,5,15), // 30
-  B(9,4,13),  // 26
-  B(8,3,11),  // 22
+  //B(13,6,19), // 38
+  //B(12,5,17), // 34
+  //B(10,5,15), // 30
+  //B(9,4,13),  // 26
+  //B(8,3,11),  // 22
   B(6,3,9),   // 18
   B(5,2,7),   // 14
   B(4,1,5),   // 10
