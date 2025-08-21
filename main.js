@@ -15,10 +15,10 @@ const tickStart = Game.cpu.getUsed();
 
 // Logging levels for controlling console output detail
 global.LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 }; // Define levels: NONE < BASIC < DEBUG
-global.currentLogLevel = LOG_LEVEL.NONE; // Default log level (adjust to DEBUG for more output)
+global.currentLogLevel = LOG_LEVEL.BASIC; // Default log level (adjust to DEBUG for more output)
 
 // Pixel generation flag (set to 1 to enable pixel generation when conditions met)
-const GenPixel = 1;
+const GenPixel = 0;
 // Main game loop function that runs every tick
 module.exports.loop = function () {
     // Every 3 ticks, log containers near sources in all rooms

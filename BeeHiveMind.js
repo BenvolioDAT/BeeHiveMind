@@ -1,7 +1,7 @@
 // Logging Levels
 const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
 //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
-const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
+//const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
 // Importing all role modules - These are the logic files for each creep role
 var roleQueen = require('role.Queen');
 var roleHoneyGuard = require('role.HoneyGuard');
@@ -124,13 +124,14 @@ const BeeHiveMind = {
     manageSpawns2() {
         // Configurable quotas for each task type
         const workerTaskLimits = {
-            baseharvest: 2,
+            baseharvest: 1,
             builder: 1,
             upgrader: 1,
             repair: 0,
             courier: 2,
             remoteharvest: 4,
             scout: 1,
+            
         };
 
         // Count how many creeps are assigned to each task (across all rooms)
