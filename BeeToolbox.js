@@ -352,9 +352,9 @@ var BeeToolbox = {
   const options = Object.assign({
     range,                 // same meaning as before
     ignoreCreeps: true,    // good default for smoother traffic
-    // useFindRoute: true, // enable for multi-room routing when needed
+     useFindRoute: true, // enable for multi-room routing when needed
     // ensurePath: true,   // try a second pass if short search failed
-    // stuckValue: 2,      // repath when stuck this many ticks
+     stuckValue: 2,      // repath when stuck this many ticks
     // repath: 0.05,       // 5% chance to randomly repath each tick
     returnData: {}         // we’ll use this to optionally draw/flag
   }, opts);
@@ -362,30 +362,13 @@ var BeeToolbox = {
   // ---- Call Traveler ----
   const res = creep.travelTo(destination, options);
 
-  // ---- OPTIONAL: role-colored path visuals (kept light) ----
-  // (Your old per-step circles are CPU-heavy; keep it minimal or remove)
-  /*
-  const roleColors = {
-    Queen: '#ffaa00', Courier_Bee: '#00ff00', Nurse_Bee: '#ff69b4',
-    Forager_Bee: '#87ceeb', Builder_Bee: '#a0522d', Apiary_Medics: '#ff0000',
-    Winged_Archer: '#0000ff', HoneyGuard: '#ff4500', Siege_Bee: '#8b0000',
-    Scout: '#9400d3', default: '#0093a1'
-  };
-  const color = roleColors[creep.memory.role] || roleColors.default;
-  if (options.returnData.nextPos) {
-    new RoomVisual(creep.room.name).line(
-      creep.pos, options.returnData.nextPos, { color, width: 0.08, opacity: 0.5 }
-    );
-  }
-  */
-
   // ---- OPTIONAL: drop/move a destination flag when a NEW path is planned ----
   // Works only when the room is visible (same as your previous code)
   if (options.returnData.pathfinderReturn && options.returnData.pathfinderReturn.path) {
     const pfPath = options.returnData.pathfinderReturn.path;
     if (pfPath.length) {
       const last = pfPath[pfPath.length - 1]; // RoomPosition
-      const fname = creep.memory.destFlag || `dest_${creep.name}`;
+      const fname = creep.memory.destFlag || `${creep.name}`;
       const FLAG_COLORS = { default: [COLOR_CYAN, COLOR_WHITE] };
       const [primary, secondary] = FLAG_COLORS.default;
       let flag = Game.flags[fname];

@@ -84,10 +84,10 @@ var TaskBuilder = {
     { type: STRUCTURE_EXTENSION, x: 5, y: 1 },//59
     { type: STRUCTURE_EXTENSION, x: 5, y:-1 },//60 
     // TOWER LOCATIONS
-    { type: STRUCTURE_TOWER,     x:-5, y:-5 },//1
-    { type: STRUCTURE_TOWER,     x: 5, y: 5 },//2
-    { type: STRUCTURE_TOWER,     x:-5, y: 5 },//3
-    { type: STRUCTURE_TOWER,     x: 5, y:-5 },//4
+    //{ type: STRUCTURE_TOWER,     x:-5, y:-5 },//1
+    //{ type: STRUCTURE_TOWER,     x: 5, y: 5 },//2
+    //{ type: STRUCTURE_TOWER,     x:-5, y: 5 },//3
+    //{ type: STRUCTURE_TOWER,     x: 5, y:-5 },//4
     //{ type: STRUCTURE_TOWER,     x:-1, y: 0 },//5
     //{ type: STRUCTURE_TOWER,     x: 1, y: 0 },//6
     { type: STRUCTURE_ROAD,      x: 1, y: 1 },
