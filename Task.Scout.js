@@ -196,7 +196,7 @@ const TaskScout = {
       creep.memory.hasAnnouncedRoomVisit = false;
 
       // NEW: fallback quip
-      BeeStandup.queueSpeech(creep, `Wing it to ${randomRoom}. YOLO = You Only Live Once… per spawn.`);    
+      BeeStandup.queueSpeech(creep, `🪽 it..... to ${randomRoom}YOLO......You Only..Live Once.per spawn.`);    
 
       if (currentLogLevel >= LOG_LEVEL.DEBUG) {
       console.log(`${creep.name} moving randomly to room: ${randomRoom}`);
