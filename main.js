@@ -5,6 +5,7 @@ var BeeHiveMind = require('BeeHiveMind');       // Central logic hub for managin
 var towerLogic = require('tower.logic');        // Tower management: defense and repairs
 var roleLinkManager = require('role.LinkManager'); // Logic for energy transfer between links
 var BeeToolbox = require('BeeToolbox');         // Utility functions for movement, energy, etc.
+var Traveler = require('Traveler');
 
 // Initialize CPU usage tracking memory
 if (!Memory.cpuUsage) Memory.cpuUsage = []; // Array to store CPU usage data per tick

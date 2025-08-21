@@ -1,5 +1,6 @@
 global.LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 }; // Define levels: NONE < BASIC < DEBUG
 global.currentLogLevel = LOG_LEVEL.BASIC; // Default log level (adjust to DEBUG for more output)
+var Traveler = require('Traveler');
 
 var BeeToolbox = {
     // Logs all sources in a room to memory
@@ -275,7 +276,7 @@ var BeeToolbox = {
         },
 
         // 🐝 Travel function for Bee creeps with path visualization
-        BeeTravel: function(creep, target, range, reuse) {
+        /*BeeTravel: function(creep, target, range, reuse) {
             range = (range !== undefined) ? range : 1;
             reuse = (reuse !== undefined) ? reuse : 30;
 
@@ -342,7 +343,71 @@ var BeeToolbox = {
 
          }
             return result;
-    },
+    },*/
+    BeeTravel: function(creep, target, range = 1, reuse = 30, opts = {}) {
+  // Normalize target (Traveler accepts RoomPosition or object with .pos)
+  const destination = (target && target.pos) ? target.pos : target;
+
+  // Traveler options you probably want
+  const options = Object.assign({
+    range,                 // same meaning as before
+    ignoreCreeps: true,    // good default for smoother traffic
+    // useFindRoute: true, // enable for multi-room routing when needed
+    // ensurePath: true,   // try a second pass if short search failed
+    // stuckValue: 2,      // repath when stuck this many ticks
+    // repath: 0.05,       // 5% chance to randomly repath each tick
+    returnData: {}         // we’ll use this to optionally draw/flag
+  }, opts);
+
+  // ---- Call Traveler ----
+  const res = creep.travelTo(destination, options);
+
+  // ---- OPTIONAL: role-colored path visuals (kept light) ----
+  // (Your old per-step circles are CPU-heavy; keep it minimal or remove)
+  /*
+  const roleColors = {
+    Queen: '#ffaa00', Courier_Bee: '#00ff00', Nurse_Bee: '#ff69b4',
+    Forager_Bee: '#87ceeb', Builder_Bee: '#a0522d', Apiary_Medics: '#ff0000',
+    Winged_Archer: '#0000ff', HoneyGuard: '#ff4500', Siege_Bee: '#8b0000',
+    Scout: '#9400d3', default: '#0093a1'
+  };
+  const color = roleColors[creep.memory.role] || roleColors.default;
+  if (options.returnData.nextPos) {
+    new RoomVisual(creep.room.name).line(
+      creep.pos, options.returnData.nextPos, { color, width: 0.08, opacity: 0.5 }
+    );
+  }
+  */
+
+  // ---- OPTIONAL: drop/move a destination flag when a NEW path is planned ----
+  // Works only when the room is visible (same as your previous code)
+  if (options.returnData.pathfinderReturn && options.returnData.pathfinderReturn.path) {
+    const pfPath = options.returnData.pathfinderReturn.path;
+    if (pfPath.length) {
+      const last = pfPath[pfPath.length - 1]; // RoomPosition
+      const fname = creep.memory.destFlag || `dest_${creep.name}`;
+      const FLAG_COLORS = { default: [COLOR_CYAN, COLOR_WHITE] };
+      const [primary, secondary] = FLAG_COLORS.default;
+      let flag = Game.flags[fname];
+      if (!flag) {
+        const made = creep.room.createFlag(last, fname, primary, secondary);
+        if (typeof made === 'string') creep.memory.destFlag = made;
+      } else if (!flag.pos.isEqualTo(last)) {
+        flag.setPosition(last);
+      }
+    }
+  }
+  // Cleanup flag when we arrive (like before)
+  if (res === OK && destination && creep.pos.inRangeTo(destination, range)) {
+    if (creep.memory.destFlag && Game.flags[creep.memory.destFlag]) {
+      Game.flags[creep.memory.destFlag].remove();
+    }
+    delete creep.memory.destFlag;
+  }
+
+  return res;
+},
+
 };
 
 module.exports = BeeToolbox; // Export the BeeToolbox module
