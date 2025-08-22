@@ -14,7 +14,7 @@ const roleHoneyGuard = {
       }
     } else {
       // No valid attack target, return to flag for regroup
-      const rallyFlag = Game.flags['HoneyGuardRally'];
+      const rallyFlag = Game.flags['Rally'];
       if (rallyFlag) {
         creep.moveTo(rallyFlag); // Move to rally point
       }
