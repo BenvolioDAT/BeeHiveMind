@@ -9,7 +9,7 @@ const roleApiary_Medics = {
         // Self-heal if the medic is damaged
         if (creep.hits < creep.hitsMax) {
             creep.heal(creep);
-            creep.say('SH'); // Say "SH" as a visual indicator for self-healing
+            creep.say('⚕️'); // Say "SH" as a visual indicator for self-healing
             return; // Exit early after healing self
         }
 
