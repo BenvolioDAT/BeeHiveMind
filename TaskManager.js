@@ -22,6 +22,7 @@ const TaskUpgrader = require ('./Task.Upgrader');
 const TaskCombatArcher = require ('./Task.CombatArcher');
 const TaskCombatMedic = require ('./Task.CombatMedic');
 const TaskCombatMelee = require ('./Task.CombatMelee');
+const TaskDismantler = require ('./Task.Dismantler');
 // -------------------------------------------
 // The task registry: A central lookup table
 // Maps task names (as strings) to their corresponding task modules
@@ -40,6 +41,7 @@ const tasks = {
   'CombatMedic': TaskCombatMedic,
   'CombatMelee': TaskCombatMelee,
   'CombatArcher': TaskCombatArcher,
+  'Dismantler': TaskDismantler,
   'idle': TaskIdle,
   // You can add more tasks here as you create new modules
   // For example: 'upgrade': upgradeModule,
