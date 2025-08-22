@@ -123,7 +123,14 @@ const BeeHiveMind = {
         };
 
         // Count how many creeps are assigned to each task (across all rooms)
-        const roleCounts = _.countBy(Game.creeps, c => c.memory.task);
+        //const roleCounts = _.countBy(Game.creeps, c => c.memory.task);
+        // Exact parity with _.countBy(Game.creeps, c => c.memory.task)
+        const roleCounts = {};
+            for (const name in Game.creeps) {
+                const task = Game.creeps[name].memory.task; // no fallback, just like lodash
+                roleCounts[task] = (roleCounts[task] || 0) + 1;
+                }
+                
         if (currentLogLevel >= LOG_LEVEL.DEBUG) {
         console.log('🐝 Task count snapshot:', JSON.stringify(roleCounts));
             }
@@ -163,17 +170,6 @@ const BeeHiveMind = {
         for (const roomName in Memory.rooms) {
             if (!Memory.rooms[roomName]) {
                 Memory.rooms[roomName] = {}; // Initialize room memory
-            }
-
-            // Set default creep limits if missing
-            if (!Memory.rooms[roomName].creepLimits) {
-                Memory.rooms[roomName].creepLimits = {
-                    Queen_Number_Limit: 1,
-                    HoneyGuard_Number_Limit: 0,
-                    Apiary_Medics_Number_Limit: 0,
-                    Winged_Archer_Number_Limit: 0,
-                    Siege_Bee_Number_Limit: 0,
-                };
             }
         }
     }
