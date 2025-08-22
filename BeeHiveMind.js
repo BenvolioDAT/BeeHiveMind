@@ -79,13 +79,13 @@ const BeeHiveMind = {
         const limits = (Memory.rooms[roomName] && Memory.rooms[roomName].creepLimits) || {}; // Fetch room-specific creep limits
 
         // Define bee roles and their spawn limits and body configurations
-        const beeTypes = [
+        /*const beeTypes = [
             { name: 'Queen', limit: limits.Queen_Number_Limit, Body: spawnLogic.Generate_Queen_Body },
             { name: 'Winged_Archer', limit: limits.Winged_Archer_Number_Limit, Body: spawnLogic.Generate_Winged_Archer_Body },
             { name: 'Apiary_Medics', limit: limits.Apiary_Medics_Number_Limit, Body: spawnLogic.Generate_Apiary_Medic_Body },
             { name: 'HoneyGuard', limit: limits.HoneyGuard_Number_Limit, Body: spawnLogic.Generate_HoneyGuard_Body },
             { name: 'Siege_Bee', limit: limits.Siege_Bee_Number_Limit, Body: spawnLogic.Generate_Siege_Bee_Body },
-        ];
+        ];*/
 
         const roleCounts = _.countBy(Game.creeps, c => c.memory.role); // Count existing creeps by role
 
@@ -119,7 +119,12 @@ const BeeHiveMind = {
             courier: 2,
             remoteharvest: 2,
             scout: 1,
-            queen: 2,            
+            queen: 2,
+            CombatArcher: 0,
+            CombatMelee: 1,
+            CombatMedic: 0,
+            Dismantler: 0,
+
         };
 
         // Count how many creeps are assigned to each task (across all rooms)
@@ -130,7 +135,7 @@ const BeeHiveMind = {
                 const task = Game.creeps[name].memory.task; // no fallback, just like lodash
                 roleCounts[task] = (roleCounts[task] || 0) + 1;
                 }
-                
+
         if (currentLogLevel >= LOG_LEVEL.DEBUG) {
         console.log('🐝 Task count snapshot:', JSON.stringify(roleCounts));
             }

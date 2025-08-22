@@ -31,6 +31,14 @@ var BODYPART_COST = {
         return Generate_Scout_Body(Calculate_Spawn_Resource);
       case 'queen':
         return Generate_Queen_Body(Calculate_Spawn_Resource);
+      case 'CombatArcher':
+        return Generate_CombatArcher_Body(Calculate_Spawn_Resource);
+      case 'CombatMelee':
+        return Generate_CombatMelee_Body(Calculate_Spawn_Resource);
+      case 'CombatMedic':
+        return Generate_CombatMedic_Body(Calculate_Spawn_Resource);
+      case 'Dismantler':
+        return Generate_Dismantler_Config_Body(Calculate_Spawn_Resource);
     }
   }
 
@@ -176,7 +184,7 @@ const Scout_Config = [
 B(0,0,1),  // 4 50 carry cap
 ];
 
-const HoneyGuard_Config = [
+const CombatMelee_Config = [
   TAM(20,5,25),
   TAM(1,1,1),
 ];
@@ -188,7 +196,7 @@ const CombatArcher_Config = [
   [TOUGH, RANGED_ATTACK, MOVE],
 ];
 
-const Apiary_Medic_Config = [
+const CombatMedic_Config = [
   MH(7,7),
   MH(6,6),
   MH(5,5),
@@ -198,7 +206,7 @@ const Apiary_Medic_Config = [
   MH(1,1),
 ];
 
-const Siege_Bee_Config = [
+const Dismantler_Config = [
   WM(25,25),
   WM(20,20),
   WM(15,15),
@@ -214,10 +222,10 @@ const configurations = [
   { task: 'Queen', body: Queen_Config },
   { task: 'repair', body: Repair_Config },
   { task: 'Scout', body: Scout_Config },
-  { task: 'HoneyGuard' , body: HoneyGuard_Config },
+  { task: 'CombatMelee' , body: CombatMelee_Config },
   { task: 'CombatArcher' , body: CombatArcher_Config },
-  { task: 'Apiary_Medic' , body: Apiary_Medic_Config },
-  { task: 'Siege_Bee' , body: Siege_Bee_Config },
+  { task: 'CombatMedic' , body: CombatMedic_Config },
+  { task: 'Dismantler_Config' , body: Dismantler_Config },
 ];
 
 
@@ -280,17 +288,17 @@ function Generate_Upgrader_Body(Calculate_Spawn_Resource) {
 function Generate_Scout_Body(Calculate_Spawn_Resource) {
   return Generate_Body_From_Config('Scout', Calculate_Spawn_Resource);
 }
-function Generate_HoneyGuard_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('HoneyGuard', Calculate_Spawn_Resource);
+function Generate_CombatMelee_Body(Calculate_Spawn_Resource){
+  return Generate_Body_From_Config('CombatMelee', Calculate_Spawn_Resource);
 }
-function Generate_Winged_Archer_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('Winged_Archer' , Calculate_Spawn_Resource);
+function Generate_CombatArcher_Body(Calculate_Spawn_Resource){
+  return Generate_Body_From_Config('CombatArcher' , Calculate_Spawn_Resource);
 }
-function Generate_Apiary_Medic_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('Apiary_Medic' , Calculate_Spawn_Resource);
+function Generate_CombatMedic_Body(Calculate_Spawn_Resource){
+  return Generate_Body_From_Config('CombatMedic' , Calculate_Spawn_Resource);
 }
-function Generate_Siege_Bee_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('Siege_Bee' , Calculate_Spawn_Resource);
+function Generate_Dismantler_Config_Body(Calculate_Spawn_Resource){
+  return Generate_Body_From_Config('Dismantler' , Calculate_Spawn_Resource);
 }
 
 // Function to spawn a creep of a specific role
@@ -356,10 +364,10 @@ function Spawn_Creep_Role(spawn, role_name, generateBodyFunction, Spawn_Resource
     Generate_Queen_Body,
     Generate_RemoteHarvest_Body,
     Generate_Scout_Body,
-    Generate_HoneyGuard_Body,
-    Generate_Winged_Archer_Body,
-    Generate_Apiary_Medic_Body,
-    Generate_Siege_Bee_Body,
+    Generate_CombatMelee_Body,
+    Generate_CombatArcher_Body,
+    Generate_CombatMedic_Body,
+    Generate_Dismantler_Config_Body,
     getBodyForTask,
     Spawn_Worker_Bee,
   };
