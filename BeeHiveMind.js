@@ -3,23 +3,11 @@ const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
 //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
 //const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
 // Importing all role modules - These are the logic files for each creep role
-var roleQueen = require('role.Queen');
-var roleHoneyGuard = require('role.HoneyGuard');
-var roleWinged_Archer = require('role.Winged_Archer');
-var roleApiary_Medics = require('role.Apiary_Medics');
 var spawnLogic = require('spawn.logic');
-var roleSiege_Bee = require('role.Siege_Bee');
 var roleWorker_Bee = require('role.Worker_Bee');
 
 // Creep role function mappings, wrapping their run methods for easier execution
-var creepRoles = {
-    Queen: roleQueen.run,
-    HoneyGuard: roleHoneyGuard.run,
-    Winged_Archer: roleWinged_Archer.run,
-    Apiary_Medics: roleApiary_Medics.run,
-    Siege_Bee: roleSiege_Bee.run,
-    Worker_Bee: roleWorker_Bee.run,
-};
+var creepRoles = {Worker_Bee: roleWorker_Bee.run,};
 
 // Core BeeHiveMind object to manage creeps, rooms, and spawning
 const BeeHiveMind = {
@@ -40,7 +28,7 @@ const BeeHiveMind = {
         }
 
         // Handle spawning logic across rooms
-        BeeHiveMind.manageSpawns2();
+        //BeeHiveMind.manageSpawns2();
         BeeHiveMind.manageSpawns();
     
         // Placeholder for managing remote operations (scouting, remote mining, claiming)
@@ -82,7 +70,7 @@ const BeeHiveMind = {
     },
 
     // Manages spawning creeps based on room needs
-    manageSpawns() {
+    manageSpawns2() {
         const spawner = _.find(Game.spawns, s => !s.spawning); // Find an idle spawner
         if (!spawner) return; // Exit if no spawner available
 
@@ -121,17 +109,17 @@ const BeeHiveMind = {
         }
     },
 
-    manageSpawns2() {
+    manageSpawns() {
         // Configurable quotas for each task type
         const workerTaskLimits = {
-            baseharvest: 1,
+            baseharvest: 2,
             builder: 1,
             upgrader: 1,
             repair: 0,
             courier: 2,
-            remoteharvest: 4,
+            remoteharvest: 2,
             scout: 1,
-            
+            queen: 2,            
         };
 
         // Count how many creeps are assigned to each task (across all rooms)

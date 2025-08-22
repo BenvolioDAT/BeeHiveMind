@@ -19,6 +19,9 @@ const TaskQueen = require ('./Task.Queen');
 const TaskScout = require ('./Task.Scout');
 const TaskRepair = require ('./Task.Repair');
 const TaskUpgrader = require ('./Task.Upgrader');
+const TaskCombatArcher = require ('./Task.CombatArcher');
+const TaskCombatMedic = require ('./Task.CombatMedic');
+const TaskCombatMelee = require ('./Task.CombatMelee');
 // -------------------------------------------
 // The task registry: A central lookup table
 // Maps task names (as strings) to their corresponding task modules
@@ -34,6 +37,9 @@ const tasks = {
   'scout': TaskScout,
   'repair': TaskRepair,
   'upgrader': TaskUpgrader,
+  'CombatMedic': TaskCombatMedic,
+  'CombatMelee': TaskCombatMelee,
+  'CombatArcher': TaskCombatArcher,
   'idle': TaskIdle,
   // You can add more tasks here as you create new modules
   // For example: 'upgrade': upgradeModule,
@@ -59,8 +65,6 @@ function colonyNeeds() {
     }
     return shortage;
 }
-
-
 
 // -------------------------------------------
 // Export the TaskManager object as a module

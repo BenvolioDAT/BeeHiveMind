@@ -1,5 +1,5 @@
 var BeeToolbox = require('BeeToolbox');
-var roleWinged_Archer = {
+var TaskCombatArcher = {
   run: function (creep) {
     if (creep.spawning) {return;}
     //if (BeeToolbox.shouldWaitForMedic(creep)) {
@@ -31,4 +31,4 @@ var roleWinged_Archer = {
     }
   }
 };
-module.exports = roleWinged_Archer;
+module.exports = TaskCombatArcher;

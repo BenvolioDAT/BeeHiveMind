@@ -29,6 +29,8 @@ var BODYPART_COST = {
         return Generate_RemoteHarvest_Body(Calculate_Spawn_Resource);
       case 'scout':
         return Generate_Scout_Body(Calculate_Spawn_Resource);
+      case 'queen':
+        return Generate_Queen_Body(Calculate_Spawn_Resource);
     }
   }
 
@@ -92,10 +94,10 @@ const BaseHarvest_Config = [
  B(1,1,1), 
 ];
 const Courier_Config = [
-  //CM(16,16), //800
-  //CM(15,15), //750
-  //CM(14,14), //700
-  //CM(13,13), //650
+  CM(16,16), //800
+  CM(15,15), //750
+  CM(14,14), //700
+  CM(13,13), //650
   CM(12,12), //600
   CM(11,11), //550
   CM(10,10), //500
@@ -179,7 +181,7 @@ const HoneyGuard_Config = [
   TAM(1,1,1),
 ];
 
-const Winged_Archer_Config = [
+const CombatArcher_Config = [
   [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
   [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE],
   [TOUGH, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE],
@@ -213,7 +215,7 @@ const configurations = [
   { task: 'repair', body: Repair_Config },
   { task: 'Scout', body: Scout_Config },
   { task: 'HoneyGuard' , body: HoneyGuard_Config },
-  { task: 'Winged_Archer' , body: Winged_Archer_Config },
+  { task: 'CombatArcher' , body: CombatArcher_Config },
   { task: 'Apiary_Medic' , body: Apiary_Medic_Config },
   { task: 'Siege_Bee' , body: Siege_Bee_Config },
 ];
