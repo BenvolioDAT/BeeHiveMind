@@ -28,7 +28,6 @@ const BeeHiveMind = {
         }
 
         // Handle spawning logic across rooms
-        //BeeHiveMind.manageSpawns2();
         BeeHiveMind.manageSpawns();
     
         // Placeholder for managing remote operations (scouting, remote mining, claiming)
@@ -69,46 +68,6 @@ const BeeHiveMind = {
         }
     },
 
-    // Manages spawning creeps based on room needs
-    manageSpawns2() {
-        const spawner = _.find(Game.spawns, s => !s.spawning); // Find an idle spawner
-        if (!spawner) return; // Exit if no spawner available
-
-        const roomName = spawner.room.name; // The room of the spawner
-        const spawnResource = spawnLogic.Calculate_Spawn_Resource(); // Calculate resources for spawning
-        const limits = (Memory.rooms[roomName] && Memory.rooms[roomName].creepLimits) || {}; // Fetch room-specific creep limits
-
-        // Define bee roles and their spawn limits and body configurations
-        /*const beeTypes = [
-            { name: 'Queen', limit: limits.Queen_Number_Limit, Body: spawnLogic.Generate_Queen_Body },
-            { name: 'Winged_Archer', limit: limits.Winged_Archer_Number_Limit, Body: spawnLogic.Generate_Winged_Archer_Body },
-            { name: 'Apiary_Medics', limit: limits.Apiary_Medics_Number_Limit, Body: spawnLogic.Generate_Apiary_Medic_Body },
-            { name: 'HoneyGuard', limit: limits.HoneyGuard_Number_Limit, Body: spawnLogic.Generate_HoneyGuard_Body },
-            { name: 'Siege_Bee', limit: limits.Siege_Bee_Number_Limit, Body: spawnLogic.Generate_Siege_Bee_Body },
-        ];*/
-
-        const roleCounts = _.countBy(Game.creeps, c => c.memory.role); // Count existing creeps by role
-
-        // Loop through bee roles, spawning if under limit
-        for (const bee of beeTypes) {
-            const count = roleCounts[bee.name] || 0;
-            if (count < bee.limit) {
-                const bodyConfig = bee.Body(spawnResource); // Get body configuration for this role
-                try {
-                    const result = spawnLogic.Spawn_Creep_Role(spawner, bee.name, () => bodyConfig, spawnResource, {
-                        memory: { role: bee.name, spawnRoom: spawner.room.name }
-                    });
-                    if (result === OK) {
-                        console.log(`${bee.name} spawned successfully.`);
-                    }
-                } catch (error) {
-                    console.error(`Failed to spawn ${bee.name}: ${error}`);
-                }
-                break; // Spawn one creep per tick
-            }
-        }
-    },
-
     manageSpawns() {
         // Configurable quotas for each task type
         const workerTaskLimits = {
@@ -121,7 +80,7 @@ const BeeHiveMind = {
             scout: 1,
             queen: 2,
             CombatArcher: 0,
-            CombatMelee: 1,
+            CombatMelee: 0,
             CombatMedic: 0,
             Dismantler: 0,
 
