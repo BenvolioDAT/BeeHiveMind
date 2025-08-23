@@ -274,76 +274,7 @@ var BeeToolbox = {
                 }
             }  
         },
-
-        // 🐝 Travel function for Bee creeps with path visualization
-        /*BeeTravel: function(creep, target, range, reuse) {
-            range = (range !== undefined) ? range : 1;
-            reuse = (reuse !== undefined) ? reuse : 30;
-
-            const roleColors = {
-            Queen: '#ffaa00',        // Yellow gold
-            Courier_Bee: '#00ff00',  // Green
-            Nurse_Bee: '#ff69b4',    // Pink
-            Forager_Bee: '#87ceeb',  // Sky blue
-            Builder_Bee: '#a0522d',  // Brown
-            Apiary_Medics: '#ff0000',// Red
-            Winged_Archer: '#0000ff',// Blue
-            HoneyGuard: '#ff4500',   // Orange red
-            Siege_Bee: '#8b0000',    // Dark red
-            Scout: '#9400d3',        // Purple
-            default: '#0093a1'       // Teal as fallback
-        };
-        //store the target as a unique string (position or ID)
-        const destKey = `${target.room.name}-${target.pos.x}-${target.pos.y}`;
-        //check if destination changed or path is missing
-        if (!creep.memory.moveDest ||
-            creep.memory.moveDest !== destKey ||
-            !creep.memory.movePath){
-                const path = creep.pos.findPathTo(target.pos, {range: range, reusePath: reuse});
-                if (path.length > 0) {
-                    creep.memory.movePath = Room.serializePath(path);
-                    creep.memory.moveDest = destKey;
-                } else {    
-                    if (currentLogLevel >= LOG_LEVEL.DEBUG) {                
-                    console.log(`🐝 ${creep.name} failed to find path to ${destKey}.`);
-                    }
-                    return ERR_NO_PATH;
-                }
-            }
-        // Visualize the path
-        const color = roleColors[creep.memory.role] || roleColors.default;  // Fallback to default if role not found
-        const deserializedPath = Room.deserializePath(creep.memory.movePath);
-            for (let i = 0; i < deserializedPath.length; i++) {
-                const step = deserializedPath[i];
-                creep.room.visual.circle(step, {
-                    radius: 0.05,
-                    fill: 'transparent',
-                    stroke: color,
-                    strokeWidth: 0.1,
-                    opacity: 1,
-                });
-                // Optionally label the path with the creep's name at the first step
-                if (i === 0) {
-                    creep.room.visual.text(`🐝 ${creep.name}`, step.x, step.y - 0.5, {
-                        font: 0.3,
-                        color: color
-                    });
-                }
-            }
-         //Attempt to move by stored path
-         const result = creep.moveByPath(creep.memory.movePath);
-         if (result !== OK) { 
-            if (currentLogLevel >= LOG_LEVEL.DEBUG) {      
-            console.log(`🐝 ${creep.name} moveByPath failed with ${result}. Clearing path.`);
-            }
-            //clear path to force recalculation next tick
-            creep.memory.movePath = null;
-            creep.memory.moveDest = null;
-            creep.memory.deserializedPath = null;  // 🧹 Clear cache too!
-
-         }
-            return result;
-    },*/
+        
     BeeTravel: function(creep, target, range = 1, reuse = 30, opts = {}) {
   // Normalize target (Traveler accepts RoomPosition or object with .pos)
   const destination = (target && target.pos) ? target.pos : target;
