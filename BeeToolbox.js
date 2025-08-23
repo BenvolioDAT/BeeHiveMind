@@ -1,5 +1,3 @@
-//global.LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 }; // Define levels: NONE < BASIC < DEBUG
-//global.currentLogLevel = LOG_LEVEL.NONE; // Default log level (adjust to DEBUG for more output)
 var Traveler = require('Traveler');
 
 var BeeToolbox = {
