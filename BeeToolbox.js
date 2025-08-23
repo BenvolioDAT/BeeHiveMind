@@ -274,7 +274,7 @@ var BeeToolbox = {
                 }
             }  
         },
-        
+
     BeeTravel: function(creep, target, range = 1, reuse = 30, opts = {}) {
   // Normalize target (Traveler accepts RoomPosition or object with .pos)
   const destination = (target && target.pos) ? target.pos : target;
@@ -292,7 +292,7 @@ var BeeToolbox = {
 
   // ---- Call Traveler ----
   const res = creep.travelTo(destination, options);
-
+/*
   // ---- OPTIONAL: drop/move a destination flag when a NEW path is planned ----
   // Works only when the room is visible (same as your previous code)
   if (options.returnData.pathfinderReturn && options.returnData.pathfinderReturn.path) {
@@ -317,7 +317,7 @@ var BeeToolbox = {
       Game.flags[creep.memory.destFlag].remove();
     }
     delete creep.memory.destFlag;
-  }
+  }*/
 
   return res;
 },
