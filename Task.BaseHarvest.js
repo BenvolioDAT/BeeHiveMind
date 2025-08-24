@@ -53,8 +53,6 @@ const TaskBaseHarvest = {
         }
       }
     };
-
-    
 // Utility function to check if there's a container adjacent to the given position
 const hasAdjacentContainer = function (pos) {
   const room = Game.rooms[pos.roomName];

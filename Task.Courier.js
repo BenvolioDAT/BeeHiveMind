@@ -8,7 +8,7 @@ const TaskCourier = {
     // Update transfer state based on energy storage
     if (creep.memory.transferring && creep.store[RESOURCE_ENERGY] === 0) {
       creep.memory.transferring = false; // Switch to collecting if out of energy
-    }                                            /////.getFreeCapacity() ===
+    }                                            
     if (!creep.memory.transferring && creep.store[RESOURCE_ENERGY] > 0) {
       creep.memory.transferring = true; // Switch to transferring when full
     }
