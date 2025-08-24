@@ -1,76 +1,57 @@
 var BeeToolbox = require('BeeToolbox');
 const TaskBaseHarvest = {
-    run: function(creep) { 
-          // Handle harvesting logic
-          if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
-            creep.memory.harvesting = true;
-          }
-          if (creep.memory.harvesting && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
-            creep.memory.harvesting = false;
-          }
-          if (creep.memory.harvesting) {
-            // If the baseharvest is in harvesting state
-            const assignedSourceId = assignSource(creep);
-            const targetSource = Game.getObjectById(assignedSourceId);
-            if (targetSource) {
-              // Check if a container is adjacent to the source
-              const container = getAdjacentContainer(targetSource);
-              if (container) {
-                // If a container exists, move onto it if not already on it
-                if (!creep.pos.isEqualTo(container.pos)) {
-                  BeeToolbox.BeeTravel(creep, container,0);
-                  //creep.moveTo(container, { reusePath: 10 });
-                } else {
-                  // Harvest from the source while standing on the container
-                  creep.harvest(targetSource);
-                }
+  run: function(creep) { 
+        // Handle harvesting logic
+        if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
+          creep.memory.harvesting = true;
+        }
+        if (creep.memory.harvesting && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+          creep.memory.harvesting = false;
+        }
+        if (creep.memory.harvesting) {
+          // If the baseharvest is in harvesting state
+          const assignedSourceId = assignSource(creep);
+          const targetSource = Game.getObjectById(assignedSourceId);
+          if (targetSource) {
+            // Check if a container is adjacent to the source
+            const container = getAdjacentContainer(targetSource);
+            if (container) {
+              // If a container exists, move onto it if not already on it
+              if (!creep.pos.isEqualTo(container.pos)) {
+                BeeToolbox.BeeTravel(creep, container,0);
               } else {
-                // If no container exists, attempt to build one
-                BeeToolbox.ensureContainerNearSource(creep, targetSource);
-                if (creep.harvest(targetSource) === ERR_NOT_IN_RANGE) {
-                  BeeToolbox.BeeTravel(creep, targetSource);
-                  //creep.moveTo(targetSource, { reusePath: 10 });
-                }
-              }          
-            }          
-          } else {
-            // Check if the creep is near a container and transfer energy if possible
-            if (hasAdjacentContainer(creep.pos) && creep.store.getFreeCapacity() === 0) {
-              const adjacentContainer = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-                filter: (structure) =>
-                  structure.structureType === STRUCTURE_CONTAINER &&
-                  structure.pos.isNearTo(creep.pos),
-              });
-              if (adjacentContainer && creep.transfer(adjacentContainer, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                BeeToolbox.BeeTravel(creep, adjacentContainer);
-                //creep.moveTo(adjacentContainer, { reusePath: 10 });
-                return;
+                // Harvest from the source while standing on the container
+                creep.harvest(targetSource);
               }
-            }
-            // Drop energy if no Couriers are available
-            const Courier = _.filter(Game.creeps, (creep) => creep.memory.task === 'courier');
-            if (Courier.length > 0) {
-              creep.drop(RESOURCE_ENERGY);
-              return;
-            }
-            // Find the closest structure to transfer energy to (spawn, extension, or storage)
-            const targetStructure = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+            } else {
+              // If no container exists, attempt to build one
+              BeeToolbox.ensureContainerNearSource(creep, targetSource);
+              if (creep.harvest(targetSource) === ERR_NOT_IN_RANGE) {
+                BeeToolbox.BeeTravel(creep, targetSource);
+              }
+            }          
+          }          
+        } else {
+          // Check if the creep is near a container and transfer energy if possible
+          if (hasAdjacentContainer(creep.pos) && creep.store.getFreeCapacity() === 0) {
+            const adjacentContainer = creep.pos.findClosestByPath(FIND_STRUCTURES, {
               filter: (structure) =>
-                (structure.structureType === STRUCTURE_SPAWN ||
-                  structure.structureType === STRUCTURE_EXTENSION ||
-                  structure.structureType === STRUCTURE_STORAGE) &&
-                structure.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
+                structure.structureType === STRUCTURE_CONTAINER &&
+                structure.pos.isNearTo(creep.pos),
             });
-            if (!targetStructure) {
+            if (adjacentContainer && creep.transfer(adjacentContainer, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+              BeeToolbox.BeeTravel(creep, adjacentContainer);
               return;
             }
-            // Transfer energy to the target structure
-            if (creep.transfer(targetStructure, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-              BeeToolbox.BeeTravel(creep, targetStructure);
-              //creep.moveTo(targetStructure, { reusePath: 10 });
-            }
+          }
+          // Drop energy if no Couriers are available
+          const Courier = _.filter(Game.creeps, (creep) => creep.memory.task === 'courier');
+          if (Courier.length > 0) {
+            creep.drop(RESOURCE_ENERGY);
+            return;
           }
         }
+      }
     };
 
     
@@ -98,18 +79,16 @@ const hasAdjacentContainer = function (pos) {
 function getAdjacentContainer(source) {  
     const containers = source.pos.findInRange(FIND_STRUCTURES, 1, {
       filter: (structure) => structure.structureType === STRUCTURE_CONTAINER,
-    });
+      });
     return containers.length > 0 ? containers[0] : null;  
-}
+  }
 
 function assignSource(creep) {
     if (creep.spawning) return;
-
     // Already assigned? Just return it.
     if (creep.memory.assignedSource) {
         return creep.memory.assignedSource;
-    }
-
+      }
     // Count living harvesters per source (using ONLY Game.creeps)
     const sources = creep.room.find(FIND_SOURCES);
     const counts = {};
@@ -119,8 +98,7 @@ function assignSource(creep) {
             c.memory.assignedSource === source.id &&
             c.room.name === creep.room.name // Only this room
         ).length;
-    }
-
+      }
     // Pick the least-occupied source
     let min = Infinity, chosen = null;
     for (const source of sources) {
@@ -128,13 +106,12 @@ function assignSource(creep) {
             min = counts[source.id];
             chosen = source;
         }
-    }
-
+      }
     if (chosen) {
         creep.memory.assignedSource = chosen.id;
         return chosen.id;
-    }
+      }
     return null;
-}
+  }
 
 module.exports = TaskBaseHarvest;
