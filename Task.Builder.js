@@ -19,7 +19,9 @@ var TaskBuilder = {
   // Define positions and types for each structure to be built
   // Y being negative counts as a up while a postive number goes down and X negitvie go left and postive goes right.
   structurePlacements: [
-    { type: STRUCTURE_STORAGE,   x:-5, y: 0 },//1
+    { type: STRUCTURE_STORAGE,   x:  8, y: 0},//1
+    { type: STRUCTURE_SPAWN,     x: -5, y: 0},
+    { type: STRUCTURE_SPAWN,     x:  5, y: 0},
 
     //{ type: STRUCTURE_CONTAINER, x: 5, y: 0},
 
@@ -117,10 +119,7 @@ var TaskBuilder = {
     // Add more structures with their positions
   ],
   // Main function to control the Builder_Bee creep
-  run: function (creep) {
-
-    
-
+  run: function (creep) {  
     // Check if the creep is currently building and has no energy left
     if (creep.memory.building && creep.store[RESOURCE_ENERGY] == 0) {
       creep.memory.building = false;
@@ -196,10 +195,10 @@ var TaskBuilder = {
   // Function to upgrade the controller when there are no construction sites
   upgradeController: function (creep) {
     var controller = creep.room.controller;
-            if (controller.level === 8 && controller.ticksToDowngrade > 180000) {
-          // Skip upgrading to save energy when controller is stable
-          return;
-        }
+    if (controller.level === 8 && controller.ticksToDowngrade > 180000) {
+      // Skip upgrading to save energy when controller is stable
+      return;
+    }
     if (creep.upgradeController(controller) == ERR_NOT_IN_RANGE) {
       // If not in range, move towards the controller with visualization
       BeeToolbox.BeeTravel(creep, controller);
@@ -244,6 +243,9 @@ var TaskBuilder = {
       room.find(FIND_CONSTRUCTION_SITES, { filter: { structureType: structureType } }).length
     );
   },
-};
 
+
+
+  
+};
 module.exports = TaskBuilder;
