@@ -196,6 +196,10 @@ var TaskBuilder = {
   // Function to upgrade the controller when there are no construction sites
   upgradeController: function (creep) {
     var controller = creep.room.controller;
+            if (controller.level === 8 && controller.ticksToDowngrade > 180000) {
+          // Skip upgrading to save energy when controller is stable
+          return;
+        }
     if (creep.upgradeController(controller) == ERR_NOT_IN_RANGE) {
       // If not in range, move towards the controller with visualization
       BeeToolbox.BeeTravel(creep, controller);

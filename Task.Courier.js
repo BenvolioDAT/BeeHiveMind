@@ -70,8 +70,37 @@ const TaskCourier = {
       }
     }
     // If no container/dropped energy, fallback to general energy collection
-    BeeToolbox.collectEnergy(creep);
-  }, 
+    //BeeToolbox.collectEnergy(creep);
+    //pickupDroppedEnergy(creep);
+    const droppedEnergy = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
+    filter: r => r.resourceType === RESOURCE_ENERGY
+      });
+
+      if (droppedEnergy) {
+          if (creep.pickup(droppedEnergy) === ERR_NOT_IN_RANGE) {
+              BeeToolbox.BeeTravel(creep,droppedEnergy)
+          }
+      }
+  },
+  
+  // Smarter energy pickup logic
+pickupDroppedEnergy: function (creep) {
+    // Find nearest dropped energy (at least 50 energy to avoid wasting time)
+    const droppedEnergy = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
+        filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= 50
+    });
+
+    if (droppedEnergy) {
+        // If not in range, move towards it
+        if (creep.pickup(droppedEnergy) === ERR_NOT_IN_RANGE) {
+            BeeToolbox.BeeTravel(creep,droppedEnergy);
+        }
+        return true; // Found and targeted energy
+    }
+
+    return false; // No dropped energy nearby
+},
+
 /////WIP collectEnergy new format not yet change added 2 as placeholder
   collectEnergy2: function (creep) {
     if (!creep.memory.state) {
