@@ -102,6 +102,12 @@ const BaseHarvest_Config = [
  B(1,1,1), 
 ];
 const Courier_Config = [
+  CM(22,22),
+  CM(21,21),
+  CM(20,20),
+  CM(19,19),
+  CM(18,18),
+  CM(17,17),
   CM(16,16), //800
   CM(15,15), //750
   CM(14,14), //700
