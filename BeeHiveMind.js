@@ -77,7 +77,7 @@ const BeeHiveMind = {
             repair: 0,
             courier: 1,
             remoteharvest: 2,
-            scout: 1,
+            scout: 0,
             queen: 1,
             CombatArcher: 0,
             CombatMelee: 0,
@@ -100,7 +100,7 @@ const BeeHiveMind = {
             }
         */
        // put this near your other constants
-        const DYING_SOON_TTL = 20;
+        const DYING_SOON_TTL = 25;
 
         // --- your existing block, with a lil’ ghost filter ---
         const roleCounts = {};
