@@ -100,7 +100,7 @@ const BeeHiveMind = {
             }
         */
        // put this near your other constants
-        const DYING_SOON_TTL = 25;
+        const DYING_SOON_TTL = 20;
 
         // --- your existing block, with a lil’ ghost filter ---
         const roleCounts = {};
