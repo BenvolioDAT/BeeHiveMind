@@ -89,7 +89,7 @@ const BeeHiveMind = {
         // Count how many creeps are assigned to each task (across all rooms)
         //const roleCounts = _.countBy(Game.creeps, c => c.memory.task);
         // Exact parity with _.countBy(Game.creeps, c => c.memory.task)
-        const roleCounts = {};
+        /*const roleCounts = {};
             for (const name in Game.creeps) {
                 const task = Game.creeps[name].memory.task; // no fallback, just like lodash
                 roleCounts[task] = (roleCounts[task] || 0) + 1;
@@ -98,6 +98,28 @@ const BeeHiveMind = {
         if (currentLogLevel >= LOG_LEVEL.DEBUG) {
         console.log('🐝 Task count snapshot:', JSON.stringify(roleCounts));
             }
+        */
+       // put this near your other constants
+        const DYING_SOON_TTL = 25;
+
+        // --- your existing block, with a lil’ ghost filter ---
+        const roleCounts = {};
+        const dyingSoonCounts = {}; // optional: for debug visibility
+
+        for (const name in Game.creeps) {
+        const creep = Game.creeps[name];
+        const task = creep.memory.task; // no fallback, just like lodash
+        const ttl = creep.ticksToLive;
+
+        // New: ignore creeps about to croak (TTL <= 50).
+        // Newborns sometimes have undefined TTL for a tick—still count those.
+        if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) {
+            dyingSoonCounts[task] = (dyingSoonCounts[task] || 0) + 1; // optional
+            continue;
+        }
+
+        roleCounts[task] = (roleCounts[task] || 0) + 1;
+        }
 
 
         // Loop through your spawns and fill missing task slots
