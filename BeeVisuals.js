@@ -81,12 +81,12 @@ const BeeVisuals = {
         // Bar position and dimensions
         const x = 0; // Adjust as needed
         const y = 19; // Adjust as needed
-        const width = 8.5; // Bar width
+        const width = 5.2; // Bar width
         const height = 1 ; // Bar height
 
         // Draw the background bar
         visuals.rect(x, y, width, height, {
-            fill: '#555555',
+            fill: '#000000ff',
             opacity: 0.3,
             stroke: '#000000'
         });
@@ -94,18 +94,18 @@ const BeeVisuals = {
         // Draw the fill bar
         visuals.rect(x, y, width * percentage, height, {
             fill: '#00ff00',
-            opacity: 0.2,
+            opacity: 0.5,
             stroke: '#000000'
         });
 
         // Draw the text
         visuals.text(`${energy}/${capacity}`, x + width / 2, y + height - .15 , {
             color: 'white',
-            font: 1,
+            font: .5,
             align: 'center',
             valign: 'middle',
-            opacity: 0.5,
-            stroke: '#000000'
+            opacity: 1,
+            stroke: '#000000ff'
         });
     },
 
@@ -124,9 +124,14 @@ const BeeVisuals = {
             builder: 1,
             upgrader: 1,
             repair: 0,
-            courier: 2,
-            remoteharvest: 0,
-            scout: 1,
+            courier: 1,
+            remoteharvest: 2,
+            scout: 0,
+            queen: 1,
+            CombatArcher: 0,
+            CombatMelee: 0,
+            CombatMedic: 0,
+            Dismantler: 0,
         };
         
         const maxTotal = Object.values(maxTasks).reduce((sum, count) => sum + count, 0);
@@ -143,12 +148,13 @@ const BeeVisuals = {
 
         // **Customizable column widths!**
         const x0 = 0, y0 = 20;
-        const nameW = 6;   // Left (task name) cell width
-        const valueW = 2.5;  // Right (count/max) cell width
-        const cellH = 1;
-        const font = 0.7;
-        const fillColor = "#ffffff";
+        const nameW = 4;   // Left (task name) cell width
+        const valueW = 1.2;  // Right (count/max) cell width
+        const cellH = .7;
+        const font = 0.5;
+        const fillColor = "#000000ff";
         const strokeColor = "#000000";
+        const opacityLvl = .4;
 
         for (let i = 0; i < nRows; i++) {
             const name = (i === 0) ? "Worker_Bee" : taskNames[i-1];
@@ -160,32 +166,32 @@ const BeeVisuals = {
             visual.rect(x0, y0 + i*cellH, nameW, cellH, {
                 fill: fillColor, 
                 stroke: strokeColor, 
-                opacity: 0.1, 
+                opacity: opacityLvl, 
                 radius: 0.05
             });
             // Draw right cell (count/max)
             visual.rect(x0 + nameW, y0 + i*cellH, valueW, cellH, {
                 fill: fillColor, 
                 stroke: strokeColor, 
-                opacity: 0.1, 
+                opacity: opacityLvl, 
                 radius: 0.05
             });
 
             // Name text (left cell, left-aligned)
             visual.text(name, x0 + 0.3, y0 + i*cellH + cellH/2 + 0.15, {
                 font, 
-                color: "#000000", 
+                color: "#ffffffff", 
                 align: 'left', 
                 valign: 'middle', 
-                opacity: 0.7
+                opacity: 1
             });
             // Value text (right cell, right-aligned)
             visual.text(value, x0 + nameW + valueW - 0.3, y0 + i*cellH + cellH/2 + 0.15, {
                 font, 
-                color: "#000000ff", 
+                color: "#ffffffff", 
                 align: 'right', 
                 valign: 'middle', 
-                opacity: 0.7
+                opacity: 1
             });
         }
     },
