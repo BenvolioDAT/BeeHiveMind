@@ -39,6 +39,8 @@ var BODYPART_COST = {
         return Generate_CombatMedic_Body(Calculate_Spawn_Resource);
       case 'Dismantler':
         return Generate_Dismantler_Config_Body(Calculate_Spawn_Resource);
+      case 'Trucker':
+        return Generate_Courier_Body(Calculate_Spawn_Resource);
     }
   }
 
