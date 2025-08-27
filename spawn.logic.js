@@ -207,7 +207,10 @@ B(0,0,1),  // 4 50 carry cap
 ];
 
 const CombatMelee_Config = [
-  TAM(20,5,25),
+  //TAM(20,5,25),
+  TAM(7,7,14),
+  TAM(6,6,12),
+  TAM(5,5,10),
   TAM(1,1,1),
 ];
 
@@ -247,7 +250,7 @@ const configurations = [
   { task: 'CombatMelee' , body: CombatMelee_Config },
   { task: 'CombatArcher' , body: CombatArcher_Config },
   { task: 'CombatMedic' , body: CombatMedic_Config },
-  { task: 'Dismantler_Config' , body: Dismantler_Config },
+  { task: 'Dismantler' , body: Dismantler_Config },
 ];
 
 

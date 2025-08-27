@@ -19,9 +19,9 @@ const roleApiary_Medics = {
         // If no target or the target is invalid, find a new one
         if (!target || target.memory.role === undefined || target.hits === 0) {
             target = _.find(Game.creeps, (ally) => {
-                return (ally.memory.role === 'HoneyGuard' || 
-                        ally.memory.role === 'Winged_Archer' ||
-                        ally.memory.role === 'Siege_Bee') &&
+                return (ally.memory.task === 'CombatMelee' || 
+                        ally.memory.task === 'CombatArcher' ||
+                        ally.memory.task === 'Siege_Bee') &&
                         !roleApiary_Medics.isTargetAssigned(ally.id); // Avoid duplicating medics on the same target
             });
 
