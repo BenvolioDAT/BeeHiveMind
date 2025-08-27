@@ -138,6 +138,7 @@ var BeeToolbox = {
     },
 
     // Placeholder for advanced attack target finder logic
+    /*
     findAttackTarget: function(creep) {
         // Find nearest hostile creep
         const target = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
@@ -156,6 +157,62 @@ var BeeToolbox = {
         });
         return barrier;
     },
+    */
+   // Replace the entire findAttackTarget with this:
+    findAttackTarget: function(creep) {
+    // 1) fight hostiles first
+    const hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
+    if (hostile) return hostile;
+
+    // 2) invader core next
+    const core = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_INVADER_CORE && s.hits > 0
+    });
+    if (core) return core;
+
+    // helper to find the first blocking wall/rampart along the path to a target
+    const firstBarrierOnPath = (from, to) => {
+        const path = from.room.findPath(from.pos, to.pos, {ignoreCreeps:true, maxOps:1000});
+        for (const step of path) {
+        const structs = from.room.lookForAt(LOOK_STRUCTURES, step.x, step.y);
+        const blocker = _.find(structs, s =>
+            s.structureType === STRUCTURE_WALL ||
+            (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic)
+        );
+        if (blocker) return blocker;
+        }
+        return null;
+    };
+
+    // 3) priority structures (ignore walls/ramparts for selection)
+    const prioTypes = [
+        STRUCTURE_TOWER, STRUCTURE_SPAWN, STRUCTURE_STORAGE, STRUCTURE_TERMINAL,
+        STRUCTURE_LAB, STRUCTURE_FACTORY, STRUCTURE_POWER_SPAWN, STRUCTURE_NUKER,
+        STRUCTURE_EXTENSION
+    ];
+
+    const prio = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
+        filter: s => prioTypes.includes(s.structureType)
+    });
+    if (prio) {
+        return firstBarrierOnPath(creep, prio) || prio;
+    }
+
+    // 4) any other hostile structure (excluding controller/walls/ramparts)
+    const other = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
+        filter: s =>
+        s.structureType !== STRUCTURE_CONTROLLER &&
+        s.structureType !== STRUCTURE_WALL &&
+        !(s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic)
+    });
+    if (other) {
+        return firstBarrierOnPath(creep, other) || other;
+    }
+
+    // 5) nothing sensible to hit -> return null (don’t randomly smack a wall)
+    return null;
+    },
+
 
     // Determines if an attacker should wait for a medic to catch up
     shouldWaitForMedic: function(attacker) {

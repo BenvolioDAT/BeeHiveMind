@@ -82,8 +82,8 @@ const BeeHiveMind = {
             CombatArcher: 2,
             CombatMelee: 2,
             CombatMedic: 2,
-            Dismantler: 3,
-            Trucker: 3,
+            Dismantler: 2,
+            Trucker: 2,
 
         };
 
