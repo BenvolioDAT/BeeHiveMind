@@ -92,7 +92,8 @@ const BeeMaintenance = {
         [STRUCTURE_LINK]: 9,
         [STRUCTURE_TERMINAL]: 10,
         [STRUCTURE_LAB]: 11,
-        [STRUCTURE_OBSERVER]: 12
+        [STRUCTURE_OBSERVER]: 12,
+        [STRUCTURE_ROAD]: 13,
         // Add more if you like!
     };
 
