@@ -1,7 +1,7 @@
 // role.Apiary_Medics.js 🐝 - Dedicated healers for offensive bees
 var BeeToolbox = require('BeeToolbox'); // Import common utilities for bee roles
 
-const roleApiary_Medics = {
+const TaskCombatMedic = {
     // Main function for Apiary_Medics behavior, runs every tick
     run: function(creep) {
         if (creep.spawning) { return; } // Skip logic if creep is still spawning
@@ -21,8 +21,8 @@ const roleApiary_Medics = {
             target = _.find(Game.creeps, (ally) => {
                 return (ally.memory.task === 'CombatMelee' || 
                         ally.memory.task === 'CombatArcher' ||
-                        ally.memory.task === 'Siege_Bee') &&
-                        !roleApiary_Medics.isTargetAssigned(ally.id); // Avoid duplicating medics on the same target
+                        ally.memory.task === 'Dismantler') &&
+                        !TaskCombatMedic.isTargetAssigned(ally.id); // Avoid duplicating medics on the same target
             });
 
             // If a valid target is found, assign it in memory
@@ -82,4 +82,4 @@ const roleApiary_Medics = {
     }
 };
 
-module.exports = roleApiary_Medics; // Export the role for use in the HiveMind system
+module.exports = TaskCombatMedic; // Export the role for use in the HiveMind system
