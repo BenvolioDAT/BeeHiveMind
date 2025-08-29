@@ -24,6 +24,7 @@ const TaskCombatMedic = require ('./Task.CombatMedic');
 const TaskCombatMelee = require ('./Task.CombatMelee');
 const TaskDismantler = require ('./Task.Dismantler');
 const TaskTrucker = require ('Task.Trucker');
+const AI = require('ai.utility');
 
 // -------------------------------------------
 // The task registry: A central lookup table
