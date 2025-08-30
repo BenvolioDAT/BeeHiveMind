@@ -209,7 +209,7 @@ B(0,0,1),  // 4 50 carry cap
 ];
 
 const CombatMelee_Config = [
-  //TAM(20,5,25),
+  TAM(20,5,25),
   TAM(7,7,14),
   TAM(6,6,12),
   TAM(5,5,10),
