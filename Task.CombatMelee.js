@@ -1,6 +1,6 @@
 var BeeToolbox = require('BeeToolbox'); // Import utility functions
 
-const roleHoneyGuard = {
+const CombatMelee = {
   // Main function executed each tick
   run: function (creep) {
     if (creep.spawning) return; // Skip logic if creep is still spawning
@@ -22,4 +22,4 @@ const roleHoneyGuard = {
   }
 };
 
-module.exports = roleHoneyGuard; // Export the module for HiveMind use
+module.exports = CombatMelee; // Export the module for HiveMind use

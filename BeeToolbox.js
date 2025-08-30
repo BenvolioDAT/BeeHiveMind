@@ -216,7 +216,7 @@ var BeeToolbox = {
 
     // Determines if an attacker should wait for a medic to catch up
     shouldWaitForMedic: function(attacker) {
-        const medic = _.find(Game.creeps, c => c.memory.role === 'Apiary_Medics' && c.memory.followTarget === attacker.id);
+        const medic = _.find(Game.creeps, c => c.memory.role === 'CombatMedic' && c.memory.followTarget === attacker.id);
         if (!medic) return false;
         if (attacker.memory.noWaitForMedic) return false; // Optional override
         if (attacker.memory.waitTicks === undefined) attacker.memory.waitTicks = 0;
