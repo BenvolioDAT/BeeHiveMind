@@ -28,17 +28,24 @@ module.exports.loop = function () {
             BeeToolbox.logSourceContainersInRoom(room); // Logs containers near sources for Courier_Bee logic
         }
     }
+
     // Perform routine memory cleanup for creeps and rooms
     BeeMaintenance.cleanUpMemory();
+
     // Run the core creep and room logic through the HiveMind system
     BeeHiveMind.run();
+
     // Execute tower logic: defense and repair
     towerLogic.run();
+
     // Run link management logic for transferring energy
     roleLinkManager.run();
+
     // Draw visuals such as CPU usage, creep data, and repair info
     BeeVisuals.drawVisuals();
+
     BeeVisuals.drawEnergyBar();
+    
     BeeVisuals.drawWorkerBeeTaskTable()
 
     // Handle repair target list updates every 5 ticks
@@ -70,7 +77,7 @@ module.exports.loop = function () {
             console.log("No spawns found.");
         }
     }
-
+BeeMaintenance.cleanStaleRooms();
     // Every 50 ticks, clean up stale room memory for rooms not seen in a while
     if (Game.time % 50 === 0) {
         BeeMaintenance.cleanStaleRooms();

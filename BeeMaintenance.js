@@ -43,8 +43,8 @@ const BeeMaintenance = {
                     // Filter out dead or invalid creeps
                     roomMemory.sources[sourceId] = assignedCreeps.filter(creepId => {
                         const creep = Game.getObjectById(creepId);
-                        return creep && (creep.memory.role === 'Forager_Bee' || 
-                                        creep.memory.role === 'Nurse_Bee'); // assignments
+                        return creep && (creep.memory.role === 'Worker_Bee' || 
+                                        creep.memory.role === 'Worker_Bees'); // assignments
                     });
                 }
             }
