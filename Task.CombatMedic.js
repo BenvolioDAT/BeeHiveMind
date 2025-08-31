@@ -6,7 +6,7 @@ const TaskCombatMedic = {
     run: function(creep) {
         if (creep.spawning) { return; } // Skip logic if creep is still spawning
 
-        // Self-heal if the medic is damaged
+        // 1) Self-heal if the medic is damaged
         if (creep.hits < creep.hitsMax) {
             creep.heal(creep);
             creep.say('⚕️'); // Say "SH" as a visual indicator for self-healing
@@ -15,9 +15,8 @@ const TaskCombatMedic = {
 
         // Check if we already have a target stored in memory
         let target = Game.getObjectById(creep.memory.followTarget);
-
         // If no target or the target is invalid, find a new one
-        if (!target || target.memory.role === undefined || target.hits === 0) {
+        if (!target || target.memory.task === undefined || target.hits === 0) {
             target = _.find(Game.creeps, (ally) => {
                 return (ally.memory.task === 'CombatMelee' || 
                         ally.memory.task === 'CombatArcher' ||
@@ -77,7 +76,7 @@ const TaskCombatMedic = {
     // Helper function to check if a target is already assigned to another CombatMedic
     isTargetAssigned: function(targetId) {
         return Object.values(Game.creeps).some(ally => {
-            return ally.memory.role === 'CombatMedic' && ally.memory.followTarget === targetId;
+            return ally.memory.task === 'CombatMedic' && ally.memory.followTarget === targetId;
         });
     }
 };

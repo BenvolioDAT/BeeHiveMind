@@ -92,9 +92,10 @@ const CM = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 const WM = (w,m)=>[...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
 const MH = (m,h)=>[...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
 const TAM = (t,a,m)=>[...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
-const WiPnotReady = (t,b,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(b).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+const R = (t,r,m)=>[...Array(t).fill(TOUGH), ...Array(r).fill(RANGED_ATTACK), ...Array(m).fill(MOVE)];
+const A = (t,a,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(a).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
 // Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
-// Role-specific configurations
+// Role-specific configurations A(t,a,r,h,w,c,m)
 const BaseHarvest_Config = [
  B(6,0,5),
  B(5,1,5),
@@ -209,7 +210,7 @@ B(0,0,1),  // 4 50 carry cap
 ];
 
 const CombatMelee_Config = [
-  TAM(20,5,25),
+  TAM(20,1,29),
   TAM(7,7,14),
   TAM(6,6,12),
   TAM(5,5,10),
@@ -217,13 +218,21 @@ const CombatMelee_Config = [
 ];
 
 const CombatArcher_Config = [
-  [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE],
-  [TOUGH, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE],
-  [TOUGH, RANGED_ATTACK, MOVE],
+  R(8,8,20),
+  R(6,6,12),
+  R(2,4,6),
+  R(2,3,5),
+  R(1,2,3),
+  R(1,1,2),
+  R(0,1,1),
 ];
 
 const CombatMedic_Config = [
+  MH(12,20),
+  MH(11,11),
+  MH(10,10),
+  MH(9,9),
+  MH(8,8),
   MH(7,7),
   MH(6,6),
   MH(5,5),
