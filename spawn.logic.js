@@ -105,10 +105,11 @@ const BaseHarvest_Config = [
  B(1,1,1), 
 ];
 const Courier_Config = [
-  //CM(22,22), //1100
-  //CM(21,21), //1050
-  //CM(20,20), //1000
-  //CM(19,19), //950
+  CM(23,23),
+  CM(22,22), //1100
+  CM(21,21), //1050
+  CM(20,20), //1000
+  CM(19,19), //950
   CM(18,18), //900
   CM(17,17), //850
   CM(16,16), //800
@@ -218,7 +219,7 @@ const CombatMelee_Config = [
 ];
 
 const CombatArcher_Config = [
-  R(8,8,20),
+  R(5,8,25),
   R(6,6,12),
   R(2,4,6),
   R(2,3,5),
@@ -228,7 +229,7 @@ const CombatArcher_Config = [
 ];
 
 const CombatMedic_Config = [
-  MH(12,20),
+  MH(25,12),
   MH(11,11),
   MH(10,10),
   MH(9,9),
