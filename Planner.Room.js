@@ -178,9 +178,9 @@ const RoomPlanner = {
         const lim = this.structureLimits[type];
         if (!lim) return false;
         const built = room.find(FIND_STRUCTURES, { filter: s => s.structureType === type }).length;
-        const sties = room.find(FIND_CONSTRUCTION_STIES, { filter: s => s.structureType === type}).length;
+        const sites = room.find(FIND_CONSTRUCTION_STIES, { filter: s => s.structureType === type}).length;
         return (built + sites) >= lim;
     },
 };
 
-MediaSourceHandle.exports = RoomPlanner;
+module.exports = RoomPlanner;

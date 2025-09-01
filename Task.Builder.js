@@ -139,8 +139,44 @@ var TaskBuilder = {
       creep.memory.building = true;
     }
     // If the creep is building
-    if (creep.memory.building) {
-      var targets = creep.room.find(FIND_CONSTRUCTION_SITES);
+    if (creep.memory.building) {// Grab ALL my construction sites (home + remotes)
+var targets = Object.values(Game.constructionSites || {});
+
+// If none found, fall back to current room (keeps behavior sane if Game.constructionSites is empty)
+if (!targets.length) {
+  targets = creep.room.find(FIND_MY_CONSTRUCTION_SITES);
+}
+
+if (targets.length) {
+  // Choose an anchor: storage if present, else first spawn, else creep position
+  const home = creep.room;
+  const spawns = home.find(FIND_MY_SPAWNS);
+  const anchor = (home.storage && home.storage.pos) || (spawns[0] && spawns[0].pos) || creep.pos;
+
+  // Sort so we:
+  // 1) Prefer your existing weights (towers > containers > extensions > ...)
+  // 2) Then prefer rooms closer to anchor's room (home -> neighbors -> farther)
+  // 3) Then prefer sites nearer to the anchor inside the same room
+  targets.sort((a, b) => {
+    const wa = (TaskBuilder.siteWeights && TaskBuilder.siteWeights[a.structureType]) || 0;
+    const wb = (TaskBuilder.siteWeights && TaskBuilder.siteWeights[b.structureType]) || 0;
+    if (wb !== wa) return wb - wa;
+
+    const ra = Game.map.getRoomLinearDistance(anchor.roomName, a.pos.roomName);
+    const rb = Game.map.getRoomLinearDistance(anchor.roomName, b.pos.roomName);
+    if (ra !== rb) return ra - rb;
+
+    const da = (a.pos.roomName === anchor.roomName) ? anchor.getRangeTo(a.pos) : 999;
+    const db = (b.pos.roomName === anchor.roomName) ? anchor.getRangeTo(b.pos) : 999;
+    return da - db;
+  });
+
+  // Build/move (creep.moveTo handles inter-room travel automatically)
+  if (creep.build(targets[0]) === ERR_NOT_IN_RANGE) {
+    BeeToolbox.BeeTravel(creep, targets[0]); // you already use this helper
+  }
+}
+      /*var targets = creep.room.find(FIND_CONSTRUCTION_SITES);
       if (targets.length) {
         // Sort construction sites by weight in descending order
         targets.sort((a, b) => (TaskBuilder.siteWeights[b.structureType] || 0) - (TaskBuilder.siteWeights[a.structureType] || 0));
@@ -149,11 +185,65 @@ var TaskBuilder = {
           BeeToolbox.BeeTravel(creep, targets[0]);
           //creep.moveTo(targets[0], {reusePath: 10,visualizePathStyle:{lineStyle: 'dashed'}});
         }
-      } else {
-        // If there are no construction sites, build predefined structures and act as an Nectar_Bee
-        TaskBuilder.buildPredefinedStructures(creep);
-        TaskBuilder.upgradeController(creep);
-      }
+      }*/ else {
+                  // No construction sites anywhere:
+                  // 1) Return any carried energy to base
+                  // 2) Recycle at nearest spawn (refunds some energy)
+                  // 3) Fallback: suicide if no spawn found (edge case)
+
+                  // Step 1: if we’re carrying energy, drop it off first
+                  if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+                    // Prefer Storage/Terminal, then Spawn/Extensions/Towers, then Containers/Links
+                    const sink = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+                      filter: s => (
+                        (
+                          (s.structureType === STRUCTURE_STORAGE) ||
+                          (s.structureType === STRUCTURE_TERMINAL) ||
+                          (s.structureType === STRUCTURE_SPAWN) ||
+                          (s.structureType === STRUCTURE_EXTENSION) ||
+                          (s.structureType === STRUCTURE_TOWER) ||
+                          (s.structureType === STRUCTURE_CONTAINER) ||
+                          (s.structureType === STRUCTURE_LINK)
+                        ) &&
+                        s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+                      )
+                    });
+
+                    if (sink) {
+                      if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                        // Use your travel helper for consistency
+                        if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
+                          BeeToolbox.BeeTravel(creep, sink);
+                        } else {
+                          creep.moveTo(sink, { reusePath: 15, range: 1 });
+                        }
+                      }
+                      // We’ll try recycling next tick after we’ve emptied out.
+                      return;
+                    }
+                    // If no valid sink, we’ll still proceed to recycle to avoid idling forever
+                  }
+
+                  // Step 2: recycle at the nearest spawn
+                  const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
+                  if (spawn) {
+                    if (creep.pos.getRangeTo(spawn) > 1) {
+                      if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
+                        BeeToolbox.BeeTravel(creep, spawn, {range: 1});
+                      } else {
+                        creep.moveTo(spawn, { reusePath: 20, range: 1 });
+                      }
+                    } else {
+                      // Adjacent: recycle me, daddy
+                      spawn.recycleCreep(creep);
+                    }
+                    return;
+                  }
+
+                  // Step 3: extreme edge case: no spawn in vision/room — avoid endless wandering
+                  creep.suicide();
+                }
+      
     }
     // If the creep is not building
     else {

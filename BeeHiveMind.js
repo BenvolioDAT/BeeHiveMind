@@ -6,6 +6,8 @@ const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
 var spawnLogic = require('spawn.logic');
 var roleWorker_Bee = require('role.Worker_Bee');
 var TaskBuilder = require('Task.Builder');
+var RoomPlanner = require('Planner.Room');
+var RoadPlanner = require('Planner.Road');
 
 // Creep role function mappings, wrapping their run methods for easier execution
 var creepRoles = {Worker_Bee: roleWorker_Bee.run,};
@@ -38,7 +40,8 @@ const BeeHiveMind = {
     // Placeholder function for any room-specific logic you'd like to add later
     manageRoom(room) {
           // Continuous, low-cost site placement
-  TaskBuilder.ensureSites(room);
+  RoomPlanner.ensureSites(room);
+  RoadPlanner.ensureRemoteRoads(room);
         // No current room-specific logic
     },
 
@@ -72,7 +75,22 @@ const BeeHiveMind = {
     },
 
     manageSpawns() {
-        const NeedBuilder = (room) => room && room.find(FIND_MY_CONSTRUCTION_SITES).length ? 1 : 0;
+        //const NeedBuilder = (room) => room && room.find(FIND_MY_CONSTRUCTION_SITES).length ? 1 : 0;
+
+        let NeedBuilder = (room) => {
+            if (!room) return 0;
+            const localSites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
+
+            // rooms that this hive is actively building roads into
+            const remotes = RoadPlanner.getActiveRemoteRooms(room); // add the helper below
+            let remoteSites = 0;
+            for (const rn of remotes) {
+                const r = Game.rooms[rn];
+                if (r) remoteSites += r.find(FIND_MY_CONSTRUCTION_SITES).length;
+                // no vision => can’t place/build there anyway, so skip
+            }
+            return (localSites + remoteSites) > 0 ? 3 : 0;
+            };
 
         for (const roomName in Game.rooms) {
             const room =Game.rooms[roomName];
@@ -87,9 +105,9 @@ const BeeHiveMind = {
             remoteharvest: 2,
             scout: 0,
             queen: 2,
-            CombatArcher: 2,
+            CombatArcher: 1,
             CombatMelee: 0,
-            CombatMedic: 2,
+            CombatMedic: 1,
             Dismantler: 0,
             Trucker: 0,
             
