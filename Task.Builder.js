@@ -1,4 +1,68 @@
 var BeeToolbox = require('BeeToolbox');
+// === Builder refuel helpers ===
+function ensureHome(creep) {
+  if (creep.memory.home) return creep.memory.home;
+
+  // pick closest owned spawn by room distance; fallback to current room
+  const spawns = Object.values(Game.spawns);
+  if (spawns.length) {
+    let best = spawns[0];
+    let bestDist = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
+    for (let i = 1; i < spawns.length; i++) {
+      const d = Game.map.getRoomLinearDistance(creep.pos.roomName, spawns[i].pos.roomName);
+      if (d < bestDist) { best = spawns[i]; bestDist = d; }
+    }
+    creep.memory.home = best.pos.roomName;
+  } else {
+    creep.memory.home = creep.pos.roomName;
+  }
+  return creep.memory.home;
+}
+
+function getHomeAnchorPos(homeName) {
+  const room = Game.rooms[homeName];
+  if (room) {
+    if (room.storage) return room.storage.pos;
+    const spawns = room.find(FIND_MY_SPAWNS);
+    if (spawns.length) return spawns[0].pos;
+    if (room.controller && room.controller.my) return room.controller.pos;
+  }
+  // no vision? head toward center; moveTo will path inter-room
+  return new RoomPosition(25, 25, homeName);
+}
+
+function findWithdrawTargetInRoom(room) {
+  if (!room) return null;
+  const targets = room.find(FIND_STRUCTURES, {
+    filter: s =>
+      s.store &&
+      s.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
+      (
+        s.structureType === STRUCTURE_STORAGE ||
+        s.structureType === STRUCTURE_TERMINAL ||
+        s.structureType === STRUCTURE_LINK ||
+        s.structureType === STRUCTURE_CONTAINER
+      )
+  });
+  if (!targets.length) return null;
+  targets.sort((a, b) =>
+    b.store.getUsedCapacity(RESOURCE_ENERGY) - a.store.getUsedCapacity(RESOURCE_ENERGY)
+  );
+  return targets[0];
+}
+
+function go(creep, dest, opts = {}) {
+  if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
+    BeeToolbox.BeeTravel(creep, dest, opts);
+  } else {
+    const range = opts.range != null ? opts.range : 1;
+    creep.moveTo(dest, { reusePath: 20, range });
+  }
+}
+
+
+
+
 var TaskBuilder = {
   // Define limits for each structure type
   structureLimits: {
@@ -246,51 +310,45 @@ if (targets.length) {
       
     }
     // If the creep is not building
-    else {
-      // If no tombstones, prioritize storage for energy withdrawal
-      var storageWithEnergy = creep.room.find(FIND_STRUCTURES, {
-        filter: (structure) => structure.structureType == STRUCTURE_STORAGE && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
-      });
-      var closestStorage = creep.pos.findClosestByPath(storageWithEnergy);
-      if (closestStorage && creep.withdraw(closestStorage, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
-        BeeToolbox.BeeTravel(creep, closestStorage);
-        //creep.moveTo(closestStorage, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
-      } else {
-        // Find containers in the room with available energy
-        var containersWithEnergy = creep.room.find(FIND_STRUCTURES, {
-          filter: (structure) => structure.structureType == STRUCTURE_CONTAINER && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
-        });
-        var closestContainer = creep.pos.findClosestByPath(containersWithEnergy);
-        if (closestContainer && creep.withdraw(closestContainer, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
-          BeeToolbox.BeeTravel(creep, closestContainer);
-          //creep.moveTo(closestContainer, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
-        } else {
-          // If no containers with energy, find dropped energy
-          var droppedEnergy = creep.room.find(FIND_DROPPED_RESOURCES, {
-            filter: (resource) => resource.resourceType == RESOURCE_ENERGY && resource.amount >= 1,
-          });
-          if (droppedEnergy.length > 0) {
-            var closestDroppedEnergy = creep.pos.findClosestByPath(droppedEnergy);
-            if (creep.pickup(closestDroppedEnergy) == ERR_NOT_IN_RANGE) {
-              BeeToolbox.BeeTravel(creep, closestDroppedEnergy);
-              //creep.moveTo(closestDroppedEnergy, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
-            }
-          } else {
-            // If no containers/extensions, find extensions
-            var extensionsWithEnergy = creep.room.find(FIND_STRUCTURES, {
-              filter: (structure) => structure.structureType == STRUCTURE_EXTENSION && structure.store.getUsedCapacity(RESOURCE_ENERGY) > 0,
-            });
-            var closestExtension = creep.pos.findClosestByPath(extensionsWithEnergy);
-            if (closestExtension && creep.withdraw(closestExtension, RESOURCE_ENERGY) == ERR_NOT_IN_RANGE) {
-              BeeToolbox.BeeTravel(creep, closestExtension);
-              //creep.moveTo(closestExtension, {reusePath: 10, visualizePathStyle:{lineStyle: 'dashed'}});
-            } else {
-                TaskBuilder.upgradeController(creep);
-              }
-            }
-          }
-        }
-      }    
+else {
+  // === CROSS-ROOM REFUEL LOGIC ===
+  const homeName = ensureHome(creep);
+
+  // 1) Try to refuel in the current room first
+  let src = findWithdrawTargetInRoom(creep.room);
+  if (src) {
+    const r = creep.withdraw(src, RESOURCE_ENERGY);
+    if (r === ERR_NOT_IN_RANGE) go(creep, src, { range: 1 });
+    return;
+  }
+
+  // 2) No energy here. If not in home room, travel home to refuel.
+  if (creep.pos.roomName !== homeName) {
+    const anchor = getHomeAnchorPos(homeName);
+    go(creep, anchor, { range: 1 });
+    return;
+  }
+
+  // 3) We're in home; check again (vision may differ)
+  src = findWithdrawTargetInRoom(creep.room);
+  if (src) {
+    const r = creep.withdraw(src, RESOURCE_ENERGY);
+    if (r === ERR_NOT_IN_RANGE) go(creep, src, { range: 1 });
+    return;
+  }
+
+  // 4) Last resort so we don't stall forever: harvest
+  const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
+  if (source) {
+    const r = creep.harvest(source);
+    if (r === ERR_NOT_IN_RANGE) go(creep, source);
+    return;
+  }
+
+  // 5) Truly nothing available? Idle at anchor and wait for haulers.
+  go(creep, getHomeAnchorPos(homeName), { range: 2 });
+  return;
+}   
   },
   // Function to upgrade the controller when there are no construction sites
   upgradeController: function (creep) {
@@ -393,6 +451,7 @@ if (targets.length) {
     // try again in a few ticks (skip extra CPU if we just placed some)
     mem.nextPlanTick = Game.time + (placed ? 10 : 25);
   },
+  
   
 };
 module.exports = TaskBuilder;
