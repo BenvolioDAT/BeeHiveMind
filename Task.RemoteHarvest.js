@@ -1,6 +1,207 @@
 var BeeToolbox = require('BeeToolbox');
+// ==== RemoteHarvester Assignment Helpers (local to this file) ====
+
+// Configs
+const REMOTE_RADIUS = 1;   // Search only rooms 1 hop away. Set 2+ if you want farther.
+const MAX_PF_OPS   = 4000; // PathFinder budget for picking targets
+
+function go(creep, dest, opts = {}) {
+  if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
+    BeeToolbox.BeeTravel(creep, dest, opts);
+  } else {
+    const range = opts.range != null ? opts.range : 1;
+    creep.moveTo(dest, { reusePath: 20, range });
+  }
+}
+
+function ensureAssignmentsMem() {
+  if (!Memory.remoteAssignments) Memory.remoteAssignments = {};
+  return Memory.remoteAssignments;
+}
+
+function getHomeName(creep) {
+  if (creep.memory.home) return creep.memory.home;
+  const spawns = Object.values(Game.spawns);
+  if (spawns.length) {
+    // nearest owned spawn by room distance
+    let best = spawns[0];
+    let bestD = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
+    for (let i = 1; i < spawns.length; i++) {
+      const d = Game.map.getRoomLinearDistance(creep.pos.roomName, spawns[i].pos.roomName);
+      if (d < bestD) { best = spawns[i]; bestD = d; }
+    }
+    creep.memory.home = best.pos.roomName;
+    return creep.memory.home;
+  }
+  creep.memory.home = creep.pos.roomName;
+  return creep.memory.home;
+}
+
+function getAnchorPos(homeName) {
+  const r = Game.rooms[homeName];
+  if (r) {
+    if (r.storage) return r.storage.pos;
+    const spawns = r.find(FIND_MY_SPAWNS);
+    if (spawns.length) return spawns[0].pos;
+    if (r.controller && r.controller.my) return r.controller.pos;
+  }
+  // No vision? Head for center; moveTo will path cross-room.
+  return new RoomPosition(25, 25, homeName);
+}
+
+function bfsNeighborRooms(startName, radius = 1) {
+  const seen = new Set([startName]);
+  let frontier = [startName];
+  for (let depth = 0; depth < radius; depth++) {
+    const next = [];
+    for (const rn of frontier) {
+      const exits = Game.map.describeExits(rn) || {};
+      for (const dir of Object.keys(exits)) {
+        const nn = exits[dir];
+        if (!seen.has(nn)) {
+          seen.add(nn);
+          next.push(nn);
+        }
+      }
+    }
+    frontier = next;
+  }
+  seen.delete(startName);
+  return [...seen];
+}
+
+function pfCost(anchorPos, targetPos) {
+  const ret = PathFinder.search(
+    anchorPos,
+    { pos: targetPos, range: 1 },
+    {
+      maxOps: MAX_PF_OPS,
+      plainCost: 2,
+      swampCost: 10,
+      roomCallback: (roomName) => {
+        const room = Game.rooms[roomName];
+        if (!room) return; // default costs when no vision
+        const costs = new PathFinder.CostMatrix();
+        room.find(FIND_STRUCTURES).forEach(s => {
+          if (s.structureType === STRUCTURE_ROAD) costs.set(s.pos.x, s.pos.y, 1);
+          else if (
+            s.structureType !== STRUCTURE_CONTAINER &&
+            (s.structureType !== STRUCTURE_RAMPART || !s.my)
+          ) costs.set(s.pos.x, s.pos.y, 0xff);
+        });
+        room.find(FIND_CONSTRUCTION_SITES).forEach(cs => {
+          if (cs.structureType !== STRUCTURE_ROAD) costs.set(cs.pos.x, cs.pos.y, 0xff);
+        });
+        return costs;
+      }
+    }
+  );
+  return ret.incomplete ? Infinity : ret.cost;
+}
+
+function pickRemoteSource(creep) {
+  const memAssign = ensureAssignmentsMem();
+  const homeName = getHomeName(creep);
+  const anchor = getAnchorPos(homeName);
+
+  // limit search to nearby rooms (your “right/bottom first” expectation)
+  const neighborRooms = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+
+  const candidates = [];
+  for (const rn of neighborRooms) {
+    const room = Game.rooms[rn];
+    if (!room) continue; // need vision to see real sources
+    const sources = room.find(FIND_SOURCES);
+    for (const s of sources) {
+      const occ = memAssign[s.id] || 0;
+      if (occ > 0) continue; // already occupied by a remote miner
+
+      const cost = pfCost(anchor, s.pos);
+      if (cost === Infinity) continue;
+
+      candidates.push({
+        id: s.id,
+        roomName: rn,
+        cost,
+        lin: Game.map.getRoomLinearDistance(homeName, rn)
+      });
+    }
+  }
+
+  if (!candidates.length) return null;
+
+  // Sort by: path cost → linear distance → stable tiebreak (id)
+  candidates.sort((a, b) =>
+    (a.cost - b.cost) ||
+    (a.lin - b.lin) ||
+    (a.id < b.id ? -1 : 1)
+  );
+
+  const best = candidates[0];
+  // Mark occupancy
+  memAssign[best.id] = (memAssign[best.id] || 0) + 1;
+
+  console.log(`🧭 ${creep.name} pick src=${best.id.slice(-6)} room=${best.roomName} cost=${best.cost}`);
+  return best;
+}
+
+function releaseAssignment(creep) {
+  const memAssign = ensureAssignmentsMem();
+  const sid = creep.memory.sourceId;
+  if (sid && memAssign[sid]) {
+    memAssign[sid] = Math.max(0, memAssign[sid] - 1);
+  }
+  creep.memory.sourceId = null;
+  creep.memory.targetRoom = null;
+  creep.memory.assigned = false;
+}
+
+
+
 const TaskRemoteHarvest = {
     run: function (creep) {
+        // === ensure assignment ===
+        if (!creep.memory.home) getHomeName(creep); // set once
+
+        // release gracefully near end-of-life so a new creep can take over
+        if (creep.ticksToLive !== undefined && creep.ticksToLive < 5 && creep.memory.assigned) {
+        releaseAssignment(creep);
+        }
+
+        if (!creep.memory.sourceId) {
+            const pick = pickRemoteSource(creep);
+                if (pick) {
+                    creep.memory.sourceId = pick.id;
+                    creep.memory.targetRoom = pick.roomName;
+                    creep.memory.assigned = true;
+                } else {
+                        // Nothing visible/available; idle at home anchor and try again next tick
+                        const anchor = getAnchorPos(getHomeName(creep));
+                        go(creep, anchor, { range: 2 });
+                        return;
+                }
+            }
+
+        // Navigate toward the assigned room if not there yet (simple rally)
+        /*if (creep.memory.targetRoom && creep.pos.roomName !== creep.memory.targetRoom) {
+        go(creep, new RoomPosition(25, 25, creep.memory.targetRoom), { range: 20 });
+        return;
+        }*/
+       // Check full/empty first
+        TaskRemoteHarvest.updateReturnState(creep);
+
+        // If we're full, head home NOW (do NOT rally to targetRoom)
+        if (creep.memory.returning) {
+        TaskRemoteHarvest.returnToStorage(creep);
+        return;
+        }
+
+        // Only rally to targetRoom while harvesting
+        if (creep.memory.targetRoom && creep.pos.roomName !== creep.memory.targetRoom) {
+        go(creep, new RoomPosition(25, 25, creep.memory.targetRoom), { range: 20 });
+        return;
+        }   
+
         // Try to assign if memory is missing
         if (!creep.memory.targetRoom || !creep.memory.sourceId) {
         TaskRemoteHarvest.initializeAndAssign(creep);
@@ -30,12 +231,22 @@ const TaskRemoteHarvest = {
         console.log(`❌ Forager ${creep.name} still can't get source info for ${creep.memory.targetRoom}`);
         return;
         }
+        
         // All good, now go on with your bee business
-        TaskRemoteHarvest.updateReturnState(creep);
+        /*TaskRemoteHarvest.updateReturnState(creep);
         if (!creep.memory.returning) {
         TaskRemoteHarvest.harvestSource(creep);
         } else {
         TaskRemoteHarvest.returnToStorage(creep);
+        }*/
+       TaskRemoteHarvest.harvestSource(creep);
+
+
+
+        const src = Game.getObjectById(creep.memory.sourceId);
+        if (!src) {
+        releaseAssignment(creep);
+        return; // we’ll pick a new one next tick
         }
     },
     initializeAndAssign: function (creep) {
