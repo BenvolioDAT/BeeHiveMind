@@ -255,7 +255,54 @@ var TaskBuilder = {
   },
 
 
+  // Plan construction sites every tick without needing a Builder creep
+  ensureSites(room) {
+    if (!room || !room.controller || !room.controller.my) return;
 
+    const spawns = room.find(FIND_MY_SPAWNS);
+    if (!spawns.length) return;
+    const center = spawns[0].pos;
+
+    // gentle throttle & cap so we don't spam sites
+    const MAX_SITES_PER_TICK = 5;
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+    const mem = Memory.rooms[room.name];
+    const next = mem.nextPlanTick || 0;
+    if (Game.time < next) return;
+
+    let placed = 0;
+
+    for (let i = 0; i < TaskBuilder.structurePlacements.length; i++) {
+      if (placed >= MAX_SITES_PER_TICK) break;
+
+      const p = TaskBuilder.structurePlacements[i];
+      const target = new RoomPosition(center.x + p.x, center.y + p.y, room.name);
+
+      // skip if blocked or already has structure/site
+      if (target.lookFor(LOOK_STRUCTURES).length > 0) continue;
+      if (target.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
+
+      // respect RCL and any soft limits you defined
+      const rcl = room.controller.level;
+      const rclLimit = (CONTROLLER_STRUCTURES[p.type] && CONTROLLER_STRUCTURES[p.type][rcl]);
+      const softLimit = (TaskBuilder.structureLimits && TaskBuilder.structureLimits[p.type]);
+      const allowed = Math.min(rclLimit, softLimit);
+
+      // how many exist (built + sites) of this type
+      const have = TaskBuilder.countStructures(room, p.type);
+      if (have >= allowed) continue;
+
+      const terr = room.getTerrain().get(target.x, target.y);
+      if (terr === TERRAIN_MASK_WALL) continue;
+
+      const res = room.createConstructionSite(target, p.type);
+      if (res === OK) placed++;
+    }
+
+    // try again in a few ticks (skip extra CPU if we just placed some)
+    mem.nextPlanTick = Game.time + (placed ? 10 : 25);
+  },
   
 };
 module.exports = TaskBuilder;

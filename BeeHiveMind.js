@@ -5,6 +5,7 @@ const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
 // Importing all role modules - These are the logic files for each creep role
 var spawnLogic = require('spawn.logic');
 var roleWorker_Bee = require('role.Worker_Bee');
+var TaskBuilder = require('Task.Builder');
 
 // Creep role function mappings, wrapping their run methods for easier execution
 var creepRoles = {Worker_Bee: roleWorker_Bee.run,};
@@ -36,6 +37,8 @@ const BeeHiveMind = {
 
     // Placeholder function for any room-specific logic you'd like to add later
     manageRoom(room) {
+          // Continuous, low-cost site placement
+  TaskBuilder.ensureSites(room);
         // No current room-specific logic
     },
 
@@ -69,10 +72,15 @@ const BeeHiveMind = {
     },
 
     manageSpawns() {
+        const NeedBuilder = (room) => room && room.find(FIND_MY_CONSTRUCTION_SITES).length ? 1 : 0;
+
+        for (const roomName in Game.rooms) {
+            const room =Game.rooms[roomName];
+        
         // Configurable quotas for each task type
         const workerTaskLimits = {
             baseharvest: 2,
-            builder: 0,
+            builder: NeedBuilder(room),
             upgrader: 1,
             repair: 0,
             courier: 1,
@@ -84,22 +92,10 @@ const BeeHiveMind = {
             CombatMedic: 0,
             Dismantler: 0,
             Trucker: 0,
+            
 
         };
 
-        // Count how many creeps are assigned to each task (across all rooms)
-        //const roleCounts = _.countBy(Game.creeps, c => c.memory.task);
-        // Exact parity with _.countBy(Game.creeps, c => c.memory.task)
-        /*const roleCounts = {};
-            for (const name in Game.creeps) {
-                const task = Game.creeps[name].memory.task; // no fallback, just like lodash
-                roleCounts[task] = (roleCounts[task] || 0) + 1;
-                }
-
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log('🐝 Task count snapshot:', JSON.stringify(roleCounts));
-            }
-        */
        // put this near your other constants
         const DYING_SOON_TTL = 25;
 
@@ -142,7 +138,7 @@ const BeeHiveMind = {
                     }
                 }
             }
-        }
+        }}
     },
     
     // Placeholder for remote operations like foraging, scouting, claiming
