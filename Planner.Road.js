@@ -25,6 +25,19 @@
 //
 // Note: This module assumes lodash (_) is available (on most servers it is).
 // If not, replace _.filter/_.uniq with plain JS equivalents.
+// === Small helper: does this position already have a road or a road construction site? ===
+function _hasRoadOrRoadSite(pos) {
+  const structures = pos.lookFor(LOOK_STRUCTURES);
+  for (const s of structures) {
+    if (s.structureType === STRUCTURE_ROAD) return true;
+  }
+  const sites = pos.lookFor(LOOK_CONSTRUCTION_SITES);
+  for (const cs of sites) {
+    if (cs.structureType === STRUCTURE_ROAD) return true;
+  }
+  return false;
+}
+
 const RoadPlanner = {
     /**
     * Main entry point: call this every tick.
@@ -98,7 +111,8 @@ const RoadPlanner = {
                             //    - RAMPARTs are okay only if they're ours (s.my)
                             // prefer existing roads
                             room.find(FIND_STRUCTURES).forEach(s => {
-                                if (s.structureType === STRUCTURE_ROAD) costs.set(s.pos.x, s.pos.y, 1);
+                                if (s.structureType === STRUCTURE_ROAD) 
+                                    costs.set(s.pos.x, s.pos.y, 1);
                                 else if (
                                     s.structureType !== STRUCTURE_CONTAINER &&
                                     (s.structureType !== STRUCTURE_RAMPART || !s.my)
@@ -114,6 +128,10 @@ const RoadPlanner = {
                                     costs.set(cs.pos.x, cs.pos.y, 0xff);
                                 }
                             });
+                            // 🚧 NEW: treat sources & minerals as impassable so we don't path "through" them
+                            room.find(FIND_SOURCES).forEach(src => costs.set(src.pos.x, src.pos.y, 0xff));
+                            const minerals = room.find ? room.find(FIND_MINERALS) : [];
+                            minerals.forEach(min => costs.set(min.pos.x, min.pos.y, 0xff));
                             // Return the customized matrix for this room.
                             return costs;
                         }
@@ -133,6 +151,8 @@ const RoadPlanner = {
                 // "5" is our per-tick placement budget to keep things gentle.
                 //drip-place a few road sites per tick on visible segments
                 RoadPlanner._placeAlongPath(homeRoom, key, 5);
+                // Occasionally audit already-complete paths and relaunch if a tile decayed
+                RoadPlanner._auditAndRelaunch(homeRoom, key, 1);
             }
         }
     },
@@ -240,6 +260,53 @@ const RoadPlanner = {
         // Convert the Set back to an Array for convenience.
         return [...rooms];
     },
+    // === Occasionally audit a finished path; if a road tile is missing, relaunch placement ===
+    _auditAndRelaunch(homeRoom, key, maxFixes = 1) {
+        // pull this room's RoadPlanner memory
+        const mem = RoadPlanner._memory(homeRoom);
+        if (!mem || !mem.paths) return;
+
+        const rec = mem.paths[key];
+        if (!rec || !rec.done || !Array.isArray(rec.path) || rec.path.length === 0) return;
+
+        // Throttle like crazy: run either once every 1000 ticks OR ~1% random chance
+        // (Keeps CPU tiny; still catches decay sooner or later.)
+        if (Game.time % 1000 !== 0 && Math.random() > 0.01) return;
+
+        let fixed = 0;
+
+        for (let idx = 0; idx < rec.path.length && fixed < maxFixes; idx++) {
+            const step = rec.path[idx];
+
+            // need vision to audit/build
+            const roomObj = Game.rooms[step.roomName];
+            if (!roomObj) continue;
+
+            // skip walls (shouldn't be on the path anyway, but being safe costs nothing)
+            const terrain = roomObj.getTerrain().get(step.x, step.y);
+            if (terrain === TERRAIN_MASK_WALL) continue;
+
+            const pos = new RoomPosition(step.x, step.y, step.roomName);
+
+            // If no road and no road site, create one
+            if (!_hasRoadOrRoadSite(pos)) {
+            const res = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
+            if (res === OK) {
+                // Roll pointer back so your existing drip-placer resumes from here
+                if (typeof rec.i !== 'number' || rec.i > idx) rec.i = idx;
+
+                // Mark "not done" so _placeAlongPath keeps doing its thing
+                rec.done = false;
+
+                fixed++;
+            } else {
+                // Optional: log if you want to see why it failed (e.g., site cap)
+                // console.log('[RoadPlanner] CS create failed', res, 'at', pos);
+            }
+            }
+        }
+    }
+
 };
 
 module.exports = RoadPlanner;
