@@ -6,12 +6,9 @@ var BeeToolbox = require('BeeToolbox');
 // - picking which remote source to work (closest-by-path),
 // - remembering that assignment across trips,
 // - knowing where "home" is and how to path there/back.
-
-
 // ----------------------------
 // Configs
 // ----------------------------
-
 // We'll only consider rooms within this many "hops" (room-to-room steps)
 // from our home when auto-picking targets. Bump to 2+ to search farther.
 const REMOTE_RADIUS = 1;   // Search only rooms 1 hop away. Set 2+ if you want farther.
