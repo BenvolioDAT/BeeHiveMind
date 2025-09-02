@@ -253,7 +253,6 @@ if (targets.length) {
                   // No construction sites anywhere:
                   // 1) Return any carried energy to base
                   // 2) Recycle at nearest spawn (refunds some energy)
-                  // 3) Fallback: suicide if no spawn found (edge case)
 
                   // Step 1: if we’re carrying energy, drop it off first
                   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
