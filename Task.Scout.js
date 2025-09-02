@@ -145,28 +145,20 @@ function isBlockedRecently(roomName) {
 
 
 function buildRing(homeName, radius) {
-  // BFS out to 'radius' using ordered exits so rings feel clockwise
-  const seen = new Set([homeName]);
-  let frontier = [homeName];
-  for (let depth = 1; depth <= radius; depth++) {
-    const next = [];
-    const layer = new Set();
-    for (const rn of frontier) {
-      for (const nbr of exitsOrdered(rn)) {
-        if (seen.has(nbr)) continue;
-        seen.add(nbr);
-        next.push(nbr);
-        if (depth === radius) layer.add(nbr);
-      }
-    }
-    if (depth === radius) {
-      // layer → array in clockwise-ish order thanks to exitsOrdered expansion
-      return [...layer].filter(okRoomName);
-    }
-    frontier = next;
+  // 1) generate all rooms at radius r, clockwise, deterministically
+  var ring = coordinateRing(homeName, radius);
+
+  // 2) filter out novice/respawn/closed
+  var ok = [];
+  for (var i=0; i<ring.length; i++) {
+    var rn = ring[i];
+    var st = Game.map.getRoomStatus(rn);
+    if (st && (st.status === 'novice' || st.status === 'respawn' || st.status === 'closed')) continue;
+    ok.push(rn);
   }
-  return [];
+  return ok;
 }
+
 
 function rebuildQueue(mem) {
   var home = mem.home;
@@ -175,23 +167,33 @@ function rebuildQueue(mem) {
   var layer = buildRing(home, ring);
   var candidates = layer.filter(function(rn){ return !isBlockedRecently(rn); });
 
-  // Prefer rooms we haven’t seen recently; if none qualify, keep all so we still move
-  var fresh = candidates.filter(function(rn){
-    return (Game.time - lastVisited(rn)) >= REVISIT_DELAY;
-  });
-  if (fresh.length) candidates = fresh;
+  // Keep never-seen rooms in insertion order (clockwise), score only the seen ones
+  var never = [];
+  var seen  = [];
+  for (var i=0; i<candidates.length; i++) {
+    var rn = candidates[i];
+    var lv = lastVisited(rn);
+    if (lv === -Infinity) never.push(rn); else seen.push({ rn: rn, last: lv });
+  }
+  // Oldest seen first
+  seen.sort(function(a,b){ return a.last - b.last; });
 
-  var prev = mem.prevRoom; // use the true previous room for bounce-penalty
-  var scored = candidates.map(function(rn){
-    return { rn: rn, last: lastVisited(rn), pen: (prev && rn === prev) ? 1 : 0 };
-  }).sort(function(a,b){
-    return (a.last - b.last) || (a.pen - b.pen) || (a.rn < b.rn ? -1 : 1);
-  });
+  // Build queue: prefer never-seen first, then seen
+  var queue = [];
+  var prev = mem.prevRoom || null;
 
-  mem.queue = scored.map(function(x){ return x.rn; });
+  // Avoid immediate backtrack to prev when we have choice
+  for (var i=0; i<never.length; i++) {
+    if (prev && never[i] === prev && never.length > 1) continue;
+    queue.push(never[i]);
+  }
+  for (var j=0; j<seen.length; j++) {
+    if (prev && seen[j].rn === prev && (seen.length - j) > 1) continue;
+    queue.push(seen[j].rn);
+  }
+
+  mem.queue = queue;
 }
-
-
 
 function ensureScoutMem(creep) {
   if (!creep.memory.scout) creep.memory.scout = {};
@@ -217,8 +219,6 @@ function ensureScoutMem(creep) {
   if (!Array.isArray(m.queue)) m.queue = [];
   return m;
 }
-
-
 
 function go(creep, dest, opts={}) {
   if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
@@ -265,6 +265,59 @@ function logRoomIntel(room) {
   }
 }
 
+// ---- Room name <-> coordinate helpers (ES5) ----
+function parseRoomName(name) {
+  // e.g. "W39S47"
+  var m = /([WE])(\d+)([NS])(\d+)/.exec(name);
+  if (!m) return null;
+  var hx = m[1], vx = m[3];
+  var x = parseInt(m[2], 10);
+  var y = parseInt(m[4], 10);
+  // east is +, west is -, south is +, north is -
+  if (hx === 'W') x = -x;
+  if (vx === 'N') y = -y;
+  return { x: x, y: y };
+}
+
+function toRoomName(x, y) {
+  var hx = x >= 0 ? 'E' : 'W';
+  var vx = y >= 0 ? 'S' : 'N';
+  var ax = Math.abs(x);
+  var ay = Math.abs(y);
+  return hx + ax + vx + ay;
+}
+
+// Generate a clockwise ring of rooms exactly at manhattan radius r around centerName
+function coordinateRing(centerName, r) {
+  var c = parseRoomName(centerName);
+  if (!c || r < 1) return [];
+  var out = [];
+  var x, y;
+
+  // Start at EAST edge (c.x + r, c.y), then walk clockwise around the rectangle perimeter
+  // Segment 1: East -> South along y increasing
+  x = c.x + r; y = c.y - (r - 1);
+  for (; y <= c.y + r; y++) out.push(toRoomName(x, y));
+  // Segment 2: South -> West along x decreasing
+  y = c.y + r - 1; x = c.x + r - 1;
+  for (; x >= c.x - r; x--) out.push(toRoomName(x, y));
+  // Segment 3: West -> North along y decreasing
+  x = c.x - r; y = c.y + r - 1;
+  for (; y >= c.y - r; y--) out.push(toRoomName(x, y));
+  // Segment 4: North -> East along x increasing
+  y = c.y - r; x = c.x - r + 1;
+  for (; x <= c.x + r; x++) out.push(toRoomName(x, y));
+
+  // Dedup (corners can double-push if r==1 logic changes)
+  var seen = {};
+  var dedup = [];
+  for (var i = 0; i < out.length; i++) {
+    if (!seen[out[i]]) { seen[out[i]] = true; dedup.push(out[i]); }
+  }
+  return dedup;
+}
+
+
 const TaskScout = {
   isExitBlocked: function (creep, exitDir) {
     // keep your quick probe (cheap), but we also track roomStatus elsewhere
@@ -281,7 +334,6 @@ const TaskScout = {
 
   run: function (creep) {
     const M = ensureScoutMem(creep);      // { home, ring, queue, lastRoom? }
-    M.prevRoom = creep.memory.prevRoom || null;
     if (!creep.memory.lastRoom) creep.memory.lastRoom = creep.room.name;
 
     // Room entry: stamp intel + lastVisited
@@ -291,6 +343,7 @@ const TaskScout = {
       creep.memory.prevRoom = creep.memory.lastRoom;
       creep.memory.lastRoom = creep.room.name;
       creep.memory.hasAnnouncedRoomVisit = false;
+      M.prevRoom = creep.memory.prevRoom || null;
 
       // log intel + visit stamp
       stampVisit(creep.room.name);
@@ -308,21 +361,30 @@ const TaskScout = {
       logRoomIntel(creep.room);
     }
 
-
     // If we have a target and we're not there yet, go there
     if (creep.memory.targetRoom && creep.room.name !== creep.memory.targetRoom) {
       const dir = creep.room.findExitTo(creep.memory.targetRoom);
       if (dir < 0) { // no path (novice border / map edge)
+      // mark it blocked
+      if (!Memory.rooms) Memory.rooms = {};
+      if (!Memory.rooms[creep.memory.targetRoom]) Memory.rooms[creep.memory.targetRoom] = {};
+      Memory.rooms[creep.memory.targetRoom].blocked = Game.time;
+
+      // unconditionally drop this target and pick another next tick
+      creep.memory.targetRoom = null;
+      return;
+
+      } else {
+        if (TaskScout.isExitBlocked(creep, dir)) {
+        // mark it blocked
         if (!Memory.rooms) Memory.rooms = {};
         if (!Memory.rooms[creep.memory.targetRoom]) Memory.rooms[creep.memory.targetRoom] = {};
         Memory.rooms[creep.memory.targetRoom].blocked = Game.time;
+
+        // unconditionally drop this target and pick another next tick
         creep.memory.targetRoom = null;
-      } else {
-        if (TaskScout.isExitBlocked(creep, dir)) {
-          if (!Memory.rooms) Memory.rooms = {};
-          if (!Memory.rooms[creep.memory.targetRoom]) Memory.rooms[creep.memory.targetRoom] = {};
-          Memory.rooms[creep.memory.targetRoom].blocked = Game.time;
-          creep.memory.targetRoom = null;
+        return;
+
         } else {
           if (creep.pos.x === 0 && dir === FIND_EXIT_LEFT)   { creep.move(LEFT);  return; }
           if (creep.pos.x === 49 && dir === FIND_EXIT_RIGHT) { creep.move(RIGHT); return; }
@@ -354,12 +416,11 @@ const TaskScout = {
     while (M.queue.length) {
       const next = M.queue.shift();
       if (!okRoomName(next) || isBlockedRecently(next)) continue;
-      if (next === (creep.memory.prevRoom || null) && M.queue.length) continue; // skip bounce
+      if (next === (M.prevRoom || null) && M.queue.length) continue; // skip bounce
       creep.memory.targetRoom = next;
       creep.memory.hasAnnouncedRoomVisit = false;
       break;
     }
-
 
     // If we still don’t have a target, idle near center and try again next tick
     if (!creep.memory.targetRoom) {
@@ -379,4 +440,3 @@ const TaskScout = {
 };
 
 module.exports = TaskScout;
-
