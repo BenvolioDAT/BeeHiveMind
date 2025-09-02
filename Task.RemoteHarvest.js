@@ -235,17 +235,20 @@ const TaskRemoteHarvest = {
     // the home anchor so scouts/vision can make candidates appear.
     if (!creep.memory.sourceId) {
         const pick = pickRemoteSource(creep);
-            if (pick) {
-                creep.memory.sourceId = pick.id;
-                creep.memory.targetRoom = pick.roomName;
-                creep.memory.assigned = true;
-            } else {
-                    // Nothing visible/available; idle at home anchor and try again next tick
-                    const anchor = getAnchorPos(getHomeName(creep));
-                    go(creep, anchor, { range: 2 });
-                    return;
+        if (pick) {
+            creep.memory.sourceId = pick.id;
+            creep.memory.targetRoom = pick.roomName;
+            creep.memory.assigned = true;
+        } else {
+            TaskRemoteHarvest.initializeAndAssign(creep);
+            if (!creep.memory.sourceId) {
+            // Nothing visible/available; idle at home anchor and try again next tick
+            const anchor = getAnchorPos(getHomeName(creep));
+            go(creep, anchor, { range: 2 });
+            return;
             }
         }
+    }
     // --- State machine: RETURNING vs HARVESTING ---
     // First, compute whether we should be going home (full) or harvesting (not full).
     TaskRemoteHarvest.updateReturnState(creep);
@@ -333,6 +336,11 @@ const TaskRemoteHarvest = {
             const assignedSource = TaskRemoteHarvest.assignSource(creep, roomMemory);
             if (assignedSource) {
                 creep.memory.sourceId = assignedSource;
+                const memAssign = ensureAssignmentsMem();
+                const sid = creep.memory.sourceId;
+                if (sid && memAssign[sid]) {
+                memAssign[sid] = Math.max(0, memAssign[sid] - 1);
+                }
                 console.log(`Forager ${creep.name} assigned to source: ${assignedSource} in room: ${creep.memory.targetRoom}`);
             } else {
                 console.log(`No available sources for creep: ${creep.name}`);
