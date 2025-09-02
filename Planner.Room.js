@@ -6,9 +6,9 @@ const RoomPlanner = {
     structureLimits: {
         STRUCTURE_TOWER: 6,
         STRUCTURE_EXTENSION: 60,
-        STRUCTURE_CONTAINER: 1,
+        STRUCTURE_CONTAINER: 10,
         STRUCTURE_RAMPART: 2,
-        STRUCTURE_ROAD: 20,
+        STRUCTURE_ROAD: 150,
     },
 
     BASE_OFFSETS:[
