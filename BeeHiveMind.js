@@ -102,7 +102,7 @@ const BeeHiveMind = {
             upgrader: 1,
             repair: 0,
             courier: 2,
-            remoteharvest: 10,
+            remoteharvest: 8,
             scout: 2,
             queen: 2,
             CombatArcher: 1,
