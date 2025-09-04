@@ -213,7 +213,9 @@ const RoadPlanner = {
             const res = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
                 if (res === OK) placed++;
             }
+            
             rec.i++;
+            console.log("pass rec.i++");
         }
         // If we've marched past the last path step, mark this path as done
         // so we never revisit it again (saves CPU in future ticks).
