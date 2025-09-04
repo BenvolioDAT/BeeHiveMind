@@ -194,34 +194,41 @@ const RoadPlanner = {
             // can only create sites in visible rooms
             const roomObj = Game.rooms[step.roomName];
             if (!roomObj) break; // No vision → skip this step for now.
+            // Create a RoomPosition object for this step.
+            const pos = new RoomPosition(step.x, step.y, step.roomName);
             // Skip impassable terrain. WALL tiles are a no-go for roads.
             // (TERRAIN_MASK_WALL is a bit mask; equality check is the standard pattern.)
             //skip walls / existing stuff
             const terr = roomObj.getTerrain().get(step.x, step.y);
-            if (terr === TERRAIN_MASK_WALL) {
-            // Create a RoomPosition object for this step.
-            const pos = new RoomPosition(step.x, step.y, step.roomName);
+            if (terr !== TERRAIN_MASK_WALL) {
             // Skip tiles that already have:
             // - An existing ROAD structure, or
             // - A ROAD construction site
-            const occupied  =
-                pos.lookFor(LOOK_STRUCTURES).some(s => s.structureType === STRUCTURE_ROAD) ||
-                pos.lookFor(LOOK_CONSTRUCTION_SITES).some(cs => cs.structureType === STRUCTURE_ROAD);
-            if (!occupied) {
+            if (!_hasRoadOrRoadSite(pos)) {
+                const res = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
+                if (res === OK) {
+                    placed++;
+                } else if (res === ERR_FULL) {
+                    break;
+                }
+            }
+            //const occupied  =
+             //   pos.lookFor(LOOK_STRUCTURES).some(s => s.structureType === STRUCTURE_ROAD) ||
+             //   pos.lookFor(LOOK_CONSTRUCTION_SITES).some(cs => cs.structureType === STRUCTURE_ROAD);
+            //if (!occupied) {
             // Try to place the ROAD construction site.
             // createConstructionSite returns an OK/ERR_* code; we only count if it succeeded.
-            const res = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
-                if (res === OK) placed++;
-            }
-            
+            //const res = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
+                //if (res === OK) placed++;
+            }            
             rec.i++;
-            console.log("pass rec.i++");
+            //console.log("pass rec.i++");
         }
         // If we've marched past the last path step, mark this path as done
         // so we never revisit it again (saves CPU in future ticks).
         if (rec.i >= rec.path.length) rec.done = true;
-        }
-    },
+        },
+    //},
     // ─────────────────────────────────────────────────────────────────────────────
     /**
      * Get (and lazily initialize) this home room's RoadPlanner memory bucket.
