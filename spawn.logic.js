@@ -197,6 +197,7 @@ const RemoteHarvest_Config = [
   //B(5,14,19), // 38 700 carry cap
   //B(5,12,17), // 34 600 carry cap
   //B(5,10,15), // 30 500 carry cap
+  B(5,8,4),
   B(5,8,13),  // 26 400 carry cap
   B(5,6,11),  // 22 300 carry cap
   B(5,4,9),  // 18 200 carry cap
@@ -220,8 +221,8 @@ const CombatMelee_Config = [
 ];
 
 const CombatArcher_Config = [
-  R(5,8,25),
-  R(6,6,12),
+  //R(5,8,25),
+  //R(6,6,12),
   R(2,4,6),
   R(2,3,5),
   R(1,2,3),
@@ -230,13 +231,13 @@ const CombatArcher_Config = [
 ];
 
 const CombatMedic_Config = [
-  MH(25,12),
-  MH(11,11),
-  MH(10,10),
-  MH(9,9),
-  MH(8,8),
-  MH(7,7),
-  MH(6,6),
+  //MH(25,12),
+  //MH(11,11),
+  //MH(10,10),
+  //MH(9,9),
+  //MH(8,8),
+  //MH(7,7),
+  //MH(6,6),
   MH(5,5),
   MH(4,4),
   MH(3,3),

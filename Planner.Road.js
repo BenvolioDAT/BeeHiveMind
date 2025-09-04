@@ -87,9 +87,10 @@ const RoadPlanner = {
                     // - goal: { pos, range } says "get within range of this position" (range 1 around the source)
                     // - opts: tuning for terrain costs + a roomCallback for custom per-tile rules
                     //plan (one big cross-room PathFinder search)
+                    const harvestPos = RoadPlanner._chooseHarvestTile(src);
                     const ret = PathFinder.search(
                        anchor,
-                       { pos: src.pos, range: 1 },
+                       harvestPos ? { pos: harvestPos, range: 0 } : { pos: src.pos, range: 1 },
                        {
                         // Base terrain costs:
                         // - plains are cheap (2)
@@ -137,6 +138,12 @@ const RoadPlanner = {
                         }
                        } 
                     );
+
+                    if (!ret.path || ret.path.length === 0 || ret.incomplete) {
+                        // Optional: keep a small backoff timestamp in memory if you want.
+                        continue;
+                    }
+
                     // Store a *serializable* copy of the path in Memory.
                     // (RoomPosition objects aren't serializable as-is.)
                     mem.paths[key] = {
@@ -176,20 +183,22 @@ const RoadPlanner = {
         if (!rec || rec.done) return;// Nothing to do.
         
         let placed = 0;
+        let guard = 0; // safety: prevents infinite loops if logic breaks.
         // Walk forward from rec.i up to the end of the path,
         // but stop if we hit our per-tick placement budget.
         while (rec.i < rec.path.length && placed < budget) {
+            if (++guard > budget + 10) break; //ultra-low overhead safety
             const step = rec.path[rec.i];
-            rec.i++;// Advance our progress pointer even if we end up skipping this step.
+            //rec.i++;// Advance our progress pointer even if we end up skipping this step.
             // We can only create construction sites in rooms we can see (have a Room object).
             // can only create sites in visible rooms
             const roomObj = Game.rooms[step.roomName];
-            if (!roomObj) continue; // No vision → skip this step for now.
+            if (!roomObj) break; // No vision → skip this step for now.
             // Skip impassable terrain. WALL tiles are a no-go for roads.
             // (TERRAIN_MASK_WALL is a bit mask; equality check is the standard pattern.)
             //skip walls / existing stuff
             const terr = roomObj.getTerrain().get(step.x, step.y);
-            if (terr === TERRAIN_MASK_WALL) continue;
+            if (terr === TERRAIN_MASK_WALL) {
             // Create a RoomPosition object for this step.
             const pos = new RoomPosition(step.x, step.y, step.roomName);
             // Skip tiles that already have:
@@ -198,16 +207,18 @@ const RoadPlanner = {
             const occupied  =
                 pos.lookFor(LOOK_STRUCTURES).some(s => s.structureType === STRUCTURE_ROAD) ||
                 pos.lookFor(LOOK_CONSTRUCTION_SITES).some(cs => cs.structureType === STRUCTURE_ROAD);
-            if (occupied) continue;
+            if (!occupied) {
             // Try to place the ROAD construction site.
             // createConstructionSite returns an OK/ERR_* code; we only count if it succeeded.
-            if (roomObj.createConstructionSite(pos, STRUCTURE_ROAD) === OK) {
-                placed++;
+            const res = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
+                if (res === OK) placed++;
             }
+            rec.i++;
         }
         // If we've marched past the last path step, mark this path as done
         // so we never revisit it again (saves CPU in future ticks).
         if (rec.i >= rec.path.length) rec.done = true;
+        }
     },
     // ─────────────────────────────────────────────────────────────────────────────
     /**
@@ -271,7 +282,7 @@ const RoadPlanner = {
 
         // Throttle like crazy: run either once every 1000 ticks OR ~1% random chance
         // (Keeps CPU tiny; still catches decay sooner or later.)
-        if (Game.time % 1000 !== 0 && Math.random() > 0.01) return;
+        if (Game.time % 100 !== 0 && Math.random() > 0.01) return;
 
         let fixed = 0;
 
@@ -305,7 +316,43 @@ const RoadPlanner = {
             }
             }
         }
-    }
+
+    },
+    _chooseHarvestTile(src) {
+        const room = Game.rooms[src.pos.roomName];
+        if (!room) return null;
+        const terrain = room.getTerrain();
+
+        let best = null, bestScore = -Infinity;
+
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) continue;
+
+            const x = src.pos.x + dx, y = src.pos.y + dy;
+            // avoid room borders (annoying for pathing & building)
+            if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
+
+            const t = terrain.get(x, y);
+            if (t === TERRAIN_MASK_WALL) continue;
+
+            const pos = new RoomPosition(x, y, room.name);
+            const structs = pos.lookFor(LOOK_STRUCTURES);
+
+            let score = 0;
+            // prefer an existing container (10) or road (5)
+            if (structs.some(s => s.structureType === STRUCTURE_CONTAINER)) score += 10;
+            if (structs.some(s => s.structureType === STRUCTURE_ROAD)) score += 5;
+
+            // prefer plains over swamp
+            if (t === TERRAIN_MASK_SWAMP) score -= 2;
+
+            if (score > bestScore) { bestScore = score; best = pos; }
+            }
+        }
+        return best; // may be null if no vision; caller should fall back
+    },
+    
 
 };
 
