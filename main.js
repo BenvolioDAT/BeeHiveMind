@@ -46,8 +46,7 @@ module.exports.loop = function () {
 
     BeeVisuals.drawEnergyBar();
     
-    BeeVisuals.drawWorkerBeeTaskTable()
-
+    BeeVisuals.drawWorkerBeeTaskTable();
     // Handle repair target list updates every 5 ticks
     if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
     Memory.GameTickRepairCounter++;

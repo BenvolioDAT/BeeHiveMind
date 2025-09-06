@@ -63,79 +63,87 @@ const RoadPlanner = {
         const activeRemotes = _.uniq(
             _.filter(Game.creeps, c => c.memory.task === 'remoteharvest' && c.memory.targetRoom)
             .map(c => c.memory.targetRoom)
+            /* Top above is the same as the commented out code below just using => aka Arrow Function.
+            const remoteCreeps = _.filter(Game.creeps, function(c){
+                return c.memory.task === "remoteharvest" && c.memory.targetRoom;
+            });
+            const targetRooms = remoteCreep.map(function(c){
+                return c.memory.targetRoom;
+            });
+            */
         );
         // 4) For each remote room we care about...
         for (const remote of activeRemotes) {
-            // We only proceed if our Memory already knows about sources in that room.
-            // (e.g., your scout/logging step filled Memory.rooms[remote].sources)
-            const rmem = Memory.rooms[remote];
-            if (!rmem || !rmem.sources) continue;// Need source IDs first.//BeeToolbox.logSourcesInRoom fills this when you have vision
-            // We can only place construction sites where we have vision (room object exists).
-            //If we can see the room, we can obtain real source positions now
-            const remoteRoomObj = Game.rooms[remote];
-            if (!remoteRoomObj) continue; // No vision → skip this remote for now.
-            // 5) Get actual live Source objects from the visible remote room.
-            const sources = remoteRoomObj.find(FIND_SOURCES);
-            // 6) Plan/ensure a path to each source in that remote room.
-            for (const src of sources) {
-                // Unique key per remote-source pair so we can track progress separately.
-                const key =`${remote}:${src.id}`;
-                // If we haven't planned this path yet, do one big cross-room path search.
-                if (!mem.paths[key]) {
-                    // PathFinder.search(start, goal, opts)
-                    // - start: our anchor Position in home room
-                    // - goal: { pos, range } says "get within range of this position" (range 1 around the source)
-                    // - opts: tuning for terrain costs + a roomCallback for custom per-tile rules
-                    //plan (one big cross-room PathFinder search)
-                    const harvestPos = RoadPlanner._chooseHarvestTile(src);
-                    const ret = PathFinder.search(
-                       anchor,
-                       harvestPos ? { pos: harvestPos, range: 0 } : { pos: src.pos, range: 1 },
-                       {
-                        // Base terrain costs:
-                        // - plains are cheap (2)
-                        // - swamps are pricier (10) so roads (which reduce fatigue) matter more there
-                        plainCost: 2,
-                        swampCost: 10,
-                        // roomCallback lets us tweak the cost matrix per room.
-                        // Returning undefined means "use default terrain costs".
-                        // Returning a CostMatrix lets us prefer roads / block impassables.
-                        roomCallback: (roomName) => {
-                            const room = Game.rooms[roomName];
-                            if (!room) return;// No vision → undefined → default costs. // undefined -> use fefault costs
-                            // Start with an empty matrix, and we will selectively mark tiles.
-                            const costs = new PathFinder.CostMatrix();
-                            // 1) Prefer existing roads by setting a *lower* cost on road tiles.
-                            //    1 is extremely attractive vs plainCost(2)/swampCost(10).
-                            // 2) Block (set 0xff) most non-passable structures:
-                            //    - Anything that's not a CONTAINER
-                            //    - RAMPARTs are okay only if they're ours (s.my)
-                            // prefer existing roads
-                            room.find(FIND_STRUCTURES).forEach(s => {
-                                if (s.structureType === STRUCTURE_ROAD) 
-                                    costs.set(s.pos.x, s.pos.y, 1);
-                                else if (
-                                    s.structureType !== STRUCTURE_CONTAINER &&
-                                    (s.structureType !== STRUCTURE_RAMPART || !s.my)
-                                ) {
-                                    costs.set(s.pos.x, s.pos.y, 0xff);// basically impassable
-                                }
-                            });
-                            // Also respect construction sites:
-                            // - Block non-road sites so we don't plan through future walls/towers, etc.
-                            // respect construction sites too
-                            room.find(FIND_CONSTRUCTION_SITES).forEach(cs => {
-                                if (cs.structureType !== STRUCTURE_ROAD) {
-                                    costs.set(cs.pos.x, cs.pos.y, 0xff);
-                                }
-                            });
-                            // 🚧 NEW: treat sources & minerals as impassable so we don't path "through" them
-                            room.find(FIND_SOURCES).forEach(src => costs.set(src.pos.x, src.pos.y, 0xff));
-                            const minerals = room.find ? room.find(FIND_MINERALS) : [];
-                            minerals.forEach(min => costs.set(min.pos.x, min.pos.y, 0xff));
-                            // Return the customized matrix for this room.
-                            return costs;
-                        }
+                // We only proceed if our Memory already knows about sources in that room.
+                // (e.g., your scout/logging step filled Memory.rooms[remote].sources)
+                const remoteMemory = Memory.rooms[remote];
+                if (!remoteMemory || !remoteMemory.sources) continue;// Need source IDs first.//BeeToolbox.logSourcesInRoom fills this when you have vision
+                // We can only place construction sites where we have vision (room object exists).
+                //If we can see the room, we can obtain real source positions now
+                const remoteRoomObj = Game.rooms[remote];
+                if (!remoteRoomObj) continue; // No vision → skip this remote for now.
+                // 5) Get actual live Source objects from the visible remote room.
+                const sources = remoteRoomObj.find(FIND_SOURCES);
+                // 6) Plan/ensure a path to each source in that remote room.
+                for (const src of sources) {
+                    // Unique key per remote-source pair so we can track progress separately.
+                    const key =`${remote}:${src.id}`;
+                    // If we haven't planned this path yet, do one big cross-room path search.
+                    if (!mem.paths[key]) {
+                        // PathFinder.search(start, goal, opts)
+                        // - start: our anchor Position in home room
+                        // - goal: { pos, range } says "get within range of this position" (range 1 around the source)
+                        // - opts: tuning for terrain costs + a roomCallback for custom per-tile rules
+                        //plan (one big cross-room PathFinder search)
+                        const harvestPos = RoadPlanner._chooseHarvestTile(src);
+                        const ret = PathFinder.search(
+                           anchor,
+                           harvestPos ? { pos: harvestPos, range: 0 } : { pos: src.pos, range: 1 },
+                           {
+                            // Base terrain costs:
+                            // - plains are cheap (2)
+                            // - swamps are pricier (10) so roads (which reduce fatigue) matter more there
+                            plainCost: 2,
+                            swampCost: 10,
+                            // roomCallback lets us tweak the cost matrix per room.
+                            // Returning undefined means "use default terrain costs".
+                            // Returning a CostMatrix lets us prefer roads / block impassables.
+                            roomCallback: (roomName) => {
+                                const room = Game.rooms[roomName];
+                                if (!room) return;// No vision → undefined → default costs. // undefined -> use fefault costs
+                                // Start with an empty matrix, and we will selectively mark tiles.
+                                const costs = new PathFinder.CostMatrix();
+                                // 1) Prefer existing roads by setting a *lower* cost on road tiles.
+                                //    1 is extremely attractive vs plainCost(2)/swampCost(10).
+                                // 2) Block (set 0xff) most non-passable structures:
+                                //    - Anything that's not a CONTAINER
+                                //    - RAMPARTs are okay only if they're ours (s.my)
+                                // prefer existing roads
+                                room.find(FIND_STRUCTURES).forEach(s => {
+                                    if (s.structureType === STRUCTURE_ROAD) 
+                                        costs.set(s.pos.x, s.pos.y, 1);
+                                    else if (
+                                        s.structureType !== STRUCTURE_CONTAINER &&
+                                        (s.structureType !== STRUCTURE_RAMPART || !s.my)
+                                    ) {
+                                        costs.set(s.pos.x, s.pos.y, 0xff);// basically impassable
+                                    }
+                                });
+                                // Also respect construction sites:
+                                // - Block non-road sites so we don't plan through future walls/towers, etc.
+                                // respect construction sites too
+                                room.find(FIND_CONSTRUCTION_SITES).forEach(cs => {
+                                    if (cs.structureType !== STRUCTURE_ROAD) {
+                                        costs.set(cs.pos.x, cs.pos.y, 0xff);
+                                    }
+                                });
+                                // 🚧 NEW: treat sources & minerals as impassable so we don't path "through" them
+                                room.find(FIND_SOURCES).forEach(src => costs.set(src.pos.x, src.pos.y, 0xff));
+                                const minerals = room.find ? room.find(FIND_MINERALS) : [];
+                                minerals.forEach(min => costs.set(min.pos.x, min.pos.y, 0xff));
+                                // Return the customized matrix for this room.
+                                return costs;
+                            }
                        } 
                     );
 
@@ -222,11 +230,10 @@ const RoadPlanner = {
                 //if (res === OK) placed++;
             }            
             rec.i++;
-            //console.log("pass rec.i++");
         }
         // If we've marched past the last path step, mark this path as done
         // so we never revisit it again (saves CPU in future ticks).
-        if (rec.i >= rec.path.length) rec.done = true;
+        //if (rec.i >= rec.path.length) rec.done = true;
         },
     //},
     // ─────────────────────────────────────────────────────────────────────────────
