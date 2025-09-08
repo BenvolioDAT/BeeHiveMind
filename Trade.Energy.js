@@ -1,66 +1,80 @@
-// Trade.Energy.js
-// Purpose: Sell excess ENERGY via the Market using the room Terminal.
-// Style: "novice-friendly" — simple, explicit, heavily commented.
+// Trade.Energy.v2.1.js
+// Purpose: Sell excess ENERGY via the Market from a room's Terminal.
+// Tone: novice-friendly (verbose comments, clear steps).
 
-// ===== Config you can tweak safely =====
 const CFG = {
-  // Keep this much in Storage for emergencies (towers, rebuilds, “oops!”)
-  KEEP_ENERGY_STORAGE: 300_000,
-
-  // Keep some energy inside the Terminal for future trades / ops
-  KEEP_ENERGY_TERMINAL: 50_000,
-
-  // Don't bother selling below this price (credits per unit)
-  MIN_PRICE: 0.15,
-
-  // Max units to attempt per one deal (keeps CPU calm)
-  MAX_PER_DEAL: 20_000,
-
-  // Only try one deal every N ticks per room so we don't spam market / CPU
-  COOLDOWN_TICKS: 25,
-
-  // Ignore tiny buy orders (not worth the fee/CPU churn)
-  MIN_ORDER_AMOUNT: 2_000,
-
-  // How many top BUY orders to examine before picking (0 = all; 20 is plenty)
-  SCAN_TOP_N: 20
+  KEEP_ENERGY_STORAGE: 300000,   // don't touch storage below this
+  KEEP_ENERGY_TERMINAL: 50000,   // keep this buffer in the terminal
+  MIN_PRICE: 0.15,               // nominal price floor (credits per unit)
+  MIN_EFFECTIVE_CPE: 0.00,       // optional floor on *effective* credits/energy after fees
+  MAX_PER_DEAL: 20000,           // don't over-swing any single order
+  COOLDOWN_TICKS: 25,            // per-room spacing so we don't spam
+  MIN_ORDER_AMOUNT: 2000,        // ignore crumbs
+  SCAN_TOP_N: 20,                // examine top N by price
+  MAX_DISTANCE: Infinity,        // optional hard cap (e.g. 18). Infinity = off.
+  HISTORY_REFRESH: 5000          // how often to refresh 14d history (ticks)
 };
 
-// ===== Helpers =====
+// ---------- tiny globals (safe, reset each tick) ----------
+const TradeState = {
+  tickSeen: -1,
+  buyOrders: [],
+  dealsThisTick: 0,    // API hard-caps at 10 deals/tick
+  history: { tick: -Infinity, byRes: {} }
+};
 
-// Effective price considering transaction energy cost.
-// When you "deal" a BUY order, you send `amount` energy and also pay an extra
-// energy `fee` (transaction cost). So total energy lost = amount + fee.
-// Credits received = amount * price.
-// We rank orders by "credits per net energy spent".
-function effectiveCreditsPerEnergy(order, roomName, amount) {
-  const fee = Game.market.calcTransactionCost(amount, roomName, order.roomName);
-  const netEnergySpent = amount + fee;
-  if (netEnergySpent <= 0) return 0;
-  return (order.price * amount) / netEnergySpent;
+// ---------- helpers ----------
+function refreshTickGlobals() {
+  if (TradeState.tickSeen !== Game.time) {
+    TradeState.tickSeen = Game.time;
+    TradeState.buyOrders = [];
+    TradeState.dealsThisTick = 0;
+  }
 }
 
-// Shrink `amount` until Terminal has enough energy to cover amount + fee
-// and we still keep our terminal reserve. Returns the final amount (>=0).
-function fitAmountToTerminal(room, order, desiredAmount) {
+// server-side filter is cheaper than client-side mass filtering
+function fetchEnergyBuyOrders() {
+  refreshTickGlobals();
+  if (TradeState.buyOrders.length) return TradeState.buyOrders;
+
+  let orders = Game.market.getAllOrders(o =>
+    o.type === ORDER_BUY &&
+    o.resourceType === RESOURCE_ENERGY &&
+    o.price >= CFG.MIN_PRICE &&
+    o.amount >= CFG.MIN_ORDER_AMOUNT
+  );
+
+  // Consider top N by raw price (fast screen), refine by effective later
+  orders.sort((a, b) => b.price - a.price);
+  if (CFG.SCAN_TOP_N > 0 && orders.length > CFG.SCAN_TOP_N) {
+    orders = orders.slice(0, CFG.SCAN_TOP_N);
+  }
+  TradeState.buyOrders = orders;
+  return orders;
+}
+
+// credits per *net* energy (amount sent + energy fee)
+function effectiveCreditsPerEnergy(order, fromRoom, amount) {
+  const fee = Game.market.calcTransactionCost(amount, fromRoom, order.roomName);
+  const net = amount + fee;
+  return net > 0 ? (order.price * amount) / net : 0;
+}
+
+// shrink amount so terminal has enough to cover shipment + fee while keeping reserve
+function fitAmountToTerminal(room, order, desired) {
   const term = room.terminal;
   if (!term) return 0;
 
-  // Energy we must keep in the terminal
   const reserve = CFG.KEEP_ENERGY_TERMINAL;
-
-  // Available energy we can spend (both to ship and to pay the fee)
   let spendable = (term.store[RESOURCE_ENERGY] || 0) - reserve;
   if (spendable <= 0) return 0;
 
-  // Start with desiredAmount, reduce in steps if needed
-  let amt = Math.max(0, Math.min(desiredAmount, spendable));
+  let amt = Math.max(0, Math.min(desired, spendable));
   if (amt === 0) return 0;
 
-  // Reduce until amt + fee <= spendable
-  // step size 500 to converge quickly without tons of CPU
+  // Nudge down in small chunks until amt + fee fits spendable
   const STEP = 500;
-  for (let guard = 0; guard < 100 && amt > 0; guard++) {
+  for (let guard = 0; guard < 50 && amt > 0; guard++) {
     const fee = Game.market.calcTransactionCost(amt, room.name, order.roomName);
     if (amt + fee <= spendable) break;
     amt = Math.max(0, amt - STEP);
@@ -68,105 +82,108 @@ function fitAmountToTerminal(room, order, desiredAmount) {
   return amt;
 }
 
-// Persisted per-room throttle
-function canTradeThisTick(room) {
+// per-room cooldown memory
+function _roomThrottle(room) {
   if (!Memory.trade) Memory.trade = {};
   if (!Memory.trade.rooms) Memory.trade.rooms = {};
-  const rec = Memory.trade.rooms[room.name] || (Memory.trade.rooms[room.name] = { last: 0 });
-  const now = Game.time || 0;
-  return now - rec.last >= CFG.COOLDOWN_TICKS;
+  if (!Memory.trade.rooms[room.name]) Memory.trade.rooms[room.name] = { last: 0 };
+  return Memory.trade.rooms[room.name];
 }
-
+function canTradeThisTick(room) {
+  const rec = _roomThrottle(room);
+  return (Game.time - rec.last) >= CFG.COOLDOWN_TICKS;
+}
 function markTraded(room) {
-  Memory.trade.rooms[room.name] = Memory.trade.rooms[room.name] || {};
-  Memory.trade.rooms[room.name].last = Game.time || 0;
+  const rec = _roomThrottle(room);
+  rec.last = Game.time;
+  TradeState.dealsThisTick++;
 }
 
-// ===== Core =====
+// Optional: lazy history to sanity-check price floors (14 days)
+function getEnergyHistory() {
+  if ((Game.time - TradeState.history.tick) < CFG.HISTORY_REFRESH) {
+    return TradeState.history.byRes[RESOURCE_ENERGY];
+  }
+  const hist = Game.market.getHistory(RESOURCE_ENERGY) || [];
+  TradeState.history.tick = Game.time;
+  TradeState.history.byRes[RESOURCE_ENERGY] = hist;
+  return hist;
+}
+
+// ---------- core ----------
 const TradeEnergy = {
-  /**
-   * Try to sell energy from ONE room (if it has a Terminal and surplus).
-   * Safe to call every tick; internal cooldown prevents spam.
-   */
   run(room) {
-    if (!room || !room.terminal || !room.storage) return; // needs both
+    refreshTickGlobals();
+    if (!room || !room.controller || !room.controller.my) return;
+    if (!room.terminal || !room.storage) return;
+
+    // global hard-cap: API allows only 10 deals/player/tick
+    if (TradeState.dealsThisTick >= 10) return;
+
+    // skip if terminal is cooling down (deals also apply cooldown)
+    if (room.terminal.cooldown && room.terminal.cooldown > 0) return;
+
     if (!canTradeThisTick(room)) return;
 
-    const storageEnergy = room.storage.store[RESOURCE_ENERGY] || 0;
-    const termEnergy = room.terminal.store[RESOURCE_ENERGY] || 0;
+    const store = room.storage.store[RESOURCE_ENERGY] || 0;
+    const termE = room.terminal.store[RESOURCE_ENERGY] || 0;
+    if (store < CFG.KEEP_ENERGY_STORAGE) return; // no true surplus
 
-    // Only trade if we truly have surplus in STORAGE
-    if (storageEnergy < CFG.KEEP_ENERGY_STORAGE) return;
+    const candidates = fetchEnergyBuyOrders();
+    if (!candidates.length) return;
 
-    // Get BUY orders for ENERGY
-    let orders = Game.market.getAllOrders({
-      type: ORDER_BUY,
-      resourceType: RESOURCE_ENERGY
-    });
+    // pick best by *effective* credits/energy using a small test amount
+    const ranked = [];
+    for (const o of candidates) {
+      if (!o.roomName) continue;
 
-    // Filter obviously bad orders
-    orders = orders.filter(o =>
-      o.amount >= CFG.MIN_ORDER_AMOUNT &&
-      o.price >= CFG.MIN_PRICE
-    );
+      if (Number.isFinite(CFG.MAX_DISTANCE)) {
+        const d = Game.map.getRoomLinearDistance(room.name, o.roomName, true);
+        if (d > CFG.MAX_DISTANCE) continue;
+      }
 
-    if (!orders.length) return; // no decent buyers right now
-
-    // Consider only the best N by nominal price to keep CPU low
-    orders.sort((a, b) => b.price - a.price);
-    if (CFG.SCAN_TOP_N > 0 && orders.length > CFG.SCAN_TOP_N) {
-      orders = orders.slice(0, CFG.SCAN_TOP_N);
-    }
-
-    // For each candidate, compute the "effective" credits per real energy spent
-    // using a tentative amount (we'll fit it to the terminal later).
-    // Start with desired = min(order.amount, MAX_PER_DEAL)
-    let ranked = [];
-    for (const o of orders) {
-      const tentative = Math.min(o.amount, CFG.MAX_PER_DEAL);
-      // Use a tiny test amount (e.g., 10k or less) to estimate efficiency
-      const testAmt = Math.max(1000, Math.min(tentative, 10_000));
-      const eff = effectiveCreditsPerEnergy(o, room.name, testAmt);
+      const cap = Math.min(o.amount, CFG.MAX_PER_DEAL);
+      const test = Math.max(1000, Math.min(cap, 10000));
+      const eff = effectiveCreditsPerEnergy(o, room.name, test);
       ranked.push([o, eff]);
     }
+    if (!ranked.length) return;
 
-    // Choose the order with the best effective credits per net energy
     ranked.sort((A, B) => B[1] - A[1]);
-    const best = ranked[0] && ranked[0][0];
-    if (!best) return;
+    const best = ranked[0][0];
+    const bestEff = ranked[0][1];
 
-    // Final amount: respect order cap, our per-deal cap, and terminal energy
+    if (bestEff < CFG.MIN_EFFECTIVE_CPE) return;
+
     const want = Math.min(best.amount, CFG.MAX_PER_DEAL);
-
-    // We can only ship what's in the TERMINAL (not storage),
-    // so if terminal is low, sell less (or not at all).
     let amount = fitAmountToTerminal(room, best, want);
-    if (amount <= 0) return; // terminal energy too low to cover fee+ship
+    if (amount <= 0) return;
 
-    // Do the deal!
     const res = Game.market.deal(best.id, amount, room.name);
     if (res === OK) {
       markTraded(room);
       const fee = Game.market.calcTransactionCost(amount, room.name, best.roomName);
       console.log(
-        `[TradeEnergy] ${room.name}: Sold ${amount} energy to ${best.roomName} @ ${best.price.toFixed(3)} ` +
-        `(fee ${fee}, eff ${(effectiveCreditsPerEnergy(best, room.name, amount)).toFixed(3)} cr/energy)`
+        `[TradeEnergy] ${room.name}: Sold ${amount} energy @ ${best.price.toFixed(3)} to ${best.roomName} ` +
+        `(fee ${fee}, eff ${effectiveCreditsPerEnergy(best, room.name, amount).toFixed(3)} cr/energy)`
       );
     } else {
-      // If failed, don't lock ourselves; we just log it.
-      console.log(`[TradeEnergy] ${room.name}: deal failed with code ${res}`);
+      console.log(
+        `[TradeEnergy] ${room.name}: deal failed (${res}). tCooldown=${room.terminal.cooldown} termE=${termE} ` +
+        `orderAmt=${best.amount} price=${best.price}`
+      );
     }
   },
 
-  /**
-   * Call this once per tick to try all your visible rooms.
-   * (It just loops run(room) over owned rooms with terminals)
-   */
   runAll() {
+    refreshTickGlobals();
+    // const hist = getEnergyHistory(); // optional future logic
+
     for (const name in Game.rooms) {
       const room = Game.rooms[name];
       if (room && room.controller && room.controller.my && room.terminal) {
         this.run(room);
+        if (TradeState.dealsThisTick >= 10) break;
       }
     }
   }

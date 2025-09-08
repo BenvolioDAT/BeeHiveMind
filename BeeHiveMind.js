@@ -8,7 +8,7 @@ var roleWorker_Bee = require('role.Worker_Bee');
 var TaskBuilder = require('Task.Builder');
 var RoomPlanner = require('Planner.Room');
 var RoadPlanner = require('Planner.Road');
-//var TradeEnergy = require('Trade.Energy');
+var TradeEnergy = require('Trade.Energy');
 
 
 // Creep role function mappings, wrapping their run methods for easier execution
@@ -45,7 +45,7 @@ const BeeHiveMind = {
   RoomPlanner.ensureSites(room);
   RoadPlanner.ensureRemoteRoads(room);
   // After your normal room + creep logic:
-    //TradeEnergy.runAll();  // tries to sell excess energy safely
+    TradeEnergy.runAll();  // tries to sell excess energy safely
 
         // No current room-specific logic
     },
@@ -94,7 +94,7 @@ const BeeHiveMind = {
                 if (r) remoteSites += r.find(FIND_MY_CONSTRUCTION_SITES).length;
                 // no vision => can’t place/build there anyway, so skip
             }
-            return (localSites + remoteSites) > 0 ? 3 : 0;
+            return (localSites + remoteSites) > 0 ? 2 : 0;
             };
 
         for (const roomName in Game.rooms) {
@@ -106,13 +106,13 @@ const BeeHiveMind = {
             builder: NeedBuilder(room),
             upgrader: 1,
             repair: 0,
-            courier: 2,
+            courier: 1,
             remoteharvest: 6,
             scout: 1,
             queen: 2,
             CombatArcher: 2,
-            CombatMelee: 2,
-            CombatMedic: 4,
+            CombatMelee: 0,
+            CombatMedic: 2,
             Dismantler: 0,
             Trucker: 0,           
 
