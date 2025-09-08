@@ -3,7 +3,7 @@
 // Tone: novice-friendly (verbose comments, clear steps).
 
 const CFG = {
-  KEEP_ENERGY_STORAGE: 300000,   // don't touch storage below this
+  KEEP_ENERGY_STORAGE: 600000,   // don't touch storage below this
   KEEP_ENERGY_TERMINAL: 50000,   // keep this buffer in the terminal
   MIN_PRICE: 0.15,               // nominal price floor (credits per unit)
   MIN_EFFECTIVE_CPE: 0.00,       // optional floor on *effective* credits/energy after fees

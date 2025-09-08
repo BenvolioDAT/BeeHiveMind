@@ -118,6 +118,11 @@ const TaskQueen = {
         transferToTarget(linkNearSpawn, RESOURCE_ENERGY);
         return;
       }
+      const targetTerminal = findNearestTarget(STRUCTURE_TERMINAL, RESOURCE_ENERGY);
+      if (targetTerminal) {
+          transferToTarget(targetTerminal, RESOURCE_ENERGY);
+          return;
+      }
       // If no targets found, check storage
       const storage = findStorageWithEnergy();
       if (storage) {
