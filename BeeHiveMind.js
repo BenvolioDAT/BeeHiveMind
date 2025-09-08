@@ -8,6 +8,8 @@ var roleWorker_Bee = require('role.Worker_Bee');
 var TaskBuilder = require('Task.Builder');
 var RoomPlanner = require('Planner.Room');
 var RoadPlanner = require('Planner.Road');
+//var TradeEnergy = require('Trade.Energy');
+
 
 // Creep role function mappings, wrapping their run methods for easier execution
 var creepRoles = {Worker_Bee: roleWorker_Bee.run,};
@@ -42,6 +44,9 @@ const BeeHiveMind = {
           // Continuous, low-cost site placement
   RoomPlanner.ensureSites(room);
   RoadPlanner.ensureRemoteRoads(room);
+  // After your normal room + creep logic:
+    //TradeEnergy.runAll();  // tries to sell excess energy safely
+
         // No current room-specific logic
     },
 
@@ -157,6 +162,7 @@ const BeeHiveMind = {
             }
         }}
     },
+    
     
     // Placeholder for remote operations like foraging, scouting, claiming
     manageRemoteOps() {
