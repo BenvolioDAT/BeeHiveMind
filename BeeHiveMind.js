@@ -94,7 +94,7 @@ const BeeHiveMind = {
                 if (r) remoteSites += r.find(FIND_MY_CONSTRUCTION_SITES).length;
                 // no vision => can’t place/build there anyway, so skip
             }
-            return (localSites + remoteSites) > 0 ? 2 : 0;
+            return (localSites + remoteSites) > 0 ? 1 : 0;
             };
 
         for (const roomName in Game.rooms) {
