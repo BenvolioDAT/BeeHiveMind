@@ -16,13 +16,14 @@ const SWAMP_COST = 10;           // Base PF cost on swamps
 // ============================
 // Small helpers
 // ============================
-function go(creep, dest, opts = {}) {
-  // Unified movement: prefer BeeTravel if available, else moveTo.
-  if (BeeToolbox && BeeToolbox.BeeTravel) {
+function go(creep, dest, opts={}) {
+  if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
     BeeToolbox.BeeTravel(creep, dest, opts);
-  } else {
-    const range = opts.range != null ? opts.range : 1;
-    creep.moveTo(dest, { reusePath: 20, range });
+    return;
+  }
+  const desired = opts.range != null ? opts.range : 1;
+  if (creep.pos.getRangeTo(dest) > desired) {
+    creep.moveTo(dest, { reusePath: 15 });
   }
 }
 
