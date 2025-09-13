@@ -1,8 +1,8 @@
 var BeeToolbox = require('BeeToolbox');
 
 // ---- SCOUT RING HELPERS ----
-const RING_MAX = 5;            // how far out to go before resetting
-const REVISIT_DELAY = 5000;    // ticks before revisiting a room is okay
+const RING_MAX = 20;            // how far out to go before resetting
+const REVISIT_DELAY = 1000;    // ticks before revisiting a room is okay
 const BLOCK_CHECK_DELAY = 10000;
 
 const DIRS_CLOCKWISE = [RIGHT, BOTTOM, LEFT, TOP]; // E, S, W, N
@@ -67,30 +67,40 @@ function rebuildQueue(mem) {
   var layer = buildRing(home, ring);
   var candidates = layer.filter(function(rn){ return !isBlockedRecently(rn); });
 
-  // Keep never-seen rooms in insertion order (clockwise), score only the seen ones
   var never = [];
-  var seen  = [];
+  var seenOld = [];
+  var seenFresh = [];
+
   for (var i=0; i<candidates.length; i++) {
     var rn = candidates[i];
     var lv = lastVisited(rn);
-    if (lv === -Infinity) never.push(rn); else seen.push({ rn: rn, last: lv });
+    if (lv === -Infinity) {
+      never.push(rn);
+    } else if (Game.time - lv >= REVISIT_DELAY) {
+      seenOld.push({ rn: rn, last: lv });
+    } else {
+      seenFresh.push({ rn: rn, last: lv });
+    }
   }
-  // Oldest seen first
-  seen.sort(function(a,b){ return a.last - b.last; });
 
-  // Build queue: prefer never-seen first, then seen
+  seenOld.sort(function(a,b){ return a.last - b.last; });
+  seenFresh.sort(function(a,b){ return a.last - b.last; });
+
   var queue = [];
   var prev = mem.prevRoom || null;
 
-  // Avoid immediate backtrack to prev when we have choice
-  for (var i=0; i<never.length; i++) {
-    if (prev && never[i] === prev && never.length > 1) continue;
-    queue.push(never[i]);
+  function pushSkippingPrev(list, pick) {
+    for (var k=0; k<list.length; k++) {
+      var name = pick ? pick(list[k]) : list[k];
+      if (prev && name === prev && list.length > 1) continue;
+      queue.push(name);
+    }
   }
-  for (var j=0; j<seen.length; j++) {
-    if (prev && seen[j].rn === prev && (seen.length - j) > 1) continue;
-    queue.push(seen[j].rn);
-  }
+
+  // Prefer: never-seen -> old-seen (past delay) -> fresh-seen (within delay)
+  pushSkippingPrev(never);
+  pushSkippingPrev(seenOld, function(x){return x.rn;});
+  pushSkippingPrev(seenFresh, function(x){return x.rn;});
 
   mem.queue = queue;
 }
@@ -123,11 +133,14 @@ function ensureScoutMem(creep) {
 function go(creep, dest, opts={}) {
   if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
     BeeToolbox.BeeTravel(creep, dest, opts);
-  } else {
-    const range = opts.range != null ? opts.range : 1;
-    creep.moveTo(dest, { reusePath: 15, range });
+    return;
+  }
+  const desired = opts.range != null ? opts.range : 1;
+  if (creep.pos.getRangeTo(dest) > desired) {
+    creep.moveTo(dest, { reusePath: 15 });
   }
 }
+
 
 function logRoomIntel(room) {
   if (!Memory.rooms) Memory.rooms = {};
@@ -219,18 +232,28 @@ function coordinateRing(centerName, r) {
 
 
 const TaskScout = {
-  isExitBlocked: function (creep, exitDir) {
-    // keep your quick probe (cheap), but we also track roomStatus elsewhere
-    const exit = creep.pos.findClosestByRange(exitDir);
-    if (!exit) return false;
-    const xMin = Math.max(exit.x - 1, 0), xMax = Math.min(exit.x + 1, 49);
-    const yMin = Math.max(exit.y - 1, 0), yMax = Math.min(exit.y + 1, 49);
-    const structures = creep.room.lookForAtArea(LOOK_STRUCTURES, yMin, xMin, yMax, xMax, true);
-    for (const structure of structures) {
-      if (structure.structure.structureType === STRUCTURE_WALL) return true;
-    }
-    return false;
-  },
+    isExitBlocked: function (creep, exitDir) {
+      const edge = creep.room.find(exitDir);          // all edge tiles for that exit
+      if (!edge || !edge.length) return true;         // treat as blocked if none
+    
+      // scan several samples across the edge instead of just one tile
+      const samples = edge.length > 6
+        ? [edge[1], edge[Math.floor(edge.length/3)], edge[Math.floor(2*edge.length/3)], edge[edge.length-2]]
+        : edge;
+    
+      for (const p of samples) {
+        // terrain at exits won’t be 'wall', but check structures/ramparts
+        const structs = p.lookFor(LOOK_STRUCTURES);
+        if (structs.some(s =>
+          s.structureType === STRUCTURE_WALL ||
+          (s.structureType === STRUCTURE_RAMPART && !s.isPublic && (!s.my))
+        )) continue; // this sample spot is blocked, try next
+    
+        // this sample is passable → consider exit not blocked
+        return false;
+      }
+      return true; // all sampled spots were blocked
+    },
 
   run: function (creep) {
     const M = ensureScoutMem(creep);      // { home, ring, queue, lastRoom? }

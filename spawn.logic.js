@@ -200,7 +200,8 @@ const RemoteHarvest_Config = [
   //B(5,14,19), // 38 700 carry cap
   //B(5,12,17), // 34 600 carry cap
   //B(5,10,15), // 30 500 carry cap
-  B(5,25,15),
+  B(5,12,9),
+  //B(5,25,15),
   B(5,8,4),
   B(5,8,13),  // 26 400 carry cap
   B(5,6,11),  // 22 300 carry cap
