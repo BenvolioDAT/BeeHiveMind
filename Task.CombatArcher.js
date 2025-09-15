@@ -2,7 +2,7 @@
 var BeeToolbox = require('BeeToolbox');
 
 const CONFIG = {
-  desiredRange: 3,        // ideal standoff distance
+  desiredRange: 2,        // ideal standoff distance
   kiteIfAtOrBelow: 2,     // if target ≤ this range, back off
   fleeHpPct: 0.40,        // archer flees if HP under 40%
   focusSticky: 15,        // ticks to stick to a chosen target before reconsidering
