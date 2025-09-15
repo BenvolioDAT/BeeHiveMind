@@ -27,6 +27,8 @@ function go(creep, dest, opts={}) {
   }
 }
 
++
+
 function ensureAssignmentsMem() {
   // Memory.remoteAssignments: { [sourceId]: numberAssigned }
   if (!Memory.remoteAssignments) Memory.remoteAssignments = {};
