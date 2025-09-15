@@ -101,7 +101,7 @@ const C = (c,m)=>[...Array(c).fill(CLAIM),...Array(m).fill(MOVE)];
 // Role-specific configurations A(t,a,r,h,w,c,m)
 
 const Claim_Config = [
-  C(2,1),
+  C(2,2),
   C(1,1),
 ]
 
@@ -227,21 +227,16 @@ B(0,0,1),  // 4 50 carry cap
 ];
 
 const CombatMelee_Config = [
-  //TAM(20,1,29),
-  TAM(7,7,14),
-  TAM(6,6,12),
-  TAM(5,5,10),
-  TAM(1,1,1),
+  TAM(6,  6,  12),              // 24p / 1140e
+  TAM(4,  4,  8 ),              // 16p /  760e
+  TAM(1,  1,  2 ),  
 ];
 
 const CombatArcher_Config = [
-  //R(5,8,25),
-  //R(6,6,12),
-  R(2,4,6),
-  R(2,3,5),
-  R(1,2,3),
-  R(1,1,2),
-  R(0,1,1),
+  R(6,  8, 14),                  // 28p / 1960e
+  R(4,  6, 10),                  // 20p / 1440e
+  R(2,  4,  6),                  // 12p /  920e
+  R(1,  2,  3),                  //  6p /  460e
 ];
 
 const CombatMedic_Config = [
@@ -252,11 +247,15 @@ const CombatMedic_Config = [
   //MH(8,8),
   //MH(7,7),
   //MH(6,6),
-  MH(5,5),
-  MH(4,4),
-  MH(3,3),
-  MH(2,2),
-  MH(1,1),
+  MH(12,12),                     // 24p / 3600e
+  MH(10,10),                     // 20p / 3000e
+  MH(8, 8 ),                     // 16p / 2400e
+  MH(6, 6 ),                     // 12p / 1800e
+  MH(5, 5 ),                     // 10p / 1500e
+  MH(4, 4 ),                     //  8p / 1200e
+  MH(3, 3 ),                     //  6p /  900e
+  MH(2, 2 ),
+  MH(1, 1 ),
 ];
 
 const Dismantler_Config = [

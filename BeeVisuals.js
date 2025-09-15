@@ -132,6 +132,7 @@ const BeeVisuals = {
             CombatMelee: 0,
             CombatMedic: 0,
             Dismantler: 0,
+            Claimer: 0,
         };
         
         const maxTotal = Object.values(maxTasks).reduce((sum, count) => sum + count, 0);
