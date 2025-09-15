@@ -1,43 +1,54 @@
 // Task.Claimer.js
-// One task that can: claim a room, reserve a room, or attack (dereserve) a controller.
-// Config via creep.memory:
-//   - claimerMode: 'claim' | 'reserve' | 'attack'  (default: 'reserve')
-//   - targetRoom: 'W0N0' (preferred), or use flags named 'Claim' / 'Reserve' / 'Attack'
-// Optional niceties:
-//   - signText: string to sign controllers you touch
-//   - placeSpawnOnClaim: true|false (only used in 'claim' mode)
+// Handles: claim | reserve | attack controllers.
+// creep.memory:
+//   claimerMode: 'claim' | 'reserve' | 'attack' (default: 'reserve')
+//   targetRoom: 'E12S34' (preferred) or use flags named 'Claim'/'Reserve'/'Attack'
 
 const BeeToolbox = require('BeeToolbox');
 
 const CONFIG = {
   defaultMode: 'reserve',
-  placeSpawnOnClaim: false,   // set false if you don’t want auto-spawn site
+  placeSpawnOnClaim: false,
   signText: '🐝 Sushi Moto Logistics — roads, loads, and righteous nodes.',
-  // Pathing:
   reusePath: 15
 };
 
 function resolveTargetRoom(creep) {
-  if (creep.memory.targetRoom) return creep.memory.targetRoom;
+  // 1) Explicit memory wins, but we still allow a flag to override if present.
+  var mode = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
 
-  // Fallback to flags if player drops them
-  const mode = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
-  const flagName = mode === 'claim' ? 'Claim' : mode === 'attack' ? 'Attack' : 'Reserve';
-  const flag = Game.flags[flagName];
-  if (flag) {
-    creep.memory.targetRoom = flag.pos.roomName;
+  // 2) Find a matching flag by exact name OR prefix:
+  //    - Exact:  "Reserve" / "Claim" / "Attack"
+  //    - Prefix: "Reserve:*", "Reserve-...", etc.
+  var exactName = mode === 'claim' ? 'Claim' : (mode === 'attack' ? 'Attack' : 'Reserve');
+
+  var chosenFlag = Game.flags[exactName];
+  if (!chosenFlag) {
+    // scan for prefix match (cheap scan over flags)
+    for (var fname in Game.flags) {
+      if (fname.indexOf(exactName) === 0) { // starts with
+        chosenFlag = Game.flags[fname];
+        break;
+      }
+    }
+  }
+
+  // 3) If we found a flag, refresh memory.targetRoom from it every tick.
+  if (chosenFlag) {
+    creep.memory.targetRoom = chosenFlag.pos.roomName;
     return creep.memory.targetRoom;
   }
 
-  // Last resort: current room
-  creep.memory.targetRoom = creep.pos.roomName;
-  return creep.memory.targetRoom;
+  // 4) If memory has a targetRoom already, keep using it.
+  if (creep.memory.targetRoom) return creep.memory.targetRoom;
+
+  // 5) No flag and no memory? -> No target. DO NOT fall back to current room.
+  return null;
 }
 
 function moveToRoom(creep, roomName) {
   if (creep.pos.roomName !== roomName) {
-    const dest = new RoomPosition(25, 25, roomName);
-    // Prefer your traveler wrapper if present:
+    var dest = new RoomPosition(25, 25, roomName);
     if (BeeToolbox && BeeToolbox.BeeTravel) {
       BeeToolbox.BeeTravel(creep, dest);
     } else {
@@ -49,7 +60,8 @@ function moveToRoom(creep, roomName) {
 }
 
 function signIfWanted(creep, controller) {
-  if (!controller || controller.owner?.username === creep.owner?.username) return;
+  if (!controller) return;
+  if (controller.my) return;
   if (CONFIG.signText && (!controller.sign || controller.sign.text !== CONFIG.signText)) {
     if (creep.signController(controller, CONFIG.signText) === ERR_NOT_IN_RANGE) {
       BeeToolbox.BeeTravel(creep, controller);
@@ -59,20 +71,17 @@ function signIfWanted(creep, controller) {
 
 function placeSpawnIfWanted(creep, controller) {
   if (!CONFIG.placeSpawnOnClaim || !controller || !controller.my) return;
-  // If no spawns in room, drop a site roughly center-ish
-  const anySpawn = creep.room.find(FIND_MY_SPAWNS)[0];
+
+  var anySpawn = creep.room.find(FIND_MY_SPAWNS)[0];
   if (!anySpawn) {
-    // Try a nice place near the controller (but not on it!)
-    const spot = controller.pos.findClosestByPath(FIND_MY_CONSTRUCTION_SITES) ||
-                 controller.pos; // fallback to near controller
-    // Try a ring around controller until one works
-    const offsets = [
+    var offsets = [
       [3,0],[3,1],[2,2],[1,3],[0,3],[-1,3],[-2,2],[-3,1],[-3,0],
       [-3,-1],[-2,-2],[-1,-3],[0,-3],[1,-3],[2,-2],[3,-1]
     ];
-    for (const [dx,dy] of offsets) {
-      const x = Math.max(1, Math.min(48, controller.pos.x + dx));
-      const y = Math.max(1, Math.min(48, controller.pos.y + dy));
+    for (var i=0;i<offsets.length;i++) {
+      var dx = offsets[i][0], dy = offsets[i][1];
+      var x = Math.max(1, Math.min(48, controller.pos.x + dx));
+      var y = Math.max(1, Math.min(48, controller.pos.y + dy));
       if (creep.room.createConstructionSite(x, y, STRUCTURE_SPAWN) === OK) {
         creep.say('🚧 spawn');
         break;
@@ -83,83 +92,80 @@ function placeSpawnIfWanted(creep, controller) {
 
 function doClaim(creep, controller) {
   if (!controller) { creep.say('❓no ctl'); return; }
-  if (controller.my) { // already ours
+  if (controller.my) {
     signIfWanted(creep, controller);
     placeSpawnIfWanted(creep, controller);
     creep.say('✅ claimed');
     return;
   }
-  // If owned by someone else: you can’t claim directly; you must attackController
   if (controller.owner && !controller.my) {
-    creep.say('⚔ atkCtl');
-    const r = creep.attackController(controller);
+    var r = creep.attackController(controller);
     if (r === ERR_NOT_IN_RANGE) return BeeToolbox.BeeTravel(creep, controller);
+    creep.say('⚔ atkCtl');
     return;
   }
-  // Neutral: try to claim (requires free GCL)
-  const res = creep.claimController(controller);
+  var res = creep.claimController(controller);
   if (res === ERR_NOT_IN_RANGE) {
-    return BeeToolbox.BeeTravel(creep, controller);
+    BeeToolbox.BeeTravel(creep, controller);
   } else if (res === OK) {
     creep.say('👑 mine');
     signIfWanted(creep, controller);
     placeSpawnIfWanted(creep, controller);
+  } else if (res === ERR_GCL_NOT_ENOUGH) {
+    creep.say('➡ reserve');
+    doReserve(creep, controller);
   } else {
-    // e.g. ERR_GCL_NOT_ENOUGH — fall back to reserve so your remote benefits
-    if (res === ERR_GCL_NOT_ENOUGH) {
-      creep.say('➡ reserve');
-      doReserve(creep, controller);
-    } else {
-      creep.say(`❌${res}`);
-    }
+    creep.say('❌' + res);
   }
 }
 
 function doReserve(creep, controller) {
   if (!controller) { creep.say('❓no ctl'); return; }
-  // If enemy or Invader reserved, nip it first
   if (controller.reservation && controller.reservation.username !== creep.owner.username) {
-    const r = creep.attackController(controller); // reduces reservation ticks
+    var r = creep.attackController(controller);
     if (r === ERR_NOT_IN_RANGE) return BeeToolbox.BeeTravel(creep, controller);
     creep.say('🪓 deres');
     return;
   }
-  const r = creep.reserveController(controller);
-  if (r === ERR_NOT_IN_RANGE) {
+  var res = creep.reserveController(controller);
+  if (res === ERR_NOT_IN_RANGE) {
     BeeToolbox.BeeTravel(creep, controller);
-  } else if (r === OK) {
+  } else if (res === OK) {
     creep.say('📌 +res');
   } else {
-    creep.say(`❌${r}`);
+    creep.say('❌' + res);
   }
   signIfWanted(creep, controller);
 }
 
 function doAttack(creep, controller) {
   if (!controller) { creep.say('❓no ctl'); return; }
-  const r = creep.attackController(controller);
+  var r = creep.attackController(controller);
   if (r === ERR_NOT_IN_RANGE) {
     BeeToolbox.BeeTravel(creep, controller);
   } else if (r === OK) {
     creep.say('🪓 atkCtl');
   } else {
-    creep.say(`❌${r}`);
+    creep.say('❌' + r);
   }
 }
 
 const TaskClaimer = {
   run: function(creep) {
-    const targetRoom = resolveTargetRoom(creep);
+    var targetRoom = resolveTargetRoom(creep);
+
+    if (!targetRoom) {
+      creep.say('❌ no target');
+      return; // do nothing until a proper target is provided
+    }
+
+    // Move first. Only act once we are IN the target room.
     if (!moveToRoom(creep, targetRoom)) return;
 
-    const ctl = creep.room.controller;
+    var ctl = creep.room.controller;
     if (!ctl) { creep.say('🚫no ctl'); return; }
 
-    // Optional: avoid smashing your own claimers into strongholds blindly
-    // If you detect an Invader Core/Stronghold, you may want to bail unless escorted.
-    // (You can still contest reservation with attack/reserve; the core itself needs fighters.)
-
-    const mode = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
+    var mode = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
     if (mode === 'claim') return doClaim(creep, ctl);
     if (mode === 'attack') return doAttack(creep, ctl);
     return doReserve(creep, ctl);

@@ -41,6 +41,8 @@ var BODYPART_COST = {
         return Generate_Dismantler_Config_Body(Calculate_Spawn_Resource);
       case 'Trucker':
         return Generate_Courier_Body(Calculate_Spawn_Resource);
+      case 'Claimer':
+        return Generate_Claimer_Body(Calculate_Spawn_Resource);
     }
   }
 
@@ -94,8 +96,15 @@ const MH = (m,h)=>[...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
 const TAM = (t,a,m)=>[...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
 const R = (t,r,m)=>[...Array(t).fill(TOUGH), ...Array(r).fill(RANGED_ATTACK), ...Array(m).fill(MOVE)];
 const A = (t,a,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(a).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+const C = (c,m)=>[...Array(c).fill(CLAIM),...Array(m).fill(MOVE)];
 // Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
 // Role-specific configurations A(t,a,r,h,w,c,m)
+
+const Claim_Config = [
+  C(2,1),
+  C(1,1),
+]
+
 const BaseHarvest_Config = [
  B(6,0,5),
  B(5,1,5),
@@ -270,6 +279,7 @@ const configurations = [
   { task: 'CombatArcher' , body: CombatArcher_Config },
   { task: 'CombatMedic' , body: CombatMedic_Config },
   { task: 'Dismantler' , body: Dismantler_Config },
+  { task: 'Claimer' , body: Claim_Config },
 ];
 
 
@@ -344,6 +354,9 @@ function Generate_CombatMedic_Body(Calculate_Spawn_Resource){
 function Generate_Dismantler_Config_Body(Calculate_Spawn_Resource){
   return Generate_Body_From_Config('Dismantler' , Calculate_Spawn_Resource);
 }
+function Generate_Claimer_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('Claimer', Calculate_Spawn_Resource);
+}
 
 // Function to spawn a creep of a specific role
 function Spawn_Creep_Role(spawn, role_name, generateBodyFunction, Spawn_Resource, memory = {}) {
@@ -412,6 +425,7 @@ function Spawn_Creep_Role(spawn, role_name, generateBodyFunction, Spawn_Resource
     Generate_CombatArcher_Body,
     Generate_CombatMedic_Body,
     Generate_Dismantler_Config_Body,
+    Generate_Claimer_Body,
     getBodyForTask,
     Spawn_Worker_Bee,
   };

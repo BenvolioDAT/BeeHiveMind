@@ -114,7 +114,8 @@ const BeeHiveMind = {
             CombatMelee: 0,
             CombatMedic: 1,
             Dismantler: 0,
-            Trucker: 0,           
+            Trucker: 0,
+            Claimer: 2,           
 
         };
 
