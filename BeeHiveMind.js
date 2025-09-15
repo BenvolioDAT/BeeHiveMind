@@ -110,7 +110,7 @@ const BeeHiveMind = {
             remoteharvest: 8,
             scout: 1,
             queen: 2,
-            CombatArcher: 3,
+            CombatArcher: 2,
             CombatMelee: 1,
             CombatMedic: 3,
             Dismantler: 0,
