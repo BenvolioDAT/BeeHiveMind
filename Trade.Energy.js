@@ -64,6 +64,7 @@ function effectiveCreditsPerEnergy(order, fromRoom, amount) {
 function fitAmountToTerminal(room, order, desired) {
   const term = room.terminal;
   if (!term) return 0;
+  if (term.cooldown > 0) return; // nothing to do this tick
 
   const reserve = CFG.KEEP_ENERGY_TERMINAL;
   let spendable = (term.store[RESOURCE_ENERGY] || 0) - reserve;
@@ -91,7 +92,9 @@ function _roomThrottle(room) {
 }
 function canTradeThisTick(room) {
   const rec = _roomThrottle(room);
+  if (room.terminal && room.terminal.cooldown > 0) return false;
   return (Game.time - rec.last) >= CFG.COOLDOWN_TICKS;
+  
 }
 function markTraded(room) {
   const rec = _roomThrottle(room);

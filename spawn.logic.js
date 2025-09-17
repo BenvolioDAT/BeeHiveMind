@@ -1,430 +1,297 @@
-  // Logging Levels
-  const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
-  //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
-  const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
-var BODYPART_COST = {
-    [MOVE]: 50,
-    [WORK]: 100,
-    [CARRY]: 50,
-    [ATTACK]: 80,
-    [RANGED_ATTACK]: 150,
-    [HEAL]: 250,
-    [TOUGH]: 10,
-    [CLAIM]: 600,
-    // ... add other body parts and their costs
-  };
-  function getBodyForTask (task, Calculate_Spawn_Resource) {
-    switch (task) {
-      case 'builder':
-        return Generate_Builder_Body(Calculate_Spawn_Resource);
-      case 'repair':
-        return Generate_Repair_Body(Calculate_Spawn_Resource);
-      case 'baseharvest':
-        return Generate_BaseHarvest_Body(Calculate_Spawn_Resource);
-      case 'upgrader':
-        return Generate_Upgrader_Body(Calculate_Spawn_Resource);
-      case 'courier':
-        return Generate_Courier_Body(Calculate_Spawn_Resource);
-      case 'remoteharvest':
-        return Generate_RemoteHarvest_Body(Calculate_Spawn_Resource);
-      case 'scout':
-        return Generate_Scout_Body(Calculate_Spawn_Resource);
-      case 'queen':
-        return Generate_Queen_Body(Calculate_Spawn_Resource);
-      case 'CombatArcher':
-        return Generate_CombatArcher_Body(Calculate_Spawn_Resource);
-      case 'CombatMelee':
-        return Generate_CombatMelee_Body(Calculate_Spawn_Resource);
-      case 'CombatMedic':
-        return Generate_CombatMedic_Body(Calculate_Spawn_Resource);
-      case 'Dismantler':
-        return Generate_Dismantler_Config_Body(Calculate_Spawn_Resource);
-      case 'Trucker':
-        return Generate_Courier_Body(Calculate_Spawn_Resource);
-      case 'Claimer':
-        return Generate_Claimer_Body(Calculate_Spawn_Resource);
-    }
-  }
+// spawn.logic.js — cleaner, same behavior
+// --------------------------------------------------------
+// Purpose: Pick creep bodies by role/task from predefined configs,
+//          spawn creeps with consistent names and memory,
+//          and do it in a clean, beginner-friendly way.
+//
+// Notes for beginners:
+// - In Screeps, body parts are strings like 'work', 'carry', 'move'.
+// - BODYPART_COST is a global map: { move:50, work:100, carry:50, ... }.
+// - We choose the *largest* body config that fits available energy.
+// - Logging is gated by LOG_LEVEL; turn to DEBUG to see details.
+// --------------------------------------------------------
 
-function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
-    let body = getBodyForTask(neededTask, Calculate_Spawn_Resource);
-    let name = Generate_Creep_Name(neededTask);
-    let memory = { 
-        role: 'Worker_Bee',           // Current role/behavior
-        task: neededTask,             // Current task
-        bornTask: neededTask,       // The "birth role"
-        birthBody: body.slice(),      // The original body config (optional, but cool)
-    };
-    let result = spawn.spawnCreep(body, name, { memory: memory }); 
-    if (result === OK) {
-        console.log(`🟢 Spawned Worker_Bee: ${name} for task ${neededTask}`);
-        return true;
-    }
-    return false; // If spawning failed, return false
+// ---------- Logging Levels ----------
+const LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
+// Flip to LOG_LEVEL.DEBUG when you want verbose logs:
+const currentLogLevel = LOG_LEVEL.NONE;
+
+// ---------- Shorthand Body Builders ----------
+// B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
+const B  = (w, c, m) => [
+  ...Array(w).fill(WORK),
+  ...Array(c).fill(CARRY),
+  ...Array(m).fill(MOVE),
+];
+// CM(c,m) = [CARRY x c, MOVE x m]
+const CM = (c, m) => [...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+// WM(w,m) = [WORK x w, MOVE x m]
+const WM = (w, m) => [...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
+// MH(m,h) = [MOVE x m, HEAL x h]
+const MH = (m, h) => [...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
+// TAM(t,a,m) = [TOUGH x t, ATTACK x a, MOVE x m]
+const TAM = (t, a, m) => [...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
+// R(t,r,m) = [TOUGH x t, RANGED_ATTACK x r, MOVE x m]
+const R  = (t, r, m) => [...Array(t).fill(TOUGH), ...Array(r).fill(RANGED_ATTACK), ...Array(m).fill(MOVE)];
+// A(...) = mixed arms builder for quick experiments
+const A  = (t,a,r,h,w,c,m)=>[
+  ...Array(t).fill(TOUGH),
+  ...Array(a).fill(ATTACK),
+  ...Array(r).fill(RANGED_ATTACK),
+  ...Array(h).fill(HEAL),
+  ...Array(w).fill(WORK),
+  ...Array(c).fill(CARRY),
+  ...Array(m).fill(MOVE),
+];
+// C(c,m) = [CLAIM x c, MOVE x m]
+const C  = (c, m) => [...Array(c).fill(CLAIM), ...Array(m).fill(MOVE)];
+
+// ---------- Role Configs (largest first is preferred) ----------
+const CONFIGS = {
+  // Workers
+  baseharvest: [
+    B(6,0,5), B(5,1,5), B(4,1,4), B(3,1,3), B(2,1,2), B(1,1,1),
+  ],
+  courier: [
+    CM(30,15), CM(23,23), CM(22,22), CM(21,21), CM(20,20), CM(19,19), CM(18,18),
+    CM(17,17), CM(16,16), CM(15,15), CM(14,14), CM(13,13), CM(12,12), CM(11,11),
+    CM(10,10), CM(9,9), CM(8,8), CM(7,7), CM(6,6), CM(5,5), CM(4,4), CM(3,3),
+    CM(2,2), CM(1,1),
+  ],
+  builder: [
+    B(8,8,8), B(4,10,7), B(8,10,9), B(8,10,18), B(6,8,14), B(6,3,9),
+    B(5,2,7), B(4,1,5), B(2,1,3),
+  ],
+  upgrader: [
+    B(4,1,5), B(2,1,3),
+  ],
+  repair: [
+    B(5,2,7), B(4,1,5), B(2,1,3),
+  ],
+  Queen: [ // keeping capitalization to match your original key
+    B(0,22,22), B(0,21,21), B(0,20,20), B(0,19,19), B(0,18,18), B(0,17,17),
+    B(0,16,16), B(0,15,15), B(0,14,14), B(0,13,13), B(0,12,12), B(0,11,11),
+    B(0,10,10), B(0,9,9), B(0,8,8), B(0,7,7), B(0,6,6), B(0,5,5), B(0,4,4),
+    B(0,3,3), B(1,2,3), B(1,1,2), B(1,1,1),
+  ],
+  remoteharvest: [
+    B(5,12,9), B(5,8,4), B(5,8,13), B(5,6,11), B(5,4,9),
+    B(5,2,7), B(4,2,6), B(3,2,5), B(2,2,4), B(1,1,2),
+  ],
+  Scout: [
+    B(0,0,1),
+  ],
+
+  // Combat
+  CombatMelee: [
+    TAM(6,6,12), TAM(4,4,8), TAM(1,1,2),
+  ],
+  CombatArcher: [
+    R(6,8,14), R(4,6,10), R(2,4,6), R(1,2,3),
+  ],
+  CombatMedic: [
+    MH(12,12), MH(10,10), MH(8,8), MH(6,6), MH(5,5), MH(4,4), MH(3,3), MH(2,2), MH(1,1),
+  ],
+  Dismantler: [
+    WM(25,25), WM(20,20), WM(15,15),
+  ],
+
+  // Special
+  Claimer: [
+    C(3,3), C(2,2), C(1,1),
+  ],
+};
+
+// ---------- Task Aliases (normalize user-facing names) ----------
+// This lets getBodyForTask('Trucker') resolve to courier configs, etc.
+const TASK_ALIAS = {
+  trucker: 'courier',
+  queen: 'Queen',
+  scout: 'Scout',
+  claimer: 'Claimer',
+  // pass-throughs (lowercased) will resolve automatically if present
+};
+
+// ---------- Energy Accounting ----------
+// Returns *total available* energy across all spawns + extensions.
+function Calculate_Spawn_Resource() {
+  let spawnEnergy = 0;
+  for (const name in Game.spawns) {
+    spawnEnergy += Game.spawns[name].store[RESOURCE_ENERGY] || 0;
+  }
+  const extensionEnergy = _.sum(Game.structures, s =>
+    s.structureType === STRUCTURE_EXTENSION ? (s.store[RESOURCE_ENERGY] || 0) : 0
+  );
+  return spawnEnergy + extensionEnergy;
 }
 
-  // Function to generate a creep name based on the set number value
-  function Generate_Creep_Name(role) {
-    for (var i = 1; i <= 70; i++) {
-      var newName = role + '_' + i;
-      if (!_.some(Game.creeps, (creep) => creep.name === newName)) {
-        return newName;
-      }
-    }
-    return null; // No available name found
-  }
-  function Calculate_Spawn_Resource() {
-    let totalSpawnEnergy = 0;
-    // Loop through all spawns and calculate their energy
-    for (let spawnName in Game.spawns) {
-        totalSpawnEnergy += Game.spawns[spawnName].store[RESOURCE_ENERGY];
-    }    
-    // Use _.sum to calculate the total energy from all extensions
-    const extensionEnergy = _.sum(Game.structures, structure =>
-        structure.structureType === STRUCTURE_EXTENSION ? structure.store[RESOURCE_ENERGY] : 0
-    );  
-    return totalSpawnEnergy + extensionEnergy;
-}
 if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
+  console.log(`[spawn] Available energy: ${Calculate_Spawn_Resource()}`);
 }
-// ---------- Shorthand Body Config --------------------
-const B = (w,c,m)=>[...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
-const CM = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
-const WM = (w,m)=>[...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
-const MH = (m,h)=>[...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
-const TAM = (t,a,m)=>[...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
-const R = (t,r,m)=>[...Array(t).fill(TOUGH), ...Array(r).fill(RANGED_ATTACK), ...Array(m).fill(MOVE)];
-const A = (t,a,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(a).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
-const C = (c,m)=>[...Array(c).fill(CLAIM),...Array(m).fill(MOVE)];
-// Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
-// Role-specific configurations A(t,a,r,h,w,c,m)
 
-const Claim_Config = [
-  C(2,2),
-  C(1,1),
-]
-
-const BaseHarvest_Config = [
- B(6,0,5),
- B(5,1,5),
- B(4,1,4),
- B(3,1,3),
- B(2,1,2),
- B(1,1,1), 
-];
-const Courier_Config = [
-  CM(30,15),
-  CM(23,23),
-  CM(22,22), //1100
-  CM(21,21), //1050
-  CM(20,20), //1000
-  CM(19,19), //950
-  CM(18,18), //900
-  CM(17,17), //850
-  CM(16,16), //800
-  CM(15,15), //750
-  CM(14,14), //700
-  CM(13,13), //650
-  CM(12,12), //600
-  CM(11,11), //550
-  CM(10,10), //500
-  CM(9,9),   //450
-  CM(8,8),   //400
-  CM(7,7),   //350
-  CM(6,6),   //300
-  CM(5,5),   //250
-  CM(4,4),   //200
-  CM(3,3),   //150
-  CM(2,2),   //100
-  CM(1,1),   //50
-];
-
-const Builder_Config = [
-  //B(17,8,25), // 50 parts
-  //B(16,7,23), // 46
-  //B(14,7,21), // 42
-  //B(13,6,19), // 38
-  //B(12,5,17), // 34
-  //B(10,5,15), // 30
-  B(8,8,8), 
-  B(4,10,7),
-  B(8,10,9),
-  B(8,10,18),  
-  B(6,8,14),
-  B(6,3,9),   // 18
-  B(5,2,7),   // 14
-  B(4,1,5),   // 10
-  B(2,1,3),   // 6
-];
-
-const Upgrader_Config = [
-  //B(9,4,13),// 26
-  //B(8,3,11),// 22
-  //B(6,3,9), // 18
-  //B(5,2,7), // 14
-  B(4,1,5), // 10
-  B(2,1,3), // 6
-];
-
-const Repair_Config = [
-  B(5,2,7),// 14
-  B(4,1,5),// 10
-  B(2,1,3),// 6
-];
-
-const Queen_Config = [
-  //B(0,25,25), //1250
-  //B(0,24,24),//1200
-  //B(0,23,23),//1150
-  B(0,22,22),//1100
-  B(0,21,21),//1050
-  B(0,20,20),//1000
-  B(0,19,19),//950
-  B(0,18,18),//900
-  B(0,17,17),//850
-  B(0,16,16),//800
-  B(0,15,15),//750
-  B(0,14,14),//700
-  B(0,13,13),//650
-  B(0,12,12),//600
-  B(0,11,11),//550
-  B(0,10,10),//500
-  B(0,9,9),//450
-  B(0,8,8),//400
-  B(0,7,7),//350
-  B(0,6,6),//300
-  B(0,5,5),//250
-  B(0,4,4),//200
-  B(0,3,3),//150
-  B(1,2,3),//100
-  B(1,1,2),//50
-  B(1,1,1),//50
-];
-
-const RemoteHarvest_Config = [
-  //B(5,20,25), // 50 parts: 5W 20C 25M  (1,000 carry cap)
-  //B(5,18,23), // 46 900 carry cap
-  //B(5,16,21), // 42 800 carry cap
-  //B(5,14,19), // 38 700 carry cap
-  //B(5,12,17), // 34 600 carry cap
-  //B(5,10,15), // 30 500 carry cap
-  B(5,12,9),
-  //B(5,25,15),
-  B(5,8,4),
-  B(5,8,13),  // 26 400 carry cap
-  B(5,6,11),  // 22 300 carry cap
-  B(5,4,9),  // 18 200 carry cap
-  B(5,2,7),  // 14 100 carry cap
-  B(4,2,6),  // 12 100 carry cap
-  B(3,2,5),  // 10 100 carry cap
-  B(2,2,4),  // 8 100 carry cap
-  B(1,1,2),  // 4 50 carry cap
-];
-
-const Scout_Config = [
-B(0,0,1),  // 4 50 carry cap
-];
-
-const CombatMelee_Config = [
-  TAM(6,  6,  12),              // 24p / 1140e
-  TAM(4,  4,  8 ),              // 16p /  760e
-  TAM(1,  1,  2 ),  
-];
-
-const CombatArcher_Config = [
-  R(6,  8, 14),                  // 28p / 1960e
-  R(4,  6, 10),                  // 20p / 1440e
-  R(2,  4,  6),                  // 12p /  920e
-  R(1,  2,  3),                  //  6p /  460e
-];
-
-const CombatMedic_Config = [
-  //MH(25,12),
-  //MH(11,11),
-  //MH(10,10),
-  //MH(9,9),
-  //MH(8,8),
-  //MH(7,7),
-  //MH(6,6),
-  MH(12,12),                     // 24p / 3600e
-  MH(10,10),                     // 20p / 3000e
-  MH(8, 8 ),                     // 16p / 2400e
-  MH(6, 6 ),                     // 12p / 1800e
-  MH(5, 5 ),                     // 10p / 1500e
-  MH(4, 4 ),                     //  8p / 1200e
-  MH(3, 3 ),                     //  6p /  900e
-  MH(2, 2 ),
-  MH(1, 1 ),
-];
-
-const Dismantler_Config = [
-  WM(25,25),
-  WM(20,20),
-  WM(15,15),
-];
-
-// Array containing all task configurations
-const configurations = [
-  { task: 'baseharvest', body: BaseHarvest_Config },
-  { task: 'courier', body: Courier_Config },
-  { task: 'builder', body: Builder_Config },
-  { task: 'upgrader', body: Upgrader_Config },
-  { task: 'remoteharvest', body: RemoteHarvest_Config },
-  { task: 'Queen', body: Queen_Config },
-  { task: 'repair', body: Repair_Config },
-  { task: 'Scout', body: Scout_Config },
-  { task: 'CombatMelee' , body: CombatMelee_Config },
-  { task: 'CombatArcher' , body: CombatArcher_Config },
-  { task: 'CombatMedic' , body: CombatMedic_Config },
-  { task: 'Dismantler' , body: Dismantler_Config },
-  { task: 'Claimer' , body: Claim_Config },
-];
-
-
-// 🔍 Selects the largest body config that fits within current available energy
-function Generate_Body_From_Config(task,Calculate_Spawn_Resource) {
-  const config = configurations.find(entry => entry.task === task);
-  if (config) {
-    let selectedConfig;
-    let bodyCost; // Declare bodyCost here
-    for (const bodyConfig of config.body) {
-      bodyCost = bodyConfig.reduce((totalCost, part) => {
-        const partCost = BODYPART_COST[part.toLowerCase()];  // Convert to lowercase
-        return totalCost + (partCost ? partCost : 0);
-      }, 0);
-      if (bodyCost <=Calculate_Spawn_Resource) {
-        selectedConfig = bodyConfig;
-        break;
-      }
-    }
-    if (selectedConfig) {
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`Available energy for ${task}: ${Calculate_Spawn_Resource}`);
-      }
-      return selectedConfig;
-    } else {
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`Insufficient energy to spawn ${task}.`);
-      }
-    }
-  } else {
+// ---------- Body Selection ----------
+// Returns the largest body from CONFIGS[taskKey] that fits energyAvailable.
+function Generate_Body_From_Config(taskKey, energyAvailable) {
+  const list = CONFIGS[taskKey];
+  if (!list) {
     if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`Configuration not found for task: ${task}`);
+      console.log(`[spawn] No config for task: ${taskKey}`);
     }
+    return [];
+  }
+  for (const body of list) {
+    const cost = _.sum(body, part => BODYPART_COST[part]); // Screeps global
+    if (cost <= energyAvailable) {
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+        console.log(`[spawn] Picked ${taskKey} body: [${body}] @ cost ${cost} (avail ${energyAvailable})`);
+      }
+      return body;
+    }
+  }
+  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+    console.log(`[spawn] Insufficient energy for ${taskKey} (need at least ${_.sum(_.last(list), p => BODYPART_COST[p])})`);
   }
   return [];
 }
-// Function to generate creep bodys form configs
-// 🔧 Role-specific body generators, used by main loop
-function Generate_Courier_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('courier',Calculate_Spawn_Resource);
-}
-function Generate_BaseHarvest_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('baseharvest',Calculate_Spawn_Resource);
-}
-function Generate_Builder_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('builder',Calculate_Spawn_Resource);
-}
-function Generate_Repair_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('repair',Calculate_Spawn_Resource);
-} 
-function Generate_Queen_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Queen',Calculate_Spawn_Resource);
-}
-function Generate_RemoteHarvest_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('remoteharvest',Calculate_Spawn_Resource);
-}
-function Generate_Upgrader_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('upgrader',Calculate_Spawn_Resource);
-}
-function Generate_Scout_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Scout', Calculate_Spawn_Resource);
-}
-function Generate_CombatMelee_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('CombatMelee', Calculate_Spawn_Resource);
-}
-function Generate_CombatArcher_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('CombatArcher' , Calculate_Spawn_Resource);
-}
-function Generate_CombatMedic_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('CombatMedic' , Calculate_Spawn_Resource);
-}
-function Generate_Dismantler_Config_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('Dismantler' , Calculate_Spawn_Resource);
-}
-function Generate_Claimer_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Claimer', Calculate_Spawn_Resource);
+
+// Helper to normalize a requested task into a CONFIGS key.
+function normalizeTask(task) {
+  if (!task) return task;
+  const key = TASK_ALIAS[task] || TASK_ALIAS[task.toLowerCase()] || task;
+  return key;
 }
 
-// Function to spawn a creep of a specific role
-function Spawn_Creep_Role(spawn, role_name, generateBodyFunction, Spawn_Resource, memory = {}) {
-  const bodyParts = generateBodyFunction(Spawn_Resource);
-  const newName = Generate_Creep_Name(role_name);
-  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`Trying to spawn ${role_name}: ${newName}, Body: [${bodyParts}]`);
+// ---------- Role-specific wrappers (kept for API compatibility) ----------
+const Generate_Courier_Body          = (e) => Generate_Body_From_Config('courier', e);
+const Generate_BaseHarvest_Body      = (e) => Generate_Body_From_Config('baseharvest', e);
+const Generate_Builder_Body          = (e) => Generate_Body_From_Config('builder', e);
+const Generate_Repair_Body           = (e) => Generate_Body_From_Config('repair', e);
+const Generate_Queen_Body            = (e) => Generate_Body_From_Config('Queen', e);
+const Generate_RemoteHarvest_Body    = (e) => Generate_Body_From_Config('remoteharvest', e);
+const Generate_Upgrader_Body         = (e) => Generate_Body_From_Config('upgrader', e);
+const Generate_Scout_Body            = (e) => Generate_Body_From_Config('Scout', e);
+const Generate_CombatMelee_Body      = (e) => Generate_Body_From_Config('CombatMelee', e);
+const Generate_CombatArcher_Body     = (e) => Generate_Body_From_Config('CombatArcher', e);
+const Generate_CombatMedic_Body      = (e) => Generate_Body_From_Config('CombatMedic', e);
+const Generate_Dismantler_Config_Body= (e) => Generate_Body_From_Config('Dismantler', e);
+const Generate_Claimer_Body          = (e) => Generate_Body_From_Config('Claimer', e);
+
+// ---------- Task → Body helper (kept for API compatibility) ----------
+function getBodyForTask(task, energyAvailable) {
+  const key = normalizeTask(task);
+  switch (key) {
+    case 'builder':        return Generate_Builder_Body(energyAvailable);
+    case 'repair':         return Generate_Repair_Body(energyAvailable);
+    case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable);
+    case 'upgrader':       return Generate_Upgrader_Body(energyAvailable);
+    case 'courier':        return Generate_Courier_Body(energyAvailable);
+    case 'remoteharvest':  return Generate_RemoteHarvest_Body(energyAvailable);
+    case 'Scout':          return Generate_Scout_Body(energyAvailable);
+    case 'Queen':          return Generate_Queen_Body(energyAvailable);
+    case 'CombatArcher':   return Generate_CombatArcher_Body(energyAvailable);
+    case 'CombatMelee':    return Generate_CombatMelee_Body(energyAvailable);
+    case 'CombatMedic':    return Generate_CombatMedic_Body(energyAvailable);
+    case 'Dismantler':     return Generate_Dismantler_Config_Body(energyAvailable);
+    case 'Claimer':        return Generate_Claimer_Body(energyAvailable);
+    // Aliases
+    case 'trucker':        return Generate_Courier_Body(energyAvailable);
+    default:
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+        console.log(`[spawn] Unknown task: ${task}`);
+      }
+      return [];
   }
-  const bodyCost = _.sum(bodyParts, (part) => BODYPART_COST[part]);
+}
+
+// ---------- Naming ----------
+function Generate_Creep_Name(role, max = 70) {
+  for (let i = 1; i <= max; i++) {
+    const name = `${role}_${i}`;
+    if (!Game.creeps[name]) return name;
+  }
+  return null; // ran out of slots
+}
+
+// ---------- Spawn Helpers ----------
+// Spawns a role using a provided body-gen function; merges memory.role automatically.
+function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory = {}) {
+  const body = generateBodyFn(availableEnergy);
+  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
+
   if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`${role_name} - Spawn Energy: ${Spawn_Resource}`);
-  }  
-  if (Spawn_Resource >= bodyCost) {
-    if (newName) {
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`Trying to spawn ${role_name}: ${newName}, Body: [${bodyParts.join(', ')}], Cost: ${bodyCost}`);
-      }
+    console.log(`[spawn] Attempt ${roleName} body=[${body}] cost=${bodyCost} avail=${availableEnergy}`);
+  }
 
-      // 👇 Merge the role into the provided memory object
-      memory.role = role_name;
-
-      const result = spawn.spawnCreep(bodyParts.map(String), newName, { memory: memory });
-
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`Spawn result for ${role_name}: ${result}`);
-      }
-
-      if (result === OK) {
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-          console.log(`🟢 Spawned ${role_name}: ${newName}`);
-        }
-        return true;
-      } else if (result === ERR_NOT_ENOUGH_ENERGY) {
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-          console.log(`🔴 F spawn ${role_name}: ${newName}. Insufficient energy. Result: ${result}`);
-        }
-      } else {
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-          console.log(`🔴 F spawn ${role_name}: ${newName}. Unknown error. Result: ${result}`);
-        }
-      }
-    }
-  } else {
+  if (!body.length || availableEnergy < bodyCost) {
     if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`Insufficient energy to spawn ${role_name}. Required: ${bodyCost}`);
+      console.log(`[spawn] Not enough energy for ${roleName}. Need ${bodyCost}, have ${availableEnergy}.`);
     }
+    return false;
+  }
+
+  const name = Generate_Creep_Name(roleName);
+  if (!name) return false;
+
+  memory.role = roleName; // ensure role is set
+  const result = spawn.spawnCreep(body, name, { memory });
+
+  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+    console.log(`[spawn] Result ${roleName}/${name}: ${result}`);
+  }
+  if (result === OK) {
+    if (currentLogLevel >= LOG_LEVEL.BASIC) {
+      console.log(`🟢 Spawned ${roleName}: ${name}`);
+    }
+    return true;
   }
   return false;
 }
 
-  module.exports = {
-    Generate_Creep_Name,
-    Calculate_Spawn_Resource,
-    configurations,
-    Generate_Body_From_Config,
-    Spawn_Creep_Role,
-    Generate_Courier_Body,
-    Generate_BaseHarvest_Body,
-    Generate_Upgrader_Body,
-    Generate_Builder_Body,
-    Generate_Repair_Body,
-    Generate_Queen_Body,
-    Generate_RemoteHarvest_Body,
-    Generate_Scout_Body,
-    Generate_CombatMelee_Body,
-    Generate_CombatArcher_Body,
-    Generate_CombatMedic_Body,
-    Generate_Dismantler_Config_Body,
-    Generate_Claimer_Body,
-    getBodyForTask,
-    Spawn_Worker_Bee,
+// Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
+function Spawn_Worker_Bee(spawn, neededTask, availableEnergy) {
+  const body = getBodyForTask(neededTask, availableEnergy);
+  const name = Generate_Creep_Name(neededTask || 'Worker');
+  const memory = {
+    role: 'Worker_Bee',
+    task: neededTask,
+    bornTask: neededTask,
+    birthBody: body.slice(),
   };
+  const res = spawn.spawnCreep(body, name, { memory });
+  if (res === OK) {
+    if (currentLogLevel >= LOG_LEVEL.BASIC) {
+      console.log(`🟢 Spawned Creep: ${name} for task ${neededTask}`);
+    }
+    return true;
+  }
+  return false;
+}
+
+// ---------- Exports ----------
+module.exports = {
+  // utilities
+  Generate_Creep_Name,
+  Calculate_Spawn_Resource,
+  configurations: Object.entries(CONFIGS).map(([task, body]) => ({ task, body })), // preserve your original shape
+  Generate_Body_From_Config,
+  Spawn_Creep_Role,
+
+  // role generators (compat)
+  Generate_Courier_Body,
+  Generate_BaseHarvest_Body,
+  Generate_Upgrader_Body,
+  Generate_Builder_Body,
+  Generate_Repair_Body,
+  Generate_Queen_Body,
+  Generate_RemoteHarvest_Body,
+  Generate_Scout_Body,
+  Generate_CombatMelee_Body,
+  Generate_CombatArcher_Body,
+  Generate_CombatMedic_Body,
+  Generate_Dismantler_Config_Body,
+  Generate_Claimer_Body,
+
+  // existing helpers
+  getBodyForTask,
+  Spawn_Worker_Bee,
+};

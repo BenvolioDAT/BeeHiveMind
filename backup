@@ -1,304 +1,431 @@
-// Planner.Road.clean.js
-// Readable road planner for Screeps (same behavior, simpler flow)
-// Plans and drip-places ROAD construction sites from your home room to each
-// visible remote source your remote-harvest creeps are working on.
+  // Logging Levels
+  const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
+  //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
+  const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
+var BODYPART_COST = {
+    [MOVE]: 50,
+    [WORK]: 100,
+    [CARRY]: 50,
+    [ATTACK]: 80,
+    [RANGED_ATTACK]: 150,
+    [HEAL]: 250,
+    [TOUGH]: 10,
+    [CLAIM]: 600,
+    // ... add other body parts and their costs
+  };
+  function getBodyForTask (task, Calculate_Spawn_Resource) {
+    switch (task) {
+      case 'builder':
+        return Generate_Builder_Body(Calculate_Spawn_Resource);
+      case 'repair':
+        return Generate_Repair_Body(Calculate_Spawn_Resource);
+      case 'baseharvest':
+        return Generate_BaseHarvest_Body(Calculate_Spawn_Resource);
+      case 'upgrader':
+        return Generate_Upgrader_Body(Calculate_Spawn_Resource);
+      case 'courier':
+        return Generate_Courier_Body(Calculate_Spawn_Resource);
+      case 'remoteharvest':
+        return Generate_RemoteHarvest_Body(Calculate_Spawn_Resource);
+      case 'scout':
+        return Generate_Scout_Body(Calculate_Spawn_Resource);
+      case 'queen':
+        return Generate_Queen_Body(Calculate_Spawn_Resource);
+      case 'CombatArcher':
+        return Generate_CombatArcher_Body(Calculate_Spawn_Resource);
+      case 'CombatMelee':
+        return Generate_CombatMelee_Body(Calculate_Spawn_Resource);
+      case 'CombatMedic':
+        return Generate_CombatMedic_Body(Calculate_Spawn_Resource);
+      case 'Dismantler':
+        return Generate_Dismantler_Config_Body(Calculate_Spawn_Resource);
+      case 'Trucker':
+        return Generate_Courier_Body(Calculate_Spawn_Resource);
+      case 'Claimer':
+        return Generate_Claimer_Body(Calculate_Spawn_Resource);
+    }
+  }
 
-/**
- * Tweakables (feel free to adjust):
- */
-const PLAIN_COST = 2;        // PathFinder base cost on plains
-const SWAMP_COST = 10;       // PathFinder base cost on swamps
-const ROAD_COST  = 1;        // Cost to step on an existing road (prefer roads)
-const PLACE_BUDGET_PER_TICK = 10;   // How many road sites to place per tick
-const CSITE_SAFETY_LIMIT = 95;     // Skip placing if global sites > this
-const AUDIT_INTERVAL = 100;        // Audit every N ticks (plus a small random chance)
+function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
+    let body = getBodyForTask(neededTask, Calculate_Spawn_Resource);
+    let name = Generate_Creep_Name(neededTask);
+    let memory = { 
+        role: 'Worker_Bee',           // Current role/behavior
+        task: neededTask,             // Current task
+        bornTask: neededTask,       // The "birth role"
+        birthBody: body.slice(),      // The original body config (optional, but cool)
+    };
+    let result = spawn.spawnCreep(body, name, { memory: memory }); 
+    if (result === OK) {
+        console.log(`🟢 Spawned Creep: ${name} for task ${neededTask}`);
+        return true;
+    }
+    return false; // If spawning failed, return false
+}
 
-/**
- * Small helper: does this position already have a road or a road construction site?
- * @param {RoomPosition} pos
- * @returns {boolean}
- */
-function hasRoadOrRoadSite(pos) {
-  const structures = pos.lookFor(LOOK_STRUCTURES);
-  for (const s of structures) if (s.structureType === STRUCTURE_ROAD) return true;
+  // Function to generate a creep name based on the set number value
+  function Generate_Creep_Name(role) {
+    for (var i = 1; i <= 70; i++) {
+      var newName = role + '_' + i;
+      if (!_.some(Game.creeps, (creep) => creep.name === newName)) {
+        return newName;
+      }
+    }
+    return null; // No available name found
+  }
+  function Calculate_Spawn_Resource() {
+    let totalSpawnEnergy = 0;
+    // Loop through all spawns and calculate their energy
+    for (let spawnName in Game.spawns) {
+        totalSpawnEnergy += Game.spawns[spawnName].store[RESOURCE_ENERGY];
+    }    
+    // Use _.sum to calculate the total energy from all extensions
+    const extensionEnergy = _.sum(Game.structures, structure =>
+        structure.structureType === STRUCTURE_EXTENSION ? structure.store[RESOURCE_ENERGY] : 0
+    );  
+    return totalSpawnEnergy + extensionEnergy;
+}
+if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
+}
+// ---------- Shorthand Body Config --------------------
+const B = (w,c,m)=>[...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];// Save on typing do "B(1,1,1)," = (WORK,CARRY,MOVE)
+const CM = (c,m)=>[...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+const WM = (w,m)=>[...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
+const MH = (m,h)=>[...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
+const TAM = (t,a,m)=>[...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
+const R = (t,r,m)=>[...Array(t).fill(TOUGH), ...Array(r).fill(RANGED_ATTACK), ...Array(m).fill(MOVE)];
+const A = (t,a,r,h,w,c,m)=>[...Array(t).fill(TOUGH),...Array(a).fill(ATTACK),...Array(r).fill(RANGED_ATTACK),...Array(h).fill(HEAL),...Array(w).fill(WORK), ...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+const C = (c,m)=>[...Array(c).fill(CLAIM),...Array(m).fill(MOVE)];
+// Each task has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
+// Role-specific configurations A(t,a,r,h,w,c,m)
 
-  const sites = pos.lookFor(LOOK_CONSTRUCTION_SITES);
-  for (const cs of sites) if (cs.structureType === STRUCTURE_ROAD) return true;
+const Claim_Config = [
+  C(3,3),
+  C(2,2),
+  C(1,1),
+]
 
+const BaseHarvest_Config = [
+ B(6,0,5),
+ B(5,1,5),
+ B(4,1,4),
+ B(3,1,3),
+ B(2,1,2),
+ B(1,1,1), 
+];
+const Courier_Config = [
+  CM(30,15),
+  CM(23,23),
+  CM(22,22), //1100
+  CM(21,21), //1050
+  CM(20,20), //1000
+  CM(19,19), //950
+  CM(18,18), //900
+  CM(17,17), //850
+  CM(16,16), //800
+  CM(15,15), //750
+  CM(14,14), //700
+  CM(13,13), //650
+  CM(12,12), //600
+  CM(11,11), //550
+  CM(10,10), //500
+  CM(9,9),   //450
+  CM(8,8),   //400
+  CM(7,7),   //350
+  CM(6,6),   //300
+  CM(5,5),   //250
+  CM(4,4),   //200
+  CM(3,3),   //150
+  CM(2,2),   //100
+  CM(1,1),   //50
+];
+
+const Builder_Config = [
+  //B(17,8,25), // 50 parts
+  //B(16,7,23), // 46
+  //B(14,7,21), // 42
+  //B(13,6,19), // 38
+  //B(12,5,17), // 34
+  //B(10,5,15), // 30
+  B(8,8,8), 
+  B(4,10,7),
+  B(8,10,9),
+  B(8,10,18),  
+  B(6,8,14),
+  B(6,3,9),   // 18
+  B(5,2,7),   // 14
+  B(4,1,5),   // 10
+  B(2,1,3),   // 6
+];
+
+const Upgrader_Config = [
+  //B(9,4,13),// 26
+  //B(8,3,11),// 22
+  //B(6,3,9), // 18
+  //B(5,2,7), // 14
+  B(4,1,5), // 10
+  B(2,1,3), // 6
+];
+
+const Repair_Config = [
+  B(5,2,7),// 14
+  B(4,1,5),// 10
+  B(2,1,3),// 6
+];
+
+const Queen_Config = [
+  //B(0,25,25), //1250
+  //B(0,24,24),//1200
+  //B(0,23,23),//1150
+  B(0,22,22),//1100
+  B(0,21,21),//1050
+  B(0,20,20),//1000
+  B(0,19,19),//950
+  B(0,18,18),//900
+  B(0,17,17),//850
+  B(0,16,16),//800
+  B(0,15,15),//750
+  B(0,14,14),//700
+  B(0,13,13),//650
+  B(0,12,12),//600
+  B(0,11,11),//550
+  B(0,10,10),//500
+  B(0,9,9),//450
+  B(0,8,8),//400
+  B(0,7,7),//350
+  B(0,6,6),//300
+  B(0,5,5),//250
+  B(0,4,4),//200
+  B(0,3,3),//150
+  B(1,2,3),//100
+  B(1,1,2),//50
+  B(1,1,1),//50
+];
+
+const RemoteHarvest_Config = [
+  //B(5,20,25), // 50 parts: 5W 20C 25M  (1,000 carry cap)
+  //B(5,18,23), // 46 900 carry cap
+  //B(5,16,21), // 42 800 carry cap
+  //B(5,14,19), // 38 700 carry cap
+  //B(5,12,17), // 34 600 carry cap
+  //B(5,10,15), // 30 500 carry cap
+  B(5,12,9),
+  //B(5,25,15),
+  B(5,8,4),
+  B(5,8,13),  // 26 400 carry cap
+  B(5,6,11),  // 22 300 carry cap
+  B(5,4,9),  // 18 200 carry cap
+  B(5,2,7),  // 14 100 carry cap
+  B(4,2,6),  // 12 100 carry cap
+  B(3,2,5),  // 10 100 carry cap
+  B(2,2,4),  // 8 100 carry cap
+  B(1,1,2),  // 4 50 carry cap
+];
+
+const Scout_Config = [
+B(0,0,1),  // 4 50 carry cap
+];
+
+const CombatMelee_Config = [
+  TAM(6,  6,  12),              // 24p / 1140e
+  TAM(4,  4,  8 ),              // 16p /  760e
+  TAM(1,  1,  2 ),  
+];
+
+const CombatArcher_Config = [
+  R(6,  8, 14),                  // 28p / 1960e
+  R(4,  6, 10),                  // 20p / 1440e
+  R(2,  4,  6),                  // 12p /  920e
+  R(1,  2,  3),                  //  6p /  460e
+];
+
+const CombatMedic_Config = [
+  //MH(25,12),
+  //MH(11,11),
+  //MH(10,10),
+  //MH(9,9),
+  //MH(8,8),
+  //MH(7,7),
+  //MH(6,6),
+  MH(12,12),                     // 24p / 3600e
+  MH(10,10),                     // 20p / 3000e
+  MH(8, 8 ),                     // 16p / 2400e
+  MH(6, 6 ),                     // 12p / 1800e
+  MH(5, 5 ),                     // 10p / 1500e
+  MH(4, 4 ),                     //  8p / 1200e
+  MH(3, 3 ),                     //  6p /  900e
+  MH(2, 2 ),
+  MH(1, 1 ),
+];
+
+const Dismantler_Config = [
+  WM(25,25),
+  WM(20,20),
+  WM(15,15),
+];
+
+// Array containing all task configurations
+const configurations = [
+  { task: 'baseharvest', body: BaseHarvest_Config },
+  { task: 'courier', body: Courier_Config },
+  { task: 'builder', body: Builder_Config },
+  { task: 'upgrader', body: Upgrader_Config },
+  { task: 'remoteharvest', body: RemoteHarvest_Config },
+  { task: 'Queen', body: Queen_Config },
+  { task: 'repair', body: Repair_Config },
+  { task: 'Scout', body: Scout_Config },
+  { task: 'CombatMelee' , body: CombatMelee_Config },
+  { task: 'CombatArcher' , body: CombatArcher_Config },
+  { task: 'CombatMedic' , body: CombatMedic_Config },
+  { task: 'Dismantler' , body: Dismantler_Config },
+  { task: 'Claimer' , body: Claim_Config },
+];
+
+
+// 🔍 Selects the largest body config that fits within current available energy
+function Generate_Body_From_Config(task,Calculate_Spawn_Resource) {
+  const config = configurations.find(entry => entry.task === task);
+  if (config) {
+    let selectedConfig;
+    let bodyCost; // Declare bodyCost here
+    for (const bodyConfig of config.body) {
+      bodyCost = bodyConfig.reduce((totalCost, part) => {
+        const partCost = BODYPART_COST[part.toLowerCase()];  // Convert to lowercase
+        return totalCost + (partCost ? partCost : 0);
+      }, 0);
+      if (bodyCost <=Calculate_Spawn_Resource) {
+        selectedConfig = bodyConfig;
+        break;
+      }
+    }
+    if (selectedConfig) {
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+        console.log(`Available energy for ${task}: ${Calculate_Spawn_Resource}`);
+      }
+      return selectedConfig;
+    } else {
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+      console.log(`Insufficient energy to spawn ${task}.`);
+      }
+    }
+  } else {
+    if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+    console.log(`Configuration not found for task: ${task}`);
+    }
+  }
+  return [];
+}
+// Function to generate creep bodys form configs
+// 🔧 Role-specific body generators, used by main loop
+function Generate_Courier_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('courier',Calculate_Spawn_Resource);
+}
+function Generate_BaseHarvest_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('baseharvest',Calculate_Spawn_Resource);
+}
+function Generate_Builder_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('builder',Calculate_Spawn_Resource);
+}
+function Generate_Repair_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('repair',Calculate_Spawn_Resource);
+} 
+function Generate_Queen_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('Queen',Calculate_Spawn_Resource);
+}
+function Generate_RemoteHarvest_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('remoteharvest',Calculate_Spawn_Resource);
+}
+function Generate_Upgrader_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('upgrader',Calculate_Spawn_Resource);
+}
+function Generate_Scout_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('Scout', Calculate_Spawn_Resource);
+}
+function Generate_CombatMelee_Body(Calculate_Spawn_Resource){
+  return Generate_Body_From_Config('CombatMelee', Calculate_Spawn_Resource);
+}
+function Generate_CombatArcher_Body(Calculate_Spawn_Resource){
+  return Generate_Body_From_Config('CombatArcher' , Calculate_Spawn_Resource);
+}
+function Generate_CombatMedic_Body(Calculate_Spawn_Resource){
+  return Generate_Body_From_Config('CombatMedic' , Calculate_Spawn_Resource);
+}
+function Generate_Dismantler_Config_Body(Calculate_Spawn_Resource){
+  return Generate_Body_From_Config('Dismantler' , Calculate_Spawn_Resource);
+}
+function Generate_Claimer_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('Claimer', Calculate_Spawn_Resource);
+}
+
+// Function to spawn a creep of a specific role
+function Spawn_Creep_Role(spawn, role_name, generateBodyFunction, Spawn_Resource, memory = {}) {
+  const bodyParts = generateBodyFunction(Spawn_Resource);
+  const newName = Generate_Creep_Name(role_name);
+  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+    console.log(`Trying to spawn ${role_name}: ${newName}, Body: [${bodyParts}]`);
+  }
+  const bodyCost = _.sum(bodyParts, (part) => BODYPART_COST[part]);
+  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+    console.log(`${role_name} - Spawn Energy: ${Spawn_Resource}`);
+  }  
+  if (Spawn_Resource >= bodyCost) {
+    if (newName) {
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+        console.log(`Trying to spawn ${role_name}: ${newName}, Body: [${bodyParts.join(', ')}], Cost: ${bodyCost}`);
+      }
+
+      // 👇 Merge the role into the provided memory object
+      memory.role = role_name;
+
+      const result = spawn.spawnCreep(bodyParts.map(String), newName, { memory: memory });
+
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+        console.log(`Spawn result for ${role_name}: ${result}`);
+      }
+
+      if (result === OK) {
+        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+          console.log(`🟢 Spawned ${role_name}: ${newName}`);
+        }
+        return true;
+      } else if (result === ERR_NOT_ENOUGH_ENERGY) {
+        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+          console.log(`🔴 F spawn ${role_name}: ${newName}. Insufficient energy. Result: ${result}`);
+        }
+      } else {
+        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+          console.log(`🔴 F spawn ${role_name}: ${newName}. Unknown error. Result: ${result}`);
+        }
+      }
+    }
+  } else {
+    if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+      console.log(`Insufficient energy to spawn ${role_name}. Required: ${bodyCost}`);
+    }
+  }
   return false;
 }
 
-const RoadPlanner = {
-  /**
-   * Call this once per tick from your main loop; super cheap when idle.
-   * @param {Room} homeRoom Your own room (where roads should start from)
-   */
-  ensureRemoteRoads(homeRoom) {
-    // --- Safety checks ---
-    if (!homeRoom || !homeRoom.controller || !homeRoom.controller.my) return;
-
-    const mem = this._memory(homeRoom);
-
-    const spawns = homeRoom.find(FIND_MY_SPAWNS);
-    if (spawns.length === 0) return; // need an anchor
-    const anchor = spawns[0].pos; // you can swap to Storage later if you want
-
-    // --- Figure out which remote rooms matter today ---
-    const activeRemotes = this._getActiveRemoteRoomsFromCreeps();
-
-    for (const remoteName of activeRemotes) {
-      // We only proceed if Memory already knows about sources in that room
-      const rmem = Memory.rooms[remoteName];
-      if (!rmem || !rmem.sources) continue;
-
-      // We can only plan/place when we have vision
-      const remoteRoom = Game.rooms[remoteName];
-      if (!remoteRoom) continue;
-
-      const sources = remoteRoom.find(FIND_SOURCES);
-      for (const src of sources) {
-        const key = `${remoteName}:${src.id}`; // one record per remote-source
-
-        // If first time seeing this pair, do a PathFinder search and store the path
-        if (!mem.paths[key]) {
-          const harvestPos = this._chooseHarvestTile(src);
-          const goal = harvestPos ? { pos: harvestPos, range: 0 } : { pos: src.pos, range: 1 };
-
-          const ret = PathFinder.search(anchor, goal, {
-            plainCost: PLAIN_COST,
-            swampCost: SWAMP_COST,
-            roomCallback: (roomName) => {
-              const room = Game.rooms[roomName];
-              if (!room) return; // no vision => use default terrain costs
-
-              const costs = new PathFinder.CostMatrix();
-
-              // Prefer roads and block most non-passable structures
-              room.find(FIND_STRUCTURES).forEach(s => {
-                if (s.structureType === STRUCTURE_ROAD) {
-                  costs.set(s.pos.x, s.pos.y, ROAD_COST);
-                } else if (
-                  s.structureType !== STRUCTURE_CONTAINER &&
-                  (s.structureType !== STRUCTURE_RAMPART || !s.my)
-                ) {
-                  costs.set(s.pos.x, s.pos.y, 0xff); // impassable
-                }
-              });
-
-              // Respect construction sites (block non-road sites)
-              room.find(FIND_CONSTRUCTION_SITES).forEach(cs => {
-                if (cs.structureType !== STRUCTURE_ROAD) {
-                  costs.set(cs.pos.x, cs.pos.y, 0xff);
-                }
-              });
-
-              // Also avoid stepping "through" sources/minerals
-              room.find(FIND_SOURCES).forEach(s => costs.set(s.pos.x, s.pos.y, 0xff));
-              const minerals = room.find(FIND_MINERALS) || [];
-              minerals.forEach(m => costs.set(m.pos.x, m.pos.y, 0xff));
-
-              return costs;
-            }
-          });
-
-          if (!ret.path || ret.path.length === 0 || ret.incomplete) {
-            // No usable path (yet). Try again in a future tick.
-            continue;
-          }
-
-          // Store a JSON-serializable copy in Memory
-          mem.paths[key] = {
-            i: 0,            // progress index along path
-            done: false,     // flipped when we reach the end
-            path: ret.path.map(p => ({ x: p.x, y: p.y, roomName: p.roomName }))
-          };
-        }
-
-        // Drip-place a few road sites along this path this tick
-        this._placeAlongPath(homeRoom, key, PLACE_BUDGET_PER_TICK);
-
-        // Occasionally audit "done" paths and relaunch if a tile decayed
-        this._auditAndRelaunch(homeRoom, key, 1);
-      }
-    }
-  },
-
-  /**
-   * Walk forward along a saved path and place up to `budget` ROAD sites this tick.
-   * Only places in rooms we can see. Skips walls and already-occupied tiles.
-   * @param {Room} homeRoom
-   * @param {string} key "<remoteRoom>:<sourceId>"
-   * @param {number} budget
-   */
-  _placeAlongPath(homeRoom, key, budget) {
-    // Avoid hitting the global cap and churning on ERR_FULL
-    if (Object.keys(Game.constructionSites).length > CSITE_SAFETY_LIMIT) return;
-
-    const mem = this._memory(homeRoom);
-    const rec = mem.paths[key];
-    if (!rec || rec.done) return;
-
-    let placed = 0;
-    let iterations = 0; // sanity guard
-
-    while (rec.i < rec.path.length && placed < budget) {
-      if (++iterations > budget + 10) break; // belt-and-suspenders guard
-
-      const step = rec.path[rec.i];
-      const roomObj = Game.rooms[step.roomName];
-      if (!roomObj) break; // stop here; we'll continue when we gain vision
-
-      const terrainVal = roomObj.getTerrain().get(step.x, step.y);
-      if (terrainVal !== TERRAIN_MASK_WALL) {
-        const pos = new RoomPosition(step.x, step.y, step.roomName);
-        if (!hasRoadOrRoadSite(pos)) {
-          const res = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
-          if (res === OK) {
-            placed++;
-          } else if (res === ERR_FULL) {
-            // Global construction-site cap exceeded; quit early
-            break;
-          }
-        }
-      }
-
-      // Advance pointer every loop, even if we skipped/failed
-      rec.i++;
-    }
-
-    // Mark complete once we pass the end; saves CPU in future ticks
-    if (rec.i >= rec.path.length) rec.done = true;
-  },
-
-  /**
-   * Get (and lazily initialize) this home room's RoadPlanner memory bucket.
-   * Stored under Memory.rooms[homeRoom.name].roadPlanner
-   */
-  _memory(homeRoom) {
-    if (!Memory.rooms) Memory.rooms = {};
-    if (!Memory.rooms[homeRoom.name]) Memory.rooms[homeRoom.name] = {};
-
-    const r = Memory.rooms[homeRoom.name];
-    if (!r.roadPlanner) r.roadPlanner = { paths: {} };
-    if (!r.roadPlanner.paths) r.roadPlanner.paths = {};
-
-    return r.roadPlanner;
-  },
-
-  /**
-   * Return a list of remote room names that currently have planned paths in memory.
-   * Purely informative.
-   * @param {Room} homeRoom
-   * @returns {string[]}
-   */
-  getActiveRemoteRooms(homeRoom) {
-    const mem = this._memory(homeRoom);
-    const rooms = new Set();
-    for (const key of Object.keys(mem.paths || {})) {
-      rooms.add(key.split(':')[0]);
-    }
-    return [...rooms];
-  },
-
-  /**
-   * Occasionally audit a finished path. If a road tile is missing, create a new
-   * construction site and roll the pointer back so the drip-placer resumes there.
-   * @param {Room} homeRoom
-   * @param {string} key
-   * @param {number} maxFixes Only fix up to this many tiles per audit
-   */
-  _auditAndRelaunch(homeRoom, key, maxFixes = 1) {
-    const mem = this._memory(homeRoom);
-    const rec = mem.paths[key];
-    if (!rec || !rec.done || !Array.isArray(rec.path) || rec.path.length === 0) return;
-
-    // Throttle like crazy: every AUDIT_INTERVAL ticks or 1% random chance
-    if (Game.time % AUDIT_INTERVAL !== 0 && Math.random() > 0.01) return;
-
-    let fixed = 0;
-
-    for (let idx = 0; idx < rec.path.length && fixed < maxFixes; idx++) {
-      const step = rec.path[idx];
-
-      const roomObj = Game.rooms[step.roomName];
-      if (!roomObj) continue; // need vision to audit/build
-
-      const terrainVal = roomObj.getTerrain().get(step.x, step.y);
-      if (terrainVal === TERRAIN_MASK_WALL) continue; // should not be on walls anyway
-
-      const pos = new RoomPosition(step.x, step.y, step.roomName);
-
-      if (!hasRoadOrRoadSite(pos)) {
-        const res = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
-        if (res === OK) {
-          // Roll pointer back and mark not-done so placer resumes here
-          if (typeof rec.i !== 'number' || rec.i > idx) rec.i = idx;
-          rec.done = false;
-          fixed++;
-        }
-      }
-    }
-  },
-
-  /**
-   * Pick a good tile next to the source for the harvester stand point.
-   * Prefers an existing container (strongly) or a road (mildly), avoids walls/borders.
-   * Returns null if we lack vision; caller will fall back to range:1 on the source.
-   * @param {Source} src
-   * @returns {RoomPosition|null}
-   */
-  _chooseHarvestTile(src) {
-    const room = Game.rooms[src.pos.roomName];
-    if (!room) return null;
-
-    const terrain = room.getTerrain();
-
-    let best = null;
-    let bestScore = -Infinity;
-
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        if (dx === 0 && dy === 0) continue; // skip the source tile itself
-
-        const x = src.pos.x + dx;
-        const y = src.pos.y + dy;
-
-        // avoid room borders (annoying for pathing & building)
-        if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
-
-        const t = terrain.get(x, y);
-        if (t === TERRAIN_MASK_WALL) continue;
-
-        const pos = new RoomPosition(x, y, room.name);
-        const structs = pos.lookFor(LOOK_STRUCTURES);
-
-        let score = 0;
-        if (structs.some(s => s.structureType === STRUCTURE_CONTAINER)) score += 10;
-        if (structs.some(s => s.structureType === STRUCTURE_ROAD)) score += 5;
-        if (t === TERRAIN_MASK_SWAMP) score -= 2; // mildly prefer plains
-
-        if (score > bestScore) { bestScore = score; best = pos; }
-      }
-    }
-
-    return best; // may be null; caller handles fallback
-  },
-
-  /**
-   * Read creeps and return a unique list of remote room names they are targeting
-   * for task === 'remoteharvest'. Uses plain JS; no lodash required.
-   * @returns {string[]}
-   */
-  _getActiveRemoteRoomsFromCreeps() {
-    const set = new Set();
-    for (const name in Game.creeps) {
-      const c = Game.creeps[name];
-      if (c && c.memory && c.memory.task === 'remoteharvest' && c.memory.targetRoom) {
-        set.add(c.memory.targetRoom);
-      }
-    }
-    return [...set];
-  }
-};
-
-module.exports = RoadPlanner;
+  module.exports = {
+    Generate_Creep_Name,
+    Calculate_Spawn_Resource,
+    configurations,
+    Generate_Body_From_Config,
+    Spawn_Creep_Role,
+    Generate_Courier_Body,
+    Generate_BaseHarvest_Body,
+    Generate_Upgrader_Body,
+    Generate_Builder_Body,
+    Generate_Repair_Body,
+    Generate_Queen_Body,
+    Generate_RemoteHarvest_Body,
+    Generate_Scout_Body,
+    Generate_CombatMelee_Body,
+    Generate_CombatArcher_Body,
+    Generate_CombatMedic_Body,
+    Generate_Dismantler_Config_Body,
+    Generate_Claimer_Body,
+    getBodyForTask,
+    Spawn_Worker_Bee,
+  };

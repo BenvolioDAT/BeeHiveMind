@@ -22,7 +22,7 @@ var RESERVE_CONFIG = {
 
 // ---- Room Locking (prevents 2 claimers from dogpiling one room) ----
 var LOCK = {
-  ttl: 150  // how long a lock lasts after acquisition; tweak to your travel time
+  ttl: 10  // how long a lock lasts after acquisition; tweak to your travel time
 };
 
 function ensureLockMem() {
