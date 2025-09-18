@@ -1,16 +1,28 @@
+// role.TaskBuilder.js (refactor, ES5-safe, API-compatible)
+// - Same export/entry: TaskBuilder.run(creep)
+// - Fixes:
+//   * ES5 only (no const/let/arrows/Object.values/default params).
+//   * structureLimits/siteWeights use STRING KEYS ('tower','extension',...) so lookups work.
+//   * Global site planner throttled, RCL-aware, terrain-safe.
+//   * Cross-room refuel kept, movement unified via go() using BeeTravel if present.
+
 var BeeToolbox = require('BeeToolbox');
-// === Builder refuel helpers ===
+
+// -----------------------------
+// Small helpers (ES5-safe)
+// -----------------------------
 function ensureHome(creep) {
   if (creep.memory.home) return creep.memory.home;
 
   // pick closest owned spawn by room distance; fallback to current room
-  const spawns = Object.values(Game.spawns);
-  if (spawns.length) {
-    let best = spawns[0];
-    let bestDist = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
-    for (let i = 1; i < spawns.length; i++) {
-      const d = Game.map.getRoomLinearDistance(creep.pos.roomName, spawns[i].pos.roomName);
-      if (d < bestDist) { best = spawns[i]; bestDist = d; }
+  var spawnKeys = Object.keys(Game.spawns);
+  if (spawnKeys.length) {
+    var best = Game.spawns[spawnKeys[0]];
+    var bestDist = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
+    for (var i = 1; i < spawnKeys.length; i++) {
+      var sp = Game.spawns[spawnKeys[i]];
+      var d = Game.map.getRoomLinearDistance(creep.pos.roomName, sp.pos.roomName);
+      if (d < bestDist) { best = sp; bestDist = d; }
     }
     creep.memory.home = best.pos.roomName;
   } else {
@@ -20,437 +32,399 @@ function ensureHome(creep) {
 }
 
 function getHomeAnchorPos(homeName) {
-  const room = Game.rooms[homeName];
+  var room = Game.rooms[homeName];
   if (room) {
     if (room.storage) return room.storage.pos;
-    const spawns = room.find(FIND_MY_SPAWNS);
+    var spawns = room.find(FIND_MY_SPAWNS);
     if (spawns.length) return spawns[0].pos;
     if (room.controller && room.controller.my) return room.controller.pos;
   }
-  // no vision? head toward center; moveTo will path inter-room
   return new RoomPosition(25, 25, homeName);
 }
 
 function findWithdrawTargetInRoom(room) {
   if (!room) return null;
-  const targets = room.find(FIND_STRUCTURES, {
-    filter: s =>
-      s.store &&
-      s.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
-      (
-        s.structureType === STRUCTURE_STORAGE ||
-        s.structureType === STRUCTURE_TERMINAL ||
-        s.structureType === STRUCTURE_LINK ||
-        s.structureType === STRUCTURE_CONTAINER
-      )
+  var targets = room.find(FIND_STRUCTURES, {
+    filter: function(s) {
+      return s.store &&
+             s.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
+             (s.structureType === STRUCTURE_STORAGE  ||
+              s.structureType === STRUCTURE_TERMINAL ||
+              s.structureType === STRUCTURE_LINK     ||
+              s.structureType === STRUCTURE_CONTAINER);
+    }
   });
   if (!targets.length) return null;
-  targets.sort((a, b) =>
-    b.store.getUsedCapacity(RESOURCE_ENERGY) - a.store.getUsedCapacity(RESOURCE_ENERGY)
-  );
+  targets.sort(function(a, b) {
+    return (b.store.getUsedCapacity(RESOURCE_ENERGY) - a.store.getUsedCapacity(RESOURCE_ENERGY));
+  });
   return targets[0];
 }
 
-function go(creep, dest, opts = {}) {
-  if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
-    BeeToolbox.BeeTravel(creep, dest, opts);
-  } else {
-    const range = opts.range != null ? opts.range : 1;
-    creep.moveTo(dest, { reusePath: 20, range });
+function go(creep, dest, opts) {
+  opts = opts || {};
+  var range = (opts.range != null) ? opts.range : 1;
+  if (BeeToolbox && BeeToolbox.BeeTravel) {
+    BeeToolbox.BeeTravel(creep, dest, { range: range, reusePath: 20 });
+  } else if (creep.pos.getRangeTo(dest) > range) {
+    creep.moveTo(dest, { reusePath: 20 });
   }
 }
 
-
-
-
+// -----------------------------
+// TaskBuilder module
+// -----------------------------
 var TaskBuilder = {
-  // Define limits for each structure type
+  // IMPORTANT: string keys match a.structureType values
   structureLimits: {
-    STRUCTURE_TOWER: 6,
-    STRUCTURE_EXTENSION: 60,
-    STRUCTURE_CONTAINER: 1,
-    STRUCTURE_RAMPART: 2,
-    STRUCTURE_ROAD: 20,
+    'tower':     6,
+    'extension': 60,
+    'container': 1,
+    'rampart':   2,
+    'road':      20
   },
-  // Define site weights for sorting construction sites
+
   siteWeights: {
-    STRUCTURE_TOWER: 5,
-    STRUCTURE_CONTAINER: 4,
-    STRUCTURE_EXTENSION: 3,
-    STRUCTURE_RAMPART: 2,
-    STRUCTURE_ROAD: 1,
+    'tower':     5,
+    'container': 4,
+    'extension': 3,
+    'rampart':   2,
+    'road':      1
   },
-  // Define positions and types for each structure to be built
-  // Y being negative counts as a up while a postive number goes down and X negitvie go left and postive goes right.
+
+  // Preplanned placements (relative to first spawn). Uses CONSTANT values for type.
   structurePlacements: [
-    { type: STRUCTURE_STORAGE,   x:  8, y: 0},//1
-    { type: STRUCTURE_SPAWN,     x: -5, y: 0},
-    { type: STRUCTURE_SPAWN,     x:  5, y: 0},
+    { type: STRUCTURE_STORAGE,   x:  8, y:  0 },
+    { type: STRUCTURE_SPAWN,     x: -5, y:  0 },
+    { type: STRUCTURE_SPAWN,     x:  5, y:  0 },
 
-    //{ type: STRUCTURE_CONTAINER, x: 5, y: 0},
+    { type: STRUCTURE_EXTENSION, x:  0, y:  2 },
+    { type: STRUCTURE_EXTENSION, x:  0, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  0, y:  3 },
+    { type: STRUCTURE_EXTENSION, x:  0, y: -3 },
+    { type: STRUCTURE_EXTENSION, x: -1, y:  3 },
+    { type: STRUCTURE_EXTENSION, x: -1, y: -3 },
+    { type: STRUCTURE_EXTENSION, x:  1, y: -3 },
+    { type: STRUCTURE_EXTENSION, x:  1, y:  3 },
+    { type: STRUCTURE_EXTENSION, x: -1, y:  2 },
+    { type: STRUCTURE_EXTENSION, x: -1, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  1, y:  2 },
+    { type: STRUCTURE_EXTENSION, x:  1, y: -2 },
+    { type: STRUCTURE_EXTENSION, x: -2, y: -1 },
+    { type: STRUCTURE_EXTENSION, x: -2, y:  1 },
+    { type: STRUCTURE_EXTENSION, x:  2, y: -1 },
+    { type: STRUCTURE_EXTENSION, x:  2, y:  1 },
+    { type: STRUCTURE_EXTENSION, x: -3, y:  1 },
+    { type: STRUCTURE_EXTENSION, x: -3, y: -1 },
+    { type: STRUCTURE_EXTENSION, x:  3, y:  1 },
+    { type: STRUCTURE_EXTENSION, x:  3, y: -1 },
+    { type: STRUCTURE_EXTENSION, x: -3, y:  2 },
+    { type: STRUCTURE_EXTENSION, x: -3, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  3, y:  2 },
+    { type: STRUCTURE_EXTENSION, x:  3, y: -2 },
+    { type: STRUCTURE_EXTENSION, x: -4, y:  2 },
+    { type: STRUCTURE_EXTENSION, x: -4, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  4, y:  2 },
+    { type: STRUCTURE_EXTENSION, x:  4, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  4, y:  3 },
+    { type: STRUCTURE_EXTENSION, x:  4, y: -3 },
+    { type: STRUCTURE_EXTENSION, x: -4, y:  3 },
+    { type: STRUCTURE_EXTENSION, x: -4, y: -3 },
+    { type: STRUCTURE_EXTENSION, x: -4, y:  4 },
+    { type: STRUCTURE_EXTENSION, x: -4, y: -4 },
+    { type: STRUCTURE_EXTENSION, x:  4, y:  4 },
+    { type: STRUCTURE_EXTENSION, x:  4, y: -4 },
+    { type: STRUCTURE_EXTENSION, x:  3, y:  4 },
+    { type: STRUCTURE_EXTENSION, x:  3, y: -4 },
+    { type: STRUCTURE_EXTENSION, x: -3, y:  4 },
+    { type: STRUCTURE_EXTENSION, x: -3, y: -4 },
+    { type: STRUCTURE_EXTENSION, x: -2, y:  4 },
+    { type: STRUCTURE_EXTENSION, x: -2, y: -4 },
+    { type: STRUCTURE_EXTENSION, x:  2, y:  4 },
+    { type: STRUCTURE_EXTENSION, x:  2, y: -4 },
+    { type: STRUCTURE_EXTENSION, x:  2, y:  5 },
+    { type: STRUCTURE_EXTENSION, x:  2, y: -5 },
+    { type: STRUCTURE_EXTENSION, x: -2, y: -5 },
+    { type: STRUCTURE_EXTENSION, x: -2, y:  5 },
+    { type: STRUCTURE_EXTENSION, x: -1, y: -5 },
+    { type: STRUCTURE_EXTENSION, x: -1, y:  5 },
+    { type: STRUCTURE_EXTENSION, x:  1, y:  5 },
+    { type: STRUCTURE_EXTENSION, x:  1, y: -5 },
+    { type: STRUCTURE_EXTENSION, x:  0, y:  5 },
+    { type: STRUCTURE_EXTENSION, x:  0, y: -5 },
+    { type: STRUCTURE_EXTENSION, x: -4, y:  0 },
+    { type: STRUCTURE_EXTENSION, x:  4, y:  0 },
+    { type: STRUCTURE_EXTENSION, x: -5, y:  1 },
+    { type: STRUCTURE_EXTENSION, x: -5, y: -1 },
+    { type: STRUCTURE_EXTENSION, x:  5, y:  1 },
+    { type: STRUCTURE_EXTENSION, x:  5, y: -1 },
 
-    { type: STRUCTURE_EXTENSION, x: 0, y: 2 },//1
-    { type: STRUCTURE_EXTENSION, x: 0, y:-2 },//2
-    { type: STRUCTURE_EXTENSION, x: 0, y: 3 },//3
-    { type: STRUCTURE_EXTENSION, x: 0, y:-3 },//4
-    { type: STRUCTURE_EXTENSION, x:-1, y: 3 },//5
-    { type: STRUCTURE_EXTENSION, x:-1, y:-3 },//6
-    { type: STRUCTURE_EXTENSION, x: 1, y:-3 },//7
-    { type: STRUCTURE_EXTENSION, x: 1, y: 3 },//8
-    { type: STRUCTURE_EXTENSION, x:-1, y: 2 },//9
-    { type: STRUCTURE_EXTENSION, x:-1, y:-2 },//10
-    { type: STRUCTURE_EXTENSION, x: 1, y: 2 },//11
-    { type: STRUCTURE_EXTENSION, x: 1, y:-2 },//12 
-    { type: STRUCTURE_EXTENSION, x:-2, y:-1 },//13
-    { type: STRUCTURE_EXTENSION, x:-2, y: 1 },//14
-    { type: STRUCTURE_EXTENSION, x: 2, y:-1 },//15
-    { type: STRUCTURE_EXTENSION, x: 2, y: 1 },//16
-    { type: STRUCTURE_EXTENSION, x:-3, y: 1 },//17
-    { type: STRUCTURE_EXTENSION, x:-3, y:-1 },//18
-    { type: STRUCTURE_EXTENSION, x: 3, y: 1 },//19
-    { type: STRUCTURE_EXTENSION, x: 3, y:-1 },//20
-    { type: STRUCTURE_EXTENSION, x:-3, y: 2 },//21
-    { type: STRUCTURE_EXTENSION, x:-3, y:-2 },//22
-    { type: STRUCTURE_EXTENSION, x: 3, y: 2 },//23
-    { type: STRUCTURE_EXTENSION, x: 3, y:-2 },//24
-    { type: STRUCTURE_EXTENSION, x:-4, y: 2 },//25
-    { type: STRUCTURE_EXTENSION, x:-4, y:-2 },//26
-    { type: STRUCTURE_EXTENSION, x: 4, y: 2 },//27
-    { type: STRUCTURE_EXTENSION, x: 4, y:-2 },//28
-    { type: STRUCTURE_EXTENSION, x: 4, y: 3 },//29
-    { type: STRUCTURE_EXTENSION, x: 4, y:-3 },//30
-    { type: STRUCTURE_EXTENSION, x:-4, y: 3 },//31
-    { type: STRUCTURE_EXTENSION, x:-4, y:-3 },//32
-    { type: STRUCTURE_EXTENSION, x:-4, y: 4 },//33
-    { type: STRUCTURE_EXTENSION, x:-4, y:-4 },//34
-    { type: STRUCTURE_EXTENSION, x: 4, y: 4 },//35
-    { type: STRUCTURE_EXTENSION, x: 4, y:-4 },//36
-    { type: STRUCTURE_EXTENSION, x: 3, y: 4 },//37
-    { type: STRUCTURE_EXTENSION, x: 3, y:-4 },//38
-    { type: STRUCTURE_EXTENSION, x:-3, y: 4 },//39
-    { type: STRUCTURE_EXTENSION, x:-3, y:-4 },//40
-    { type: STRUCTURE_EXTENSION, x:-2, y: 4 },//41
-    { type: STRUCTURE_EXTENSION, x:-2, y:-4 },//42
-    { type: STRUCTURE_EXTENSION, x: 2, y: 4 },//43
-    { type: STRUCTURE_EXTENSION, x: 2, y:-4 },//44
-    { type: STRUCTURE_EXTENSION, x: 2, y: 5 },//45
-    { type: STRUCTURE_EXTENSION, x: 2, y:-5 },//46
-    { type: STRUCTURE_EXTENSION, x:-2, y:-5 },//47
-    { type: STRUCTURE_EXTENSION, x:-2, y: 5 },//48
-    { type: STRUCTURE_EXTENSION, x:-1, y:-5 },//49
-    { type: STRUCTURE_EXTENSION, x:-1, y: 5 },//50
-    { type: STRUCTURE_EXTENSION, x: 1, y: 5 },//51
-    { type: STRUCTURE_EXTENSION, x: 1, y:-5 },//52
-    { type: STRUCTURE_EXTENSION, x: 0, y: 5 },//53
-    { type: STRUCTURE_EXTENSION, x: 0, y:-5 },//54
-    { type: STRUCTURE_EXTENSION, x:-4, y: 0 },//55
-    { type: STRUCTURE_EXTENSION, x: 4, y: 0 },//56
-    { type: STRUCTURE_EXTENSION, x:-5, y: 1 },//57
-    { type: STRUCTURE_EXTENSION, x:-5, y:-1 },//58
-    { type: STRUCTURE_EXTENSION, x: 5, y: 1 },//59
-    { type: STRUCTURE_EXTENSION, x: 5, y:-1 },//60 
-    // TOWER LOCATIONS
-    //{ type: STRUCTURE_TOWER, x:-5, y:-5 },//1
-    //{ type: STRUCTURE_TOWER, x: 5, y: 5 },//2
-    //{ type: STRUCTURE_TOWER, x:-5, y: 5 },//3
-    //{ type: STRUCTURE_TOWER, x: 5, y:-5 },//4
-    //{ type: STRUCTURE_TOWER, x:-1, y: 0 },//5
-    //{ type: STRUCTURE_TOWER, x: 1, y: 0 },//6
-    { type: STRUCTURE_ROAD, x: 1, y: 1 },
-    { type: STRUCTURE_ROAD, x: 0, y: 1 },
-    { type: STRUCTURE_ROAD, x:-1, y: 1 },
-    { type: STRUCTURE_ROAD, x:-1, y: 0 },
-    { type: STRUCTURE_ROAD, x:-1, y:-1 },
-    { type: STRUCTURE_ROAD, x: 0, y:-1 },
-    { type: STRUCTURE_ROAD, x: 1, y:-1 },
-    { type: STRUCTURE_ROAD, x: 1, y: 0 },
-    { type: STRUCTURE_ROAD, x: 2, y: 0 },
-    { type: STRUCTURE_ROAD, x: 3, y: 0 },
-    { type: STRUCTURE_ROAD, x:-2, y: 0 },
-    { type: STRUCTURE_ROAD, x:-3, y: 0 },
-    { type: STRUCTURE_ROAD, x:-4, y: 1 },
-    { type: STRUCTURE_ROAD, x:-4, y:-1 },
-    { type: STRUCTURE_ROAD, x: 4, y:-1 },
-    { type: STRUCTURE_ROAD, x: 4, y: 1 },
-    { type: STRUCTURE_ROAD, x: 2, y: 2 },
-    { type: STRUCTURE_ROAD, x: 2, y:-2 },
-    { type: STRUCTURE_ROAD, x: 3, y:-3 },
-    { type: STRUCTURE_ROAD, x: 3, y: 3 },
-    { type: STRUCTURE_ROAD, x:-2, y: 2 },
-    { type: STRUCTURE_ROAD, x:-2, y:-2 },
-    { type: STRUCTURE_ROAD, x:-3, y:-3 },
-    { type: STRUCTURE_ROAD, x:-3, y: 3 },
-    { type: STRUCTURE_ROAD, x:-2, y: 3 },
-    { type: STRUCTURE_ROAD, x: 2, y: 3 },
-    { type: STRUCTURE_ROAD, x:-2, y:-3 },
-    { type: STRUCTURE_ROAD, x: 2, y:-3 },
-    { type: STRUCTURE_ROAD, x:-1, y: 4 },
-    { type: STRUCTURE_ROAD, x: 1, y: 4 },
-    { type: STRUCTURE_ROAD, x:-1, y:-4 },
-    { type: STRUCTURE_ROAD, x: 1, y:-4 },
-    { type: STRUCTURE_ROAD, x: 0, y: 4 },
-    { type: STRUCTURE_ROAD, x: 0, y:-4 },
-    // Add more structures with their positions
+    // Roads
+    { type: STRUCTURE_ROAD, x:  1, y:  1 },
+    { type: STRUCTURE_ROAD, x:  0, y:  1 },
+    { type: STRUCTURE_ROAD, x: -1, y:  1 },
+    { type: STRUCTURE_ROAD, x: -1, y:  0 },
+    { type: STRUCTURE_ROAD, x: -1, y: -1 },
+    { type: STRUCTURE_ROAD, x:  0, y: -1 },
+    { type: STRUCTURE_ROAD, x:  1, y: -1 },
+    { type: STRUCTURE_ROAD, x:  1, y:  0 },
+    { type: STRUCTURE_ROAD, x:  2, y:  0 },
+    { type: STRUCTURE_ROAD, x:  3, y:  0 },
+    { type: STRUCTURE_ROAD, x: -2, y:  0 },
+    { type: STRUCTURE_ROAD, x: -3, y:  0 },
+    { type: STRUCTURE_ROAD, x: -4, y:  1 },
+    { type: STRUCTURE_ROAD, x: -4, y: -1 },
+    { type: STRUCTURE_ROAD, x:  4, y: -1 },
+    { type: STRUCTURE_ROAD, x:  4, y:  1 },
+    { type: STRUCTURE_ROAD, x:  2, y:  2 },
+    { type: STRUCTURE_ROAD, x:  2, y: -2 },
+    { type: STRUCTURE_ROAD, x:  3, y: -3 },
+    { type: STRUCTURE_ROAD, x:  3, y:  3 },
+    { type: STRUCTURE_ROAD, x: -2, y:  2 },
+    { type: STRUCTURE_ROAD, x: -2, y: -2 },
+    { type: STRUCTURE_ROAD, x: -3, y: -3 },
+    { type: STRUCTURE_ROAD, x: -3, y:  3 },
+    { type: STRUCTURE_ROAD, x: -2, y:  3 },
+    { type: STRUCTURE_ROAD, x:  2, y:  3 },
+    { type: STRUCTURE_ROAD, x: -2, y: -3 },
+    { type: STRUCTURE_ROAD, x:  2, y: -3 },
+    { type: STRUCTURE_ROAD, x: -1, y:  4 },
+    { type: STRUCTURE_ROAD, x:  1, y:  4 },
+    { type: STRUCTURE_ROAD, x: -1, y: -4 },
+    { type: STRUCTURE_ROAD, x:  1, y: -4 },
+    { type: STRUCTURE_ROAD, x:  0, y:  4 },
+    { type: STRUCTURE_ROAD, x:  0, y: -4 }
   ],
-  // Main function to control the Builder_Bee creep
-  run: function (creep) {  
-    // Check if the creep is currently building and has no energy left
-    if (creep.memory.building && creep.store[RESOURCE_ENERGY] == 0) {
+
+  run: function (creep) {
+    // Toggle build state
+    if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
       creep.memory.building = false;
     }
-    // Check if the creep is not building and has full energy capacity
-    if (!creep.memory.building && creep.store.getFreeCapacity() == 0) {
+    if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
       creep.memory.building = true;
     }
-    // If the creep is building
-    if (creep.memory.building) {// Grab ALL my construction sites (home + remotes)
-var targets = Object.values(Game.constructionSites || {});
 
-// If none found, fall back to current room (keeps behavior sane if Game.constructionSites is empty)
-if (!targets.length) {
-  targets = creep.room.find(FIND_MY_CONSTRUCTION_SITES);
-}
+    if (creep.memory.building) {
+      // ---- BUILD PHASE ----
+      // Gather all construction sites across Game (ES5-safe)
+      var allSites = [];
+      for (var id in Game.constructionSites) allSites.push(Game.constructionSites[id]);
 
-if (targets.length) {
-  // Choose an anchor: storage if present, else first spawn, else creep position
-  const home = creep.room;
-  const spawns = home.find(FIND_MY_SPAWNS);
-  const anchor = (home.storage && home.storage.pos) || (spawns[0] && spawns[0].pos) || creep.pos;
+      // Fallback to current room if global is empty (rare)
+      if (!allSites.length) {
+        allSites = creep.room.find(FIND_MY_CONSTRUCTION_SITES);
+      }
 
-  // Sort so we:
-  // 1) Prefer your existing weights (towers > containers > extensions > ...)
-  // 2) Then prefer rooms closer to anchor's room (home -> neighbors -> farther)
-  // 3) Then prefer sites nearer to the anchor inside the same room
-  targets.sort((a, b) => {
-    const wa = (TaskBuilder.siteWeights && TaskBuilder.siteWeights[a.structureType]) || 0;
-    const wb = (TaskBuilder.siteWeights && TaskBuilder.siteWeights[b.structureType]) || 0;
-    if (wb !== wa) return wb - wa;
+      if (allSites.length) {
+        // Choose anchor: storage > first spawn > self
+        var home = creep.room;
+        var spawns = home.find(FIND_MY_SPAWNS);
+        var anchor = (home.storage && home.storage.pos) || (spawns[0] && spawns[0].pos) || creep.pos;
 
-    const ra = Game.map.getRoomLinearDistance(anchor.roomName, a.pos.roomName);
-    const rb = Game.map.getRoomLinearDistance(anchor.roomName, b.pos.roomName);
-    if (ra !== rb) return ra - rb;
+        // Sorting:
+        // 1) by siteWeights (higher first)
+        // 2) by linear room distance from anchor.roomName (nearer rooms first)
+        // 3) by range to anchor inside same room
+        var weights = TaskBuilder.siteWeights;
+        allSites.sort(function(a, b) {
+          var wa = (weights && weights[a.structureType]) || 0;
+          var wb = (weights && weights[b.structureType]) || 0;
+          if (wb !== wa) return wb - wa;
 
-    const da = (a.pos.roomName === anchor.roomName) ? anchor.getRangeTo(a.pos) : 999;
-    const db = (b.pos.roomName === anchor.roomName) ? anchor.getRangeTo(b.pos) : 999;
-    return da - db;
-  });
+          var ra = Game.map.getRoomLinearDistance(anchor.roomName, a.pos.roomName);
+          var rb = Game.map.getRoomLinearDistance(anchor.roomName, b.pos.roomName);
+          if (ra !== rb) return ra - rb;
 
-  // Build/move (creep.moveTo handles inter-room travel automatically)
-  if (creep.build(targets[0]) === ERR_NOT_IN_RANGE) {
-    BeeToolbox.BeeTravel(creep, targets[0]); // you already use this helper
-  }
-}
-      /*var targets = creep.room.find(FIND_CONSTRUCTION_SITES);
-      if (targets.length) {
-        // Sort construction sites by weight in descending order
-        targets.sort((a, b) => (TaskBuilder.siteWeights[b.structureType] || 0) - (TaskBuilder.siteWeights[a.structureType] || 0));
-        if (creep.build(targets[0]) == ERR_NOT_IN_RANGE) {
-          // If not in range, move towards the construction site with visualization
-          BeeToolbox.BeeTravel(creep, targets[0]);
-          //creep.moveTo(targets[0], {reusePath: 10,visualizePathStyle:{lineStyle: 'dashed'}});
+          var da = (a.pos.roomName === anchor.roomName) ? anchor.getRangeTo(a.pos) : 999;
+          var db = (b.pos.roomName === anchor.roomName) ? anchor.getRangeTo(b.pos) : 999;
+          return da - db;
+        });
+
+        if (creep.build(allSites[0]) === ERR_NOT_IN_RANGE) {
+          go(creep, allSites[0], { range: 3 });
         }
-      }*/ else {
-                  // No construction sites anywhere:
-                  // 1) Return any carried energy to base
-                  // 2) Recycle at nearest spawn (refunds some energy)
+        return;
+      } else {
+        // No sites anywhere → dump energy if any, then recycle (or suicide if no spawn)
+        if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+          var sink = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+            filter: function(s) {
+              if (!s.store || s.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) return false;
+              // Prefer storage/terminal > spawn/ext/tower > container/link
+              return (s.structureType === STRUCTURE_STORAGE  ||
+                      s.structureType === STRUCTURE_TERMINAL ||
+                      s.structureType === STRUCTURE_SPAWN    ||
+                      s.structureType === STRUCTURE_EXTENSION||
+                      s.structureType === STRUCTURE_TOWER    ||
+                      s.structureType === STRUCTURE_CONTAINER||
+                      s.structureType === STRUCTURE_LINK);
+            }
+          });
+          if (sink) {
+            if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+              go(creep, sink, { range: 1 });
+            }
+            return; // try recycle next tick once empty
+          }
+        }
 
-                  // Step 1: if we’re carrying energy, drop it off first
-                  if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
-                    // Prefer Storage/Terminal, then Spawn/Extensions/Towers, then Containers/Links
-                    const sink = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-                      filter: s => (
-                        (
-                          (s.structureType === STRUCTURE_STORAGE) ||
-                          (s.structureType === STRUCTURE_TERMINAL) ||
-                          (s.structureType === STRUCTURE_SPAWN) ||
-                          (s.structureType === STRUCTURE_EXTENSION) ||
-                          (s.structureType === STRUCTURE_TOWER) ||
-                          (s.structureType === STRUCTURE_CONTAINER) ||
-                          (s.structureType === STRUCTURE_LINK)
-                        ) &&
-                        s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
-                      )
-                    });
+        var spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
+        if (spawn) {
+          if (creep.pos.getRangeTo(spawn) > 1) {
+            go(creep, spawn, { range: 1 });
+          } else {
+            spawn.recycleCreep(creep);
+          }
+          return;
+        }
 
-                    if (sink) {
-                      if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                        // Use your travel helper for consistency
-                        if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
-                          BeeToolbox.BeeTravel(creep, sink);
-                        } else {
-                          creep.moveTo(sink, { reusePath: 15, range: 1 });
-                        }
-                      }
-                      // We’ll try recycling next tick after we’ve emptied out.
-                      return;
-                    }
-                    // If no valid sink, we’ll still proceed to recycle to avoid idling forever
-                  }
+        // Absolute edge-case fallback
+        creep.suicide();
+        return;
+      }
+    } else {
+      // ---- REFUEL PHASE ----
+      var homeName = ensureHome(creep);
 
-                  // Step 2: recycle at the nearest spawn
-                  const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
-                  if (spawn) {
-                    if (creep.pos.getRangeTo(spawn) > 1) {
-                      if (typeof BeeToolbox !== 'undefined' && BeeToolbox.BeeTravel) {
-                        BeeToolbox.BeeTravel(creep, spawn, {range: 1});
-                      } else {
-                        creep.moveTo(spawn, { reusePath: 20, range: 1 });
-                      }
-                    } else {
-                      // Adjacent: recycle me, daddy
-                      spawn.recycleCreep(creep);
-                    }
-                    return;
-                  }
+      // 1) Try current room
+      var src = findWithdrawTargetInRoom(creep.room);
+      if (src) {
+        var r1 = creep.withdraw(src, RESOURCE_ENERGY);
+        if (r1 === ERR_NOT_IN_RANGE) go(creep, src, { range: 1 });
+        return;
+      }
 
-                  // Step 3: extreme edge case: no spawn in vision/room — avoid endless wandering
-                  creep.suicide();
-                }
-      
+      // 2) Head home if not there
+      if (creep.pos.roomName !== homeName) {
+        go(creep, getHomeAnchorPos(homeName), { range: 1 });
+        return;
+      }
+
+      // 3) Try again with home vision
+      src = findWithdrawTargetInRoom(creep.room);
+      if (src) {
+        var r2 = creep.withdraw(src, RESOURCE_ENERGY);
+        if (r2 === ERR_NOT_IN_RANGE) go(creep, src, { range: 1 });
+        return;
+      }
+
+      // 4) Last resort: harvest so we don’t stall
+      var source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
+      if (source) {
+        var r3 = creep.harvest(source);
+        if (r3 === ERR_NOT_IN_RANGE) go(creep, source);
+        return;
+      }
+
+      // 5) Truly nothing? Idle at anchor
+      go(creep, getHomeAnchorPos(homeName), { range: 2 });
+      return;
     }
-    // If the creep is not building
-else {
-  // === CROSS-ROOM REFUEL LOGIC ===
-  const homeName = ensureHome(creep);
-
-  // 1) Try to refuel in the current room first
-  let src = findWithdrawTargetInRoom(creep.room);
-  if (src) {
-    const r = creep.withdraw(src, RESOURCE_ENERGY);
-    if (r === ERR_NOT_IN_RANGE) go(creep, src, { range: 1 });
-    return;
-  }
-
-  // 2) No energy here. If not in home room, travel home to refuel.
-  if (creep.pos.roomName !== homeName) {
-    const anchor = getHomeAnchorPos(homeName);
-    go(creep, anchor, { range: 1 });
-    return;
-  }
-
-  // 3) We're in home; check again (vision may differ)
-  src = findWithdrawTargetInRoom(creep.room);
-  if (src) {
-    const r = creep.withdraw(src, RESOURCE_ENERGY);
-    if (r === ERR_NOT_IN_RANGE) go(creep, src, { range: 1 });
-    return;
-  }
-
-  // 4) Last resort so we don't stall forever: harvest
-  const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
-  if (source) {
-    const r = creep.harvest(source);
-    if (r === ERR_NOT_IN_RANGE) go(creep, source);
-    return;
-  }
-
-  // 5) Truly nothing available? Idle at anchor and wait for haulers.
-  go(creep, getHomeAnchorPos(homeName), { range: 2 });
-  return;
-}   
   },
-  // Function to upgrade the controller when there are no construction sites
+
+  // (Optional utility) Upgrade when appropriate (kept from your original)
   upgradeController: function (creep) {
     var controller = creep.room.controller;
-    if (controller.level === 8 && controller.ticksToDowngrade > 180000) {
-      // Skip upgrading to save energy when controller is stable
-      return;
-    }
-    if (creep.upgradeController(controller) == ERR_NOT_IN_RANGE) {
-      // If not in range, move towards the controller with visualization
-      BeeToolbox.BeeTravel(creep, controller);
-      //creep.moveTo(controller, {reusePath: 10, visualizePathStyle:{opacity: .8 ,stroke: '#32a852',lineStyle: 'dashed'}});
+    if (!controller) return;
+    if (controller.level === 8 && controller.ticksToDowngrade > 180000) return;
+    if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
+      go(creep, controller, { range: 3 });
     }
   },
-  // Function to build predefined structures at specified positions
+
+  // Place your predefined blueprint relative to the first spawn
   buildPredefinedStructures: function (creep) {
+    var spawns = creep.room.find(FIND_MY_SPAWNS);
+    if (!spawns.length) return;
+    var base = spawns[0].pos;
+
     for (var i = 0; i < TaskBuilder.structurePlacements.length; i++) {
       var placement = TaskBuilder.structurePlacements[i];
-      var targetPosition = new RoomPosition(
-        placement.x + creep.room.find(FIND_MY_SPAWNS)[0].pos.x,
-        placement.y + creep.room.find(FIND_MY_SPAWNS)[0].pos.y,
-        creep.room.find(FIND_MY_SPAWNS)[0].pos.roomName
-      );
-      // Check if a structure or construction site already exists at the specified spot
-      if (
-        targetPosition.lookFor(LOOK_STRUCTURES).length === 0 &&
-        targetPosition.lookFor(LOOK_CONSTRUCTION_SITES).length === 0
-      ) {
-        // Build the structure at the specified spot
-        TaskBuilder.buildStructures(creep, targetPosition, placement.type);
-      }
+      var tx = base.x + placement.x;
+      var ty = base.y + placement.y;
+      if (tx < 0 || tx > 49 || ty < 0 || ty > 49) continue;
+
+      var targetPosition = new RoomPosition(tx, ty, base.roomName);
+
+      if (targetPosition.lookFor(LOOK_STRUCTURES).length > 0) continue;
+      if (targetPosition.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
+
+      TaskBuilder.buildStructures(creep, targetPosition, placement.type);
     }
   },
-  // Function to build structures at a specified position
+
   buildStructures: function (creep, targetPosition, structureType) {
-    // Check if the structure limit has been reached for the specified type
-    if (
-      TaskBuilder.structureLimits[structureType] &&
-      TaskBuilder.countStructures(creep.room, structureType) >= TaskBuilder.structureLimits[structureType]
-    ) {
-      return;
-    }
-    // Create a construction site for the structure at the specified position
+    // Respect both soft limits and RCL limits
+    var softLimit = TaskBuilder.structureLimits[structureType] != null ? TaskBuilder.structureLimits[structureType] : Infinity;
+    var rcl = creep.room.controller ? creep.room.controller.level : 0;
+    var rclLimit = (CONTROLLER_STRUCTURES[structureType] && CONTROLLER_STRUCTURES[structureType][rcl] != null)
+                    ? CONTROLLER_STRUCTURES[structureType][rcl]
+                    : Infinity;
+    var allowed = Math.min(softLimit, rclLimit);
+
+    if (TaskBuilder.countStructures(creep.room, structureType) >= allowed) return;
+
     creep.room.createConstructionSite(targetPosition, structureType);
   },
-  // Function to count structures of a specific type in the room
+
   countStructures: function (room, structureType) {
-    return (
-      room.find(FIND_STRUCTURES, { filter: { structureType: structureType } }).length +
-      room.find(FIND_CONSTRUCTION_SITES, { filter: { structureType: structureType } }).length
-    );
+    var built = room.find(FIND_STRUCTURES, { filter: { structureType: structureType } }).length;
+    var sites = room.find(FIND_CONSTRUCTION_SITES, { filter: { structureType: structureType } }).length;
+    return built + sites;
   },
 
-
-  // Plan construction sites every tick without needing a Builder creep
-  ensureSites(room) {
+  // Plan construction sites periodically (no Builder required)
+  ensureSites: function(room) {
     if (!room || !room.controller || !room.controller.my) return;
 
-    const spawns = room.find(FIND_MY_SPAWNS);
+    var spawns = room.find(FIND_MY_SPAWNS);
     if (!spawns.length) return;
-    const center = spawns[0].pos;
+    var center = spawns[0].pos;
 
-    // gentle throttle & cap so we don't spam sites
-    const MAX_SITES_PER_TICK = 5;
+    var MAX_SITES_PER_TICK = 5;
     if (!Memory.rooms) Memory.rooms = {};
     if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-    const mem = Memory.rooms[room.name];
-    const next = mem.nextPlanTick || 0;
+    var mem = Memory.rooms[room.name];
+
+    var next = mem.nextPlanTick || 0;
     if (Game.time < next) return;
 
-    let placed = 0;
+    var placed = 0;
 
-    for (let i = 0; i < TaskBuilder.structurePlacements.length; i++) {
+    for (var i = 0; i < TaskBuilder.structurePlacements.length; i++) {
       if (placed >= MAX_SITES_PER_TICK) break;
 
-      const p = TaskBuilder.structurePlacements[i];
-      const target = new RoomPosition(center.x + p.x, center.y + p.y, room.name);
+      var p = TaskBuilder.structurePlacements[i];
+      var tx = center.x + p.x, ty = center.y + p.y;
+      if (tx < 0 || tx > 49 || ty < 0 || ty > 49) continue;
 
-      // skip if blocked or already has structure/site
+      var target = new RoomPosition(tx, ty, room.name);
+
       if (target.lookFor(LOOK_STRUCTURES).length > 0) continue;
       if (target.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
 
-      // respect RCL and any soft limits you defined
-      const rcl = room.controller.level;
-      const rclLimit = (CONTROLLER_STRUCTURES[p.type] && CONTROLLER_STRUCTURES[p.type][rcl]);
-      const softLimit = (TaskBuilder.structureLimits && TaskBuilder.structureLimits[p.type]);
-      const allowed = Math.min(rclLimit, softLimit);
+      var rcl = room.controller.level;
+      var rclLimit = (CONTROLLER_STRUCTURES[p.type] && CONTROLLER_STRUCTURES[p.type][rcl] != null)
+                      ? CONTROLLER_STRUCTURES[p.type][rcl]
+                      : Infinity;
+      var softLimit = (TaskBuilder.structureLimits && TaskBuilder.structureLimits[p.type] != null)
+                      ? TaskBuilder.structureLimits[p.type]
+                      : Infinity;
+      var allowed = Math.min(rclLimit, softLimit);
 
-      // how many exist (built + sites) of this type
-      const have = TaskBuilder.countStructures(room, p.type);
+      var have = TaskBuilder.countStructures(room, p.type);
       if (have >= allowed) continue;
 
-      const terr = room.getTerrain().get(target.x, target.y);
+      var terr = room.getTerrain().get(target.x, target.y);
       if (terr === TERRAIN_MASK_WALL) continue;
 
-      const res = room.createConstructionSite(target, p.type);
+      var res = room.createConstructionSite(target, p.type);
       if (res === OK) placed++;
     }
 
-    // try again in a few ticks (skip extra CPU if we just placed some)
     mem.nextPlanTick = Game.time + (placed ? 10 : 25);
-  },
-  
-  
+  }
 };
+
 module.exports = TaskBuilder;
