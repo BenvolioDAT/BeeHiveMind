@@ -136,7 +136,7 @@ var BeeHiveMind = {
         CombatMedic:   1,
         Dismantler:    0,
         Trucker:       0,
-        Claimer:       1,
+        Claimer:       4,
       };
 
       // Ghost filter: don’t count creeps that will die very soon
