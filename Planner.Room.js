@@ -1,186 +1,241 @@
-//Planner.Room.js
+// Planner.Room.es5.cpu.js
 // Single source of truth for room/base planning & construction site placement
+// ES5-safe + CPU-minded: per-tick scans, zero-allocation placement, RCL-aware limits, staggered.
 
-const RoomPlanner = {
-    // Define limits for each structure type
-    structureLimits: {
-        STRUCTURE_TOWER: 6,
-        STRUCTURE_EXTENSION: 60,
-        STRUCTURE_CONTAINER: 10,
-        STRUCTURE_RAMPART: 2,
-        STRUCTURE_ROAD: 150,
-    },
+'use strict';
 
-    BASE_OFFSETS:[
-        { type: STRUCTURE_STORAGE,   x:  8, y: 0},//1
-        { type: STRUCTURE_SPAWN,     x: -5, y: 0},
-        { type: STRUCTURE_SPAWN,     x:  5, y: 0},
+var CFG = Object.freeze({
+  maxSitesPerTick: 5,            // gentle drip; global cap is 100
+  csiteSafetyLimit: 95,          // stop early if we’re near the global cap
+  tickModulo: 5,                 // stagger planners across rooms; set to 1 to run every tick
+  noPlacementCooldownPlaced: 10, // ticks to wait after we successfully place >=1 site
+  noPlacementCooldownNone: 25    // ticks to wait when nothing placed
+});
 
-        //{ type: STRUCTURE_CONTAINER, x: 5, y: 0},
+var RoomPlanner = {
+  // Hard caps (upper bounds). Also clamped by CONTROLLER_STRUCTURES per RCL.
+  structureLimits: (function () {
+    var o = {};
+    o[STRUCTURE_TOWER]     = 6;
+    o[STRUCTURE_EXTENSION] = 60;
+    o[STRUCTURE_CONTAINER] = 10;
+    o[STRUCTURE_RAMPART]   = 2;
+    o[STRUCTURE_ROAD]      = 150;
+    return o;
+  })(),
 
-        { type: STRUCTURE_EXTENSION, x: 0, y: 2 },//1
-        { type: STRUCTURE_EXTENSION, x: 0, y:-2 },//2
-        { type: STRUCTURE_EXTENSION, x: 0, y: 3 },//3
-        { type: STRUCTURE_EXTENSION, x: 0, y:-3 },//4
-        { type: STRUCTURE_EXTENSION, x:-1, y: 3 },//5
-        { type: STRUCTURE_EXTENSION, x:-1, y:-3 },//6
-        { type: STRUCTURE_EXTENSION, x: 1, y:-3 },//7
-        { type: STRUCTURE_EXTENSION, x: 1, y: 3 },//8
-        { type: STRUCTURE_EXTENSION, x:-1, y: 2 },//9
-        { type: STRUCTURE_EXTENSION, x:-1, y:-2 },//10
-        { type: STRUCTURE_EXTENSION, x: 1, y: 2 },//11
-        { type: STRUCTURE_EXTENSION, x: 1, y:-2 },//12 
-        { type: STRUCTURE_EXTENSION, x:-2, y:-1 },//13
-        { type: STRUCTURE_EXTENSION, x:-2, y: 1 },//14
-        { type: STRUCTURE_EXTENSION, x: 2, y:-1 },//15
-        { type: STRUCTURE_EXTENSION, x: 2, y: 1 },//16
-        { type: STRUCTURE_EXTENSION, x:-3, y: 1 },//17
-        { type: STRUCTURE_EXTENSION, x:-3, y:-1 },//18
-        { type: STRUCTURE_EXTENSION, x: 3, y: 1 },//19
-        { type: STRUCTURE_EXTENSION, x: 3, y:-1 },//20
-        { type: STRUCTURE_EXTENSION, x:-3, y: 2 },//21
-        { type: STRUCTURE_EXTENSION, x:-3, y:-2 },//22
-        { type: STRUCTURE_EXTENSION, x: 3, y: 2 },//23
-        { type: STRUCTURE_EXTENSION, x: 3, y:-2 },//24
-        { type: STRUCTURE_EXTENSION, x:-4, y: 2 },//25
-        { type: STRUCTURE_EXTENSION, x:-4, y:-2 },//26
-        { type: STRUCTURE_EXTENSION, x: 4, y: 2 },//27
-        { type: STRUCTURE_EXTENSION, x: 4, y:-2 },//28
-        { type: STRUCTURE_EXTENSION, x: 4, y: 3 },//29
-        { type: STRUCTURE_EXTENSION, x: 4, y:-3 },//30
-        { type: STRUCTURE_EXTENSION, x:-4, y: 3 },//31
-        { type: STRUCTURE_EXTENSION, x:-4, y:-3 },//32
-        { type: STRUCTURE_EXTENSION, x:-4, y: 4 },//33
-        { type: STRUCTURE_EXTENSION, x:-4, y:-4 },//34
-        { type: STRUCTURE_EXTENSION, x: 4, y: 4 },//35
-        { type: STRUCTURE_EXTENSION, x: 4, y:-4 },//36
-        { type: STRUCTURE_EXTENSION, x: 3, y: 4 },//37
-        { type: STRUCTURE_EXTENSION, x: 3, y:-4 },//38
-        { type: STRUCTURE_EXTENSION, x:-3, y: 4 },//39
-        { type: STRUCTURE_EXTENSION, x:-3, y:-4 },//40
-        { type: STRUCTURE_EXTENSION, x:-2, y: 4 },//41
-        { type: STRUCTURE_EXTENSION, x:-2, y:-4 },//42
-        { type: STRUCTURE_EXTENSION, x: 2, y: 4 },//43
-        { type: STRUCTURE_EXTENSION, x: 2, y:-4 },//44
-        { type: STRUCTURE_EXTENSION, x: 2, y: 5 },//45
-        { type: STRUCTURE_EXTENSION, x: 2, y:-5 },//46
-        { type: STRUCTURE_EXTENSION, x:-2, y:-5 },//47
-        { type: STRUCTURE_EXTENSION, x:-2, y: 5 },//48
-        { type: STRUCTURE_EXTENSION, x:-1, y:-5 },//49
-        { type: STRUCTURE_EXTENSION, x:-1, y: 5 },//50
-        { type: STRUCTURE_EXTENSION, x: 1, y: 5 },//51
-        { type: STRUCTURE_EXTENSION, x: 1, y:-5 },//52
-        { type: STRUCTURE_EXTENSION, x: 0, y: 5 },//53
-        { type: STRUCTURE_EXTENSION, x: 0, y:-5 },//54
-        { type: STRUCTURE_EXTENSION, x:-4, y: 0 },//55
-        { type: STRUCTURE_EXTENSION, x: 4, y: 0 },//56
-        { type: STRUCTURE_EXTENSION, x:-5, y: 1 },//57
-        { type: STRUCTURE_EXTENSION, x:-5, y:-1 },//58
-        { type: STRUCTURE_EXTENSION, x: 5, y: 1 },//59
-        { type: STRUCTURE_EXTENSION, x: 5, y:-1 },//60 
-        // TOWER LOCATIONS
-        //{ type: STRUCTURE_TOWER, x:-5, y:-5 },//1
-        //{ type: STRUCTURE_TOWER, x: 5, y: 5 },//2
-        //{ type: STRUCTURE_TOWER, x:-5, y: 5 },//3
-        //{ type: STRUCTURE_TOWER, x: 5, y:-5 },//4
-        //{ type: STRUCTURE_TOWER, x:-1, y: 0 },//5
-        //{ type: STRUCTURE_TOWER, x: 1, y: 0 },//6
-        { type: STRUCTURE_ROAD, x: 1, y: 1 },
-        { type: STRUCTURE_ROAD, x: 0, y: 1 },
-        { type: STRUCTURE_ROAD, x:-1, y: 1 },
-        { type: STRUCTURE_ROAD, x:-1, y: 0 },
-        { type: STRUCTURE_ROAD, x:-1, y:-1 },
-        { type: STRUCTURE_ROAD, x: 0, y:-1 },
-        { type: STRUCTURE_ROAD, x: 1, y:-1 },
-        { type: STRUCTURE_ROAD, x: 1, y: 0 },
-        { type: STRUCTURE_ROAD, x: 2, y: 0 },
-        { type: STRUCTURE_ROAD, x: 3, y: 0 },
-        { type: STRUCTURE_ROAD, x:-2, y: 0 },
-        { type: STRUCTURE_ROAD, x:-3, y: 0 },
-        { type: STRUCTURE_ROAD, x:-4, y: 1 },
-        { type: STRUCTURE_ROAD, x:-4, y:-1 },
-        { type: STRUCTURE_ROAD, x: 4, y:-1 },
-        { type: STRUCTURE_ROAD, x: 4, y: 1 },
-        { type: STRUCTURE_ROAD, x: 2, y: 2 },
-        { type: STRUCTURE_ROAD, x: 2, y:-2 },
-        { type: STRUCTURE_ROAD, x: 3, y:-3 },
-        { type: STRUCTURE_ROAD, x: 3, y: 3 },
-        { type: STRUCTURE_ROAD, x:-2, y: 2 },
-        { type: STRUCTURE_ROAD, x:-2, y:-2 },
-        { type: STRUCTURE_ROAD, x:-3, y:-3 },
-        { type: STRUCTURE_ROAD, x:-3, y: 3 },
-        { type: STRUCTURE_ROAD, x:-2, y: 3 },
-        { type: STRUCTURE_ROAD, x: 2, y: 3 },
-        { type: STRUCTURE_ROAD, x:-2, y:-3 },
-        { type: STRUCTURE_ROAD, x: 2, y:-3 },
-        { type: STRUCTURE_ROAD, x:-1, y: 4 },
-        { type: STRUCTURE_ROAD, x: 1, y: 4 },
-        { type: STRUCTURE_ROAD, x:-1, y:-4 },
-        { type: STRUCTURE_ROAD, x: 1, y:-4 },
-        { type: STRUCTURE_ROAD, x: 0, y: 4 },
-        { type: STRUCTURE_ROAD, x: 0, y:-4 },
-        // Add more structures with their positions
-    ],
+  BASE_OFFSETS: [
+    { type: STRUCTURE_STORAGE,   x:  8, y:  0 },
+    { type: STRUCTURE_SPAWN,     x: -5, y:  0 },
+    { type: STRUCTURE_SPAWN,     x:  5, y:  0 },
 
-    ensureSites(room) {
-        if (!room || !room.controller || !room.controller.my) return;
+    { type: STRUCTURE_EXTENSION, x:  0, y:  2 },
+    { type: STRUCTURE_EXTENSION, x:  0, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  0, y:  3 },
+    { type: STRUCTURE_EXTENSION, x:  0, y: -3 },
+    { type: STRUCTURE_EXTENSION, x: -1, y:  3 },
+    { type: STRUCTURE_EXTENSION, x: -1, y: -3 },
+    { type: STRUCTURE_EXTENSION, x:  1, y: -3 },
+    { type: STRUCTURE_EXTENSION, x:  1, y:  3 },
+    { type: STRUCTURE_EXTENSION, x: -1, y:  2 },
+    { type: STRUCTURE_EXTENSION, x: -1, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  1, y:  2 },
+    { type: STRUCTURE_EXTENSION, x:  1, y: -2 },
+    { type: STRUCTURE_EXTENSION, x: -2, y: -1 },
+    { type: STRUCTURE_EXTENSION, x: -2, y:  1 },
+    { type: STRUCTURE_EXTENSION, x:  2, y: -1 },
+    { type: STRUCTURE_EXTENSION, x:  2, y:  1 },
+    { type: STRUCTURE_EXTENSION, x: -3, y:  1 },
+    { type: STRUCTURE_EXTENSION, x: -3, y: -1 },
+    { type: STRUCTURE_EXTENSION, x:  3, y:  1 },
+    { type: STRUCTURE_EXTENSION, x:  3, y: -1 },
+    { type: STRUCTURE_EXTENSION, x: -3, y:  2 },
+    { type: STRUCTURE_EXTENSION, x: -3, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  3, y:  2 },
+    { type: STRUCTURE_EXTENSION, x:  3, y: -2 },
+    { type: STRUCTURE_EXTENSION, x: -4, y:  2 },
+    { type: STRUCTURE_EXTENSION, x: -4, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  4, y:  2 },
+    { type: STRUCTURE_EXTENSION, x:  4, y: -2 },
+    { type: STRUCTURE_EXTENSION, x:  4, y:  3 },
+    { type: STRUCTURE_EXTENSION, x:  4, y: -3 },
+    { type: STRUCTURE_EXTENSION, x: -4, y:  3 },
+    { type: STRUCTURE_EXTENSION, x: -4, y: -3 },
+    { type: STRUCTURE_EXTENSION, x: -4, y:  4 },
+    { type: STRUCTURE_EXTENSION, x: -4, y: -4 },
+    { type: STRUCTURE_EXTENSION, x:  4, y:  4 },
+    { type: STRUCTURE_EXTENSION, x:  4, y: -4 },
+    { type: STRUCTURE_EXTENSION, x:  3, y:  4 },
+    { type: STRUCTURE_EXTENSION, x:  3, y: -4 },
+    { type: STRUCTURE_EXTENSION, x: -3, y:  4 },
+    { type: STRUCTURE_EXTENSION, x: -3, y: -4 },
+    { type: STRUCTURE_EXTENSION, x: -2, y:  4 },
+    { type: STRUCTURE_EXTENSION, x: -2, y: -4 },
+    { type: STRUCTURE_EXTENSION, x:  2, y:  4 },
+    { type: STRUCTURE_EXTENSION, x:  2, y: -4 },
+    { type: STRUCTURE_EXTENSION, x:  2, y:  5 },
+    { type: STRUCTURE_EXTENSION, x:  2, y: -5 },
+    { type: STRUCTURE_EXTENSION, x: -2, y: -5 },
+    { type: STRUCTURE_EXTENSION, x: -2, y:  5 },
+    { type: STRUCTURE_EXTENSION, x: -1, y: -5 },
+    { type: STRUCTURE_EXTENSION, x: -1, y:  5 },
+    { type: STRUCTURE_EXTENSION, x:  1, y:  5 },
+    { type: STRUCTURE_EXTENSION, x:  1, y: -5 },
+    { type: STRUCTURE_EXTENSION, x:  0, y:  5 },
+    { type: STRUCTURE_EXTENSION, x:  0, y: -5 },
+    { type: STRUCTURE_EXTENSION, x: -4, y:  0 },
+    { type: STRUCTURE_EXTENSION, x:  4, y:  0 },
+    { type: STRUCTURE_EXTENSION, x: -5, y:  1 },
+    { type: STRUCTURE_EXTENSION, x: -5, y: -1 },
+    { type: STRUCTURE_EXTENSION, x:  5, y:  1 },
+    { type: STRUCTURE_EXTENSION, x:  5, y: -1 },
 
-        //anchor = first spawn(stable & cheap)
-        const spawns = room.find(FIND_MY_SPAWNS);
-        if (!spawns.length) return;
-        const anchor = spawns[0].pos;
+    // roads
+    { type: STRUCTURE_ROAD, x:  1, y:  1 },
+    { type: STRUCTURE_ROAD, x:  0, y:  1 },
+    { type: STRUCTURE_ROAD, x: -1, y:  1 },
+    { type: STRUCTURE_ROAD, x: -1, y:  0 },
+    { type: STRUCTURE_ROAD, x: -1, y: -1 },
+    { type: STRUCTURE_ROAD, x:  0, y: -1 },
+    { type: STRUCTURE_ROAD, x:  1, y: -1 },
+    { type: STRUCTURE_ROAD, x:  1, y:  0 },
+    { type: STRUCTURE_ROAD, x:  2, y:  0 },
+    { type: STRUCTURE_ROAD, x:  3, y:  0 },
+    { type: STRUCTURE_ROAD, x: -2, y:  0 },
+    { type: STRUCTURE_ROAD, x: -3, y:  0 },
+    { type: STRUCTURE_ROAD, x: -4, y:  1 },
+    { type: STRUCTURE_ROAD, x: -4, y: -1 },
+    { type: STRUCTURE_ROAD, x:  4, y: -1 },
+    { type: STRUCTURE_ROAD, x:  4, y:  1 },
+    { type: STRUCTURE_ROAD, x:  2, y:  2 },
+    { type: STRUCTURE_ROAD, x:  2, y: -2 },
+    { type: STRUCTURE_ROAD, x:  3, y: -3 },
+    { type: STRUCTURE_ROAD, x:  3, y:  3 },
+    { type: STRUCTURE_ROAD, x: -2, y:  2 },
+    { type: STRUCTURE_ROAD, x: -2, y: -2 },
+    { type: STRUCTURE_ROAD, x: -3, y: -3 },
+    { type: STRUCTURE_ROAD, x: -3, y:  3 },
+    { type: STRUCTURE_ROAD, x: -2, y:  3 },
+    { type: STRUCTURE_ROAD, x:  2, y:  3 },
+    { type: STRUCTURE_ROAD, x: -2, y: -3 },
+    { type: STRUCTURE_ROAD, x:  2, y: -3 },
+    { type: STRUCTURE_ROAD, x: -1, y:  4 },
+    { type: STRUCTURE_ROAD, x:  1, y:  4 },
+    { type: STRUCTURE_ROAD, x: -1, y: -4 },
+    { type: STRUCTURE_ROAD, x:  1, y: -4 },
+    { type: STRUCTURE_ROAD, x:  0, y:  4 },
+    { type: STRUCTURE_ROAD, x:  0, y: -4 }
+  ],
 
-        const mem = RoomPlanner._memory(room);
-        if (mem.netPlanTick && Game.time < mem.nextPlanTick) return;
+  ensureSites: function (room) {
+    if (!room || !room.controller || !room.controller.my) return;
 
-        const MAX_SITES_PER_TICK = 5; // be gentle: site cap is 100 global
-        let placed = 0;
+    // stagger per room to flatten CPU spikes
+    if (CFG.tickModulo > 1) {
+      var h = 0, n = room.name;
+      for (var iHash = 0; iHash < n.length; iHash++) h = (h * 31 + n.charCodeAt(iHash)) | 0;
+      if (((Game.time + (h & 3)) % CFG.tickModulo) !== 0) return;
+    }
 
-        for (const p of RoomPlanner.BASE_OFFSETS) {
-            if (placed >= MAX_SITES_PER_TICK) break;
+    var mem = RoomPlanner._memory(room);
+    if (mem.nextPlanTick && Game.time < mem.nextPlanTick) return;
 
-            const tx = anchor.x + p.x;
-            const ty = anchor.y + p.y;
-            if (tx < 1 || tx > 48 || ty < 1 || ty > 48) continue;
+    // anchor = first spawn (stable & cheap)
+    var spawns = room.find(FIND_MY_SPAWNS);
+    if (!spawns.length) return;
+    var anchor = spawns[0].pos;
 
-            const target = new RoomPosition(tx, ty, room.name);
+    // global csite count once, bail if near cap
+    var globalCsiteCount = Object.keys(Game.constructionSites).length;
+    if (globalCsiteCount >= CFG.csiteSafetyLimit) {
+      mem.nextPlanTick = Game.time + CFG.noPlacementCooldownNone;
+      return;
+    }
 
-            //skip if something already here
-            const already =
-                target.lookFor(LOOK_STRUCTURES).length ||
-                target.lookFor(LOOK_CONSTRUCTION_SITES).length;
-            if (already) continue;
+    // pre-scan structures & sites once (CPU saver)
+    var built = Object.create(null);
+    var sites = Object.create(null);
+    var terrain = room.getTerrain();
 
-            //respect hard limits (existing + sites)
-            if (RoomPlanner._isAtLimit(room, p.type)) continue;
+    var arrStructs = room.find(FIND_STRUCTURES);
+    for (var i = 0; i < arrStructs.length; i++) {
+      var stype = arrStructs[i].structureType;
+      built[stype] = (built[stype] | 0) + 1;
+    }
 
-            // don't place into walls
-            const terr = room.getTerrain().get(tx, ty);
-            if (terr === TERRAIN_MASK_WALL) continue;
+    var arrSites = room.find(FIND_CONSTRUCTION_SITES);
+    for (var j = 0; j < arrSites.length; j++) {
+      var sType = arrSites[j].structureType;
+      sites[sType] = (sites[sType] | 0) + 1;
+    }
 
-            if (room.createConstructionSite(target, p.type) === OK) {
-                placed++;
-            }
+    function allowed(type) {
+      var hard = (RoomPlanner.structureLimits && RoomPlanner.structureLimits[type] !== undefined)
+        ? RoomPlanner.structureLimits[type] : Infinity;
+      var ctrl = Infinity;
+      if (room.controller && typeof CONTROLLER_STRUCTURES !== 'undefined') {
+        var table = CONTROLLER_STRUCTURES[type];
+        if (table) {
+          var lvl = room.controller.level | 0;
+          ctrl = (table[lvl] != null) ? table[lvl] : 0;
+        } else {
+          ctrl = 0;
         }
+      }
+      return (hard < ctrl) ? hard : ctrl;
+    }
 
-        mem.nextPlanTick = Game.time + (placed ? 10 : 25);
-    },
+    var placed = 0;
+    var cCount = globalCsiteCount;
 
-    // ---Helpers---
-    _memory(room) {
-        if (!Memory.rooms) Memory.rooms = {};
-        if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-        if (!Memory.rooms[room.name].planner) Memory.rooms[room.name].planner = {};
-        return Memory.rooms[room.name].planner;
-    },
+    function hasAnythingAt(x, y) {
+      if (room.lookForAt(LOOK_STRUCTURES, x, y).length) return true;
+      if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return true;
+      return false;
+    }
 
-    _isAtLimit(room, type) {
-        const lim = this.structureLimits[type];
-        if (!lim) return false;
-        const built = room.find(FIND_STRUCTURES, { filter: s => s.structureType === type }).length;
-        const sites = room.find(FIND_CONSTRUCTION_STIES, { filter: s => s.structureType === type}).length;
-        return (built + sites) >= lim;
-    },
+    for (var k = 0; k < RoomPlanner.BASE_OFFSETS.length; k++) {
+      if (placed >= CFG.maxSitesPerTick) break;
+      if (cCount >= CFG.csiteSafetyLimit) break;
+
+      var p = RoomPlanner.BASE_OFFSETS[k];
+      var tx = anchor.x + p.x;
+      var ty = anchor.y + p.y;
+
+      // bounds + terrain check (walls are out)
+      if (tx < 1 || tx > 48 || ty < 1 || ty > 48) continue;
+      if (terrain.get(tx, ty) === TERRAIN_MASK_WALL) continue;
+
+      // skip if already occupied (built or site)
+      if (hasAnythingAt(tx, ty)) continue;
+
+      // respect limits now (built + sites < allowed)
+      var t = p.type;
+      var have = (built[t] | 0) + (sites[t] | 0);
+      var cap = allowed(t);
+      if (have >= cap) continue;
+
+      // try to place (x,y,type) zero-allocation call
+      var rc = room.createConstructionSite(tx, ty, t);
+      if (rc === OK) {
+        placed++;
+        cCount++;
+        sites[t] = (sites[t] | 0) + 1;
+        if (cCount >= CFG.csiteSafetyLimit) break;
+      }
+      // else ignore errors; will retry on a later pass
+    }
+
+    mem.nextPlanTick = Game.time + (placed ? CFG.noPlacementCooldownPlaced : CFG.noPlacementCooldownNone);
+  },
+
+  // --- Helpers ---
+  _memory: function (room) {
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+    if (!Memory.rooms[room.name].planner) Memory.rooms[room.name].planner = {};
+    return Memory.rooms[room.name].planner;
+  }
 };
 
 module.exports = RoomPlanner;

@@ -1,9 +1,9 @@
-// Planner.Road.clean.refactor.js
-// Readable, staged road planner for Screeps
-// - Builds a home-room logistics spine (spawn → storage) and spokes to sources (and optional controller).
+// Planner.Road.clean.refactor.cpu.js
+// CPU-minded, staged road planner for Screeps
+// - Builds a home-room logistics spine (spawn → storage) and spokes to sources (+ optional controller).
 // - Plans + drip-places ROAD sites to remote sources used by your remote-harvest creeps.
 // - Audits occasionally and relaunches placements if tiles decay.
-// Compatible with vanilla Screeps API: PathFinder, CostMatrix, Room.createConstructionSite, etc.
+// Design goals: cut repeated work per tick; reuse path/state; avoid allocations in hot loops.
 
 'use strict';
 
@@ -16,39 +16,79 @@ const CFG = Object.freeze({
   swampCost: 10,
   roadCost: 1,
 
+  // Pathfinding safety caps (prevent expensive searches on mega routes)
+  maxRoomsPlanning: 6,        // cap path search footprint (tune for your empire layout)
+  maxOpsPlanning: 20000,      // PathFinder ops guardrail; lower on CPU pinches
+
   // Placement behavior
-  placeBudgetPerTick: 10, // how many tiles we attempt to place per tick across a path
-  globalCSiteSafetyLimit: 95, // stop if we’re close to the global 100 cap
-  auditInterval: 100, // every N ticks we do a light audit pass (with a tiny random chance in between)
-  randomAuditChance: 0.01, // 1% random background audit on off-ticks
+  placeBudgetPerTick: 10,     // ROAD sites we attempt per tick across a path
+  globalCSiteSafetyLimit: 95, // skip if near 100 cap
+  plannerTickModulo: 3,       // run ensureRemoteRoads only 1/modulo ticks (staggered by room)
+  // Auditing: regular interval + tiny random chance to smooth load
+  auditInterval: 100,         // bumped for calmer CPU
+  randomAuditChance: 0.01,    // 1% background audit on off-ticks
 
   // Home network
   includeControllerSpoke: true
 });
 
 /** =========================
- *  Small utilities
+ *  One-tick caches (zero cost across module calls the same tick)
  *  ========================= */
+const _tick = () => Game.time;
 
-/**
- * @param {RoomPosition} pos
- * @returns {boolean} true if there is already a road or a road construction site on this tile
- */
-function hasRoadOrRoadSite(pos) {
-  // Structures first (fast)
-  const structures = pos.lookFor(LOOK_STRUCTURES);
-  for (const s of structures) if (s.structureType === STRUCTURE_ROAD) return true;
-
-  // Sites next
-  const sites = pos.lookFor(LOOK_CONSTRUCTION_SITES);
-  for (const cs of sites) if (cs.structureType === STRUCTURE_ROAD) return true;
-
-  return false;
+if (!global.__RPM) {
+  global.__RPM = {
+    csiteCountTick: -1,
+    csiteCount: 0,
+    cmTick: -1,
+    cm: Object.create(null), // roomName -> CostMatrix (per tick)
+    remoteTick: -1,
+    remotes: [],
+  };
 }
 
-/** Convert plain step (x,y,roomName) into a RoomPosition. */
-function toPos(step) {
-  return new RoomPosition(step.x, step.y, step.roomName);
+/** Get global construction site count once per tick. */
+function getCSiteCountOnce() {
+  if (__RPM.csiteCountTick === _tick()) return __RPM.csiteCount;
+  __RPM.csiteCountTick = _tick();
+  // Counting keys is fine; we do it once.
+  __RPM.csiteCount = Object.keys(Game.constructionSites).length;
+  return __RPM.csiteCount;
+}
+
+/** Cached active remote rooms (scan creeps once per tick). */
+function activeRemotesOncePerTick() {
+  if (__RPM.remoteTick === _tick()) return __RPM.remotes;
+  const set = new Set();
+  for (const name in Game.creeps) {
+    const c = Game.creeps[name];
+    if (c && c.memory && c.memory.task === 'remoteharvest' && c.memory.targetRoom) {
+      set.add(c.memory.targetRoom);
+    }
+  }
+  __RPM.remotes = [...set];
+  __RPM.remoteTick = _tick();
+  return __RPM.remotes;
+}
+
+/** =========================
+ *  Fast tile checks (avoid allocations)
+ *  ========================= */
+/**
+ * Cheap check for existing road or road site at (x,y) in room.
+ * Uses room.lookForAt to avoid constructing RoomPosition objects in hot loops.
+ */
+function hasRoadOrRoadSiteFast(room, x, y) {
+  // Structures first (fast path)
+  const sArr = room.lookForAt(LOOK_STRUCTURES, x, y);
+  for (let i = 0; i < sArr.length; i++) if (sArr[i].structureType === STRUCTURE_ROAD) return true;
+
+  // Then sites
+  const siteArr = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y);
+  for (let i = 0; i < siteArr.length; i++) if (siteArr[i].structureType === STRUCTURE_ROAD) return true;
+
+  return false;
 }
 
 /** =========================
@@ -56,35 +96,45 @@ function toPos(step) {
  *  ========================= */
 const RoadPlanner = {
   /**
-   * Call this once per tick from your main loop.
-   * - Ensures staged home network (spawn→storage, spokes to sources, optional controller).
-   * - Ensures remote roads to active remote sources (discovered via creeps with task=remoteharvest).
+   * Call this from your main loop (once per owned room, or just your primary room).
+   * CPU guards:
+   *  - Stagger by room via plannerTickModulo
+   *  - Remote list cached once per tick
+   *  - Per-room CostMatrix cached per tick
    * @param {Room} homeRoom
    */
   ensureRemoteRoads(homeRoom) {
     if (!homeRoom || !homeRoom.controller || !homeRoom.controller.my) return;
 
+    // Stagger work across rooms/ticks to flatten spikes:
+    if (CFG.plannerTickModulo > 1) {
+      // Stagger by roomName hash (cheap + stable)
+      let h = 0;
+      for (let i = 0; i < homeRoom.name.length; i++) h = (h * 31 + homeRoom.name.charCodeAt(i)) | 0;
+      if (((_tick() + (h & 3)) % CFG.plannerTickModulo) !== 0) return;
+    }
+
     const mem = this._memory(homeRoom);
 
-    // Require at least one spawn known early game
+    // Require some anchor in early game
     const spawns = homeRoom.find(FIND_MY_SPAWNS);
     if (!spawns.length && !homeRoom.storage) return;
 
     // 1) Staged home logistics network
     this._ensureStagedHomeNetwork(homeRoom);
 
-    // 2) Remote spokes for any active remote-harvest creeps
-    const activeRemotes = this._discoverActiveRemoteRoomsFromCreeps();
+    // 2) Remote spokes for any active remote-harvest creeps (list cached once per tick)
+    const activeRemotes = activeRemotesOncePerTick();
     for (const remoteName of activeRemotes) {
       const rmem = Memory.rooms && Memory.rooms[remoteName];
-      if (!rmem || !rmem.sources) continue;                 // needs your exploration/memory elsewhere
+      if (!rmem || !rmem.sources) continue;            // needs your exploration/memory elsewhere
       const remoteRoom = Game.rooms[remoteName];
-      if (!remoteRoom) continue;                            // only plan when visible (safe + accurate)
+      if (!remoteRoom) continue;                       // only plan when visible (safe + accurate)
 
       const sources = remoteRoom.find(FIND_SOURCES);
       for (const src of sources) {
         const key = `${remoteName}:${src.id}`;
-        // Path is planned once then drip-placed and audited forever after
+        // Plan once, then drip-place and audit thereafter
         if (!mem.paths[key]) {
           const harvestPos = this._chooseHarvestTile(src);
           const goal = harvestPos ? { pos: harvestPos, range: 0 } : { pos: src.pos, range: 1 };
@@ -92,6 +142,8 @@ const RoadPlanner = {
           const ret = PathFinder.search(this._getAnchorPos(homeRoom), goal, {
             plainCost: CFG.plainCost,
             swampCost: CFG.swampCost,
+            maxRooms: CFG.maxRoomsPlanning,
+            maxOps: CFG.maxOpsPlanning,
             roomCallback: (roomName) => this._roomCostMatrix(roomName)
           });
 
@@ -100,6 +152,7 @@ const RoadPlanner = {
           mem.paths[key] = {
             i: 0,
             done: false,
+            // Store minimal plain objects (no RoomPosition instances)
             path: ret.path.map(p => ({ x: p.x, y: p.y, roomName: p.roomName }))
           };
         }
@@ -141,6 +194,8 @@ const RoadPlanner = {
       const ret = PathFinder.search(fromPos, { pos: goalPos, range }, {
         plainCost: CFG.plainCost,
         swampCost: CFG.swampCost,
+        maxRooms: CFG.maxRoomsPlanning,
+        maxOps: CFG.maxOpsPlanning,
         roomCallback: (roomName) => this._roomCostMatrix(roomName)
       });
       if (!ret.path || !ret.path.length || ret.incomplete) return;
@@ -199,6 +254,7 @@ const RoadPlanner = {
 
   /**
    * Drip-placer: walk along a stored path and attempt to place ROAD sites up to a budget.
+   * - Uses zero-allocation coordinate form (x,y) to avoid RoomPosition churn.
    * - Advances the cursor (rec.i) whether or not a placement happens to avoid re-trying blocked tiles forever.
    * - Stops if global construction sites are near the cap.
    * @param {Room} homeRoom
@@ -206,7 +262,7 @@ const RoadPlanner = {
    * @param {number} budget
    */
   _dripPlaceAlongPath(homeRoom, key, budget) {
-    if (Object.keys(Game.constructionSites).length > CFG.globalCSiteSafetyLimit) return;
+    if (getCSiteCountOnce() > CFG.globalCSiteSafetyLimit) return;
 
     const mem = this._memory(homeRoom);
     const rec = mem.paths[key];
@@ -223,18 +279,18 @@ const RoadPlanner = {
       const roomObj = Game.rooms[step.roomName];
       if (!roomObj) break; // need visibility to place
 
-      // Skip walls
+      // Skip walls fast
       if (roomObj.getTerrain().get(step.x, step.y) !== TERRAIN_MASK_WALL) {
-        const pos = toPos(step);
-        if (!hasRoadOrRoadSite(pos)) {
-          const rc = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
+        if (!hasRoadOrRoadSiteFast(roomObj, step.x, step.y)) {
+          const rc = roomObj.createConstructionSite(step.x, step.y, STRUCTURE_ROAD);
           if (rc === OK) {
             placed++;
+            // Re-check global cap in case we got close during loop
+            if (getCSiteCountOnce() > CFG.globalCSiteSafetyLimit) break;
           } else if (rc === ERR_FULL) {
-            // Hit the global (100) cap; bail out this tick
-            break;
+            break; // hit global cap
           }
-          // Other error codes: skip silently (blocked by rampart/structure); still advance cursor
+          // Other error codes: silently skip; still advance cursor
         }
       }
       rec.i++;
@@ -244,11 +300,9 @@ const RoadPlanner = {
   },
 
   /**
-   * Every so often (or randomly with tiny probability) we check a handful of path tiles.
-   * If a tile lacks a road/road-site and isn’t a wall, we re-queue construction from that point.
-   * @param {Room} homeRoom
-   * @param {string} key
-   * @param {number} maxFixes how many missing tiles we try to revive per audit
+   * Periodic gap-fix audit:
+   * - On schedule or tiny random chance, scan a handful of tiles.
+   * - If missing road & not a wall & visible, queue a site and rewind cursor so drip-placer resumes from there.
    */
   _auditAndRelaunch(homeRoom, key, maxFixes = 1) {
     const mem = this._memory(homeRoom);
@@ -256,7 +310,7 @@ const RoadPlanner = {
     if (!rec || !rec.done || !Array.isArray(rec.path) || !rec.path.length) return;
 
     // Throttle audits to reduce CPU (regular interval OR low-probability random check)
-    const onInterval = (Game.time % CFG.auditInterval) === 0;
+    const onInterval = (_tick() % CFG.auditInterval) === 0;
     const randomTick = Math.random() < CFG.randomAuditChance;
     if (!onInterval && !randomTick) return;
 
@@ -268,23 +322,26 @@ const RoadPlanner = {
 
       if (roomObj.getTerrain().get(step.x, step.y) === TERRAIN_MASK_WALL) continue;
 
-      const pos = toPos(step);
-      if (!hasRoadOrRoadSite(pos)) {
-        const rc = roomObj.createConstructionSite(pos, STRUCTURE_ROAD);
+      if (!hasRoadOrRoadSiteFast(roomObj, step.x, step.y)) {
+        const rc = roomObj.createConstructionSite(step.x, step.y, STRUCTURE_ROAD);
         if (rc === OK) {
           // Rewind cursor to this gap so drip placer resumes from here
           if (typeof rec.i !== 'number' || rec.i > idx) rec.i = idx;
           rec.done = false;
           fixed++;
+          if (getCSiteCountOnce() > CFG.globalCSiteSafetyLimit) break;
+        } else if (rc === ERR_FULL) {
+          break;
         }
       }
     }
   },
 
-  // ---------- Cost matrix ----------
+  // ---------- Cost matrix (per-tick cache) ----------
 
   /**
    * Favor roads; block most non-road buildings; allow own ramparts; block minerals/sources.
+   * Cached per room per tick so repeated PathFinder calls don’t rebuild it.
    * @param {string} roomName
    * @returns {PathFinder.CostMatrix|undefined}
    */
@@ -292,33 +349,51 @@ const RoadPlanner = {
     const room = Game.rooms[roomName];
     if (!room) return; // no visibility → leave undefined (PathFinder uses defaults)
 
+    if (__RPM.cmTick !== _tick()) {
+      __RPM.cmTick = _tick();
+      __RPM.cm = Object.create(null);
+    }
+    const cached = __RPM.cm[roomName];
+    if (cached) return cached;
+
     const costs = new PathFinder.CostMatrix();
 
     // Existing roads are cheap to encourage reuse
-    room.find(FIND_STRUCTURES).forEach(s => {
+    const structs = room.find(FIND_STRUCTURES);
+    for (let i = 0; i < structs.length; i++) {
+      const s = structs[i];
       if (s.structureType === STRUCTURE_ROAD) {
         costs.set(s.pos.x, s.pos.y, CFG.roadCost);
       } else if (
-        // Walk through own ramparts; block others (and most buildings)
         s.structureType !== STRUCTURE_CONTAINER &&
         (s.structureType !== STRUCTURE_RAMPART || !s.my)
       ) {
         costs.set(s.pos.x, s.pos.y, 0xff);
       }
-    });
+    }
 
-    // Block non-road construction sites (don't plan through someone else's incoming walls)
-    room.find(FIND_CONSTRUCTION_SITES).forEach(cs => {
+    // Block non-road construction sites (don't plan through incoming walls)
+    const sites = room.find(FIND_CONSTRUCTION_SITES);
+    for (let i = 0; i < sites.length; i++) {
+      const cs = sites[i];
       if (cs.structureType !== STRUCTURE_ROAD) {
         costs.set(cs.pos.x, cs.pos.y, 0xff);
       }
-    });
+    }
 
     // Keep sources/minerals non-walkable for pathfinding
-    room.find(FIND_SOURCES).forEach(s => costs.set(s.pos.x, s.pos.y, 0xff));
+    const sources = room.find(FIND_SOURCES);
+    for (let i = 0; i < sources.length; i++) {
+      const s = sources[i];
+      costs.set(s.pos.x, s.pos.y, 0xff);
+    }
     const minerals = room.find(FIND_MINERALS);
-    for (const m of minerals) costs.set(m.pos.x, m.pos.y, 0xff);
+    for (let i = 0; i < minerals.length; i++) {
+      const m = minerals[i];
+      costs.set(m.pos.x, m.pos.y, 0xff);
+    }
 
+    __RPM.cm[roomName] = costs;
     return costs;
   },
 
@@ -354,26 +429,18 @@ const RoadPlanner = {
   // ---------- Discovery helpers ----------
 
   /**
-   * Find remote rooms by scanning creeps with task === 'remoteharvest' and a targetRoom.
-   * (Keeps your planner decoupled from other systems; dead simple and effective.)
+   * Kept for API compatibility, but not used internally (we cache once per tick).
    * @returns {string[]}
    */
   _discoverActiveRemoteRoomsFromCreeps() {
-    const set = new Set();
-    for (const name in Game.creeps) {
-      const c = Game.creeps[name];
-      if (c && c.memory && c.memory.task === 'remoteharvest' && c.memory.targetRoom) {
-        set.add(c.memory.targetRoom);
-      }
-    }
-    return [...set];
+    return activeRemotesOncePerTick();
   },
 
   /**
    * Pick the best adjacent harvest tile for a Source:
-   * - Prefer tiles with an existing container (big bonus) or road (smaller bonus).
+   * - Prefer tiles with a container (big bonus) or road (smaller bonus).
    * - Avoid walls; penalize swamps slightly.
-   * Returns a RoomPosition or null (if room not visible).
+   * Early-out if we find a container tile.
    * @param {Source} src
    * @returns {RoomPosition|null}
    */
@@ -385,11 +452,27 @@ const RoadPlanner = {
     let best = null;
     let bestScore = -Infinity;
 
-    // Check the 8 neighbors around the source
+    // First pass: if any container-adjacent tile exists, return it immediately.
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
         if (dx === 0 && dy === 0) continue;
+        const x = src.pos.x + dx;
+        const y = src.pos.y + dy;
+        if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
+        if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
+        const structs = room.lookForAt(LOOK_STRUCTURES, x, y);
+        for (let i = 0; i < structs.length; i++) {
+          if (structs[i].structureType === STRUCTURE_CONTAINER) {
+            return new RoomPosition(x, y, room.name);
+          }
+        }
+      }
+    }
 
+    // Second pass: scoring (road bonus, swamp penalty)
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (dx === 0 && dy === 0) continue;
         const x = src.pos.x + dx;
         const y = src.pos.y + dy;
         if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
@@ -397,15 +480,18 @@ const RoadPlanner = {
         const t = terrain.get(x, y);
         if (t === TERRAIN_MASK_WALL) continue;
 
-        const pos = new RoomPosition(x, y, room.name);
-        const structs = pos.lookFor(LOOK_STRUCTURES);
-
+        const structs = room.lookForAt(LOOK_STRUCTURES, x, y);
         let score = 0;
-        if (structs.some(s => s.structureType === STRUCTURE_CONTAINER)) score += 10;
-        if (structs.some(s => s.structureType === STRUCTURE_ROAD)) score += 5;
+        for (let i = 0; i < structs.length; i++) {
+          const type = structs[i].structureType;
+          if (type === STRUCTURE_ROAD) score += 5;
+        }
         if (t === TERRAIN_MASK_SWAMP) score -= 2;
 
-        if (score > bestScore) { bestScore = score; best = pos; }
+        if (score > bestScore) {
+          bestScore = score;
+          best = new RoomPosition(x, y, room.name);
+        }
       }
     }
     return best;

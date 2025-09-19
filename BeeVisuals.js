@@ -1,202 +1,195 @@
-// BeeVisuals.js 🎨🐝
-var TaskBuilder = require('./Task.Builder'); // Import Builder Bee role for building tasks
-// Handles RoomVisual overlays for displaying debug information and creep data
-  // Logging Levels
-  const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
-  //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
-  //const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs  
+// BeeVisuals.cpu.always.es5.js
+// ES5-safe visuals that draw EVERY TICK (no blinking), with light CPU hygiene.
 
-const BeeVisuals = {
-    // Main function to draw visuals on the screen 0000000000000000000000000000each tick
-    drawVisuals: function () {
-        const roomName = Memory.firstSpawnRoom; // The room used for displaying visuals (likely the "main" room)
-        if (!roomName || !Game.rooms[roomName]) return; // If no valid room, skip drawing
-        const room = Game.rooms[roomName]; // Get the room object
-        let yOffset = 1; // Start vertical position for text stacking
-        // Iterate over all creeps to display their info
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        for (const creepName in Game.creeps) {
-            const creep = Game.creeps[creepName];
-            const text = [
-                `${creep.name}: ${creep.ticksToLive}`, // Creep name and remaining life ticks
-                creep.memory.assignedSource ? 'A.S.ID:' + creep.memory.assignedSource : '', // Assigned source ID if set
-                creep.memory.assignedContainer ? 'C.ID:' + creep.memory.assignedContainer : '', // Assigned container ID if set
-                creep.memory.targetRoom ? `T.R:${creep.memory.targetRoom}` : '', // Target room info if set
-                creep.memory.sourceId ? `S.ID:${creep.memory.sourceId}` : '' // Assigned source ID if set
-            ].filter(Boolean).join(', '); // Filter out empty strings and join with commas
+'use strict';
 
-            // Draw the text at a fixed position in the room, incrementing vertical offset for each creep
-            new RoomVisual(room.name).text(text, 0, yOffset++, {
-                color: 'white', font: 0.5, opacity: 1, align: 'Left'
-            });
-            }
+var TaskBuilder = require('Task.Builder'); // guarded below
+
+// Logging fallback (uses your global currentLogLevel if present)
+var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
+var _logLevel = (typeof currentLogLevel === 'number') ? currentLogLevel : LOG_LEVEL.BASIC;
+
+// Config: draw every tick, but keep caps to avoid runaway CPU
+var CFG = {
+  maxCreepsRenderedDebug: 30, // cap per-creep debug lines
+  showCpuStats: true,
+  showRepairCounter: true,
+  drawDebugEachTick: true,    // set false to throttle debug lines later if needed
+  debugTickModulo: 1,         // 1 = every tick; raise if you want throttling later
+  tableTickModulo: 1          // 1 = every tick; raise if you want throttling later
+};
+
+// ---------- helpers ----------
+function _getMainRoom() {
+  var rn = Memory.firstSpawnRoom;
+  if (rn && Game.rooms[rn]) return Game.rooms[rn];
+  for (var name in Game.spawns) {
+    if (!Game.spawns.hasOwnProperty(name)) continue;
+    var sp = Game.spawns[name];
+    if (sp && sp.room) return sp.room;
+  }
+  return null;
+}
+function _shouldDraw(mod, roomName) {
+  if (mod <= 1) return true;
+  // staggered hash (unused when mod=1)
+  var h = 0;
+  for (var i = 0; i < roomName.length; i++) h = (h * 31 + roomName.charCodeAt(i)) | 0;
+  return ((Game.time + (h & 3)) % mod) === 0;
+}
+
+// ---------- module ----------
+var BeeVisuals = {
+  // Always called each tick
+  drawVisuals: function () {
+    var room = _getMainRoom();
+    if (!room) return;
+
+    var visual = new RoomVisual(room.name);
+
+    // DEBUG creep lines (draw every tick by default)
+    if (_logLevel >= LOG_LEVEL.DEBUG && (CFG.drawDebugEachTick || _shouldDraw(CFG.debugTickModulo, room.name))) {
+      var yOffset = 1;
+      var count = 0;
+      for (var cname in Game.creeps) {
+        if (!Game.creeps.hasOwnProperty(cname)) continue;
+        var creep = Game.creeps[cname];
+
+        var parts = [];
+        parts.push((creep.name || 'bee') + ': ' + (creep.ticksToLive || 0));
+        if (creep.memory && creep.memory.assignedSource) parts.push('A.S.ID:' + creep.memory.assignedSource);
+        if (creep.memory && creep.memory.assignedContainer) parts.push('C.ID:' + creep.memory.assignedContainer);
+        if (creep.memory && creep.memory.targetRoom) parts.push('T.R:' + creep.memory.targetRoom);
+        if (creep.memory && creep.memory.sourceId) parts.push('S.ID:' + creep.memory.sourceId);
+
+        visual.text(parts.join(', '), 0, yOffset, { color: 'white', font: 0.5, opacity: 1, align: 'left' });
+        yOffset += 1;
+        count++;
+        if (count >= CFG.maxCreepsRenderedDebug) break;
+      }
+
+      // structure placement markers near first spawn (cheap)
+      var firstSpawn = null;
+      for (var sn in Game.spawns) { if (Game.spawns.hasOwnProperty(sn)) { firstSpawn = Game.spawns[sn]; break; } }
+      if (firstSpawn && TaskBuilder && TaskBuilder.structurePlacements) {
+        var baseX = firstSpawn.pos.x;
+        var baseY = firstSpawn.pos.y;
+        var placements = TaskBuilder.structurePlacements;
+        for (var p = 0; p < placements.length; p++) {
+          var pl = placements[p];
+          visual.circle(baseX + pl.x, baseY + pl.y, { radius: 0.4, opacity: 0.1, stroke: 'cyan' });
+          // Labels cost more CPU; keep off unless you really need them
+          // visual.text(String(pl.type).replace('STRUCTURE_', ''), baseX + pl.x, baseY + pl.y, { font: 0.3, color: 'cyan' });
         }
-        // Draw the CPU bucket value (how much CPU reserve you have)
-        new RoomVisual(room.name).text(`CPU Bucket: ${Game.cpu.bucket}`, 20, 1, {
-            color: 'white', font: 0.6, opacity: 1
-        });
-        // Calculate CPU usage delta for performance tracking
-        const used = Game.cpu.getUsed(); // Current tick's CPU usage
-        const delta = used - (Memory.lastCpuUsage || 0); // Difference from last tick's usage
-        Memory.lastCpuUsage = used; // Update for next tick
+      }
+    }
 
-        // Display CPU usage stats on screen
-        new RoomVisual(room.name).text(`CPU Used: ${used.toFixed(2)} / Δ ${delta.toFixed(2)}`, 20, 2, {
-            color: 'white', font: 0.6, opacity: 1
-        });
-        // Display a repair counter (likely linked to repair logic updates)
-        const counter = Memory.GameTickRepairCounter || 0;
-        new RoomVisual(room.name).text(`Repair Tick Count: ${counter}/5`, 20, 3, {
-            color: 'white', font: 0.6, opacity: 1
-        });
-        /////////////////////////////////////////////
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        // Draw a visual for the TaskBuilder
-        const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
-            if (spawn) {
-                const visual = new RoomVisual(spawn.room.name);
-                const baseX = spawn.pos.x;
-                const baseY = spawn.pos.y;
+    // CPU + bucket readouts (every tick so they stay visible)
+    if (CFG.showCpuStats) {
+      var used = Game.cpu.getUsed();
+      var last = Memory.lastCpuUsage || 0;
+      var delta = used - last;
+      Memory.lastCpuUsage = used;
 
-                for (const placement of TaskBuilder.structurePlacements) {
-                    const posX = baseX + placement.x;
-                    const posY = baseY + placement.y;
-                    visual.circle(posX, posY, { radius: 0.4,opacity: .1, stroke: 'cyan' });
-                    //visual.text(placement.type.replace('STRUCTURE_', ''), posX, posY, { font: 0.3, color: 'cyan' });
-                }
-            }
-        }
-        ////////////////////////////////////////////
-    },
-    drawEnergyBar: function() {
-        const roomName = Memory.firstSpawnRoom; // The room used for displaying visuals (likely the "main" room)
-        if (!roomName || !Game.rooms[roomName]) return; // If no valid room, skip drawing
-        const room = Game.rooms[roomName]; // Get the room object    
+      visual.text('CPU Bucket: ' + Game.cpu.bucket, 20, 1, { color: 'white', font: 0.6, opacity: 1 });
+      visual.text('CPU Used: ' + used.toFixed(2) + ' / Δ ' + delta.toFixed(2), 20, 2, { color: 'white', font: 0.6, opacity: 1 });
+    }
 
-        const visuals = new RoomVisual(roomName);
-        const energy = room.energyAvailable;
-        const capacity = room.energyCapacityAvailable;
-        const percentage = energy / capacity;
+    // Repair counter (every tick)
+    if (CFG.showRepairCounter) {
+      var counter = Memory.GameTickRepairCounter || 0;
+      visual.text('Repair Tick Count: ' + counter + '/5', 20, 3, { color: 'white', font: 0.6, opacity: 1 });
+    }
+  },
 
-        // Bar position and dimensions
-        const x = 0; // Adjust as needed
-        const y = 19; // Adjust as needed
-        const width = 5.2; // Bar width
-        const height = 1 ; // Bar height
+  // Always draw each tick
+  drawEnergyBar: function () {
+    var room = _getMainRoom();
+    if (!room) return;
 
-        // Draw the background bar
-        visuals.rect(x, y, width, height, {
-            fill: '#000000ff',
-            opacity: 0.3,
-            stroke: '#000000'
-        });
+    var visuals = new RoomVisual(room.name);
+    var energy = room.energyAvailable | 0;
+    var capacity = room.energyCapacityAvailable | 0;
+    var pct = (capacity > 0) ? (energy / capacity) : 0;
 
-        // Draw the fill bar
-        visuals.rect(x, y, width * percentage, height, {
-            fill: '#00ff00',
-            opacity: 0.5,
-            stroke: '#000000'
-        });
+    var x = 0, y = 19, width = 5.2, height = 1;
 
-        // Draw the text
-        visuals.text(`${energy}/${capacity}`, x + width / 2, y + height - .15 , {
-            color: 'white',
-            font: .5,
-            align: 'center',
-            valign: 'middle',
-            opacity: 1,
-            stroke: '#000000ff'
-        });
-    },
+    visuals.rect(x, y, width, height, { fill: '#000000', opacity: 0.3, stroke: '#000000' });
+    visuals.rect(x, y, width * pct, height, { fill: '#00ff00', opacity: 0.5, stroke: '#000000' });
+    visuals.text(String(energy) + '/' + String(capacity), x + width / 2, y + height - 0.15, {
+      color: 'white', font: 0.5, align: 'center', opacity: 1, stroke: '#000000'
+    });
+  },
 
-    drawWorkerBeeTaskTable: function() {
-        const roomName = Memory.firstSpawnRoom;
-        if (!roomName || !Game.rooms[roomName]) return;
-        const visual = new RoomVisual(roomName);
+  // By default: every tick too; you can throttle with tableTickModulo later
+  drawWorkerBeeTaskTable: function () {
+    var room = _getMainRoom();
+    if (!room) return;
+    if (!_shouldDraw(CFG.tableTickModulo, room.name)) return; // 1 => always
 
-        // Gather bees and tasks (same as before)
-        const workerBees = _.filter(Game.creeps, c => c.memory.role === 'Worker_Bee');
-        const totalCount = workerBees.length;
-        //const maxTotal = 50;
+    var visual = new RoomVisual(room.name);
 
-        const maxTasks = {
-            baseharvest: 2,
-            builder: 1,
-            upgrader: 1,
-            repair: 0,
-            courier: 1,
-            remoteharvest: 2,
-            scout: 0,
-            queen: 1,
-            CombatArcher: 0,
-            CombatMelee: 0,
-            CombatMedic: 0,
-            Dismantler: 0,
-            Claimer: 0,
-        };
-        
-        const maxTotal = Object.values(maxTasks).reduce((sum, count) => sum + count, 0);
+    // collect counts
+    var workerBees = [];
+    for (var cn in Game.creeps) {
+      if (!Game.creeps.hasOwnProperty(cn)) continue;
+      var c = Game.creeps[cn];
+      if (c && c.memory && c.memory.role === 'Worker_Bee') workerBees.push(c);
+    }
+    var totalCount = workerBees.length | 0;
 
-        const tasks = {};
-        for (const creep of workerBees) {
-            const task = creep.memory.task || 'idle';
-            if (!tasks[task]) tasks[task] = 0;
-            tasks[task]++;
-        }
-        for (let t in maxTasks) if (!tasks[t]) tasks[t] = 0;
-        const taskNames = Object.keys(maxTasks);
-        const nRows = 1 + taskNames.length;
-
-        // **Customizable column widths!**
-        const x0 = 0, y0 = 20;
-        const nameW = 4;   // Left (task name) cell width
-        const valueW = 1.2;  // Right (count/max) cell width
-        const cellH = .7;
-        const font = 0.5;
-        const fillColor = "#000000ff";
-        const strokeColor = "#000000";
-        const opacityLvl = .4;
-
-        for (let i = 0; i < nRows; i++) {
-            const name = (i === 0) ? "Worker_Bee" : taskNames[i-1];
-            const value = (i === 0)
-                ? `${totalCount}/${maxTotal}`
-                : `${tasks[taskNames[i-1]]}/${maxTasks[taskNames[i-1]]}`;
-
-            // Draw left cell (task name)
-            visual.rect(x0, y0 + i*cellH, nameW, cellH, {
-                fill: fillColor, 
-                stroke: strokeColor, 
-                opacity: opacityLvl, 
-                radius: 0.05
-            });
-            // Draw right cell (count/max)
-            visual.rect(x0 + nameW, y0 + i*cellH, valueW, cellH, {
-                fill: fillColor, 
-                stroke: strokeColor, 
-                opacity: opacityLvl, 
-                radius: 0.05
-            });
-
-            // Name text (left cell, left-aligned)
-            visual.text(name, x0 + 0.3, y0 + i*cellH + cellH/2 + 0.15, {
-                font, 
-                color: "#ffffffff", 
-                align: 'left', 
-                valign: 'middle', 
-                opacity: 1
-            });
-            // Value text (right cell, right-aligned)
-            visual.text(value, x0 + nameW + valueW - 0.3, y0 + i*cellH + cellH/2 + 0.15, {
-                font, 
-                color: "#ffffffff", 
-                align: 'right', 
-                valign: 'middle', 
-                opacity: 1
-            });
-        }
-    },
-
+    var maxTasks = {
+      baseharvest: 2,
+      builder: 1,
+      upgrader: 1,
+      repair: 0,
+      courier: 1,
+      remoteharvest: 2,
+      scout: 0,
+      queen: 1,
+      CombatArcher: 0,
+      CombatMelee: 0,
+      CombatMedic: 0,
+      Dismantler: 0,
+      Claimer: 0
     };
-// Export the BeeVisuals module so other files can use it
+
+    var tasks = {};
+    var k;
+    for (k in maxTasks) if (maxTasks.hasOwnProperty(k)) tasks[k] = 0;
+    for (var i = 0; i < workerBees.length; i++) {
+      var t = (workerBees[i].memory && workerBees[i].memory.task) ? workerBees[i].memory.task : 'idle';
+      if (tasks.hasOwnProperty(t)) tasks[t] = (tasks[t] | 0) + 1;
+    }
+
+    var maxTotal = 0;
+    for (k in maxTasks) if (maxTasks.hasOwnProperty(k)) maxTotal += (maxTasks[k] | 0);
+
+    // table drawing
+    var x0 = 0, y0 = 20;
+    var nameW = 4, valueW = 1.2, cellH = 0.7;
+    var font = 0.5, fillColor = '#000000', strokeColor = '#000000', opacityLvl = 0.4;
+
+    // header
+    visual.rect(x0, y0, nameW, cellH, { fill: fillColor, stroke: strokeColor, opacity: opacityLvl, radius: 0.05 });
+    visual.rect(x0 + nameW, y0, valueW, cellH, { fill: fillColor, stroke: strokeColor, opacity: opacityLvl, radius: 0.05 });
+    visual.text('Worker_Bee', x0 + 0.3, y0 + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'left', opacity: 1 });
+    visual.text(String(totalCount) + '/' + String(maxTotal), x0 + nameW + valueW - 0.3, y0 + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'right', opacity: 1 });
+
+    var row = 1;
+    for (k in maxTasks) {
+      if (!maxTasks.hasOwnProperty(k)) continue;
+      var y = y0 + row * cellH;
+      var val = String(tasks[k] | 0) + '/' + String(maxTasks[k] | 0);
+
+      visual.rect(x0, y, nameW, cellH, { fill: fillColor, stroke: strokeColor, opacity: opacityLvl, radius: 0.05 });
+      visual.rect(x0 + nameW, y, valueW, cellH, { fill: fillColor, stroke: strokeColor, opacity: opacityLvl, radius: 0.05 });
+      visual.text(k, x0 + 0.3, y + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'left', opacity: 1 });
+      visual.text(val, x0 + nameW + valueW - 0.3, y + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'right', opacity: 1 });
+
+      row++;
+    }
+  }
+};
+
 module.exports = BeeVisuals;
