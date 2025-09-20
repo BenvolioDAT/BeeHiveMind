@@ -17,7 +17,7 @@ var BeeToolbox = require('BeeToolbox');
 // ============================
 // Tunables
 // ============================
-var REMOTE_RADIUS = 3;             // Room hops from home to scan
+var REMOTE_RADIUS = 4;             // Room hops from home to scan
 var MAX_PF_OPS    = 4000;          // PathFinder ops budget during selection
 var PLAIN_COST    = 2;             // PF cost on plains
 var SWAMP_COST    = 10;            // PF cost on swamps
