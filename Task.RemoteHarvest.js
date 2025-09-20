@@ -27,6 +27,113 @@ var MAX_FORAGERS_PER_SOURCE = 1;   // Raise to 2+ if you plan miner/hauler split
 // Global, safe, ES5 utilities
 // ============================
 
+// ---- Source-flag helpers (ES5-safe, idempotent) ----
+function shortSid(id) {
+  if (!id || typeof id !== 'string') return '??????';
+  var n = id.length;
+  return id.substr(n - 6);
+}
+
+/**
+ * Ensure exactly one flag exists on this source tile.
+ * Idempotent via Memory.rooms[room].sources[sourceId].flagName and tile scan.
+ * - If the memoized flag still exists at the same tile, no-op.
+ * - Else if any matching flag is already on this tile, adopt & memoize, no-op.
+ * - Else create a new yellow flag and memoize its name.
+ */
+function ensureSourceFlag(source) {
+  if (!source || !source.pos || !source.room) return;
+
+  // Ensure room memory scaffolding
+  var rm = Memory.rooms[source.pos.roomName] = (Memory.rooms[source.pos.roomName] || {});
+  rm.sources = rm.sources || {};
+  var srec = rm.sources[source.id] = (rm.sources[source.id] || {});
+
+  // If we have a memoized flag name and it's still on this exact tile, we're done
+  if (srec.flagName) {
+    var f = Game.flags[srec.flagName];
+    if (f &&
+        f.pos.x === source.pos.x &&
+        f.pos.y === source.pos.y &&
+        f.pos.roomName === source.pos.roomName) {
+      return; // already correct
+    }
+  }
+
+  // Check for ANY suitable flag already sitting on this tile (adopt if found)
+  var flagsHere = source.pos.lookFor(LOOK_FLAGS) || [];
+  var expectedPrefix = 'SRC-' + source.pos.roomName + '-';
+  var sidTail = shortSid(source.id);
+  for (var i = 0; i < flagsHere.length; i++) {
+    var fh = flagsHere[i];
+    // Accept prior flags we created (prefix + tail) or any flag exactly on tile if you want to be looser
+    if (typeof fh.name === 'string' &&
+        fh.name.indexOf(expectedPrefix) === 0 &&
+        fh.name.indexOf(sidTail) !== -1) {
+      srec.flagName = fh.name; // adopt existing
+      return;
+    }
+  }
+
+  // Nothing to adopt -> create one
+  var base = expectedPrefix + sidTail; // e.g., "SRC-E12S34-abc123"
+  var name = base;
+  var tries = 1;
+  while (Game.flags[name]) {
+    tries++;
+    name = base + '-' + tries;
+    if (tries > 10) break; // sanity cap
+  }
+
+  var rc = source.room.createFlag(source.pos, name, COLOR_YELLOW, COLOR_YELLOW);
+  if (typeof rc === 'string') {
+    srec.flagName = rc; // record the created name
+  } else if (rc < 0) {
+    // Could not create for some reason; do not loop creation this tick
+    // (Leaving srec.flagName unset; next eligible tick we'll try again.)
+  }
+}
+
+// Create flags ONLY on sources that are valid remote-mining targets for this home.
+// - within REMOTE_RADIUS of home
+// - room not hostile (Memory.rooms[room].hostile !== true)
+// - path is finite under your PF settings
+// - occupancy below MAX_FORAGERS_PER_SOURCE
+// Throttled: once per room every ~300 ticks.
+function markValidRemoteSourcesForHome(homeName) {
+  var anchor = getAnchorPos(homeName);
+  var memAssign = ensureAssignmentsMem();
+  var neighborRooms = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+
+  for (var i = 0; i < neighborRooms.length; i++) {
+    var rn = neighborRooms[i];
+    var room = Game.rooms[rn];
+    if (!room) continue; // need vision
+
+    // Throttle per-room scans
+    var rm = Memory.rooms[rn] = (Memory.rooms[rn] || {});
+    if (rm.hostile) continue;
+    if (rm._lastValidFlagScan && (Game.time - rm._lastValidFlagScan) < 300) continue;
+    rm._lastValidFlagScan = Game.time;
+
+    var sources = room.find(FIND_SOURCES);
+    for (var j = 0; j < sources.length; j++) {
+      var s = sources[j];
+
+      // Respect per-source cap (how many foragers are allowed to target it)
+      var occ = memAssign[s.id] || 0;
+      if (occ >= MAX_FORAGERS_PER_SOURCE) continue;
+
+      // Must be pathable under your PF policy
+      var cost = pfCostCached(anchor, s.pos, s.id);
+      if (cost === Infinity) continue;
+
+      // Looks good → ensure a single yellow flag exists
+      ensureSourceFlag(s);
+    }
+  }
+}
+
 // --- Occupancy audit ---
 // Rebuilds Memory.remoteAssignments from live creeps to prevent leaks.
 // We run this ONCE per tick (guarded) so calling from each creep is safe.
@@ -40,11 +147,11 @@ function auditRemoteAssignments() {
     }
   }
   var memAssign = Memory.remoteAssignments || (Memory.remoteAssignments = {});
-  for (var sid in memAssign) {
-    memAssign[sid] = live[sid] || 0;
+  for (var sid2 in memAssign) {
+    memAssign[sid2] = live[sid2] || 0;
   }
   // Also add any new sids observed this tick (covers first-claim cases)
-  for (var sid2 in live) memAssign[sid2] = live[sid2];
+  for (var sid3 in live) memAssign[sid3] = live[sid3];
 }
 
 // Ensure the audit runs once per tick regardless of how many creeps call run().
@@ -195,7 +302,11 @@ function pfCost(anchorPos, targetPos) {
 // Respects MAX_FORAGERS_PER_SOURCE via Memory.remoteAssignments.
 function pickRemoteSource(creep) {
   var memAssign = ensureAssignmentsMem();
+  // Light, staggered scanning so not every creep scans on the same tick.
   var homeName = getHomeName(creep);
+  if ((Game.time + creep.name.charCodeAt(0)) % 50 === 0) {
+    markValidRemoteSourcesForHome(homeName);
+  }
   var anchor = getAnchorPos(homeName);
 
   var neighborRooms = bfsNeighborRooms(homeName, REMOTE_RADIUS);
@@ -523,6 +634,11 @@ var TaskRemoteHarvest = {
     rm.sources = rm.sources || {};
     var sid = creep.memory.sourceId;
     var src = Game.getObjectById(sid);
+
+    // Ensure exactly one flag on this source (safe to call every tick)
+    if (src) {
+      ensureSourceFlag(src);
+    }
 
     if (src && rm.sources[sid] && rm.sources[sid].entrySteps == null) {
       var res = PathFinder.search(creep.pos, { pos: src.pos, range: 1 }, {
