@@ -1,3 +1,93 @@
+
+const roleLinkManager = {
+    run: function () {
+        // Get the room's spawn and controller
+        //const room = Game.spawns['Spawn1'].room;
+        //const spawn = Game.spawns['Spawn1'];
+        for ( const spawnName in Game.spawns) {//rmoeve if braks
+            const spawn = Game.spawns[spawnName];//remove if braks
+            const room = spawn.room;//remove if braks
+        const controller = room.controller;
+        // Find the link closest to the spawn (sending link)
+        const sendingLink = spawn.pos.findClosestByRange(FIND_STRUCTURES, {
+            filter: (structure) => structure.structureType === STRUCTURE_LINK
+        });
+        // Find the link closest to the controller (receiving link)
+        const receivingLink = controller.pos.findClosestByRange(FIND_STRUCTURES, {
+            filter: (structure) => structure.structureType === STRUCTURE_LINK
+        });
+        // Check if both links exist and the sending link has energy
+        if (sendingLink && receivingLink && sendingLink.store[RESOURCE_ENERGY] > 0 && sendingLink.cooldown === 0) {
+            const result = sendingLink.transferEnergy(receivingLink);            
+            if (result === OK) {
+               // console.log(`Transferred energy from link near spawn to link near controller.`);
+            } else {
+                //console.log(`Failed to transfer energy: ${result}`);
+            }
+        } else {
+            //console.log(`No valid links found or link is on cooldown.`);
+        }
+    }
+}//remove if broks
+};
+module.exports = roleLinkManager;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /*
  * Module code goes here. Use 'module.exports' to export things:
  * module.exports.thing = 'a thing';
@@ -2633,3 +2723,293 @@ var TaskBuilder = {
 };
 
 module.exports = TaskBuilder;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// BeeMaintenance.js
+// Handles memory cleanup and repair target tracking for your bee empire
+const BeeMaintenance = {
+
+    // Cleans up memory of rooms that have been inactive (not visible) for a long time
+    cleanStaleRooms: function () {
+        const activeRooms = Object.keys(Game.rooms); // Get all active rooms from Game object
+        Memory.recentlyCleanedRooms = []; // Temporary list to track cleaned rooms for reporting
+
+        for (const room in Memory.rooms) { // Loop through all rooms in memory
+            const mem = Memory.rooms[room]; // Get memory for this room
+            if (!activeRooms.includes(room) && // If room is not currently active (no vision)
+                mem.lastVisited && // ...and has a lastVisited timestamp
+                Game.time - mem.lastVisited > 1000) { // ...and it's been over 1000 ticks since last visit (~17 mins)
+                
+                delete Memory.rooms[room]; // Remove the room memory entirely
+                Memory.recentlyCleanedRooms.push(room); // Add to cleaned list
+                console.log(`🧼 Cleaned up stale memory for room: ${room}`); // Log the cleanup
+            }
+        }
+    },
+
+    // Cleans up creep memory, resource assignments, and container memory
+    cleanUpMemory: function () {
+        // Remove memory of dead creeps
+        for (const name in Memory.creeps) {
+            if (!Game.creeps[name]) { // If creep is no longer in game
+                delete Memory.creeps[name]; // Remove from memory
+                console.log(`🧼 Removed memory for non-existent creep: ${name}`);
+            }
+        }
+
+        // Loop through each room's memory
+        for (const roomName in Memory.rooms) {
+            const roomMemory = Memory.rooms[roomName];
+
+            // 🧹 Clean up Nurse_Bee source claims
+            if (roomMemory.sources) {
+                for (const sourceId in roomMemory.sources) {
+                    const assignedCreeps = roomMemory.sources[sourceId]; // List of creep IDs assigned to the source
+                    if (!Array.isArray(assignedCreeps)) continue; // Skip if not an array
+
+                    // Filter out dead or invalid creeps
+                    roomMemory.sources[sourceId] = assignedCreeps.filter(creepId => {
+                        const creep = Game.getObjectById(creepId);
+                        return creep && (creep.memory.role === 'Worker_Bee' || 
+                                        creep.memory.role === 'Worker_Bees'); // assignments
+                    });
+                }
+            }
+
+            // 🧹 Clean up Courier_Bee container assignments
+            if (roomMemory.sourceContainers) {
+                for (const containerId in roomMemory.sourceContainers) {
+                    const assigned = roomMemory.sourceContainers[containerId];
+                    if (assigned && !Game.creeps[assigned]) { // If assigned creep is gone
+                        delete roomMemory.sourceContainers[containerId]; // Remove assignment
+                        console.log(`🧹 Unassigned container ${containerId} from Courier_Bee (creep gone)`);
+                    }
+                }
+            }
+
+            // 🧼 Clean up dead containers (containers that no longer exist in game)
+            const containers = roomMemory.sourceContainers;
+            if (containers) {
+                for (const containerId in containers) {
+                    if (!Game.getObjectById(containerId)) { // If the container no longer exists
+                        delete containers[containerId]; // Remove from memory
+                        console.log(`🧼 Removed memory of non-existent container ${containerId} from ${roomName}`);
+                    }
+                }
+            }
+        }
+    },
+
+    findStructuresNeedingRepair: function (room) {
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {}; // Ensure room memory exists
+
+    const repairTargets = Memory.rooms[room.name].repairTargets || [];
+    const MAX_RAMPART_HEALTH = 30000;
+    const MAX_WALL_HEALTH = 30000;
+
+    // Define repair priority (lower number = higher priority)
+    const priorityOrder = {
+        [STRUCTURE_CONTAINER]: 1,
+        [STRUCTURE_RAMPART]: 3,
+        [STRUCTURE_WALL]: 4,
+        [STRUCTURE_STORAGE]: 5,
+        [STRUCTURE_SPAWN]: 6,
+        [STRUCTURE_EXTENSION]: 7,
+        [STRUCTURE_TOWER]: 8,
+        [STRUCTURE_LINK]: 9,
+        [STRUCTURE_TERMINAL]: 10,
+        [STRUCTURE_LAB]: 11,
+        [STRUCTURE_OBSERVER]: 12,
+        [STRUCTURE_ROAD]: 13,
+        // Add more if you like!
+    };
+
+    // Find structures that need repair
+    const structuresToRepair = room.find(FIND_STRUCTURES, {
+        filter: (structure) => {
+            if (structure.structureType === STRUCTURE_ROAD)
+                return false; //Ignore Roads!
+            if (structure.structureType === STRUCTURE_RAMPART)
+                return structure.hits < Math.min(structure.hitsMax, MAX_RAMPART_HEALTH);
+            if (structure.structureType === STRUCTURE_WALL)
+                return structure.hits < Math.min(structure.hitsMax, MAX_WALL_HEALTH);
+            return structure.hits < structure.hitsMax;
+        }
+    });
+
+    // Update or add targets to the memory list
+    structuresToRepair.forEach(structure => {
+        const existing = repairTargets.find(t => t.id === structure.id);
+        if (existing) {
+            existing.hits = structure.hits;
+        } else {
+            repairTargets.push({
+                id: structure.id,
+                hits: structure.hits,
+                hitsMax: structure.hitsMax,
+                type: structure.structureType
+            });
+        }
+    });
+
+    // Filter out structures that no longer need repairs
+    Memory.rooms[room.name].repairTargets = repairTargets.filter(t => {
+        const structure = Game.getObjectById(t.id);
+        if (!structure) return false;
+        if ([STRUCTURE_WALL, STRUCTURE_RAMPART].includes(structure.structureType)) {
+            const max = structure.structureType === STRUCTURE_WALL ? MAX_WALL_HEALTH : MAX_RAMPART_HEALTH;
+            return structure.hits < Math.min(structure.hitsMax, max);
+        }
+        return structure.hits < structure.hitsMax;
+    });
+
+    // Sort the memory targets by priority and damage
+    Memory.rooms[room.name].repairTargets.sort((a, b) => {
+        const aPriority = priorityOrder[a.type] || 99; // Unknown types go last
+        const bPriority = priorityOrder[b.type] || 99;
+        if (aPriority !== bPriority) {
+            return aPriority - bPriority;
+        }
+        return a.hits - b.hits; // Within same type, repair most damaged first
+    });
+
+    return Memory.rooms[room.name].repairTargets;
+}
+
+};
+
+module.exports = BeeMaintenance; // Export the module for use in main.js
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+module.exports = {
+  run: function () {
+    // Get the first spawn in the room (assumes there is at least one spawn)
+    var spawn = Game.spawns[Object.keys(Game.spawns)[0]];
+    if (spawn) {
+      // Ensure room memory is initialized
+      if (!Memory.rooms[spawn.room.name]) {
+        Memory.rooms[spawn.room.name] = {};
+      }
+      // Initialize repairTargets array in memory if not present
+      if (!Memory.rooms[spawn.room.name].repairTargets) {
+        Memory.rooms[spawn.room.name].repairTargets = [];
+      }
+      // Find all towers in the room owned by you
+      var towers = spawn.room.find(FIND_MY_STRUCTURES, {
+        filter: { structureType: STRUCTURE_TOWER }
+      });
+      // Check if hostile creeps are present in the room
+      var hostileCreepPresent = towers.some(tower => tower.pos.findClosestByRange(FIND_HOSTILE_CREEPS));
+      // If hostile creeps are present, attack them using towers
+      if (hostileCreepPresent) {
+        towers.forEach(tower => {
+          var closestHostile = tower.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+          if (closestHostile) {
+            tower.attack(closestHostile);
+          }
+        });
+      } else if (Memory.rooms[spawn.room.name].repairTargets.length > 0) {
+        // Check if any tower has 300 or less energy in its storage
+        var lowEnergyTower = towers.find(tower => tower.store.getUsedCapacity(RESOURCE_ENERGY) <= 300);
+        if (!lowEnergyTower) {
+          // Get the first target from repairTargets array
+          var targetData = Memory.rooms[spawn.room.name].repairTargets[0];
+          // Check if the target is still valid (exists in the room)
+          var target = Game.getObjectById(targetData.id);
+          // Check if the target is valid
+          if (target) {
+            towers.forEach(tower => {
+              tower.repair(target);
+              // Visualize the repair target by drawing a circle around it
+              tower.room.visual.circle(target.pos, { radius: 0.5, fill: 'transparent', stroke: 'green' });
+            });
+            // Check if the target is fully repaired
+            if (target.hits === target.hitsMax) {
+              // Remove the fully repaired target from memory
+              Memory.rooms[spawn.room.name].repairTargets.shift();
+            }
+          } else {
+            // Remove invalid target from memory
+            Memory.rooms[spawn.room.name].repairTargets.shift();
+          }
+        }
+      }
+    }
+  }
+};
+
+

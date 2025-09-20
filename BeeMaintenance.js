@@ -1,154 +1,273 @@
-// BeeMaintenance.js
-// Handles memory cleanup and repair target tracking for your bee empire
-const BeeMaintenance = {
+// BeeMaintenance.cpu.es5.js
+// ES5-safe, CPU-lean maintenance utilities.
+// - Throttled memory cleanup (rooms/creeps/assignments)
+// - Robust stale-room detection using multiple "last seen" fields
+// - Cached, interval-based repair target list per room (sorted & filtered)
+// - No ES6 (no const/let/arrows/includes/template strings)
 
-    // Cleans up memory of rooms that have been inactive (not visible) for a long time
-    cleanStaleRooms: function () {
-        const activeRooms = Object.keys(Game.rooms); // Get all active rooms from Game object
-        Memory.recentlyCleanedRooms = []; // Temporary list to track cleaned rooms for reporting
+'use strict';
 
-        for (const room in Memory.rooms) { // Loop through all rooms in memory
-            const mem = Memory.rooms[room]; // Get memory for this room
-            if (!activeRooms.includes(room) && // If room is not currently active (no vision)
-                mem.lastVisited && // ...and has a lastVisited timestamp
-                Game.time - mem.lastVisited > 1000) { // ...and it's been over 1000 ticks since last visit (~17 mins)
-                
-                delete Memory.rooms[room]; // Remove the room memory entirely
-                Memory.recentlyCleanedRooms.push(room); // Add to cleaned list
-                console.log(`🧼 Cleaned up stale memory for room: ${room}`); // Log the cleanup
-            }
+var BeeMaintenance = (function () {
+  // -----------------------------
+  // Tunables (all ES5-safe)
+  // -----------------------------
+  var CFG = {
+    ROOM_STALE_TICKS:      600,  // how long without vision before pruning a room
+    ROOM_PRUNE_INTERVAL:    200,  // run stale-room cleanup every N ticks
+    MEMORY_SWEEP_INTERVAL:   10,  // run heavy creep/assignment sweeps every N ticks
+    REPAIR_SCAN_INTERVAL:    5,  // rebuild repair list every N ticks per room
+    REPAIR_MAX_RAMPART:   30000,  // rampart cap
+    REPAIR_MAX_WALL:      30000,  // wall cap
+    LOG: false                   // set true if you want cleanup logs
+  };
+
+  // -----------------------------
+  // Small helpers
+  // -----------------------------
+  function _now() { return Game.time | 0; }
+
+  function _log(msg) { if (CFG.LOG) console.log(msg); }
+
+  // Safely read a "last seen" timestamp from room memory written by various systems
+  function _lastSeen(mem) {
+    if (!mem) return -Infinity;
+    // prefer a unified custom stamp if present
+    if (typeof mem.lastSeenAt === 'number') return mem.lastSeenAt;
+    // fallbacks to your other modules' fields
+    if (mem.scout && typeof mem.scout.lastVisited === 'number') return mem.scout.lastVisited;
+    if (mem.intel && typeof mem.intel.lastVisited === 'number') return mem.intel.lastVisited;
+    if (typeof mem.lastVisited === 'number') return mem.lastVisited;
+    return -Infinity;
+  }
+
+  // Keep per-room maintenance sub-bucket
+  function _roomMaint(roomName) {
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+    var r = Memory.rooms[roomName];
+    if (!r._maint) r._maint = {};
+    return r._maint;
+  }
+
+  // -----------------------------
+  // Public: prune old/inactive room memory (cheap, interval)
+  // -----------------------------
+  function cleanStaleRooms() {
+    var T = _now();
+    if ((T % CFG.ROOM_PRUNE_INTERVAL) !== 0) {
+      // still stamp "lastSeenAt" for visible rooms cheaply
+      for (var rn in Game.rooms) {
+        if (!Game.rooms.hasOwnProperty(rn)) continue;
+        if (!Memory.rooms) Memory.rooms = {};
+        if (!Memory.rooms[rn]) Memory.rooms[rn] = {};
+        Memory.rooms[rn].lastSeenAt = T;
+      }
+      return;
+    }
+
+    // stamp for visible rooms (helps stale detection)
+    for (var rn2 in Game.rooms) {
+      if (!Game.rooms.hasOwnProperty(rn2)) continue;
+      if (!Memory.rooms) Memory.rooms = {};
+      if (!Memory.rooms[rn2]) Memory.rooms[rn2] = {};
+      Memory.rooms[rn2].lastSeenAt = T;
+    }
+
+    Memory.recentlyCleanedRooms = []; // optional report
+
+    if (!Memory.rooms) return;
+
+    for (var roomName in Memory.rooms) {
+      if (!Memory.rooms.hasOwnProperty(roomName)) continue;
+      // if we can currently see it, it's not stale
+      if (Game.rooms[roomName]) continue;
+
+      var mem = Memory.rooms[roomName];
+      var seenAt = _lastSeen(mem);
+      if (seenAt !== -Infinity && (T - seenAt) > CFG.ROOM_STALE_TICKS) {
+        delete Memory.rooms[roomName];
+        Memory.recentlyCleanedRooms.push(roomName);
+        _log('🧼 Cleaned room mem: ' + roomName);
+      }
+    }
+  }
+
+  // -----------------------------
+  // Public: creep + assignment cleanup (interval-gated)
+  // -----------------------------
+  function cleanUpMemory() {
+    var T = _now();
+
+    // Always: remove memory of dead creeps (cheap)
+    if (Memory.creeps) {
+      for (var name in Memory.creeps) {
+        if (!Memory.creeps.hasOwnProperty(name)) continue;
+        if (!Game.creeps[name]) {
+          delete Memory.creeps[name];
+          _log('🧼 Removed creep mem: ' + name);
         }
-    },
+      }
+    }
 
-    // Cleans up creep memory, resource assignments, and container memory
-    cleanUpMemory: function () {
-        // Remove memory of dead creeps
-        for (const name in Memory.creeps) {
-            if (!Game.creeps[name]) { // If creep is no longer in game
-                delete Memory.creeps[name]; // Remove from memory
-                console.log(`🧼 Removed memory for non-existent creep: ${name}`);
-            }
+    // Heavy parts only every N ticks
+    if ((T % CFG.MEMORY_SWEEP_INTERVAL) !== 0) return;
+
+    if (!Memory.rooms) return;
+
+    for (var roomName in Memory.rooms) {
+      if (!Memory.rooms.hasOwnProperty(roomName)) continue;
+      var roomMemory = Memory.rooms[roomName];
+
+      // Nurse_Bee source claims: keep only Worker_Bee / Worker_Bees that still exist
+      if (roomMemory.sources) {
+        for (var sourceId in roomMemory.sources) {
+          if (!roomMemory.sources.hasOwnProperty(sourceId)) continue;
+          var assignedCreeps = roomMemory.sources[sourceId];
+          if (!assignedCreeps || !assignedCreeps.length) continue;
+
+          var pruned = [];
+          for (var i = 0; i < assignedCreeps.length; i++) {
+            var cid = assignedCreeps[i];
+            var cr  = Game.getObjectById(cid); // returns null if not visible or dead; but IDs of creeps are not stable—if you stored names, prefer Game.creeps[name]
+            if (!cr) continue;
+            var role = (cr.memory && cr.memory.role) || '';
+            if (role === 'Worker_Bee' || role === 'Worker_Bees') pruned.push(cid);
+          }
+          roomMemory.sources[sourceId] = pruned;
         }
+      }
 
-        // Loop through each room's memory
-        for (const roomName in Memory.rooms) {
-            const roomMemory = Memory.rooms[roomName];
-
-            // 🧹 Clean up Nurse_Bee source claims
-            if (roomMemory.sources) {
-                for (const sourceId in roomMemory.sources) {
-                    const assignedCreeps = roomMemory.sources[sourceId]; // List of creep IDs assigned to the source
-                    if (!Array.isArray(assignedCreeps)) continue; // Skip if not an array
-
-                    // Filter out dead or invalid creeps
-                    roomMemory.sources[sourceId] = assignedCreeps.filter(creepId => {
-                        const creep = Game.getObjectById(creepId);
-                        return creep && (creep.memory.role === 'Worker_Bee' || 
-                                        creep.memory.role === 'Worker_Bees'); // assignments
-                    });
-                }
-            }
-
-            // 🧹 Clean up Courier_Bee container assignments
-            if (roomMemory.sourceContainers) {
-                for (const containerId in roomMemory.sourceContainers) {
-                    const assigned = roomMemory.sourceContainers[containerId];
-                    if (assigned && !Game.creeps[assigned]) { // If assigned creep is gone
-                        delete roomMemory.sourceContainers[containerId]; // Remove assignment
-                        console.log(`🧹 Unassigned container ${containerId} from Courier_Bee (creep gone)`);
-                    }
-                }
-            }
-
-            // 🧼 Clean up dead containers (containers that no longer exist in game)
-            const containers = roomMemory.sourceContainers;
-            if (containers) {
-                for (const containerId in containers) {
-                    if (!Game.getObjectById(containerId)) { // If the container no longer exists
-                        delete containers[containerId]; // Remove from memory
-                        console.log(`🧼 Removed memory of non-existent container ${containerId} from ${roomName}`);
-                    }
-                }
-            }
+      // Courier_Bee container assignments: drop if creep gone
+      if (roomMemory.sourceContainers) {
+        for (var containerId in roomMemory.sourceContainers) {
+          if (!roomMemory.sourceContainers.hasOwnProperty(containerId)) continue;
+          var assigned = roomMemory.sourceContainers[containerId];
+          if (assigned && !Game.creeps[assigned]) {
+            delete roomMemory.sourceContainers[containerId];
+            _log('🧹 Unassigned container ' + containerId + ' in ' + roomName);
+          }
         }
-    },
+      }
 
-    findStructuresNeedingRepair: function (room) {
-    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {}; // Ensure room memory exists
-
-    const repairTargets = Memory.rooms[room.name].repairTargets || [];
-    const MAX_RAMPART_HEALTH = 30000;
-    const MAX_WALL_HEALTH = 30000;
-
-    // Define repair priority (lower number = higher priority)
-    const priorityOrder = {
-        [STRUCTURE_CONTAINER]: 1,
-        [STRUCTURE_RAMPART]: 3,
-        [STRUCTURE_WALL]: 4,
-        [STRUCTURE_STORAGE]: 5,
-        [STRUCTURE_SPAWN]: 6,
-        [STRUCTURE_EXTENSION]: 7,
-        [STRUCTURE_TOWER]: 8,
-        [STRUCTURE_LINK]: 9,
-        [STRUCTURE_TERMINAL]: 10,
-        [STRUCTURE_LAB]: 11,
-        [STRUCTURE_OBSERVER]: 12,
-        [STRUCTURE_ROAD]: 13,
-        // Add more if you like!
-    };
-
-    // Find structures that need repair
-    const structuresToRepair = room.find(FIND_STRUCTURES, {
-        filter: (structure) => {
-            if (structure.structureType === STRUCTURE_ROAD)
-                return false; //Ignore Roads!
-            if (structure.structureType === STRUCTURE_RAMPART)
-                return structure.hits < Math.min(structure.hitsMax, MAX_RAMPART_HEALTH);
-            if (structure.structureType === STRUCTURE_WALL)
-                return structure.hits < Math.min(structure.hitsMax, MAX_WALL_HEALTH);
-            return structure.hits < structure.hitsMax;
+      // Remove entries for containers that no longer exist
+      var containers = roomMemory.sourceContainers;
+      if (containers) {
+        for (var cid in containers) {
+          if (!containers.hasOwnProperty(cid)) continue;
+          if (!Game.getObjectById(cid)) {
+            delete containers[cid];
+            _log('🧼 Removed non-existent container ' + cid + ' from ' + roomName);
+          }
         }
-    });
+      }
+    }
+  }
 
-    // Update or add targets to the memory list
-    structuresToRepair.forEach(structure => {
-        const existing = repairTargets.find(t => t.id === structure.id);
-        if (existing) {
-            existing.hits = structure.hits;
+  // -----------------------------
+  // Public: find (cached) structures needing repair
+  // Returns an ARRAY of {id,hits,hitsMax,type}, sorted by priority then damage.
+  // Rebuilt only every REPAIR_SCAN_INTERVAL ticks per room.
+  // -----------------------------
+  function findStructuresNeedingRepair(room) {
+    if (!room) return [];
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+
+    var mem = Memory.rooms[room.name];
+    var m   = _roomMaint(room.name);
+
+    // build priority order (ES5-safe: assign keys)
+    if (!m.priorityOrder) {
+      m.priorityOrder = {};
+      m.priorityOrder[STRUCTURE_CONTAINER] = 1;
+      m.priorityOrder[STRUCTURE_RAMPART]   = 3;
+      m.priorityOrder[STRUCTURE_WALL]      = 4;
+      m.priorityOrder[STRUCTURE_STORAGE]   = 5;
+      m.priorityOrder[STRUCTURE_SPAWN]     = 6;
+      m.priorityOrder[STRUCTURE_EXTENSION] = 7;
+      m.priorityOrder[STRUCTURE_TOWER]     = 8;
+      m.priorityOrder[STRUCTURE_LINK]      = 9;
+      m.priorityOrder[STRUCTURE_TERMINAL]  = 10;
+      m.priorityOrder[STRUCTURE_LAB]       = 11;
+      m.priorityOrder[STRUCTURE_OBSERVER]  = 12;
+      m.priorityOrder[STRUCTURE_ROAD]      = 13; // even if you ignore roads, keeping the key is fine
+    }
+    var priorityOrder = m.priorityOrder;
+
+    var T = _now();
+    var nextScan = m.nextRepairScanTick | 0;
+
+    // If not time to rescan, return cached (and soft-filter obvious fully repaired ones)
+    if (T < nextScan && m.cachedRepairTargets && m.cachedRepairTargets.length) {
+      // cheap refresh: drop fully repaired
+      var kept = [];
+      var maxR = CFG.REPAIR_MAX_RAMPART;
+      var maxW = CFG.REPAIR_MAX_WALL;
+      for (var i0 = 0; i0 < m.cachedRepairTargets.length; i0++) {
+        var t = m.cachedRepairTargets[i0];
+        var obj = Game.getObjectById(t.id);
+        if (!obj) continue;
+        if (obj.structureType === STRUCTURE_RAMPART) {
+          if (obj.hits < Math.min(obj.hitsMax, maxR)) kept.push(t);
+        } else if (obj.structureType === STRUCTURE_WALL) {
+          if (obj.hits < Math.min(obj.hitsMax, maxW)) kept.push(t);
         } else {
-            repairTargets.push({
-                id: structure.id,
-                hits: structure.hits,
-                hitsMax: structure.hitsMax,
-                type: structure.structureType
-            });
+          if (obj.hits < obj.hitsMax) kept.push(t);
         }
+      }
+      m.cachedRepairTargets = kept;
+      return kept;
+    }
+
+    // Full rescan (throttled)
+    var list = room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        // Skip roads altogether (fast bail)
+        if (s.structureType === STRUCTURE_ROAD) return false;
+
+        if (s.structureType === STRUCTURE_RAMPART) {
+          return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_RAMPART);
+        }
+        if (s.structureType === STRUCTURE_WALL) {
+          return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_WALL);
+        }
+        return s.hits < s.hitsMax;
+      }
     });
 
-    // Filter out structures that no longer need repairs
-    Memory.rooms[room.name].repairTargets = repairTargets.filter(t => {
-        const structure = Game.getObjectById(t.id);
-        if (!structure) return false;
-        if ([STRUCTURE_WALL, STRUCTURE_RAMPART].includes(structure.structureType)) {
-            const max = structure.structureType === STRUCTURE_WALL ? MAX_WALL_HEALTH : MAX_RAMPART_HEALTH;
-            return structure.hits < Math.min(structure.hitsMax, max);
-        }
-        return structure.hits < structure.hitsMax;
+    // Build new targets (simple loop, no find()/includes()/arrows)
+    var targets = [];
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      targets.push({
+        id: s.id,
+        hits: s.hits,
+        hitsMax: s.hitsMax,
+        type: s.structureType
+      });
+    }
+
+    // Sort by priority then damage (ascending)
+    targets.sort(function (a, b) {
+      var pa = priorityOrder[a.type] != null ? priorityOrder[a.type] : 99;
+      var pb = priorityOrder[b.type] != null ? priorityOrder[b.type] : 99;
+      if (pa !== pb) return pa - pb;
+      return a.hits - b.hits;
     });
 
-    // Sort the memory targets by priority and damage
-    Memory.rooms[room.name].repairTargets.sort((a, b) => {
-        const aPriority = priorityOrder[a.type] || 99; // Unknown types go last
-        const bPriority = priorityOrder[b.type] || 99;
-        if (aPriority !== bPriority) {
-            return aPriority - bPriority;
-        }
-        return a.hits - b.hits; // Within same type, repair most damaged first
-    });
+    // Cache + schedule next scan
+    m.cachedRepairTargets = targets;
+    m.nextRepairScanTick  = T + CFG.REPAIR_SCAN_INTERVAL;
 
-    return Memory.rooms[room.name].repairTargets;
-}
+    return targets;
+  }
 
-};
+  // Expose public API
+  return {
+    cleanStaleRooms: cleanStaleRooms,
+    cleanUpMemory: cleanUpMemory,
+    findStructuresNeedingRepair: findStructuresNeedingRepair
+  };
+})();
 
-module.exports = BeeMaintenance; // Export the module for use in main.js
+module.exports = BeeMaintenance;
