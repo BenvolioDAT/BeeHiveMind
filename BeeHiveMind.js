@@ -11,7 +11,7 @@
 // -------- Logging --------
 var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
 // Toggle here:
-var currentLogLevel = LOG_LEVEL.BASIC;
+var currentLogLevel = LOG_LEVEL.NONE;
 
 // -------- Requires --------
 var spawnLogic      = require('spawn.logic');
@@ -214,9 +214,9 @@ var BeeHiveMind = {
         remoteharvest: 12,
         scout:         1,
         queen:         2,
-        CombatArcher:  1,
-        CombatMelee:   0,
-        CombatMedic:   0,
+        CombatArcher:  2,
+        CombatMelee:   1,
+        CombatMedic:   1,
         Dismantler:    0,
         Trucker:       0,
         Claimer:       4,

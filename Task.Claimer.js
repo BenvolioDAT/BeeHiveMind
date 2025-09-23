@@ -9,7 +9,7 @@ const BeeToolbox = require('BeeToolbox');
 const CONFIG = {
   defaultMode: 'reserve',
   placeSpawnOnClaim: false,
-  signText: '🐝 Sushi Moto Logistics — roads, loads, and righteous nodes.',
+  signText: '🐝 BenvolioDAT - energy up front, potholes out back, perfect balance like my CPU usage (lies).',
   reusePath: 15
 };
 // ---- Multi-room Reserve Helpers ----

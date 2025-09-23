@@ -7,7 +7,7 @@ var TaskBuilder = require('Task.Builder'); // guarded below
 
 // Logging fallback (uses your global currentLogLevel if present)
 var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
-var _logLevel = (typeof currentLogLevel === 'number') ? currentLogLevel : LOG_LEVEL.BASIC;
+var _logLevel = (typeof currentLogLevel === 'number') ? currentLogLevel : LOG_LEVEL.NONE;
 
 // Config: draw every tick, but keep caps to avoid runaway CPU
 var CFG = {
