@@ -114,7 +114,30 @@ const TASK_ALIAS = {
 
 // ---------- Energy Accounting ----------
 // Returns *total available* energy across all spawns + extensions.
-function Calculate_Spawn_Resource() {
+// Returns energy available for spawning.
+// - If you pass a spawn, room, or roomName => returns that ROOM's energy (spawns + extensions).
+// - If you pass nothing => falls back to empire-wide total (old behavior).
+function Calculate_Spawn_Resource(spawnOrRoom) {
+  // Per-room mode
+  if (spawnOrRoom) {
+    let room =
+      (spawnOrRoom.room && spawnOrRoom.room) ||           // a spawn (or structure)
+      (typeof spawnOrRoom === 'string' ? Game.rooms[spawnOrRoom] : spawnOrRoom); // roomName or Room
+    if (!room) return 0;
+
+    // Fast, built-in sum of spawns+extensions for this room
+    return room.energyAvailable;
+
+    // If you ever want the manual sum instead, uncomment:
+    /*
+    let spawnEnergy = _.sum(room.find(FIND_MY_SPAWNS), s => s.store[RESOURCE_ENERGY] || 0);
+    let extEnergy   = _.sum(room.find(FIND_MY_STRUCTURES, {filter: s => s.structureType === STRUCTURE_EXTENSION}),
+                            s => s.store[RESOURCE_ENERGY] || 0);
+    return spawnEnergy + extEnergy;
+    */
+  }
+
+  // ---- Backward-compat (empire-wide) ----
   let spawnEnergy = 0;
   for (const name in Game.spawns) {
     spawnEnergy += Game.spawns[name].store[RESOURCE_ENERGY] || 0;
@@ -125,9 +148,12 @@ function Calculate_Spawn_Resource() {
   return spawnEnergy + extensionEnergy;
 }
 
-if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-  console.log(`[spawn] Available energy: ${Calculate_Spawn_Resource()}`);
-}
+// Optional: tweak your debug line to show per-room when you have a spawner handy
+// if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+//   const anySpawn = Object.values(Game.spawns)[0];
+//   console.log(`[spawn] Energy empire=${Calculate_Spawn_Resource()} | room=${anySpawn ? Calculate_Spawn_Resource(anySpawn) : 0}`);
+// }
+
 
 // ---------- Body Selection ----------
 // Returns the largest body from CONFIGS[taskKey] that fits energyAvailable.
@@ -248,7 +274,7 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
 }
 
 // Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
-function Spawn_Worker_Bee(spawn, neededTask, availableEnergy) {
+function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   const body = getBodyForTask(neededTask, availableEnergy);
   const name = Generate_Creep_Name(neededTask || 'Worker');
   const memory = {
@@ -257,6 +283,7 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy) {
     bornTask: neededTask,
     birthBody: body.slice(),
   };
+  if (extraMemory) Object.assign(memory, extraMemory);
   const res = spawn.spawnCreep(body, name, { memory });
   if (res === OK) {
     if (currentLogLevel >= LOG_LEVEL.BASIC) {
@@ -267,6 +294,73 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy) {
   return false;
 }
 
+
+// --- REPLACE your existing Spawn_Squad with this hardened version ---
+function Spawn_Squad(spawn, squadId = 'Alpha') {
+  if (!spawn || spawn.spawning) return false;
+
+  // Per-squad memory book-keeping to avoid rapid duplicate spawns
+  if (!Memory.squads) Memory.squads = {};
+  if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
+  const S = Memory.squads[squadId];
+  const COOLDOWN_TICKS = 1;                  // don’t spawn same-squad twice within 5 ticks
+
+  // Desired layout (exact counts)
+  const layout = [
+    { role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
+    { role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 2 },
+    { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 1 },
+  ];
+
+  // Count squad members by role (includes spawning eggs)
+function haveCount(taskName) {
+    // count live creeps
+    var live = _.sum(Game.creeps, function(c){
+      return c.my && c.memory && c.memory.squadId === squadId && c.memory.task === taskName ? 1 : 0;
+    });
+    // count "eggs" currently spawning (Memory is set immediately when you spawn)
+    var hatching = _.sum(Memory.creeps, function(mem, name){
+      if (!mem) return 0;
+      if (mem.squadId !== squadId) return 0;
+      if (mem.task !== taskName) return 0;
+      // Only count if not yet in Game.creeps (i.e., still spawning)
+      return Game.creeps[name] ? 0 : 1;
+    });
+    return live + hatching;
+  }
+
+  // Simple cooldown guard
+  if (S.lastSpawnAt && (Game.time - S.lastSpawnAt) < COOLDOWN_TICKS) {
+    return false;
+  }
+
+  const avail = Calculate_Spawn_Resource(spawn);
+
+  // Find the first underfilled slot (in order) and spawn exactly one
+  for (let i = 0; i < layout.length; i++) {
+    const plan = layout[i];
+    const have = haveCount(plan.role);
+
+    if (have < plan.need) {
+      const memory = { task: plan.role, squadId: squadId, role: plan.role }; // role is set again defensively
+      const ok = Spawn_Worker_Bee(spawn, plan.role, avail, { squadId: squadId });
+      if (ok) {
+        S.lastSpawnAt = Game.time;
+        S.lastSpawnRole = plan.role;
+        return true;
+      } else {
+        // If we failed due to energy, bail; don’t try other roles this tick
+        return false;
+      }
+    }
+  }
+
+  // Nothing missing → ensure cooldown resets slowly (optional)
+  return false;
+}
+
+
+
 // ---------- Exports ----------
 module.exports = {
   // utilities
@@ -275,7 +369,8 @@ module.exports = {
   configurations: Object.entries(CONFIGS).map(([task, body]) => ({ task, body })), // preserve your original shape
   Generate_Body_From_Config,
   Spawn_Creep_Role,
-
+    // + new helper
+  Spawn_Squad,
   // role generators (compat)
   Generate_Courier_Body,
   Generate_BaseHarvest_Body,

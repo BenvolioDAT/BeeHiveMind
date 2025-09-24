@@ -202,7 +202,13 @@ var BeeHiveMind = {
     for (var s = 0; s < C.spawns.length; s++) {
       var spawner = C.spawns[s];
       if (!spawner || spawner.spawning) continue;
-
+        // --- Squad spawning (run before normal quotas) ---
+        // Only the first spawn attempts squad maintenance to avoid double-spawning.
+        if (typeof spawnLogic.Spawn_Squad === 'function') {
+          if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
+          //if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
+          //if (spawnLogic.Spawn_Squad(spawner, 'Charle')) continue;
+        }
       var room = spawner.room;
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
       var workerTaskLimits = {
@@ -214,9 +220,9 @@ var BeeHiveMind = {
         remoteharvest: 12,
         scout:         1,
         queen:         2,
-        CombatArcher:  2,
-        CombatMelee:   1,
-        CombatMedic:   1,
+        CombatArcher:  0,
+        CombatMelee:   0,
+        CombatMedic:   0,
         Dismantler:    0,
         Trucker:       0,
         Claimer:       4,
