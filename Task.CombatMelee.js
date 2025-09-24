@@ -1,4 +1,4 @@
-// Task.CombatMelee.js — Vanguard with squad anchor & shared target (ES5-safe)
+// Task.CombatMelee.js — Vanguard + bodyguard + squad anchor (ES5-safe)
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
@@ -27,6 +27,9 @@ var CombatMelee = {
       return;
     }
 
+    // --- NEW: quick self/buddy healing if we have any HEAL parts
+    this._auxHeal(creep);
+
     // (1) emergency bail
     var lowHp = (creep.hits / creep.hitsMax) < CONFIG.fleeHpPct;
     if (lowHp || this._inTowerDanger(creep.pos)) {
@@ -36,10 +39,17 @@ var CombatMelee = {
       return;
     }
 
+    // --- NEW: bodyguard move — interpose for squishies when hostiles hug them
+    if (this._guardSquadmate(creep)) {
+      // we took a protective step; still swing if something is adjacent
+      var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
+      if (hugger) creep.attack(hugger);
+      return;
+    }
+
     // (2) squad shared target (preferred)
     var target = TaskSquad.sharedTarget(creep);
     if (!target) {
-      // no visible target: hold near anchor
       var anc = TaskSquad.getAnchor(creep);
       if (anc) this._moveSmart(creep, anc, 1);
       return;
@@ -77,11 +87,73 @@ var CombatMelee = {
       var weak = this._weakestIn1to2(creep);
       if (weak && (weak.hits / weak.hitsMax) < 0.5) target = weak;
     }
-
-    // act as squad anchor (implicitly via Task.Squad)
   },
 
-  // ---- utilities (mostly your originals) ----
+  // --- NEW: if we have HEAL, keep ourselves up; else sprinkle help at R1/R3
+  _auxHeal: function (creep) {
+    var healParts = creep.getActiveBodyparts(HEAL);
+    if (!healParts) return;
+
+    if (creep.hits < creep.hitsMax) {
+      // frontline: prefer direct heal if hurt
+      creep.heal(creep);
+      return;
+    }
+
+    // find lowest % squadmate in 3 (prefer same squad)
+    var sid = (creep.memory && creep.memory.squadId) || 'Alpha';
+    var mates = _.filter(Game.creeps, function (c) {
+      return c.my && c.id !== creep.id && c.memory && c.memory.squadId === sid && c.hits < c.hitsMax;
+    });
+    if (!mates.length) return;
+    var target = _.min(mates, function (c) { return c.hits / c.hitsMax; });
+
+    if (creep.pos.isNearTo(target)) creep.heal(target);
+    else if (creep.pos.inRangeTo(target, 3)) creep.rangedHeal(target);
+  },
+
+  // --- NEW: try to stand between squishies and danger, or friendly-swap with them
+  _guardSquadmate: function (creep) {
+    var sid = (creep.memory && creep.memory.squadId) || 'Alpha';
+    var threatened = _.filter(Game.creeps, function (ally) {
+      if (!ally.my || !ally.memory || ally.memory.squadId !== sid) return false;
+      // protect archers/medics/dismantlers first
+      var role = ally.memory.task || ally.memory.role || '';
+      if (role !== 'CombatArcher' && role !== 'CombatMedic' && role !== 'Dismantler') return false;
+      // threatened if enemy melee is adjacent
+      return ally.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {
+        filter: function (h){ return h.getActiveBodyparts(ATTACK) > 0; }
+      }).length > 0;
+    });
+
+    if (!threatened.length) return false;
+
+    // pick closest threatened ally
+    var buddy = creep.pos.findClosestByRange(threatened);
+    if (!buddy) return false;
+
+    // if we're adjacent, try to swap tiles to put us in harm's way
+    if (creep.pos.isNearTo(buddy)) {
+      // best-effort friendly swap into ally tile
+      if (TaskSquad.tryFriendlySwap(creep, buddy.pos)) return true;
+
+      // or step onto a tile that is adjacent to both buddy and the hostile
+      var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {filter: function (h){return h.getActiveBodyparts(ATTACK)>0;}})[0];
+      if (bad) {
+        var best = this._bestAdjacentTile(creep, bad);
+        if (best && creep.pos.getRangeTo(best) === 1) {
+          creep.move(creep.pos.getDirectionTo(best));
+          return true;
+        }
+      }
+    } else {
+      // close distance toward buddy (will auto-attempt swap via stepToward)
+      TaskSquad.stepToward(creep, buddy.pos, 1);
+      return true;
+    }
+    return false;
+  },
+
   _moveSmart: function (creep, targetPos, range) {
     if (!targetPos) return;
     creep.moveTo(targetPos, {
@@ -143,11 +215,8 @@ var CombatMelee = {
       if (impass) continue;
 
       var score=0;
-      // enemy melee adjacency
       for (i=0;i<threats.length;i++) if (threats[i].pos.getRangeTo(pos)<=1) score+=20;
-      // tower danger
       if (this._inTowerDanger(pos)) score+=50;
-      // edge penalty
       if (x===0||x===49||y===0||y===49) score+=CONFIG.edgePenalty;
       if (onRoad) score-=1;
 

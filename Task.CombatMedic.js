@@ -1,4 +1,4 @@
-// Task.CombatMedic.js — Squad-aware healer (ES5-safe)
+// Task.CombatMedic.js — Squad-aware healer with damage-aware triage (ES5-safe)
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
@@ -37,23 +37,27 @@ var TaskCombatMedic = {
       return creep.moveTo(targetPos, { range: range, reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms, plainCost: 2, swampCost: 6 });
     }
 
+    // --- NEW: always patch ourselves first if bleeding
     if (creep.hits < creep.hitsMax && canHeal) {
       creep.heal(creep);
     }
 
-    // follow the most critical squadmate if not already assigned
+    // choose / refresh buddy (prefer the most endangered squadmate)
     var buddy = Game.getObjectById(creep.memory.followTarget);
     if (!buddy || !buddy.my || buddy.hits <= 0) {
-      // pick weakest squadmate in room
       var squadId = creep.memory.squadId || 'Alpha';
       var candidates = _.filter(Game.creeps, function (a){
         if (!a.my || !a.memory) return false;
         if (a.memory.squadId !== squadId) return false;
-        if (!CombatRoles[a.memory.task] && a.memory.role !== 'CombatMelee' && a.memory.role !== 'CombatArcher' && a.memory.role !== 'Dismantler') return false;
-        return true;
+        return !!CombatRoles[a.memory.task] || a.memory.role === 'CombatMelee' || a.memory.role === 'CombatArcher' || a.memory.role === 'Dismantler';
       });
       if (candidates.length) {
-        buddy = _.min(candidates, function (a){ return a.hits / a.hitsMax; });
+        // --- NEW: prefer lowest expected health (HP minus tower pressure)
+        var room = creep.room;
+        var that = this;
+        buddy = _.min(candidates, function (a){
+          return (a.hits - that._estimateTowerDamage(room, a.pos)) / Math.max(1, a.hitsMax);
+        });
         if (buddy) { creep.memory.followTarget = buddy.id; creep.memory.assignedAt = now; }
       }
     }
@@ -83,44 +87,76 @@ var TaskCombatMedic = {
       return;
     }
 
-    // normal: stay glued near buddy (rear position)
+    // stay glued near buddy (rear position)
     if (!creep.pos.inRangeTo(buddy, CONFIG.followRange)) {
-      // one cooperative step (allows friendly swap through TaskSquad)
+      // cooperative step (allows friendly swap through TaskSquad)
       TaskSquad.stepToward(creep, buddy.pos, CONFIG.followRange);
     }
 
-    // triage prioritization
-    var crit = lowestInRange(creep.pos, CONFIG.triageRange);
-    if (crit && (crit.hits / crit.hitsMax) <= CONFIG.criticalPct && crit.id !== buddy.id) {
-      if (creep.pos.isNearTo(crit)) creep.heal(crit);
-      else { moveSmart(crit.pos, 1); if (creep.pos.inRangeTo(crit,3)) creep.rangedHeal(crit); }
-    } else {
-      // prioritize buddy
-      if (creep.pos.isNearTo(buddy)) {
-        if (buddy.hits < buddy.hitsMax) creep.heal(buddy);
+    // --- NEW: damage-aware triage (inspired by Harabi's "maximize lowest expected HP")
+    var triageSet = creep.pos.findInRange(FIND_MY_CREEPS, CONFIG.triageRange);
+    if (triageSet && triageSet.length) {
+      var room = creep.room, self = this;
+      var scored = _.map(triageSet, function (a) {
+        var exp = a.hits - self._estimateTowerDamage(room, a.pos);
+        return { a: a, key: exp / Math.max(1, a.hitsMax) };
+      });
+      var worst = _.min(scored, 'key');
+      var target = worst && worst.a;
+
+      if (target) {
+        if (creep.pos.isNearTo(target)) creep.heal(target);
         else {
-          var other = lowestInRange(creep.pos, 1);
-          if (other) creep.heal(other);
+          moveSmart(target.pos, 1);
+          if (creep.pos.inRangeTo(target, 3)) creep.rangedHeal(target);
         }
-      } else if (creep.pos.inRangeTo(buddy, 3)) {
-        if (buddy.hits < buddy.hitsMax) creep.rangedHeal(buddy);
-        else {
-          var other3 = lowestInRange(creep.pos, 3);
-          if (other3) creep.rangedHeal(other3);
+      }
+    } else {
+      // fallback: heal buddy / others as before
+      var crit = lowestInRange(creep.pos, CONFIG.triageRange);
+      if (crit && (crit.hits / crit.hitsMax) <= CONFIG.criticalPct && crit.id !== buddy.id) {
+        if (creep.pos.isNearTo(crit)) creep.heal(crit);
+        else { moveSmart(crit.pos, 1); if (creep.pos.inRangeTo(crit,3)) creep.rangedHeal(crit); }
+      } else {
+        if (creep.pos.isNearTo(buddy)) {
+          if (buddy.hits < buddy.hitsMax) creep.heal(buddy);
+          else {
+            var other = lowestInRange(creep.pos, 1);
+            if (other) creep.heal(other);
+          }
+        } else if (creep.pos.inRangeTo(buddy, 3)) {
+          if (buddy.hits < buddy.hitsMax) creep.rangedHeal(buddy);
+          else {
+            var other3 = lowestInRange(creep.pos, 3);
+            if (other3) creep.rangedHeal(other3);
+          }
         }
       }
     }
 
-    // refresh / reconsider
+    // refresh buddy assignment occasionally
     if (creep.memory.assignedAt && (now - creep.memory.assignedAt) > CONFIG.stickiness) {
-      var inj = lowestInRange(creep.pos, CONFIG.triageRange);
-      if (inj && (inj.hits / inj.hitsMax) < 0.5 && inj.id !== buddy.id) {
-        delete creep.memory.followTarget;
-        delete creep.memory.assignedAt;
-      } else {
-        creep.memory.assignedAt = now;
+      delete creep.memory.followTarget;
+      delete creep.memory.assignedAt;
+    }
+  },
+
+  // --- NEW: quick tower damage estimate (matches Screeps constants; simple & cheap)
+  _estimateTowerDamage: function (room, pos) {
+    if (!room || !pos) return 0;
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType === STRUCTURE_TOWER; } });
+    var total = 0;
+    for (var i=0;i<towers.length;i++) {
+      var d = towers[i].pos.getRangeTo(pos);
+      if (d <= TOWER_OPTIMAL_RANGE) total += TOWER_POWER_ATTACK;
+      else {
+        var capped = Math.min(d, TOWER_FALLOFF_RANGE);
+        var frac = (capped - TOWER_OPTIMAL_RANGE) / Math.max(1, (TOWER_FALLOFF_RANGE - TOWER_OPTIMAL_RANGE));
+        var fall = TOWER_POWER_ATTACK * (1 - (TOWER_FALLOFF * frac));
+        total += Math.max(0, Math.floor(fall));
       }
     }
+    return total;
   },
 
   _inTowerDanger: function (pos) {
