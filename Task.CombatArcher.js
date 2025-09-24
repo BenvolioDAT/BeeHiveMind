@@ -76,7 +76,7 @@ var TaskCombatArcher = {
     // if personally hurt, prefer self heal (archer wants to keep DPS online)
     if (creep.hits < creep.hitsMax) {
       if (creep.pos.findInRange(FIND_HOSTILE_CREEPS,1).length) creep.heal(creep);
-      else creep.rangedHeal(creep);
+      else creep.Heal(creep);
       return;
     }
 
