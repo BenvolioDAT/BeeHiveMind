@@ -94,6 +94,8 @@ var BeeVisuals = {
       visual.text('CPU Bucket: ' + Game.cpu.bucket, 20, 1, { color: 'white', font: 0.6, opacity: 1 });
       visual.text('CPU Used: ' + used.toFixed(2) + ' / Δ ' + delta.toFixed(2), 20, 2, { color: 'white', font: 0.6, opacity: 1 });
     }
+// Show planned roads (ghost-roads) when DEBUG is on
+BeeVisuals.drawPlannedRoadsDebug();
 
     // Repair counter (every tick)
     if (CFG.showRepairCounter) {
@@ -191,5 +193,107 @@ var BeeVisuals = {
     }
   }
 };
+// --- Planned road overlay (DEBUG only) ---
+// Draws future/planned road tiles from Planner.Road's memory (even before sites exist).
+// ES5-safe; throttled + capped per room to stay CPU-friendly.
+BeeVisuals.drawPlannedRoadsDebug = function () {
+  // Only show at DEBUG level
+  if (_logLevel < LOG_LEVEL.DEBUG) return;
+
+  // Pick a "home" room like other BeeVisuals helpers do
+  var room = _getMainRoom();
+  if (!room) return;
+
+  // Throttle a bit (change modulo for heavier/lighter draw)
+  var MOD = 1; // 1 = every tick; bump to 2/3 if you want fewer draws
+  if (((Game.time + 3) % MOD) !== 0) return;
+
+  var v = new RoomVisual(room.name);
+
+  // Finder: this room's road planner memory bucket
+  if (!Memory.rooms || !Memory.rooms[room.name] || !Memory.rooms[room.name].roadPlanner) return;
+  var rp = Memory.rooms[room.name].roadPlanner;
+  var paths = rp.paths || {};
+  var key;
+
+  // Render caps per room for safety
+  var MAX_PATHS = 6;     // draw at most N paths per tick (per "home")
+  var MAX_TILES = 250;   // total tile dots/segments per tick cap
+
+  var drawnPaths = 0;
+  var drawnTiles = 0;
+
+  // Cheap color defs
+  var COLOR_PLANNED = '#ffe066'; // amber/yellow for future road
+  var COLOR_BUILT   = '#99ff99'; // soft green for already-road
+  var COLOR_CURSOR  = '#66ccff'; // blue-ish for rec.i cursor pointer
+
+  // Helper: quick presence check for existing/built road/site on a tile
+  function _hasRoadOrSiteFast(roomObj, x, y) {
+    var arr = roomObj.lookForAt(LOOK_STRUCTURES, x, y);
+    for (var i = 0; i < arr.length; i++) if (arr[i].structureType === STRUCTURE_ROAD) return true;
+    var siteArr = roomObj.lookForAt(LOOK_CONSTRUCTION_SITES, x, y);
+    for (var j = 0; j < siteArr.length; j++) if (siteArr[j].structureType === STRUCTURE_ROAD) return true;
+    return false;
+  }
+
+  // Loop paths
+  for (key in paths) {
+    if (!paths.hasOwnProperty(key)) continue;
+    if (drawnPaths >= MAX_PATHS) break;
+
+    var rec = paths[key];
+    if (!rec || !rec.path || !rec.path.length) continue;
+
+    // Show light label for the path header in the home room
+    v.text(key, 1, 5 + (drawnPaths * 0.6), { color: '#ffffff', font: 0.5, opacity: 0.6, align: 'left' });
+
+    // Iterate the stored tiles; only draw portions that are currently visible (cheap)
+    var lastX = -1, lastY = -1, lastRoom = null;
+
+    for (var idx = 0; idx < rec.path.length; idx++) {
+      if (drawnTiles >= MAX_TILES) break;
+
+      var step = rec.path[idx];
+      var rname = step.roomName;
+      var rx = step.x | 0, ry = step.y | 0;
+      var theRoom = Game.rooms[rname];
+      if (!theRoom) continue; // no vision → skip drawing
+
+      // Cursor indicator (where drip-placer will continue)
+      if (typeof rec.i === 'number' && idx === rec.i) {
+        // Outline circle to show current cursor
+        new RoomVisual(rname).circle(rx, ry, { radius: 0.4, stroke: COLOR_CURSOR, fill: 'transparent', opacity: 0.7 });
+      }
+
+      // If terrain is wall, skip visuals (the planner also skips)
+      if (theRoom.getTerrain().get(rx, ry) === TERRAIN_MASK_WALL) continue;
+
+      var already = _hasRoadOrSiteFast(theRoom, rx, ry);
+      var color = already ? COLOR_BUILT : COLOR_PLANNED;
+      var opacity = already ? 0.55 : 0.35;
+
+      // Dot for the tile
+      new RoomVisual(rname).circle(rx, ry, { radius: 0.25, fill: color, opacity: opacity, stroke: undefined });
+
+      // Light line segment to previous step (same room only) for readability
+      if (lastRoom === rname && lastX !== -1) {
+        new RoomVisual(rname).line(lastX, lastY, rx, ry, { width: 0.09, color: color, opacity: opacity });
+      }
+
+      lastX = rx; lastY = ry; lastRoom = rname;
+      drawnTiles++;
+      if (drawnTiles >= MAX_TILES) break;
+    }
+
+    // If planner marked as done, stamp a faint check on the last tile we drew in the home room (cheap)
+    if (rec.done && lastRoom === room.name && lastX !== -1) {
+      v.text('✓', lastX, lastY, { color: COLOR_BUILT, font: 0.6, opacity: 0.7, align: 'center' });
+    }
+
+    drawnPaths++;
+  }
+};
+
 
 module.exports = BeeVisuals;

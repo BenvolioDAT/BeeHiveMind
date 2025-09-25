@@ -339,41 +339,14 @@ var BeeToolbox = {
     range,                 // same meaning as before
     ignoreCreeps: true,    // good default for smoother traffic
      useFindRoute: true, // enable for multi-room routing when needed
-    // ensurePath: true,   // try a second pass if short search failed
-     stuckValue: 2,      // repath when stuck this many ticks
-    // repath: 0.05,       // 5% chance to randomly repath each tick
+    ensurePath: true,   // try a second pass if short search failed
+    stuckValue: 2,      // repath when stuck this many ticks
+    repath: 0.05,       // 5% chance to randomly repath each tick
     returnData: {}         // we’ll use this to optionally draw/flag
   }, opts);
 
   // ---- Call Traveler ----
   const res = creep.travelTo(destination, options);
-/*
-  // ---- OPTIONAL: drop/move a destination flag when a NEW path is planned ----
-  // Works only when the room is visible (same as your previous code)
-  if (options.returnData.pathfinderReturn && options.returnData.pathfinderReturn.path) {
-    const pfPath = options.returnData.pathfinderReturn.path;
-    if (pfPath.length) {
-      const last = pfPath[pfPath.length - 1]; // RoomPosition
-      const fname = creep.memory.destFlag || `${creep.name}`;
-      const FLAG_COLORS = { default: [COLOR_CYAN, COLOR_WHITE] };
-      const [primary, secondary] = FLAG_COLORS.default;
-      let flag = Game.flags[fname];
-      if (!flag) {
-        const made = creep.room.createFlag(last, fname, primary, secondary);
-        if (typeof made === 'string') creep.memory.destFlag = made;
-      } else if (!flag.pos.isEqualTo(last)) {
-        flag.setPosition(last);
-      }
-    }
-  }
-  // Cleanup flag when we arrive (like before)
-  if (res === OK && destination && creep.pos.inRangeTo(destination, range)) {
-    if (creep.memory.destFlag && Game.flags[creep.memory.destFlag]) {
-      Game.flags[creep.memory.destFlag].remove();
-    }
-    delete creep.memory.destFlag;
-  }*/
-
   return res;
 },
 

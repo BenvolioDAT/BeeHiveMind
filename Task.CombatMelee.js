@@ -243,14 +243,20 @@ var CombatMelee = {
     return _.min(xs, function (c){ return c.hits / c.hitsMax; });
   },
 
-  _flee: function (creep) {
-    var rally = Game.flags.MedicRally || Game.flags.Rally || TaskSquad.getAnchor(creep);
-    if (rally) this._moveSmart(creep, rally.pos || rally, 1);
-    else {
-      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
-      if (bad) creep.move((creep.pos.getDirectionTo(bad) + 4) % 8);
+_flee: function (creep) {
+  var rally = Game.flags.MedicRally || Game.flags.Rally || TaskSquad.getAnchor(creep);
+  if (rally) {
+    this._moveSmart(creep, rally.pos || rally, 1);
+  } else {
+    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    if (bad) {
+      var dir = creep.pos.getDirectionTo(bad);
+      var zero = (dir - 1 + 8) % 8;
+      var back = ((zero + 4) % 8) + 1; // 1..8
+      creep.move(back);
     }
   }
+}
 };
 
 module.exports = CombatMelee;

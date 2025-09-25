@@ -50,33 +50,96 @@ const C  = (c, m) => [...Array(c).fill(CLAIM), ...Array(m).fill(MOVE)];
 const CONFIGS = {
   // Workers
   baseharvest: [
-    B(6,0,5), B(5,1,5), B(4,1,4), B(3,1,3), B(2,1,2), B(1,1,1),
+    B(6,0,5), 
+    B(5,1,5), 
+    B(4,1,4), 
+    B(3,1,3), 
+    B(2,1,2), 
+    B(1,1,1),
   ],
   courier: [
-    CM(30,15), CM(23,23), CM(22,22), CM(21,21), CM(20,20), CM(19,19), CM(18,18),
-    CM(17,17), CM(16,16), CM(15,15), CM(14,14), CM(13,13), CM(12,12), CM(11,11),
-    CM(10,10), CM(9,9), CM(8,8), CM(7,7), CM(6,6), CM(5,5), CM(4,4), CM(3,3),
-    CM(2,2), CM(1,1),
+    CM(30,15), 
+    CM(23,23), 
+    CM(22,22), 
+    CM(21,21), 
+    CM(20,20), 
+    CM(19,19),
+    CM(18,18),
+    CM(17,17), 
+    CM(16,16), 
+    CM(15,15), 
+    CM(14,14), 
+    CM(13,13), 
+    CM(12,12), 
+    CM(11,11),
+    CM(10,10), 
+    CM(9,9), 
+    CM(8,8), 
+    CM(7,7), 
+    CM(6,6), 
+    CM(5,5), 
+    CM(4,4), 
+    CM(3,3),
+    CM(2,2), 
+    CM(1,1),
   ],
   builder: [
-    B(8,8,8), B(4,10,7), B(8,10,9), B(8,10,18), B(6,8,14), B(6,3,9),
-    B(5,2,7), B(4,1,5), B(2,1,3),
+    B(8,8,8), 
+    B(4,10,7), 
+    B(8,10,9), 
+    B(8,10,18), 
+    B(6,8,14), 
+    B(6,3,9),
+    B(5,2,7), 
+    B(4,1,5), 
+    B(2,1,3),
   ],
   upgrader: [
-    B(4,1,5), B(2,1,3),
+    B(4,1,5), 
+    B(2,1,3),
   ],
   repair: [
-    B(5,2,7), B(4,1,5), B(2,1,3),
+    B(5,2,7), 
+    B(4,1,5), 
+    B(2,1,3),
   ],
   Queen: [ // keeping capitalization to match your original key
-    B(0,22,22), B(0,21,21), B(0,20,20), B(0,19,19), B(0,18,18), B(0,17,17),
-    B(0,16,16), B(0,15,15), B(0,14,14), B(0,13,13), B(0,12,12), B(0,11,11),
-    B(0,10,10), B(0,9,9), B(0,8,8), B(0,7,7), B(0,6,6), B(0,5,5), B(0,4,4),
-    B(0,3,3), B(1,2,3), B(1,1,2), B(1,1,1),
+    B(0,22,22), 
+    B(0,21,21), 
+    B(0,20,20), 
+    B(0,19,19), 
+    B(0,18,18), 
+    B(0,17,17),
+    B(0,16,16), 
+    B(0,15,15), 
+    B(0,14,14), 
+    B(0,13,13), 
+    B(0,12,12), 
+    B(0,11,11),
+    B(0,10,10), 
+    B(0,9,9), 
+    B(0,8,8), 
+    B(0,7,7), 
+    B(0,6,6), 
+    B(0,5,5), 
+    B(0,4,4),
+    B(0,3,3), 
+    B(1,2,3), 
+    B(1,1,2), 
+    B(1,1,1),
   ],
   remoteharvest: [
-    B(8,25,17), B(5,10,8), B(5,8,4), B(5,8,13), B(5,6,11), B(5,4,9),
-    B(5,2,7), B(4,2,6), B(3,2,5), B(2,2,4), B(1,1,2),
+    //B(8,25,17), 
+    B(5,10,8), 
+    B(5,8,4),
+    B(5,8,13), 
+    B(5,6,11), 
+    B(5,4,9),
+    B(5,2,7), 
+    B(4,2,6), 
+    B(3,2,5), 
+    B(2,2,4), 
+    B(1,1,2),
   ],
   Scout: [
     B(0,0,1),
@@ -84,21 +147,38 @@ const CONFIGS = {
 
   // Combat
   CombatMelee: [
-    TAM(6,6,12), TAM(4,4,8), TAM(1,1,2),
+    TAM(6,6,12), 
+    TAM(4,4,8), 
+    TAM(1,1,2),
   ],
   CombatArcher: [
-    R(6,8,14), R(4,6,10), R(2,4,6), R(1,2,3),
+    R(6,8,14), 
+    R(4,6,10), 
+    R(2,4,6), 
+    R(1,2,3),
   ],
   CombatMedic: [
-    MH(12,12), MH(10,10), MH(8,8), MH(6,6), MH(5,5), MH(4,4), MH(3,3), MH(2,2), MH(1,1),
+    MH(12,12), 
+    MH(10,10), 
+    MH(8,8), 
+    MH(6,6), 
+    MH(5,5), 
+    MH(4,4), 
+    MH(3,3), 
+    MH(2,2), 
+    MH(1,1),
   ],
   Dismantler: [
-    WM(25,25), WM(20,20), WM(15,15),
+    WM(25,25), 
+    WM(20,20), 
+    WM(15,15),
   ],
 
   // Special
   Claimer: [
-    C(3,3), C(2,2), C(1,1),
+    C(3,3), 
+    C(2,2), 
+    C(1,1),
   ],
 };
 
@@ -303,13 +383,13 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   if (!Memory.squads) Memory.squads = {};
   if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
   const S = Memory.squads[squadId];
-  const COOLDOWN_TICKS = 1;                  // don’t spawn same-squad twice within 5 ticks
+  const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
 
   // Desired layout (exact counts)
   const layout = [
-    { role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
+    //{ role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
     { role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 2 },
-    { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 1 },
+    { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 2 },
   ];
 
   // Count squad members by role (includes spawning eggs)
