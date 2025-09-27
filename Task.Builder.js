@@ -2,6 +2,7 @@
 // ES5-safe, CPU-lean Builder with per-tick site caching, anti-stuck movement,
 // friendly swaps, per-site reservations, and correct fallback so we don't
 // withdraw then immediately re-deposit energy.
+// + Visuals: gold line to destination, marker + label, path dots (low-CPU).
 
 'use strict';
 
@@ -10,8 +11,22 @@ var BeeToolbox = require('BeeToolbox');
 // =============================
 // Tunables
 // =============================
-var BUILDERS_PER_SITE_CAP = 2;   // allow up to N builders per site per tick
+var BUILDERS_PER_SITE_CAP = 1;   // allow up to N builders per site per tick
 var IDLE_NEAR_SITE_RANGE  = 2;   // where to wait if no reservation available
+
+// =============================
+// Visuals (ES5-safe, low-CPU)
+// =============================
+var VIS = {
+  enabled: true,              // set false to turn off globally
+  drawPathDots: true,         // show first few steps of the path as dots
+  drawLineToDest: true,       // draw a line from creep to destination
+  drawDestMarker: true,       // circle + label at the destination
+  maxDots: 10,                // how many steps to draw
+  color: '#ffd700',           // gold-ish; easy to see
+  opacity: 0.5,               // overall visual opacity
+  labelEveryTicks: 3          // throttle labels to every N ticks
+};
 
 // -----------------------------
 // Global, per-tick builder cache
@@ -212,7 +227,50 @@ function _pickReservableSite(creep, list, cap, weights) {
   return null;
 }
 
-// Unified mover with anti-stuck + friendly swap
+// ========== Visual helpers ==========
+function _asPos(dest) { return dest && dest.pos ? dest.pos : dest; }
+
+function _drawMove(creep, dest, path, tag) {
+  if (!VIS.enabled) return;
+  try {
+    var p = _asPos(dest);
+    if (!p || !p.roomName) return;
+
+    var v = new RoomVisual(p.roomName);
+
+    // Destination marker
+    if (VIS.drawDestMarker) {
+      v.circle(p.x, p.y, {
+        radius: 0.35, fill: 'transparent',
+        stroke: VIS.color, strokeWidth: 0.12, opacity: VIS.opacity
+      });
+      if ((Game.time % VIS.labelEveryTicks) === 0 && tag) {
+        v.text(tag, p.x, p.y - 0.6, {
+          font: 0.6, color: '#ffffff', background: '#000000',
+          backgroundPadding: 0.03, opacity: 0.9
+        });
+      }
+    }
+
+    // Line to destination
+    if (VIS.drawLineToDest && creep.pos.roomName === p.roomName) {
+      v.line(creep.pos.x, creep.pos.y, p.x, p.y, {
+        color: VIS.color, width: 0.05, opacity: VIS.opacity * 0.9
+      });
+    }
+
+    // Path dots (first few steps)
+    if (VIS.drawPathDots && path && path.length) {
+      var limit = Math.min(VIS.maxDots | 0, path.length | 0);
+      for (var i = 0; i < limit; i++) {
+        var s = path[i];
+        v.circle(s.x, s.y, { radius: 0.14, fill: VIS.color, opacity: 0.75 });
+      }
+    }
+  } catch (e) { /* visuals are best-effort; ignore */ }
+}
+
+// ========== Unified mover with visuals ==========
 function go(creep, dest, opts) {
   if (!dest) return;
   opts = opts || {};
@@ -226,6 +284,9 @@ function go(creep, dest, opts) {
 
   if (!_edgeSafe(creep.pos)) { _lateralNudge(creep); }
 
+  // Tag for destination label (optional)
+  var vTag = opts.vTag || (opts.range === 3 ? '🔨 build' : '➡');
+
   var path = creep.pos.findPathTo(dest, {
     ignoreCreeps: ignoreCreeps,
     range: range,
@@ -234,6 +295,9 @@ function go(creep, dest, opts) {
   });
 
   if (path && path.length) {
+    // Draw planned action before moving
+    _drawMove(creep, dest, path, vTag);
+
     var step = path[0];
     var dir = creep.pos.getDirectionTo(step.x, step.y);
     var res = creep.move(dir);
@@ -245,15 +309,22 @@ function go(creep, dest, opts) {
   }
 
   if (BeeToolbox && BeeToolbox.BeeTravel) {
-    try { BeeToolbox.BeeTravel(creep, dest, { range: range, reusePath: baseReuse }); return; } catch (e) {}
+    try {
+      _drawMove(creep, dest, null, vTag); // still show intent
+      BeeToolbox.BeeTravel(creep, dest, { range: range, reusePath: baseReuse });
+      return;
+    } catch (e) {}
   }
 
+  // Fallback moveTo
+  _drawMove(creep, dest, null, vTag); // still show intent
   var moveRes = creep.moveTo(dest, {
     range: range,
     reusePath: baseReuse,
     ignoreCreeps: ignoreCreeps,
     maxOps: (stuck >= 3) ? 3000 : 1800,
-    plainCost: 2, swampCost: 6
+    plainCost: 2, swampCost: 6,
+    visualizePathStyle: {} // keep empty; we draw our own visuals
   });
   if (stuck >= 3 && moveRes === ERR_NO_PATH) _lateralNudge(creep);
 }
@@ -289,16 +360,16 @@ var TaskBuilder = {
         if (site) {
           if (creep.pos.inRangeTo(site.pos, 3)) {
             var r = creep.build(site);
-            if (r === ERR_NOT_IN_RANGE) { go(creep, site, { range: 3 }); }
+            if (r === ERR_NOT_IN_RANGE) { go(creep, site, { range: 3, vTag: '🔨 build' }); }
             else if (r === ERR_INVALID_TARGET) { _lateralNudge(creep); }
           } else {
-            go(creep, site, { range: 3 });
+            go(creep, site, { range: 3, vTag: '🔨 build' });
           }
           return;
         } else {
           // No slot free this tick: WAIT near best local site instead of dumping energy
           var bestLocal = C.bestByRoom[here];
-          if (bestLocal) { go(creep, bestLocal.pos, { range: IDLE_NEAR_SITE_RANGE }); return; }
+          if (bestLocal) { go(creep, bestLocal.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
         }
       }
 
@@ -314,7 +385,7 @@ var TaskBuilder = {
         // If the nearest room is *this* room, we already tried; just idle near its best site.
         if (nearestRoom === here) {
           var bestHere = C.bestByRoom[here];
-          if (bestHere) { go(creep, bestHere.pos, { range: IDLE_NEAR_SITE_RANGE }); return; }
+          if (bestHere) { go(creep, bestHere.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
         } else {
           if (Game.rooms[nearestRoom]) {
             // With vision: try to reserve & build its best site
@@ -323,22 +394,22 @@ var TaskBuilder = {
               if (_reserveSite(bestSite.id, BUILDERS_PER_SITE_CAP)) {
                 if (creep.pos.inRangeTo(bestSite.pos, 3)) {
                   var r3 = creep.build(bestSite);
-                  if (r3 === ERR_NOT_IN_RANGE) go(creep, bestSite, { range: 3 });
+                  if (r3 === ERR_NOT_IN_RANGE) go(creep, bestSite, { range: 3, vTag: '🔨 build' });
                   else if (r3 === ERR_INVALID_TARGET) _lateralNudge(creep);
                 } else {
-                  go(creep, bestSite, { range: 3 });
+                  go(creep, bestSite, { range: 3, vTag: '🔨 build' });
                 }
                 return;
               } else {
                 // No slot free there either: move toward it and wait close
-                go(creep, bestSite.pos, { range: IDLE_NEAR_SITE_RANGE }); return;
+                go(creep, bestSite.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return;
               }
             } else {
-              go(creep, new RoomPosition(25, 25, nearestRoom), { range: 20 }); return;
+              go(creep, new RoomPosition(25, 25, nearestRoom), { range: 20, vTag: '🧭 center' }); return;
             }
           } else {
             // No vision: head to room center
-            go(creep, new RoomPosition(25, 25, nearestRoom), { range: 20 }); return;
+            go(creep, new RoomPosition(25, 25, nearestRoom), { range: 20, vTag: '🧭 center' }); return;
           }
         }
       }
@@ -359,20 +430,20 @@ var TaskBuilder = {
             }
           });
           if (sink) {
-            if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) go(creep, sink, { range: 1 });
+            if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) go(creep, sink, { range: 1, vTag: '📦 drop' });
             return;
           }
         }
         var spawn = creep.pos.findClosestByRange(FIND_MY_SPAWNS);
-        if (spawn) { if (creep.pos.getRangeTo(spawn) > 1) go(creep, spawn, { range: 1 }); else spawn.recycleCreep(creep); }
+        if (spawn) { if (creep.pos.getRangeTo(spawn) > 1) go(creep, spawn, { range: 1, vTag: '♻ recycle' }); else spawn.recycleCreep(creep); }
         else creep.suicide();
         return;
       }
 
       // If we got here, just chill near the best known site in this room or home anchor
       var bestFallback = C.bestByRoom[here];
-      if (bestFallback) { go(creep, bestFallback.pos, { range: IDLE_NEAR_SITE_RANGE }); return; }
-      go(creep, getHomeAnchorPos(ensureHome(creep)), { range: 2 }); return;
+      if (bestFallback) { go(creep, bestFallback.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
+      go(creep, getHomeAnchorPos(ensureHome(creep)), { range: 2, vTag: '🏠 home' }); return;
 
     } else {
       // ---- REFUEL PHASE ----
@@ -381,23 +452,23 @@ var TaskBuilder = {
       var src = findWithdrawTargetInRoom(creep.room);
       if (src) {
         var r1 = creep.withdraw(src, RESOURCE_ENERGY);
-        if (r1 === ERR_NOT_IN_RANGE) go(creep, src, { range: 1 });
+        if (r1 === ERR_NOT_IN_RANGE) go(creep, src, { range: 1, vTag: '⛽ refuel' });
         return;
       }
 
-      if (creep.pos.roomName !== homeName) { go(creep, getHomeAnchorPos(homeName), { range: 1 }); return; }
+      if (creep.pos.roomName !== homeName) { go(creep, getHomeAnchorPos(homeName), { range: 1, vTag: '🏠 home' }); return; }
 
       src = findWithdrawTargetInRoom(creep.room);
       if (src) {
         var r2 = creep.withdraw(src, RESOURCE_ENERGY);
-        if (r2 === ERR_NOT_IN_RANGE) go(creep, src, { range: 1 });
+        if (r2 === ERR_NOT_IN_RANGE) go(creep, src, { range: 1, vTag: '⛽ refuel' });
         return;
       }
 
       var source = creep.pos.findClosestByRange(FIND_SOURCES_ACTIVE);
-      if (source) { var r3 = creep.harvest(source); if (r3 === ERR_NOT_IN_RANGE) go(creep, source); return; }
+      if (source) { var r3 = creep.harvest(source); if (r3 === ERR_NOT_IN_RANGE) go(creep, source, { vTag: '⛏ harvest' }); return; }
 
-      go(creep, getHomeAnchorPos(homeName), { range: 2 }); return;
+      go(creep, getHomeAnchorPos(homeName), { range: 2, vTag: '🏠 home' }); return;
     }
   },
 

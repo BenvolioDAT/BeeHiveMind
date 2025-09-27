@@ -14,10 +14,10 @@ const CONFIG = {
 };
 // ---- Multi-room Reserve Helpers ----
 var RESERVE_CONFIG = {
-  desired: 4500,      // aim to keep rooms near this; max is 5000
-  rotateAt: 4000,     // once >= this, head to next target
+  desired: 3500,      // aim to keep rooms near this; max is 5000
+  rotateAt: 2000,     // once >= this, head to next target
   scanRoleNames: ['remoteharvest', 'remoteMiner','remoteHarvest'], // tweak to your codebase
-  maxTargets: 12      // safety cap
+  maxTargets: 8      // safety cap
 };
 
 // ---- Room Locking (prevents 2 claimers from dogpiling one room) ----

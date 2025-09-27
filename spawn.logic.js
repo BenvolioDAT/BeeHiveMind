@@ -84,12 +84,11 @@ const CONFIGS = {
     CM(1,1),
   ],
   builder: [
-    B(8,8,8), 
-    B(4,10,7), 
-    B(8,10,9), 
-    B(8,10,18), 
-    B(6,8,14), 
-    B(6,3,9),
+    B(5,14,19),
+    B(5,12,17),
+    B(5,10,15),
+    B(5,8,12), 
+    B(5,3,9),
     B(5,2,7), 
     B(4,1,5), 
     B(2,1,3),
@@ -152,17 +151,17 @@ const CONFIGS = {
     TAM(1,1,2),
   ],
   CombatArcher: [
-    R(6,8,14), 
-    R(4,6,10), 
+    //R(6,8,14), 
+    R(4,6,10),//1140 
     R(2,4,6), 
     R(1,2,3),
   ],
   CombatMedic: [
-    MH(12,12), 
-    MH(10,10), 
-    MH(8,8), 
-    MH(6,6), 
-    MH(5,5), 
+   // MH(12,12), 
+   // MH(10,10), 
+    //MH(8,8), 
+    //MH(6,6), 
+   // MH(5,5), 
     MH(4,4), 
     MH(3,3), 
     MH(2,2), 
@@ -388,8 +387,8 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   // Desired layout (exact counts)
   const layout = [
     //{ role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
-    { role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 2 },
-    { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 2 },
+    { role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 1 },
+    { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 1 },
   ];
 
   // Count squad members by role (includes spawning eggs)

@@ -16,7 +16,7 @@ var CONFIG = {
   reusePath: 10,
   maxOps: 2000,
   towerAvoidRadius: 20,
-  waitForMedic: false
+  waitForMedic: true
 };
 
 var TaskCombatArcher = {
@@ -29,7 +29,7 @@ var TaskCombatArcher = {
       if (rf) this._moveSmart(creep, (rf.pos || rf), 0);
       return;
     }
-
+    
     // (1) Acquire target or rally
     var target = TaskSquad.sharedTarget(creep);
     if (!target) {
