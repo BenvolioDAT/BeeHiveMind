@@ -226,7 +226,7 @@ var BeeHiveMind = {
         CombatMedic:   0,
         Dismantler:    0,
         Trucker:       0,
-        Claimer:       4,
+        Claimer:       1,
       };
 
       // find first underfilled task and try to spawn it

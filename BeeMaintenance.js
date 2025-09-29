@@ -223,8 +223,9 @@ var BeeMaintenance = (function () {
     var list = room.find(FIND_STRUCTURES, {
       filter: function (s) {
         // Skip roads altogether (fast bail)
-        if (s.structureType === STRUCTURE_ROAD) return false;
-
+        if (s.structureType === STRUCTURE_ROAD) {//return false;
+          return s.hits < (s.hitMax * .20);
+        }
         if (s.structureType === STRUCTURE_RAMPART) {
           return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_RAMPART);
         }
