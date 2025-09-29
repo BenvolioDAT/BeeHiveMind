@@ -219,14 +219,14 @@ var BeeHiveMind = {
         repair:        0,
         courier:       1,
         queen:         2,
-        remoteharvest: 4,
+        remoteharvest: 12,
         scout:         0,
         CombatArcher:  0,
         CombatMelee:   0,
         CombatMedic:   0,
         Dismantler:    0,
         Trucker:       0,
-        Claimer:       2,
+        Claimer:       4,
       };
 
       // find first underfilled task and try to spawn it
