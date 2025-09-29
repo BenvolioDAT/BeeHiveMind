@@ -18,7 +18,7 @@ var BeeMaintenance = (function () {
     REPAIR_SCAN_INTERVAL:    5,  // rebuild repair list every N ticks per room
     REPAIR_MAX_RAMPART:   30000,  // rampart cap
     REPAIR_MAX_WALL:      30000,  // wall cap
-    LOG: false                   // set true if you want cleanup logs
+    LOG: true                // set true if you want cleanup logs
   };
 
   // -----------------------------
@@ -224,7 +224,7 @@ var BeeMaintenance = (function () {
       filter: function (s) {
         // Skip roads altogether (fast bail)
         if (s.structureType === STRUCTURE_ROAD) {//return false;
-          return s.hits < (s.hitMax * .20);
+          return s.hits < (s.hitsMax * 0.60);
         }
         if (s.structureType === STRUCTURE_RAMPART) {
           return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_RAMPART);

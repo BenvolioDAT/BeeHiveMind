@@ -120,12 +120,20 @@ function _qCache(room) {
       return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
     }
   });
+  var REFILL_AT_OR_BELOW = 0.70;
 
   // Towers needing energy
   var towersNeed = room.find(FIND_STRUCTURES, {
     filter: function (s) {
       if (s.structureType !== STRUCTURE_TOWER || !s.store) return false;
-      return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
+      
+      var used = (s.store.getUsedCapacity(RESOURCE_ENERGY) | 0);
+      var cap = (s.store.getCapacity(RESOURCE_ENERGY) | 0);
+      if (cap <= 0) return false;
+      
+      var fillPct = used / cap; // 0.0 .. 1.0
+      return fillPct <= REFILL_AT_OR_BELOW; // true = needs refill
+      //return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
     }
   });
 
