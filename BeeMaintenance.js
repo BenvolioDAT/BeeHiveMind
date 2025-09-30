@@ -18,7 +18,7 @@ var BeeMaintenance = (function () {
     REPAIR_SCAN_INTERVAL:    5,  // rebuild repair list every N ticks per room
     REPAIR_MAX_RAMPART:   30000,  // rampart cap
     REPAIR_MAX_WALL:      30000,  // wall cap
-    LOG: true                // set true if you want cleanup logs
+    LOG: false                // set true if you want cleanup logs
   };
 
   // -----------------------------

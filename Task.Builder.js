@@ -1,8 +1,10 @@
 // role.TaskBuilder.cpu.es5.js
 // ES5-safe, CPU-lean Builder with per-tick site caching, anti-stuck movement,
-// friendly swaps, per-site reservations, and correct fallback so we don't
-// withdraw then immediately re-deposit energy.
+// friendly swaps, per-site reservations, correct fallback, and "true lock":
+// once a builder picks a site, it stays on it until completion.
 // + Visuals: gold line to destination, marker + label, path dots (low-CPU).
+// + On-path preference: favors road sites that lie along the current route,
+//   and lightly penalizes building targets sitting in swamp tiles.
 
 'use strict';
 
@@ -13,19 +15,29 @@ var BeeToolbox = require('BeeToolbox');
 // =============================
 var BUILDERS_PER_SITE_CAP = 1;   // allow up to N builders per site per tick
 var IDLE_NEAR_SITE_RANGE  = 2;   // where to wait if no reservation available
+var LOCK_STUCK_GRACE_TICKS = 50; // if we truly cannot reach the locked site for this long, drop lock
+
+// Prefer building road sites that lie along our current path in-room
+var ONPATH_CFG = {
+  enable: true,
+  steps: 25,      // how many steps of our path to consider
+  radius: 1,      // corridor half-width in tiles around the path
+  roadBonus: 3,   // weight bonus if a road site lies in the corridor
+  swampPenalty: 1 // subtract from weight if target tile is swamp (non-road)
+};
 
 // =============================
 // Visuals (ES5-safe, low-CPU)
 // =============================
 var VIS = {
-  enabled: true,              // set false to turn off globally
-  drawPathDots: true,         // show first few steps of the path as dots
-  drawLineToDest: true,       // draw a line from creep to destination
-  drawDestMarker: true,       // circle + label at the destination
-  maxDots: 10,                // how many steps to draw
-  color: '#ffd700',           // gold-ish; easy to see
-  opacity: 0.5,               // overall visual opacity
-  labelEveryTicks: 3          // throttle labels to every N ticks
+  enabled: true,
+  drawPathDots: true,
+  drawLineToDest: true,
+  drawDestMarker: true,
+  maxDots: 10,
+  color: '#ffd700',
+  opacity: 0.5,
+  labelEveryTicks: 3
 };
 
 // -----------------------------
@@ -207,26 +219,6 @@ function _reserveSite(siteId, cap) {
   return true;
 }
 
-// Choose the best reservable site from a list (weight -> distance), trying next-best if the first is taken.
-function _pickReservableSite(creep, list, cap, weights) {
-  if (!list || !list.length) return null;
-  var tried = {};
-  for (var attempt = 0; attempt < list.length; attempt++) {
-    var best = null, bestW = -1, bestD = 1e9, bestIdx = -1;
-    for (var i = 0; i < list.length; i++) {
-      if (tried[i]) continue;
-      var s = list[i];
-      var w = (weights && weights[s.structureType]) || 0;
-      var d = creep.pos.getRangeTo(s.pos);
-      if (w > bestW || (w === bestW && d < bestD)) { best = s; bestW = w; bestD = d; bestIdx = i; }
-    }
-    if (!best) break;
-    tried[bestIdx] = true;
-    if (_reserveSite(best.id, cap)) return best; // got a slot; use it
-  }
-  return null;
-}
-
 // ========== Visual helpers ==========
 function _asPos(dest) { return dest && dest.pos ? dest.pos : dest; }
 
@@ -238,7 +230,6 @@ function _drawMove(creep, dest, path, tag) {
 
     var v = new RoomVisual(p.roomName);
 
-    // Destination marker
     if (VIS.drawDestMarker) {
       v.circle(p.x, p.y, {
         radius: 0.35, fill: 'transparent',
@@ -252,14 +243,12 @@ function _drawMove(creep, dest, path, tag) {
       }
     }
 
-    // Line to destination
     if (VIS.drawLineToDest && creep.pos.roomName === p.roomName) {
       v.line(creep.pos.x, creep.pos.y, p.x, p.y, {
         color: VIS.color, width: 0.05, opacity: VIS.opacity * 0.9
       });
     }
 
-    // Path dots (first few steps)
     if (VIS.drawPathDots && path && path.length) {
       var limit = Math.min(VIS.maxDots | 0, path.length | 0);
       for (var i = 0; i < limit; i++) {
@@ -284,7 +273,6 @@ function go(creep, dest, opts) {
 
   if (!_edgeSafe(creep.pos)) { _lateralNudge(creep); }
 
-  // Tag for destination label (optional)
   var vTag = opts.vTag || (opts.range === 3 ? '🔨 build' : '➡');
 
   var path = creep.pos.findPathTo(dest, {
@@ -295,9 +283,7 @@ function go(creep, dest, opts) {
   });
 
   if (path && path.length) {
-    // Draw planned action before moving
     _drawMove(creep, dest, path, vTag);
-
     var step = path[0];
     var dir = creep.pos.getDirectionTo(step.x, step.y);
     var res = creep.move(dir);
@@ -310,23 +296,157 @@ function go(creep, dest, opts) {
 
   if (BeeToolbox && BeeToolbox.BeeTravel) {
     try {
-      _drawMove(creep, dest, null, vTag); // still show intent
+      _drawMove(creep, dest, null, vTag);
       BeeToolbox.BeeTravel(creep, dest, { range: range, reusePath: baseReuse });
       return;
     } catch (e) {}
   }
 
-  // Fallback moveTo
-  _drawMove(creep, dest, null, vTag); // still show intent
+  _drawMove(creep, dest, null, vTag);
   var moveRes = creep.moveTo(dest, {
     range: range,
     reusePath: baseReuse,
     ignoreCreeps: ignoreCreeps,
     maxOps: (stuck >= 3) ? 3000 : 1800,
     plainCost: 2, swampCost: 6,
-    visualizePathStyle: {} // keep empty; we draw our own visuals
+    visualizePathStyle: {}
   });
   if (stuck >= 3 && moveRes === ERR_NO_PATH) _lateralNudge(creep);
+}
+
+// -----------------------------
+// NEW: Lock helpers
+// -----------------------------
+function _lockToSite(creep, site) {
+  // lock id + a position snapshot so we can path back even if we lose visibility for a bit
+  creep.memory.tBuildId = site.id;
+  creep.memory.tBuildPos = { x: site.pos.x, y: site.pos.y, roomName: site.pos.roomName, type: site.structureType };
+  creep.memory.tLockSince = Game.time | 0;
+  creep.memory.tLockStuck = 0; // reset a separate stuck counter for the lock
+}
+
+function _clearLock(creep) {
+  delete creep.memory.tBuildId;
+  delete creep.memory.tBuildPos;
+  delete creep.memory.tLockSince;
+  delete creep.memory.tLockStuck;
+}
+
+function _getLockedSite(creep) {
+  var id = creep.memory.tBuildId;
+  if (!id) return null;
+  return Game.constructionSites[id] || null;
+}
+
+function _gotoLock(creep) {
+  // When we have no live site object (no vision or completed), move toward last known pos to confirm
+  var p = creep.memory.tBuildPos;
+  if (!p) return false;
+  var pos = new RoomPosition(p.x, p.y, p.roomName);
+  go(creep, pos, { range: 3, vTag: '🔒 seek' });
+  return true;
+}
+
+// -----------------------------
+// NEW: On-path helpers
+// -----------------------------
+function _pathCorridorToward(creep, goalPos, steps, radius) {
+  if (!ONPATH_CFG.enable) return null;
+  if (!goalPos || goalPos.roomName !== creep.pos.roomName) return null; // in-room only
+  var path = creep.pos.findPathTo(goalPos, {
+    ignoreCreeps: true, range: 1, maxOps: 1500, plainCost: 2, swampCost: 6
+  });
+  if (!path || !path.length) return null;
+
+  var map = {};
+  var n = Math.min(steps | 0, path.length | 0);
+  for (var i = 0; i < n; i++) {
+    var s = path[i];
+    for (var dx = -radius; dx <= radius; dx++) {
+      for (var dy = -radius; dy <= radius; dy++) {
+        var x = s.x + dx, y = s.y + dy;
+        if (x < 0 || x > 49 || y < 0 || y > 49) continue;
+        map[x + '_' + y + '_' + creep.pos.roomName] = 1;
+      }
+    }
+  }
+  return map;
+}
+
+function _computeLocalCorridor(creep, localList) {
+  if (!ONPATH_CFG.enable || !localList || !localList.length) return null;
+
+  var goal = null, bestD = 1e9;
+
+  // Prefer the nearest road site in-room
+  for (var i = 0; i < localList.length; i++) {
+    var s = localList[i];
+    if (s.structureType !== STRUCTURE_ROAD) continue;
+    if (s.pos.roomName !== creep.pos.roomName) continue;
+    var d = creep.pos.getRangeTo(s.pos);
+    if (d < bestD) { bestD = d; goal = s.pos; }
+  }
+
+  // Fallback: nearest site of any type in-room
+  if (!goal) {
+    bestD = 1e9;
+    for (var j = 0; j < localList.length; j++) {
+      var t = localList[j];
+      if (t.pos.roomName !== creep.pos.roomName) continue;
+      var d2 = creep.pos.getRangeTo(t.pos);
+      if (d2 < bestD) { bestD = d2; goal = t.pos; }
+    }
+  }
+
+  if (!goal) return null;
+  return _pathCorridorToward(creep, goal, ONPATH_CFG.steps, ONPATH_CFG.radius);
+}
+
+// -----------------------------
+// Choose the best reservable site with optional on-path bias
+// -----------------------------
+function _pickReservableSite(creep, list, cap, weights, opts) {
+  if (!list || !list.length) return null;
+  opts = opts || {};
+  var tried = {};
+  var terr = creep.room ? creep.room.getTerrain() : null;
+
+  for (var attempt = 0; attempt < list.length; attempt++) {
+    var best = null, bestScore = -1, bestIdx = -1, bestDist = 1e9;
+
+    for (var i = 0; i < list.length; i++) {
+      if (tried[i]) continue;
+      var s = list[i];
+
+      // base weight (your structure priority)
+      var score = (weights && weights[s.structureType]) || 0;
+
+      // on-path road bonus (same-room corridor only)
+      if (opts.corridorMap && s.structureType === STRUCTURE_ROAD) {
+        var key = s.pos.x + '_' + s.pos.y + '_' + s.pos.roomName;
+        if (opts.corridorMap[key]) score += (opts.roadBonus | 0);
+      }
+
+      // light swamp penalty for non-road targets (only if we have same-room terrain)
+      if (opts.swampPenalty && terr && s.pos.roomName === creep.pos.roomName) {
+        if (s.structureType !== STRUCTURE_ROAD &&
+            terr.get(s.pos.x, s.pos.y) === TERRAIN_MASK_SWAMP) {
+          score -= (opts.swampPenalty | 0);
+        }
+      }
+
+      var d = creep.pos.getRangeTo(s.pos);
+      // higher score wins; tie -> closer wins
+      if (score > bestScore || (score === bestScore && d < bestDist)) {
+        best = s; bestScore = score; bestIdx = i; bestDist = d;
+      }
+    }
+
+    if (!best) break;
+    tried[bestIdx] = true;
+    if (_reserveSite(best.id, cap)) return best; // got a slot; use it
+  }
+  return null;
 }
 
 // -----------------------------
@@ -340,9 +460,19 @@ var TaskBuilder = {
   structurePlacements: [ /* paste your existing placements here */ ],
 
   run: function (creep) {
-    // Toggle build state
+    // Toggle build state (lock persists across refuels)
     if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) creep.memory.building = false;
     if (!creep.memory.building && creep.store.getFreeCapacity() === 0) creep.memory.building = true;
+
+    // If we have a lock but the site is actually gone (completed/removed), clear it.
+    var locked = _getLockedSite(creep);
+    if (!locked && creep.memory.tBuildId) {
+      var lp = creep.memory.tBuildPos;
+      if (lp && Game.rooms[lp.roomName]) {
+        var hereSites = Game.rooms[lp.roomName].lookForAt(LOOK_CONSTRUCTION_SITES, lp.x, lp.y);
+        if (!hereSites || !hereSites.length) { _clearLock(creep); }
+      }
+    }
 
     if (creep.memory.building) {
       // ---- BUILD PHASE ----
@@ -350,30 +480,60 @@ var TaskBuilder = {
       var here = creep.pos.roomName;
       var weights = TaskBuilder.siteWeights;
 
-      // 1) Prefer sites in current room
-      var localList = C.byRoom[here] || [];
-
-      if (localList.length) {
-        // Pick a reservable site (tries next-best if first is already capped)
-        var site = _pickReservableSite(creep, localList, BUILDERS_PER_SITE_CAP, weights);
-
-        if (site) {
-          if (creep.pos.inRangeTo(site.pos, 3)) {
-            var r = creep.build(site);
-            if (r === ERR_NOT_IN_RANGE) { go(creep, site, { range: 3, vTag: '🔨 build' }); }
-            else if (r === ERR_INVALID_TARGET) { _lateralNudge(creep); }
+      // (A) If we have a locked site, honor it first
+      locked = _getLockedSite(creep); // re-fetch after potential clear
+      if (creep.memory.tBuildId && locked) {
+        if (_reserveSite(locked.id, BUILDERS_PER_SITE_CAP)) {
+          if (creep.pos.inRangeTo(locked.pos, 3)) {
+            var br = creep.build(locked);
+            if (br === ERR_NOT_IN_RANGE) { go(creep, locked, { range: 3, vTag: '🔒 build' }); }
+            else if (br === ERR_INVALID_TARGET) { _clearLock(creep); }
           } else {
-            go(creep, site, { range: 3, vTag: '🔨 build' });
+            go(creep, locked, { range: 3, vTag: '🔒 build' });
           }
           return;
         } else {
-          // No slot free this tick: WAIT near best local site instead of dumping energy
+          go(creep, locked.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 wait🔒' });
+          return;
+        }
+      } else if (creep.memory.tBuildId && !locked) {
+        var oldStuck = creep.memory.tLockStuck | 0;
+        creep.memory.tLockStuck = oldStuck + 1;
+        if (oldStuck > LOCK_STUCK_GRACE_TICKS) {
+          _clearLock(creep);
+        } else if (_gotoLock(creep)) {
+          return;
+        } else {
+          _clearLock(creep);
+        }
+      }
+
+      // (B) No lock: normal selection with reservation + on-path bias, then create a lock
+      var localList = C.byRoom[here] || [];
+      if (localList.length) {
+        var corridor = _computeLocalCorridor(creep, localList);
+        var site = _pickReservableSite(
+          creep, localList, BUILDERS_PER_SITE_CAP, weights,
+          { corridorMap: corridor, roadBonus: ONPATH_CFG.roadBonus, swampPenalty: ONPATH_CFG.swampPenalty }
+        );
+        if (site) {
+          _lockToSite(creep, site);
+
+          if (creep.pos.inRangeTo(site.pos, 3)) {
+            var r = creep.build(site);
+            if (r === ERR_NOT_IN_RANGE) { go(creep, site, { range: 3, vTag: '🔒 build' }); }
+            else if (r === ERR_INVALID_TARGET) { _clearLock(creep); }
+          } else {
+            go(creep, site, { range: 3, vTag: '🔒 build' });
+          }
+          return;
+        } else {
           var bestLocal = C.bestByRoom[here];
           if (bestLocal) { go(creep, bestLocal.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
         }
       }
 
-      // 2) Otherwise go to the NEAREST room that has sites (including 'here' case)
+      // (C) Otherwise go to the NEAREST room that has sites
       if (C.rooms.length) {
         var nearestRoom = null, bestDist = 1e9;
         for (var r2 = 0; r2 < C.rooms.length; r2++) {
@@ -382,39 +542,37 @@ var TaskBuilder = {
           if (dist < bestDist) { bestDist = dist; nearestRoom = rn; }
         }
 
-        // If the nearest room is *this* room, we already tried; just idle near its best site.
         if (nearestRoom === here) {
           var bestHere = C.bestByRoom[here];
           if (bestHere) { go(creep, bestHere.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
         } else {
           if (Game.rooms[nearestRoom]) {
-            // With vision: try to reserve & build its best site
             var bestSite = C.bestByRoom[nearestRoom];
             if (bestSite) {
               if (_reserveSite(bestSite.id, BUILDERS_PER_SITE_CAP)) {
+                _lockToSite(creep, bestSite);
+
                 if (creep.pos.inRangeTo(bestSite.pos, 3)) {
                   var r3 = creep.build(bestSite);
-                  if (r3 === ERR_NOT_IN_RANGE) go(creep, bestSite, { range: 3, vTag: '🔨 build' });
-                  else if (r3 === ERR_INVALID_TARGET) _lateralNudge(creep);
+                  if (r3 === ERR_NOT_IN_RANGE) go(creep, bestSite, { range: 3, vTag: '🔒 build' });
+                  else if (r3 === ERR_INVALID_TARGET) _clearLock(creep);
                 } else {
-                  go(creep, bestSite, { range: 3, vTag: '🔨 build' });
+                  go(creep, bestSite, { range: 3, vTag: '🔒 build' });
                 }
                 return;
               } else {
-                // No slot free there either: move toward it and wait close
                 go(creep, bestSite.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return;
               }
             } else {
               go(creep, new RoomPosition(25, 25, nearestRoom), { range: 20, vTag: '🧭 center' }); return;
             }
           } else {
-            // No vision: head to room center
             go(creep, new RoomPosition(25, 25, nearestRoom), { range: 20, vTag: '🧭 center' }); return;
           }
         }
       }
 
-      // 3) Only if there are truly NO sites anywhere do we dump energy + recycle
+      // (D) No sites anywhere: dump energy / recycle
       if (C.rooms.length === 0) {
         if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
           var sink = creep.pos.findClosestByRange(FIND_STRUCTURES, {
@@ -440,13 +598,13 @@ var TaskBuilder = {
         return;
       }
 
-      // If we got here, just chill near the best known site in this room or home anchor
       var bestFallback = C.bestByRoom[here];
       if (bestFallback) { go(creep, bestFallback.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
       go(creep, getHomeAnchorPos(ensureHome(creep)), { range: 2, vTag: '🏠 home' }); return;
 
     } else {
       // ---- REFUEL PHASE ----
+      // NOTE: we do NOT clear the lock when refueling; we’ll resume the same site.
       var homeName = ensureHome(creep);
 
       var src = findWithdrawTargetInRoom(creep.room);
