@@ -1,12 +1,15 @@
 // TaskRemoteHarvest.clean.js
 // Remote-harvester ("forager"): mines a remote source and hauls energy home.
-// Upgrades:
-// - Skip locked rooms (Invader Core or Invader reservation).
-// - Enforce unique source ownership (1 per source) with backoff + "soonest-free" fallback.
-// - NEW: per-tick source-claim lock (atomic, deterministic) to prevent same-tick double-picks.
-// - PF-cost caching + once-per-tick occupancy audit.
-// - Return-to-storage takes priority over cooldown so full creeps always deposit.
-// - ES5-safe (no const/let/arrow/optional-chaining).
+//
+// This revision:
+// - Stores count + owner per source in Memory.remoteAssignments[sourceId] = {count, owner, roomName, since}
+// - Creep memory always carries {sourceId, targetRoom}
+// - Duplicate resolver elects 1 winner (oldest _assignTick, then name), losers yield
+// - Removes stale owners when creeps die or retarget
+// - FLAG PRUNING: removes source flags when unused or room locked (with grace TTL)
+// - Still ES5-safe (no const/let/arrow)
+//
+// ⚙️ Tuned for MAX_FORAGERS_PER_SOURCE = 1. Owner field can be extended later.
 
 'use strict';
 
@@ -18,49 +21,71 @@ var BeeToolbox = require('BeeToolbox');
 // ============================
 // Tunables
 // ============================
-var REMOTE_RADIUS = 6;             // Room hops from home to scan
-var MAX_PF_OPS    = 3000;          // PathFinder ops budget during selection
-var PLAIN_COST    = 2;             // PF cost on plains
-var SWAMP_COST    = 10;            // PF cost on swamps
-var MAX_FORAGERS_PER_SOURCE = 1;   // Strict unique ownership
+var REMOTE_RADIUS = 6;
+var MAX_PF_OPS    = 3000;
+var PLAIN_COST    = 2;
+var SWAMP_COST    = 10;
+var MAX_FORAGERS_PER_SOURCE = 1;
 
-var PF_CACHE_TTL = 150;            // ticks
-var INVADER_LOCK_MEMO_TTL = 1500;  // ticks to trust lock memo without vision
+var PF_CACHE_TTL = 150;
+var INVADER_LOCK_MEMO_TTL = 1500;
 
-// Anti-flap / avoid list
-var AVOID_TTL = 30;                // ticks to avoid a source after losing it (shorter so retries happen)
-var RETARGET_COOLDOWN = 5;         // ticks to wait before repicking
+var AVOID_TTL = 30;
+var RETARGET_COOLDOWN = 5;
+
+// Small bias to keep the current owner briefly (soft preference only)
+var ASSIGN_STICKY_TTL = 50;
+
+// Anti-stuck
+var STUCK_WINDOW = 4;
+
+// Flag pruning cadence & grace
+var FLAG_PRUNE_PERIOD   = 25;   // how often to scan for flag deletions
+var FLAG_RETENTION_TTL  = 500;  // keep a flag this many ticks since last activity
 
 // ============================
-// Global, safe, ES5 utilities
+// Helpers: short id, flags
 // ============================
-
 function shortSid(id) {
   if (!id || typeof id !== 'string') return '??????';
-  var n = id.length;
-  return id.substr(n - 6);
+  var n = id.length; return id.substr(n - 6);
 }
 
-/** Ensure exactly one flag exists on this source tile (idempotent). */
+function _sourceMem(roomName, sid) {
+  var rm = Memory.rooms[roomName] = (Memory.rooms[roomName] || {});
+  rm.sources = rm.sources || {};
+  return (rm.sources[sid] = (rm.sources[sid] || {}));
+}
+
+// mark activity each time we touch/own/harvest a source
+function touchSourceActive(roomName, sid) {
+  if (!roomName || !sid) return;
+  var srec = _sourceMem(roomName, sid);
+  srec.lastActive = Game.time;
+}
+
+/** Ensure exactly one flag exists on this source tile (idempotent) and touch lastActive. */
 function ensureSourceFlag(source) {
   if (!source || !source.pos || !source.room) return;
 
-  var rm = Memory.rooms[source.pos.roomName] = (Memory.rooms[source.pos.roomName] || {});
-  rm.sources = rm.sources || {};
-  var srec = rm.sources[source.id] = (rm.sources[source.id] || {});
+  var roomName = source.pos.roomName;
+  var srec = _sourceMem(roomName, source.id);
 
+  // reuse previous flag if it still matches this tile
   if (srec.flagName) {
     var f = Game.flags[srec.flagName];
     if (f &&
         f.pos.x === source.pos.x &&
         f.pos.y === source.pos.y &&
-        f.pos.roomName === source.pos.roomName) {
+        f.pos.roomName === roomName) {
+      touchSourceActive(roomName, source.id);
       return;
     }
   }
 
+  // does a properly-named flag already sit here? adopt it
   var flagsHere = source.pos.lookFor(LOOK_FLAGS) || [];
-  var expectedPrefix = 'SRC-' + source.pos.roomName + '-';
+  var expectedPrefix = 'SRC-' + roomName + '-';
   var sidTail = shortSid(source.id);
   for (var i = 0; i < flagsHere.length; i++) {
     var fh = flagsHere[i];
@@ -68,156 +93,240 @@ function ensureSourceFlag(source) {
         fh.name.indexOf(expectedPrefix) === 0 &&
         fh.name.indexOf(sidTail) !== -1) {
       srec.flagName = fh.name;
+      touchSourceActive(roomName, source.id);
       return;
     }
   }
 
-  var base = expectedPrefix + sidTail; // e.g., "SRC-E12S34-abc123"
-  var name = base;
-  var tries = 1;
-  while (Game.flags[name]) {
-    tries++;
-    name = base + '-' + tries;
-    if (tries > 10) break;
-  }
-
+  // create a new one
+  var base = expectedPrefix + sidTail;
+  var name = base, tries = 1;
+  while (Game.flags[name]) { tries++; name = base + '-' + tries; if (tries > 10) break; }
   var rc = source.room.createFlag(source.pos, name, COLOR_YELLOW, COLOR_YELLOW);
   if (typeof rc === 'string') {
     srec.flagName = rc;
+    touchSourceActive(roomName, source.id);
   }
 }
 
-// -------- Avoid-list helpers (per-creep) --------
-function _ensureAvoid(creep) {
-  if (!creep.memory._avoid) creep.memory._avoid = {}; // { sourceId: untilTick }
-  return creep.memory._avoid;
-}
+// ============================
+// Avoid-list (per creep)
+// ============================
+function _ensureAvoid(creep){ if (!creep.memory._avoid) creep.memory._avoid = {}; return creep.memory._avoid; }
+function shouldAvoid(creep, sid){ var a=_ensureAvoid(creep); var t=a[sid]; return (typeof t==='number' && Game.time<t); }
+function markAvoid(creep, sid, ttl){ var a=_ensureAvoid(creep); a[sid] = Game.time + (ttl!=null?ttl:AVOID_TTL); }
+function avoidRemaining(creep, sid){ var a=_ensureAvoid(creep); var t=a[sid]; if (typeof t!=='number') return 0; var left=t-Game.time; return left>0?left:0; }
 
-function shouldAvoid(creep, sourceId) {
-  if (!sourceId) return false;
-  var avoid = _ensureAvoid(creep);
-  var until = avoid[sourceId];
-  return (typeof until === 'number' && Game.time < until);
-}
-
-function markAvoid(creep, sourceId, ttl) {
-  if (!sourceId) return;
-  var avoid = _ensureAvoid(creep);
-  avoid[sourceId] = Game.time + (ttl != null ? ttl : AVOID_TTL);
-}
-
-function avoidRemaining(creep, sourceId) {
-  var avoid = _ensureAvoid(creep);
-  var until = avoid[sourceId];
-  if (typeof until !== 'number') return 0;
-  var left = until - Game.time;
-  return left > 0 ? left : 0;
+// ============================
+// Per-tick *claim* (same-tick contention guard)
+// ============================
+function _claimTable(){ var sc=Memory._sourceClaim; if(!sc||sc.t!==Game.time){ Memory._sourceClaim={t:Game.time,m:{}}; } return Memory._sourceClaim.m; }
+function tryClaimSourceForTick(creep, sid){
+  var m=_claimTable(), cur=m[sid];
+  if (!cur){ m[sid]=creep.name; return true; }
+  if (creep.name < cur){ m[sid]=creep.name; return true; }
+  return cur===creep.name;
 }
 
 // ============================
-// Per-tick source claim lock (atomic-ish)
+// remoteAssignments model
+//   Memory.remoteAssignments[sid] = {
+//     count: <number>,
+//     owner: <creepName or null>,
+//     roomName: <string or null>,
+//     since: <tick or null>
+//   }
 // ============================
-// Only one creep can "win" a source in a given tick.
-// Winner = lexicographically smallest creep.name among claimants.
-function _claimTable() {
-  var sc = Memory._sourceClaim;
-  if (!sc || sc.t !== Game.time) {
-    Memory._sourceClaim = { t: Game.time, m: {} };
-  }
-  return Memory._sourceClaim.m;
+function ensureAssignmentsMem(){ if(!Memory.remoteAssignments) Memory.remoteAssignments={}; return Memory.remoteAssignments; }
+function _maEnsure(entry, roomName){
+  if (!entry || typeof entry !== 'object') entry = { count: 0, owner: null, roomName: roomName||null, since: null };
+  if (typeof entry.count !== 'number') entry.count = (entry.count|0);
+  if (!('owner' in entry)) entry.owner = null;
+  if (!('roomName' in entry)) entry.roomName = roomName||null;
+  if (!('since' in entry)) entry.since = null;
+  return entry;
 }
-
-/**
- * Try to claim sourceId for this tick.
- * Returns true if this creep is the elected winner for that source this tick.
- */
-function tryClaimSourceForTick(creep, sourceId) {
-  var m = _claimTable();
-  var cur = m[sourceId];
-  if (!cur) {
-    m[sourceId] = creep.name;
-    return true; // first claimant wins (tentatively)
-  }
-  // Elect the lexicographically smallest name as the single winner
-  if (creep.name < cur) {
-    m[sourceId] = creep.name;
-    return true;
-  }
-  return cur === creep.name;
+function maCount(memAssign, sid){
+  var e = memAssign[sid];
+  if (!e) return 0;
+  if (typeof e === 'number') return e; // backward compat
+  return e.count|0;
 }
-
-// ============================
-// Invader Core / lock detection
-// ============================
-function isRoomLockedByInvaderCore(roomName) {
-  if (!roomName) return false;
-
-  var rm = Memory.rooms[roomName] = (Memory.rooms[roomName] || {});
-  var now = Game.time;
-
-  var room = Game.rooms[roomName];
-  if (room) {
-    var locked = false;
-
-    // Invader Core present?
-    var cores = room.find(FIND_STRUCTURES, {
-      filter: function(s){ return s.structureType === STRUCTURE_INVADER_CORE; }
-    });
-    if (cores && cores.length > 0) locked = true;
-
-    // Controller reserved by 'Invader'?
-    if (!locked && room.controller && room.controller.reservation &&
-        room.controller.reservation.username === 'Invader') {
-      locked = true;
-    }
-
-    // Optional: toolbox signal
-    if (!locked && BeeToolbox && BeeToolbox.isRoomInvaderLocked) {
-      try { if (BeeToolbox.isRoomInvaderLocked(room)) locked = true; } catch (e) {}
-    }
-
-    rm._invaderLock = { locked: locked, t: now };
-    return locked;
-  }
-
-  // No vision → use memo if fresh
-  if (rm._invaderLock && typeof rm._invaderLock.locked === 'boolean' && typeof rm._invaderLock.t === 'number') {
-    if ((now - rm._invaderLock.t) <= INVADER_LOCK_MEMO_TTL) {
-      return rm._invaderLock.locked;
-    }
-  }
-
-  return false;
+function maOwner(memAssign, sid){
+  var e = memAssign[sid];
+  if (!e || typeof e === 'number') return null;
+  return e.owner || null;
+}
+function maSetOwner(memAssign, sid, owner, roomName){
+  var e = _maEnsure(memAssign[sid], roomName);
+  e.owner = owner; e.roomName = roomName || e.roomName; e.since = Game.time;
+  memAssign[sid] = e;
+  // PRUNE / lastActive: any time we set owner, bump activity so the flag isn't pruned
+  if (e.roomName) touchSourceActive(e.roomName, sid);
+}
+function maClearOwner(memAssign, sid){
+  var e = _maEnsure(memAssign[sid], null);
+  e.owner = null; e.since = null;
+  memAssign[sid] = e;
+}
+function maInc(memAssign, sid, roomName){
+  var e = _maEnsure(memAssign[sid], roomName); e.count = (e.count|0) + 1; memAssign[sid]=e;
+}
+function maDec(memAssign, sid){
+  var e = _maEnsure(memAssign[sid], null); e.count = Math.max(0,(e.count|0)-1); memAssign[sid]=e;
 }
 
 // ============================
-// Occupancy audit (once per tick)
+// Ownership / duplicate resolver
 // ============================
-function ensureAssignmentsMem() {
-  if (!Memory.remoteAssignments) Memory.remoteAssignments = {};
-  return Memory.remoteAssignments;
-}
+function resolveOwnershipForSid(sid){
+  var memAssign = ensureAssignmentsMem();
+  var e = _maEnsure(memAssign[sid], null);
 
-function auditRemoteAssignments() {
-  var live = {};
-  for (var name in Game.creeps) {
+  // Collect live contenders
+  var contenders = [];
+  for (var name in Game.creeps){
     var c = Game.creeps[name];
-    if (c && c.memory && c.memory.task === 'remoteharvest') {
-      var sid = c.memory.sourceId;
-      if (sid) live[sid] = (live[sid] || 0) + 1;
+    if (!c || !c.memory) continue;
+    if (c.memory.task === 'remoteharvest' && c.memory.sourceId === sid){
+      contenders.push(c);
     }
   }
-  var memAssign = Memory.remoteAssignments || (Memory.remoteAssignments = {});
-  for (var sid2 in memAssign) {
-    memAssign[sid2] = live[sid2] || 0;
+
+  // If no contenders, clear owner; counts refresh in audit
+  if (!contenders.length){
+    maClearOwner(memAssign, sid);
+    return null;
   }
-  for (var sid3 in live) memAssign[sid3] = live[sid3];
+
+  // Elect one: oldest _assignTick wins; tie-break by name
+  contenders.sort(function(a,b){
+    var at = a.memory._assignTick||0, bt=b.memory._assignTick||0;
+    if (at!==bt) return at-bt;
+    return a.name<b.name?-1:1;
+  });
+  var winner = contenders[0];
+
+  // Bless the winner
+  maSetOwner(memAssign, sid, winner.name, winner.memory.targetRoom||null);
+
+  // Force losers to yield (they'll obey in their own runs)
+  for (var i=1; i<contenders.length; i++){
+    var loser = contenders[i];
+    if (loser && loser.memory && loser.memory.sourceId === sid){
+      loser.memory._forceYield = true;
+    }
+  }
+
+  return winner.name;
 }
 
-function auditOncePerTick() {
-  if (Memory._auditRemoteAssignmentsTick !== Game.time) {
+// Audits all sids once per tick: recompute counts, scrub dead owners, and prune flags
+function auditRemoteAssignments(){
+  var memAssign = ensureAssignmentsMem();
+
+  // Reset counts to 0
+  for (var sid in memAssign){
+    memAssign[sid] = _maEnsure(memAssign[sid], memAssign[sid].roomName||null);
+    memAssign[sid].count = 0;
+  }
+
+  // Count live assignments
+  for (var name in Game.creeps){
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (c.memory.task === 'remoteharvest' && c.memory.sourceId){
+      var sid2 = c.memory.sourceId;
+      var e2 = _maEnsure(memAssign[sid2], c.memory.targetRoom||null);
+      e2.count = (e2.count|0) + 1;
+      memAssign[sid2] = e2;
+    }
+  }
+
+  // Scrub owners: dead, retargeted, or duplicates → resolve
+  for (var sid3 in memAssign){
+    var owner = maOwner(memAssign, sid3);
+    if (owner){
+      var oc = Game.creeps[owner];
+      if (!oc || !oc.memory || oc.memory.sourceId !== sid3){
+        // stale owner → resolve fresh
+        resolveOwnershipForSid(sid3);
+      }else{
+        // Too many on this sid → resolve to one
+        if (memAssign[sid3].count > MAX_FORAGERS_PER_SOURCE){
+          resolveOwnershipForSid(sid3);
+        }
+      }
+    }else{
+      // If no owner but count > 0, pick one as owner
+      if (memAssign[sid3].count > 0){
+        resolveOwnershipForSid(sid3);
+      }
+    }
+  }
+
+  // PRUNE: run flag pruning on cadence
+  if ((Game.time % FLAG_PRUNE_PERIOD) === 0) pruneUnusedSourceFlags();
+}
+
+function auditOncePerTick(){
+  if (Memory._auditRemoteAssignmentsTick !== Game.time){
     auditRemoteAssignments();
     Memory._auditRemoteAssignmentsTick = Game.time;
+  }
+}
+
+// ============================
+// Flag pruning
+// ============================
+function pruneUnusedSourceFlags(){
+  var memAssign = ensureAssignmentsMem();
+  var now = Game.time;
+
+  // Walk all known rooms/sources in memory
+  var rooms = Memory.rooms || {};
+  for (var roomName in rooms){
+    if (!rooms.hasOwnProperty(roomName)) continue;
+    var rm = rooms[roomName]; if (!rm || !rm.sources) continue;
+
+    var roomLocked = isRoomLockedByInvaderCore(roomName);
+
+    for (var sid in rm.sources){
+      if (!rm.sources.hasOwnProperty(sid)) continue;
+      var srec = rm.sources[sid] || {};
+      var flagName = srec.flagName;
+      if (!flagName) continue; // nothing to remove
+
+      // Decide if the flag is removable:
+      var e = _maEnsure(memAssign[sid], rm.sources[sid].roomName || roomName);
+      var count  = e.count|0;
+      var owner  = e.owner || null;
+      var last   = srec.lastActive|0;
+
+      var inactiveLong = (now - last) > FLAG_RETENTION_TTL;
+      var nobodyOwns   = (count === 0 && owner == null);
+
+      if (roomLocked || (nobodyOwns && inactiveLong)) {
+        var f = Game.flags[flagName];
+        // Only remove if the flag still sits on the source tile; otherwise just clean memory.
+        if (f) {
+          // Optional: verify it looks like one of *our* flags
+          var prefix = 'SRC-' + roomName + '-';
+          var looksLikeOurs = (typeof flagName === 'string' && flagName.indexOf(prefix) === 0);
+          var posMatches = (!srec.x || !srec.y) ? true : (f.pos.x === srec.x && f.pos.y === srec.y);
+          // If we have the source object we can double-check its tile
+          var srcObj = Game.getObjectById(sid);
+          var tileOk = srcObj ? (f.pos.x === srcObj.pos.x && f.pos.y === srcObj.pos.y && f.pos.roomName === srcObj.pos.roomName) : true;
+
+          if (looksLikeOurs && (posMatches && tileOk)) {
+            try { f.remove(); } catch (e1) {}
+          }
+        }
+        // Always clear the memory pointer so we can recreate later if needed
+        delete srec.flagName;
+        rm.sources[sid] = srec;
+      }
+    }
   }
 }
 
@@ -230,12 +339,10 @@ function pfCostCached(anchorPos, targetPos, sourceId) {
   var key = anchorPos.roomName + ':' + sourceId;
   var rec = Memory._pfCost[key];
   if (rec && (Game.time - rec.t) < PF_CACHE_TTL) return rec.c;
-
   var c = pfCost(anchorPos, targetPos);
   Memory._pfCost[key] = { c: c, t: Game.time };
   return c;
 }
-
 function pfCost(anchorPos, targetPos) {
   var ret = PathFinder.search(
     anchorPos,
@@ -245,118 +352,79 @@ function pfCost(anchorPos, targetPos) {
       plainCost: PLAIN_COST,
       swampCost: SWAMP_COST,
       roomCallback: function(roomName) {
-        var room = Game.rooms[roomName];
-        if (!room) return; // default costs if no vision
-        var matrix = new PathFinder.CostMatrix();
-
-        room.find(FIND_STRUCTURES).forEach(function(s) {
-          if (s.structureType === STRUCTURE_ROAD) {
-            matrix.set(s.pos.x, s.pos.y, 1);
-          } else if (
-            s.structureType !== STRUCTURE_CONTAINER &&
-            (s.structureType !== STRUCTURE_RAMPART || !s.my)
-          ) {
-            matrix.set(s.pos.x, s.pos.y, 0xff);
-          }
+        var room = Game.rooms[roomName]; if (!room) return;
+        var m = new PathFinder.CostMatrix();
+        room.find(FIND_STRUCTURES).forEach(function(s){
+          if (s.structureType===STRUCTURE_ROAD) m.set(s.pos.x,s.pos.y,1);
+          else if (s.structureType!==STRUCTURE_CONTAINER && (s.structureType!==STRUCTURE_RAMPART || !s.my)) m.set(s.pos.x,s.pos.y,0xff);
         });
-
-        room.find(FIND_CONSTRUCTION_SITES).forEach(function(cs) {
-          if (cs.structureType !== STRUCTURE_ROAD) {
-            matrix.set(cs.pos.x, cs.pos.y, 0xff);
-          }
-        });
-
-        return matrix;
+        room.find(FIND_CONSTRUCTION_SITES).forEach(function(cs){ if (cs.structureType!==STRUCTURE_ROAD) m.set(cs.pos.x,cs.pos.y,0xff); });
+        return m;
       }
     }
   );
-
   return ret.incomplete ? Infinity : ret.cost;
 }
-
-function go(creep, dest, opts) {
+function go(creep, dest, opts){
   opts = opts || {};
-  if (typeof BeeToolbox !== 'undefined' && BeeToolbox && BeeToolbox.BeeTravel) {
-    BeeToolbox.BeeTravel(creep, dest, opts);
-    return;
-  }
-  var desired = (opts.range != null) ? opts.range : 1;
-  if (creep.pos.getRangeTo(dest) > desired) {
-    creep.moveTo(dest, { reusePath: (opts.reusePath != null ? opts.reusePath : 15) });
+  if (BeeToolbox && BeeToolbox.BeeTravel){ BeeToolbox.BeeTravel(creep, dest, opts); return; }
+  var desired = (opts.range!=null) ? opts.range : 1;
+  if (creep.pos.getRangeTo(dest) > desired){
+    creep.moveTo(dest, { reusePath: (opts.reusePath!=null?opts.reusePath:15) });
   }
 }
 
 // ============================
 // Room discovery & anchor
 // ============================
-function getHomeName(creep) {
+function getHomeName(creep){
   if (creep.memory.home) return creep.memory.home;
-
-  var spawns = Object.keys(Game.spawns).map(function(k){ return Game.spawns[k]; });
-  if (spawns.length) {
-    var best = spawns[0];
-    var bestD = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
-    for (var i = 1; i < spawns.length; i++) {
-      var s = spawns[i];
-      var d = Game.map.getRoomLinearDistance(creep.pos.roomName, s.pos.roomName);
-      if (d < bestD) { best = s; bestD = d; }
+  var spawns = Object.keys(Game.spawns).map(function(k){return Game.spawns[k];});
+  if (spawns.length){
+    var best = spawns[0], bestD = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
+    for (var i=1;i<spawns.length;i++){
+      var s=spawns[i], d=Game.map.getRoomLinearDistance(creep.pos.roomName, s.pos.roomName);
+      if (d<bestD){ best=s; bestD=d; }
     }
-    creep.memory.home = best.pos.roomName;
-    return creep.memory.home;
+    creep.memory.home = best.pos.roomName; return creep.memory.home;
   }
-
-  creep.memory.home = creep.pos.roomName;
-  return creep.memory.home;
+  creep.memory.home = creep.pos.roomName; return creep.memory.home;
 }
-
-function getAnchorPos(homeName) {
+function getAnchorPos(homeName){
   var r = Game.rooms[homeName];
-  if (r) {
+  if (r){
     if (r.storage) return r.storage.pos;
-    var spawns = r.find(FIND_MY_SPAWNS);
-    if (spawns.length) return spawns[0].pos;
+    var spawns = r.find(FIND_MY_SPAWNS); if (spawns.length) return spawns[0].pos;
     if (r.controller && r.controller.my) return r.controller.pos;
   }
-  return new RoomPosition(25, 25, homeName);
+  return new RoomPosition(25,25,homeName);
 }
-
-function bfsNeighborRooms(startName, radius) {
-  radius = radius == null ? 1 : radius;
-  var seen = {};
-  seen[startName] = true;
-  var frontier = [startName];
-
-  for (var depth = 0; depth < radius; depth++) {
-    var next = [];
-    for (var f = 0; f < frontier.length; f++) {
-      var rn = frontier[f];
-      var exits = Game.map.describeExits(rn) || {};
-      for (var dir in exits) {
-        var n = exits[dir];
-        if (!seen[n]) { seen[n] = true; next.push(n); }
-      }
+function bfsNeighborRooms(startName, radius){
+  radius = radius==null?1:radius;
+  var seen={}; seen[startName]=true;
+  var frontier=[startName];
+  for (var depth=0; depth<radius; depth++){
+    var next=[];
+    for (var f=0; f<frontier.length; f++){
+      var rn=frontier[f], exits=Game.map.describeExits(rn)||{};
+      for (var dir in exits){ var n=exits[dir]; if(!seen[n]){ seen[n]=true; next.push(n);} }
     }
-    frontier = next;
+    frontier=next;
   }
-
-  var out = [];
-  for (var k in seen) if (k !== startName) out.push(k);
+  var out=[]; for (var k in seen) if (k!==startName) out.push(k);
   return out;
 }
 
 // ============================
 // Flagging helper (optional)
 // ============================
-function markValidRemoteSourcesForHome(homeName) {
-  var anchor = getAnchorPos(homeName);
-  var memAssign = ensureAssignmentsMem();
-  var neighborRooms = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+function markValidRemoteSourcesForHome(homeName){
+  var anchor=getAnchorPos(homeName);
+  var memAssign=ensureAssignmentsMem();
+  var rooms=bfsNeighborRooms(homeName, REMOTE_RADIUS);
 
-  for (var i = 0; i < neighborRooms.length; i++) {
-    var rn = neighborRooms[i];
-    var room = Game.rooms[rn];
-    if (!room) continue;
-
+  for (var i=0;i<rooms.length;i++){
+    var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
     var rm = Memory.rooms[rn] = (Memory.rooms[rn] || {});
     if (rm.hostile) continue;
     if (isRoomLockedByInvaderCore(rn)) continue;
@@ -365,163 +433,189 @@ function markValidRemoteSourcesForHome(homeName) {
     rm._lastValidFlagScan = Game.time;
 
     var sources = room.find(FIND_SOURCES);
-    for (var j = 0; j < sources.length; j++) {
-      var s = sources[j];
-
-      if (memAssign[s.id] >= MAX_FORAGERS_PER_SOURCE) continue;
-
-      var cost = pfCostCached(anchor, s.pos, s.id);
-      if (cost === Infinity) continue;
-
+    for (var j=0;j<sources.length;j++){
+      var s=sources[j];
+      var e=_maEnsure(memAssign[s.id], rn);
+      if (maCount(memAssign, s.id) >= MAX_FORAGERS_PER_SOURCE) continue;
+      var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
       ensureSourceFlag(s);
+      // record tile for safer prune compares
+      var srec = _sourceMem(rn, s.id); srec.x = s.pos.x; srec.y = s.pos.y;
+      memAssign[s.id] = e; // persist shape
     }
   }
+}
+
+// ============================
+// Invader lock detection
+// ============================
+function isRoomLockedByInvaderCore(roomName){
+  if (!roomName) return false;
+  var rm = Memory.rooms[roomName] = (Memory.rooms[roomName] || {});
+  var now = Game.time, room = Game.rooms[roomName];
+
+  if (room){
+    var locked=false;
+    var cores = room.find(FIND_STRUCTURES, { filter:function(s){return s.structureType===STRUCTURE_INVADER_CORE;} });
+    if (cores && cores.length>0) locked=true;
+    if (!locked && room.controller && room.controller.reservation &&
+        room.controller.reservation.username==='Invader'){ locked=true; }
+    if (!locked && BeeToolbox && BeeToolbox.isRoomInvaderLocked){
+      try{ if (BeeToolbox.isRoomInvaderLocked(room)) locked=true; }catch(e){}
+    }
+    rm._invaderLock = { locked: locked, t: now };
+    return locked;
+  }
+
+  if (rm._invaderLock && typeof rm._invaderLock.locked==='boolean' && typeof rm._invaderLock.t==='number'){
+    if ((now - rm._invaderLock.t) <= INVADER_LOCK_MEMO_TTL) return rm._invaderLock.locked;
+  }
+  return false;
 }
 
 // ============================
 // Picking & exclusivity
 // ============================
-function pickRemoteSource(creep) {
+function pickRemoteSource(creep){
   var memAssign = ensureAssignmentsMem();
   var homeName = getHomeName(creep);
 
-  if ((Game.time + creep.name.charCodeAt(0)) % 50 === 0) {
-    markValidRemoteSourcesForHome(homeName);
-  }
+  if ((Game.time + creep.name.charCodeAt(0)) % 50 === 0) markValidRemoteSourcesForHome(homeName);
   var anchor = getAnchorPos(homeName);
 
   var neighborRooms = bfsNeighborRooms(homeName, REMOTE_RADIUS);
-  var candidates = [];
-  var avoided = []; // collect avoided options to allow "soonest-free" fallback
+  var candidates=[], avoided=[], i, rn;
 
-  for (var i = 0; i < neighborRooms.length; i++) {
-    var rn = neighborRooms[i];
+  // 1) With vision
+  for (i=0;i<neighborRooms.length;i++){
+    rn=neighborRooms[i];
     if (isRoomLockedByInvaderCore(rn)) continue;
-
-    var room = Game.rooms[rn];
-    if (!room) continue; // need vision
+    var room=Game.rooms[rn]; if (!room) continue;
 
     var sources = room.find(FIND_SOURCES);
-    for (var j = 0; j < sources.length; j++) {
-      var s = sources[j];
-
-      var cost = pfCostCached(anchor, s.pos, s.id);
-      if (cost === Infinity) continue;
-
+    for (var j=0;j<sources.length;j++){
+      var s=sources[j];
+      var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
       var lin = Game.map.getRoomLinearDistance(homeName, rn);
 
-      if (shouldAvoid(creep, s.id)) {
-        avoided.push({
-          id: s.id,
-          roomName: rn,
-          cost: cost,
-          lin: lin,
-          left: avoidRemaining(creep, s.id)
-        });
-        continue;
+      if (shouldAvoid(creep, s.id)){ avoided.push({id:s.id,roomName:rn,cost:cost,lin:lin,left:avoidRemaining(creep,s.id)}); continue; }
+      // Skip if another owner is active
+      var ownerNow = maOwner(memAssign, s.id);
+      if (ownerNow && ownerNow !== creep.name) continue;
+      if (maCount(memAssign, s.id) >= MAX_FORAGERS_PER_SOURCE) continue;
+
+      var sticky = (creep.memory.sourceId===s.id) ? 1 : 0;
+      candidates.push({ id:s.id, roomName:rn, cost:cost, lin:lin, sticky:sticky });
+    }
+  }
+
+  // 2) No vision → use Memory.rooms.*.sources
+  if (!candidates.length){
+    for (i=0;i<neighborRooms.length;i++){
+      rn=neighborRooms[i]; if (isRoomLockedByInvaderCore(rn)) continue;
+      var rm = Memory.rooms[rn]; if (!rm || !rm.sources) continue;
+      for (var sid in rm.sources){
+        if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
+        var ownerNow2 = maOwner(memAssign, sid);
+        if (ownerNow2 && ownerNow2 !== creep.name) continue;
+        if (maCount(memAssign, sid) >= MAX_FORAGERS_PER_SOURCE) continue;
+
+        var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
+        var synth = (lin2*200)+800;
+        var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
+        candidates.push({ id:sid, roomName:rn, cost:synth, lin:lin2, sticky:sticky2 });
       }
-
-      var occ = memAssign[s.id] || 0;
-      if (occ >= MAX_FORAGERS_PER_SOURCE) continue;
-
-      candidates.push({
-        id: s.id,
-        roomName: rn,
-        cost: cost,
-        lin: lin
-      });
     }
   }
 
-  if (!candidates.length) {
-    // No clean candidates. Fall back to the avoided one that frees up soonest,
-    // but only if it's about to open (prevents flapping).
+  if (!candidates.length){
     if (!avoided.length) return null;
-    avoided.sort(function(a, b) {
-      return (a.left - b.left) || (a.cost - b.cost) || (a.lin - b.lin) ||
-             (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0));
-    });
+    avoided.sort(function(a,b){ return (a.left-b.left)||(a.cost-b.cost)||(a.lin-b.lin)||(a.id<b.id?-1:1); });
     var soonest = avoided[0];
-    if (soonest.left <= 5) {
-      candidates.push(soonest);
-    } else {
-      return null;
-    }
+    if (soonest.left <= 5) candidates.push(soonest); else return null;
   }
 
-  candidates.sort(function(a, b) {
-    return (a.cost - b.cost) || (a.lin - b.lin) || (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0));
+  candidates.sort(function(a,b){
+    if (b.sticky !== a.sticky) return (b.sticky - a.sticky);
+    return (a.cost-b.cost) || (a.lin-b.lin) || (a.id<b.id?-1:1);
   });
 
-  // NEW: atomically claim a source for this tick; if we don't win the claim for top candidate, try next.
-  for (var k = 0; k < candidates.length; k++) {
-    var best = candidates[k];
-    if (!tryClaimSourceForTick(creep, best.id)) continue; // lost the election for this source this tick
+  for (var k=0;k<candidates.length;k++){
+    var best=candidates[k];
+    if (!tryClaimSourceForTick(creep, best.id)) continue;
 
-    // Reserve slot immediately
-    memAssign[best.id] = (memAssign[best.id] || 0) + 1;
-    creep.memory._assignTick = Game.time;
+    // Reserve immediately
+    maInc(memAssign, best.id, best.roomName);
+    maSetOwner(memAssign, best.id, creep.name, best.roomName);
 
-    // Throttle log to only when changed
-    if (creep.memory._lastLogSid !== best.id) {
-      console.log('🧭 ' + creep.name + ' pick src=' + best.id.slice(-6) + ' room=' + best.roomName + ' cost=' + best.cost);
+    if (creep.memory._lastLogSid !== best.id){
+      console.log('🧭 '+creep.name+' pick src='+best.id.slice(-6)+' room='+best.roomName+' cost='+best.cost+(best.sticky?' (sticky)':''));
       creep.memory._lastLogSid = best.id;
     }
-
     return best;
   }
 
-  // Could not win any claim this tick
   return null;
 }
 
-function releaseAssignment(creep) {
+function releaseAssignment(creep){
   var memAssign = ensureAssignmentsMem();
   var sid = creep.memory.sourceId;
-  if (sid && memAssign[sid]) memAssign[sid] = Math.max(0, memAssign[sid] - 1);
 
-  // Avoid this source for a bit so we don't re-pick it instantly
-  if (sid) markAvoid(creep, sid, AVOID_TTL);
+  if (sid){
+    maDec(memAssign, sid);
+    var owner = maOwner(memAssign, sid);
+    if (owner === creep.name) maClearOwner(memAssign, sid);
+    markAvoid(creep, sid, AVOID_TTL);
+  }
 
   creep.memory.sourceId   = null;
   creep.memory.targetRoom = null;
   creep.memory.assigned   = false;
-
-  // Short cooldown before repicking (prevents console flap)
   creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
 }
 
-function validateExclusiveSource(creep) {
+// If duplicates exist, loser yields this tick (no repick same tick)
+function validateExclusiveSource(creep){
   if (!creep.memory || !creep.memory.sourceId) return true;
 
   var sid = creep.memory.sourceId;
-  var winners = [];
-  for (var name in Game.creeps) {
-    var c = Game.creeps[name];
-    if (!c || !c.memory) continue;
-    if (c.memory.task === 'remoteharvest' && c.memory.sourceId === sid) {
+  var memAssign = ensureAssignmentsMem();
+  var owner = maOwner(memAssign, sid);
+
+  // If someone else is the recorded owner, we yield
+  if (owner && owner !== creep.name){
+    releaseAssignment(creep);
+    return false;
+  }
+
+  // Hard scan in case of races
+  var winners=[];
+  for (var name in Game.creeps){
+    var c=Game.creeps[name];
+    if (c && c.memory && c.memory.task==='remoteharvest' && c.memory.sourceId===sid){
       winners.push(c);
     }
   }
+  if (winners.length <= MAX_FORAGERS_PER_SOURCE){
+    // become/keep owner if none set
+    if (!owner) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
+    return true;
+  }
 
-  if (winners.length <= MAX_FORAGERS_PER_SOURCE) return true;
-
-  // Deterministic: oldest assignment wins; then name
-  winners.sort(function(a, b) {
-    var at = a.memory._assignTick || 0;
-    var bt = b.memory._assignTick || 0;
-    if (at !== bt) return at - bt;
-    return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+  winners.sort(function(a,b){
+    var at=a.memory._assignTick||0, bt=b.memory._assignTick||0;
+    if (at!==bt) return at-bt;
+    return a.name<b.name?-1:1;
   });
+  var win = winners[0];
+  maSetOwner(memAssign, sid, win.name, win.memory.targetRoom||null);
 
-  for (var i = MAX_FORAGERS_PER_SOURCE; i < winners.length; i++) {
-    var loser = winners[i];
-    if (loser.name === creep.name) {
-      markAvoid(creep, sid, AVOID_TTL);
-      console.log('🚦 ' + creep.name + ' yielding duplicate source ' + sid.slice(-6) + ' (backing off).');
-      releaseAssignment(creep);
-      return false;
-    }
+  // If we're not the winner, yield
+  if (win.name !== creep.name){
+    console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
+    releaseAssignment(creep);
+    return false;
   }
   return true;
 }
@@ -530,370 +624,237 @@ function validateExclusiveSource(creep) {
 // Main role
 // ============================
 var TaskRemoteHarvest = {
-  run: function(creep) {
+  run: function(creep){
     auditOncePerTick();
-
     if (!creep.memory.home) getHomeName(creep);
 
-    // Always update carry state FIRST so returning takes priority
+    // Anti-stuck tracking
+    var lastX=creep.memory._lx|0, lastY=creep.memory._ly|0, lastR=creep.memory._lr||'';
+    var samePos = (lastX===creep.pos.x && lastY===creep.pos.y && lastR===creep.pos.roomName);
+    creep.memory._stuck = samePos ? ((creep.memory._stuck|0)+1) : 0;
+    creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
+
+    // Carry state
     this.updateReturnState(creep);
+    if (creep.memory.returning){ this.returnToStorage(creep); return; }
 
-    // If full, deposit immediately — do NOT let cooldown block this
-    if (creep.memory.returning) {
-      this.returnToStorage(creep);
-      return;
+    // Gentle EOL slot free
+    if (creep.ticksToLive!==undefined && creep.ticksToLive<5 && creep.memory.assigned){ releaseAssignment(creep); }
+
+    // Cooldown after yield
+    if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt){
+      var _anchor = getAnchorPos(getHomeName(creep)); go(creep,_anchor,{range:2,reusePath:10}); return;
     }
 
-    // Graceful slot free near EOL
-    if (creep.ticksToLive !== undefined && creep.ticksToLive < 5 && creep.memory.assigned) {
+    // If we were flagged to yield by resolver, obey & stop
+    if (creep.memory._forceYield){
+      delete creep.memory._forceYield;
       releaseAssignment(creep);
-    }
-
-    // Retarget cooldown only applies when we're *not* returning
-    if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt && !creep.memory.returning) {
-      var _anchor = getAnchorPos(getHomeName(creep));
-      go(creep, _anchor, { range: 2, reusePath: 10 });
       return;
     }
 
     // Assignment phase
-    if (!creep.memory.sourceId) {
+    if (!creep.memory.sourceId){
       var pick = pickRemoteSource(creep);
-      if (pick) {
+      if (pick){
         creep.memory.sourceId   = pick.id;
         creep.memory.targetRoom = pick.roomName;
         creep.memory.assigned   = true;
         creep.memory._assignTick = Game.time;
-      } else {
+      }else{
         this.initializeAndAssign(creep);
-        if (!creep.memory.sourceId) {
-          var anchor = getAnchorPos(getHomeName(creep));
-          go(creep, anchor, { range: 2 });
-          return;
-        } else {
-          creep.memory._assignTick = Game.time;
-        }
+        if (!creep.memory.sourceId){ var anchor=getAnchorPos(getHomeName(creep)); go(creep,anchor,{range:2}); return; }
+        else creep.memory._assignTick = Game.time;
       }
     }
 
-    // If the target room became locked, drop and repick.
-    if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)) {
-      console.log('⛔ ' + creep.name + ' skipping locked room ' + creep.memory.targetRoom + ' (Invader activity).');
+    // If room got locked by invader activity, drop and repick
+    if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)){
+      console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
       releaseAssignment(creep);
-      var retry = pickRemoteSource(creep);
-      if (retry) {
-        creep.memory.sourceId   = retry.id;
-        creep.memory.targetRoom = retry.roomName;
-        creep.memory.assigned   = true;
-        creep.memory._assignTick = Game.time;
-      } else {
-        var anchor2 = getAnchorPos(getHomeName(creep));
-        go(creep, anchor2, { range: 2 });
-        return;
-      }
-    }
-
-    // Ensure exclusivity at runtime (handles rare races)
-    if (!validateExclusiveSource(creep)) {
-      var again = pickRemoteSource(creep);
-      if (again) {
-        creep.memory.sourceId   = again.id;
-        creep.memory.targetRoom = again.roomName;
-        creep.memory.assigned   = true;
-        creep.memory._assignTick = Game.time;
-      } else {
-        var anchor3 = getAnchorPos(getHomeName(creep));
-        go(creep, anchor3, { range: 2 });
-        return;
-      }
-    }
-
-    // Travel toward target room if needed
-    if (creep.memory.targetRoom && creep.pos.roomName !== creep.memory.targetRoom) {
-      go(creep, new RoomPosition(25, 25, creep.memory.targetRoom), { range: 20 });
       return;
     }
 
-    // Defensive: if memory wiped mid-run, re-init
-    if (!creep.memory.targetRoom || !creep.memory.sourceId) {
+    // Ensure exclusivity or yield
+    if (!validateExclusiveSource(creep)) return;
+
+    // Travel to target room
+    if (creep.memory.targetRoom && creep.pos.roomName !== creep.memory.targetRoom){
+      go(creep, new RoomPosition(25,25,creep.memory.targetRoom), { range:20, reusePath:20 });
+      return;
+    }
+
+    // Defensive: memory wipe mid-run
+    if (!creep.memory.targetRoom || !creep.memory.sourceId){
       this.initializeAndAssign(creep);
-      if (!creep.memory.targetRoom || !creep.memory.sourceId) {
-        if (Game.time % 25 === 0) console.log('🚫 Forager ' + creep.name + ' could not be assigned a room/source.');
+      if (!creep.memory.targetRoom || !creep.memory.sourceId){
+        if (Game.time % 25 === 0) console.log('🚫 Forager '+creep.name+' could not be assigned a room/source.');
         return;
       }
     }
 
-    // Toolbox metadata (optional)
+    // Optional metadata
     var targetRoomObj = Game.rooms[creep.memory.targetRoom];
-    if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom) {
-      BeeToolbox.logSourcesInRoom(targetRoomObj);
-    }
+    if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ BeeToolbox.logSourcesInRoom(targetRoomObj); }
 
-    // Also bail if Memory flagged hostile
+    // Avoid rooms you marked hostile in Memory
     var tmem = Memory.rooms[creep.memory.targetRoom];
-    if (tmem && tmem.hostile) {
-      console.log('⚠️ Forager ' + creep.name + ' avoiding hostile room ' + creep.memory.targetRoom);
+    if (tmem && tmem.hostile){
+      console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
       releaseAssignment(creep);
       return;
     }
-
     if (!tmem || !tmem.sources) return;
 
     // Work the source
     this.harvestSource(creep);
-
-    // Validate assignment only when in target room (vision guaranteed)
-    if (creep.memory.targetRoom && creep.pos.roomName === creep.memory.targetRoom) {
-      var srcObj = Game.getObjectById(creep.memory.sourceId);
-      if (!srcObj) {
-        releaseAssignment(creep);
-        return;
-      }
-    }
   },
 
-  // ------ Legacy / fallback assignment (Memory-based) ------
-  initializeAndAssign: function(creep) {
+  // Legacy fallback (no vision): still respects remoteAssignments owner
+  initializeAndAssign: function(creep){
     var targetRooms = this.getNearbyRoomsWithSources(creep.room.name);
+    if (!creep.memory.targetRoom || !creep.memory.sourceId){
+      var least = this.findRoomWithLeastForagers(targetRooms);
+      if (!least){ if (Game.time%25===0) console.log('🚫 Forager '+creep.name+' found no suitable room with unclaimed sources.'); return; }
+      creep.memory.targetRoom = least;
 
-    if (!creep.memory.targetRoom || !creep.memory.sourceId) {
-      var leastAssignedRoom = this.findRoomWithLeastForagers(targetRooms);
-      if (!leastAssignedRoom) {
-        if (Game.time % 25 === 0) console.log('🚫 Forager ' + creep.name + ' found no suitable room with unclaimed sources.');
-        return;
-      }
-
-      creep.memory.targetRoom = leastAssignedRoom;
       var roomMemory = Memory.rooms[creep.memory.targetRoom];
-      var assignedSource = this.assignSource(creep, roomMemory);
-
-      if (assignedSource) {
-        creep.memory.sourceId = assignedSource;
+      var sid = this.assignSource(creep, roomMemory);
+      if (sid){
+        creep.memory.sourceId = sid;
         creep.memory.assigned = true;
         creep.memory._assignTick = Game.time;
-        var memAssign = ensureAssignmentsMem();
-        memAssign[assignedSource] = (memAssign[assignedSource] || 0) + 1;
 
-        if (creep.memory._lastLogSid !== assignedSource) {
-          console.log('🐝 ' + creep.name + ' assigned to source: ' + assignedSource + ' in ' + creep.memory.targetRoom);
-          creep.memory._lastLogSid = assignedSource;
+        var memAssign = ensureAssignmentsMem();
+        maInc(memAssign, sid, creep.memory.targetRoom);
+        maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom);
+
+        if (creep.memory._lastLogSid !== sid){
+          console.log('🐝 '+creep.name+' assigned to source: '+sid+' in '+creep.memory.targetRoom);
+          creep.memory._lastLogSid = sid;
         }
-      } else {
-        if (Game.time % 25 === 0) console.log('No available sources for creep: ' + creep.name);
-        creep.memory.targetRoom = null;
-        creep.memory.sourceId   = null;
+      }else{
+        if (Game.time%25===0) console.log('No available sources for creep: '+creep.name);
+        creep.memory.targetRoom=null; creep.memory.sourceId=null;
       }
     }
   },
 
-  getNearbyRoomsWithSources: function(origin) {
-    var all = Object.keys(Memory.rooms || {});
-    var filtered = all.filter(function(roomName) {
+  getNearbyRoomsWithSources: function(origin){
+    var all = Object.keys(Memory.rooms||{});
+    var filtered = all.filter(function(roomName){
       var rm = Memory.rooms[roomName];
       if (!rm || !rm.sources) return false;
       if (rm.hostile) return false;
       if (isRoomLockedByInvaderCore(roomName)) return false;
       return roomName !== Memory.firstSpawnRoom;
     });
-
-    return filtered.sort(function(a, b) {
-      return Game.map.getRoomLinearDistance(origin, a) - Game.map.getRoomLinearDistance(origin, b);
-    });
+    return filtered.sort(function(a,b){ return Game.map.getRoomLinearDistance(origin,a) - Game.map.getRoomLinearDistance(origin,b); });
   },
 
-  findRoomWithLeastForagers: function(targetRooms) {
-    var bestRoom = null;
-    var lowestAvg = Infinity;
+  findRoomWithLeastForagers: function(rooms){
+    var best=null, lowest=Infinity;
+    for (var i=0;i<rooms.length;i++){
+      var rn=rooms[i]; if (isRoomLockedByInvaderCore(rn)) continue;
+      var rm=Memory.rooms[rn]||{}, sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
 
-    for (var i = 0; i < targetRooms.length; i++) {
-      var roomName = targetRooms[i];
-      if (isRoomLockedByInvaderCore(roomName)) continue;
-
-      var rm = Memory.rooms[roomName] || {};
-      var sources = rm.sources ? Object.keys(rm.sources) : [];
-      if (!sources.length) continue;
-
-      var foragersInRoom = 0;
-      for (var name in Game.creeps) {
-        var c = Game.creeps[name];
-        if (c && c.memory && c.memory.task === 'remoteharvest' && c.memory.targetRoom === roomName) {
-          foragersInRoom++;
-        }
+      var count=0;
+      for (var name in Game.creeps){
+        var c=Game.creeps[name];
+        if (c && c.memory && c.memory.task==='remoteharvest' && c.memory.targetRoom===rn) count++;
       }
-
-      var avg = foragersInRoom / sources.length;
-      if (avg < lowestAvg) { lowestAvg = avg; bestRoom = roomName; }
+      var avg = count / Math.max(1,sources.length);
+      if (avg < lowest){ lowest=avg; best=rn; }
     }
-
-    return bestRoom;
+    return best;
   },
 
-  assignSource: function(creep, roomMemory) {
+  assignSource: function(creep, roomMemory){
     if (!roomMemory || !roomMemory.sources) return null;
-    var sources = Object.keys(roomMemory.sources);
-    if (!sources.length) return null;
+    var sids = Object.keys(roomMemory.sources); if (!sids.length) return null;
 
-    var counts = {};
-    var maxCount = 0;
-    var avoided = []; // track avoided in case we can grace-pick soon
+    var memAssign = ensureAssignmentsMem();
+    // Prefer free → then sticky (self) → finally any
+    var free=[], sticky=[], rest=[];
+    for (var i=0;i<sids.length;i++){
+      var sid=sids[i];
+      var owner = maOwner(memAssign, sid);
+      var cnt   = maCount(memAssign, sid);
+      if (owner && owner !== creep.name) continue;           // taken
+      if (cnt >= MAX_FORAGERS_PER_SOURCE) continue;          // full
 
-    // Build occupancy table and avoided list
-    for (var si = 0; si < sources.length; si++) {
-      var sid = sources[si];
-
-      // Count current foragers on this source in this room
-      var capCnt = 0;
-      for (var name in Game.creeps) {
-        var c = Game.creeps[name];
-        if (c && c.memory && c.memory.task === 'remoteharvest' &&
-            c.memory.targetRoom === creep.memory.targetRoom &&
-            c.memory.sourceId === sid) {
-          capCnt++;
-        }
-      }
-
-      // Respect cap
-      if (capCnt >= MAX_FORAGERS_PER_SOURCE) {
-        counts[sid] = capCnt;
-        if (capCnt > maxCount) maxCount = capCnt;
-        continue;
-      }
-
-      if (shouldAvoid(creep, sid)) {
-        avoided.push({ sid: sid, left: avoidRemaining(creep, sid) });
-        continue;
-      }
-
-      counts[sid] = capCnt;
-      if (capCnt > maxCount) maxCount = capCnt;
+      if (creep.memory.sourceId===sid) sticky.push(sid);
+      else if (!owner) free.push(sid);
+      else rest.push(sid);
     }
 
-    // Prefer truly free first (lowest count). Use per-tick claim to avoid races.
-    for (var tier = 0; tier <= maxCount; tier++) {
-      var candidates = [];
-      for (var sid2 in counts) if (counts[sid2] === tier) candidates.push(sid2);
-      if (candidates.length) {
-        // Try each candidate until we win a claim
-        for (var i = 0; i < candidates.length; i++) {
-          var trySid = candidates[i];
-          if (tryClaimSourceForTick(creep, trySid)) return trySid;
-        }
-      }
-    }
+    var pick = free[0] || sticky[0] || rest[0] || null;
+    if (!pick) return null;
 
-    // Fallback: pick avoided source whose backoff ends soonest (also respect claim)
-    if (avoided.length) {
-      avoided.sort(function(a, b){ return a.left - b.left; });
-      if (avoided[0].left <= 5 && tryClaimSourceForTick(creep, avoided[0].sid)) return avoided[0].sid;
-    }
-
-    return null;
+    if (!tryClaimSourceForTick(creep, pick)) return null; // rare
+    return pick;
   },
 
-  updateReturnState: function(creep) {
-    if (!creep.memory.returning && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
-      creep.memory.returning = true;
-    }
-    if (creep.memory.returning && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
-      creep.memory.returning = false;
-    }
+  updateReturnState: function(creep){
+    if (!creep.memory.returning && creep.store.getFreeCapacity(RESOURCE_ENERGY)===0) creep.memory.returning=true;
+    if (creep.memory.returning && creep.store.getUsedCapacity(RESOURCE_ENERGY)===0) creep.memory.returning=false;
   },
 
-  findUnclaimedSource: function(targetRooms) {
-    // Legacy helper (kept for compatibility)
-    for (var i = 0; i < targetRooms.length; i++) {
-      var roomName = targetRooms[i];
-      var mem = Memory.rooms[roomName];
-      if (!mem || !mem.sources) continue;
-      for (var sid in mem.sources) {
-        var assigned = mem.sources[sid];
-        if (!Array.isArray(assigned) || assigned.length === 0) return { roomName: roomName, sourceId: sid };
-      }
-    }
-    return null;
+  returnToStorage: function(creep){
+    var homeName=getHomeName(creep);
+    if (creep.room.name !== homeName){ go(creep,new RoomPosition(25,25,homeName),{range:20,reusePath:20}); return; }
+
+    var pri=creep.room.find(FIND_STRUCTURES,{filter:function(s){
+      return (s.structureType===STRUCTURE_EXTENSION || s.structureType===STRUCTURE_SPAWN) &&
+             s.store && s.store.getFreeCapacity(RESOURCE_ENERGY)>0; }});
+    if (pri.length){ var a=creep.pos.findClosestByPath(pri); if (a){ var rc=creep.transfer(a,RESOURCE_ENERGY); if (rc===ERR_NOT_IN_RANGE) go(creep,a); return; } }
+
+    var stor=creep.room.storage;
+    if (stor && stor.store && stor.store.getFreeCapacity(RESOURCE_ENERGY)>0){ var rc2=creep.transfer(stor,RESOURCE_ENERGY); if (rc2===ERR_NOT_IN_RANGE) go(creep,stor); return; }
+
+    var conts=creep.room.find(FIND_STRUCTURES,{filter:function(s){ return s.structureType===STRUCTURE_CONTAINER && s.store && s.store.getFreeCapacity(RESOURCE_ENERGY)>0; }});
+    if (conts.length){ var b=creep.pos.findClosestByPath(conts); if (b){ var rc3=creep.transfer(b,RESOURCE_ENERGY); if (rc3===ERR_NOT_IN_RANGE) go(creep,b); return; } }
+
+    var anchor=getAnchorPos(homeName); go(creep,anchor,{range:2});
   },
 
-  returnToStorage: function(creep) {
-    var homeName = getHomeName(creep);
-
-    if (creep.room.name !== homeName) {
-      go(creep, new RoomPosition(25, 25, homeName), { range: 20 });
-      return;
+  harvestSource: function(creep){
+    if (!creep.memory.targetRoom || !creep.memory.sourceId){
+      if (Game.time%25===0) console.log('Forager '+creep.name+' missing targetRoom/sourceId'); return;
     }
 
-    // Prefer core sinks first (spawn/ext/storage)
-    var targets = creep.room.find(FIND_STRUCTURES, {
-      filter: function(s) {
-        var canFill =
-          (s.structureType === STRUCTURE_EXTENSION ||
-           s.structureType === STRUCTURE_SPAWN ||
-           s.structureType === STRUCTURE_STORAGE);
-        return canFill && s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
-      }
-    });
-
-    if (!targets.length) {
-      // Fallback: containers if core sinks are full
-      targets = creep.room.find(FIND_STRUCTURES, {
-        filter: function(s) {
-          return s.structureType === STRUCTURE_CONTAINER &&
-                 s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
-        }
-      });
+    if (creep.room.name !== creep.memory.targetRoom){
+      go(creep,new RoomPosition(25,25,creep.memory.targetRoom),{range:20,reusePath:20}); return;
     }
 
-    if (targets.length) {
-      var closest = creep.pos.findClosestByPath(targets);
-      if (closest) {
-        var rc = creep.transfer(closest, RESOURCE_ENERGY);
-        if (rc === ERR_NOT_IN_RANGE) go(creep, closest);
-      }
-    } else {
-      var anchor = getAnchorPos(homeName);
-      go(creep, anchor, { range: 2 });
-    }
-  },
-
-  harvestSource: function(creep) {
-    if (!creep.memory.targetRoom || !creep.memory.sourceId) {
-      if (Game.time % 25 === 0) console.log('Forager ' + creep.name + ' missing targetRoom/sourceId');
-      return;
+    if (isRoomLockedByInvaderCore(creep.room.name)){
+      console.log('⛔ '+creep.name+' bailing from locked room '+creep.room.name+'.');
+      releaseAssignment(creep); return;
     }
 
-    if (creep.room.name !== creep.memory.targetRoom) {
-      if (BeeToolbox && BeeToolbox.logSourceContainersInRoom) {
-        BeeToolbox.logSourceContainersInRoom(creep.room);
-      }
-      go(creep, new RoomPosition(25, 25, creep.memory.targetRoom), { range: 20 });
-      return;
-    }
+    var sid = creep.memory.sourceId;
+    var src = Game.getObjectById(sid);
+    if (!src){ if (Game.time%25===0) console.log('Source not found for '+creep.name); releaseAssignment(creep); return; }
 
-    // If target room becomes locked while we're inside, bail & repick.
-    if (isRoomLockedByInvaderCore(creep.room.name)) {
-      console.log('⛔ ' + creep.name + ' bailing from locked room ' + creep.room.name + '.');
-      releaseAssignment(creep);
-      return;
-    }
+    ensureSourceFlag(src); // will touch lastActive
+    // also remember tile for safer prune compare
+    var srec = _sourceMem(creep.room.name, sid); srec.x = src.pos.x; srec.y = src.pos.y;
 
     var rm = Memory.rooms[creep.memory.targetRoom] = (Memory.rooms[creep.memory.targetRoom] || {});
     rm.sources = rm.sources || {};
-    var sid = creep.memory.sourceId;
-    var src = Game.getObjectById(sid);
-
-    if (src) {
-      ensureSourceFlag(src);
-    }
-
-    if (src && rm.sources[sid] && rm.sources[sid].entrySteps == null) {
-      var res = PathFinder.search(creep.pos, { pos: src.pos, range: 1 }, {
-        plainCost: PLAIN_COST, swampCost: SWAMP_COST, maxOps: MAX_PF_OPS
-      });
+    if (rm.sources[sid] && rm.sources[sid].entrySteps == null){
+      var res = PathFinder.search(creep.pos, { pos: src.pos, range: 1 }, { plainCost: PLAIN_COST, swampCost: SWAMP_COST, maxOps: MAX_PF_OPS });
       if (!res.incomplete) rm.sources[sid].entrySteps = res.path.length;
     }
 
-    if (!src) { if (Game.time % 25 === 0) console.log('Source not found for ' + creep.name); return; }
+    if ((creep.memory._stuck|0) >= STUCK_WINDOW){ go(creep, src, { range:1, reusePath:3 }); creep.say('🚧'); }
 
-    if (creep.harvest(src) === ERR_NOT_IN_RANGE) go(creep, src);
+    var rc = creep.harvest(src);
+    if (rc===ERR_NOT_IN_RANGE) go(creep, src, { range:1, reusePath:15 });
+    else if (rc===OK){
+      // harvesting is also activity
+      touchSourceActive(creep.room.name, sid);
+    }
   }
 };
 

@@ -183,9 +183,10 @@ const CONFIGS = {
     MH(1,1),
   ],
   Dismantler: [
-    WM(25,25), 
-    WM(20,20), 
-    WM(15,15),
+    //WM(25,25), 
+    //WM(20,20), 
+    //WM(15,15),
+    WM(5,5),
   ],
 
   // Special
@@ -401,7 +402,7 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
 
   // Desired layout (exact counts)
   const layout = [
-    //{ role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
+    { role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
     { role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 1 },
     { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 1 },
   ];

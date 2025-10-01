@@ -1,19 +1,27 @@
 // Task.CombatMedic.js — Squad-aware healer with damage-aware triage (ES5-safe)
+// Improvements:
+// - Fix _inTowerDanger loop bug
+// - Enforce maxMedicsPerTarget to avoid dogpiles
+// - Safer follow & heal-while-moving discipline (exactly one heal action per tick)
+// - Better buddy selection & re-eval; tower-aware triage scoring
+// - Avoid stepping into melee if rangedHeal is enough
+
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
 
 var CONFIG = {
-  followRange: 1,
-  triageRange: 4,
-  criticalPct: 0.75,     // keep
+  followRange: 1,          // how close we try to stay to buddy
+  triageRange: 4,          // scan radius for patients
+  criticalPct: 0.75,       // "critical" if below this fraction
   fleePct: 0.35,
-  stickiness: 25,
+  stickiness: 25,          // ticks before re-evaluating buddy
   reusePath: 3,
   maxRooms: 2,
   towerAvoidRadius: 20,
-  maxMedicsPerTarget: 1
+  maxMedicsPerTarget: 1,   // enforce per-buddy medic cap
+  avoidMeleeRange: 2       // try to keep >=2 tiles from enemy melee
 };
 
 // Which combat tasks we consider "frontline" squadmates
@@ -26,12 +34,13 @@ var TaskCombatMedic = {
     var now = Game.time;
     var bodyHeal = creep.getActiveBodyparts(HEAL);
     var canHeal = bodyHeal > 0;
-    var healedThisTick = false; // ✅ track the single allowed HEAL action
+    var healedThisTick = false; // we will cast at most once/tick
 
+    // ---------- Helpers ----------
     function lowestInRange(origin, range) {
       var allies = origin.findInRange(FIND_MY_CREEPS, range, { filter: function (a){ return a.hits < a.hitsMax; } });
       if (!allies.length) return null;
-      return _.min(allies, function (a){ return a.hits / a.hitsMax; });
+      return _.min(allies, function (a){ return a.hits / Math.max(1, a.hitsMax); });
     }
 
     function moveSmart(targetPos, range) {
@@ -42,23 +51,40 @@ var TaskCombatMedic = {
       );
     }
 
-    // Small helper: perform the best-possible heal on a target (prefers direct heal)
     function tryHeal(target) {
-      if (!canHeal || !target || healedThisTick) return;
+      if (!canHeal || healedThisTick || !target) return;
+      if (target.hits >= target.hitsMax) return;
       if (creep.pos.isNearTo(target)) {
-        if (target.hits < target.hitsMax) {
-          if (creep.heal(target) === OK) healedThisTick = true;
-        }
+        if (creep.heal(target) === OK) healedThisTick = true;
       } else if (creep.pos.inRangeTo(target, 3)) {
-        if (target.hits < target.hitsMax) {
-          if (creep.rangedHeal(target) === OK) healedThisTick = true;
-        }
+        if (creep.rangedHeal(target) === OK) healedThisTick = true;
       }
     }
 
-    // 1) Choose/refresh buddy (prefer endangered; else prefer melee when all healthy)
+    function countMedicsFollowing(targetId) {
+      var sid = creep.memory.squadId || 'Alpha';
+      var n = 0;
+      for (var name in Game.creeps) {
+        var c = Game.creeps[name];
+        if (!c || !c.my || !c.memory) continue;
+        if ((c.memory.squadId || 'Alpha') !== sid) continue;
+        if ((c.memory.task || c.memory.role) !== 'CombatMedic') continue;
+        if (c.memory.followTarget === targetId) n++;
+      }
+      return n;
+    }
+
+    // ---------- 1) Choose / refresh buddy ----------
     var buddy = Game.getObjectById(creep.memory.followTarget);
-    if (!buddy || !buddy.my || buddy.hits <= 0) {
+    var needNewBuddy = (!buddy || !buddy.my || buddy.hits <= 0);
+    if (!needNewBuddy && creep.memory.assignedAt && (now - creep.memory.assignedAt) > CONFIG.stickiness) {
+      needNewBuddy = true;
+    }
+
+    if (needNewBuddy) {
+      delete creep.memory.followTarget;
+      delete creep.memory.assignedAt;
+
       var squadId = creep.memory.squadId || 'Alpha';
       var candidates = _.filter(Game.creeps, function (a){
         if (!a || !a.my || !a.memory) return false;
@@ -68,38 +94,49 @@ var TaskCombatMedic = {
       });
 
       if (candidates.length) {
-        var room = creep.room;
         var anyInjured = _.some(candidates, function(a){ return a.hits < a.hitsMax; });
-
         if (anyInjured) {
+          // Prefer the most endangered (HP minus expected tower damage)
           var selfRef = this;
           buddy = _.min(candidates, function (a){
-            return (a.hits - selfRef._estimateTowerDamage(room, a.pos)) / Math.max(1, a.hitsMax);
+            return (a.hits - selfRef._estimateTowerDamage(creep.room, a.pos)) / Math.max(1, a.hitsMax);
           });
         } else {
+          // Prefer melee as anchor if nobody is hurt
           buddy = _.find(candidates, function(a){
             var t = a.memory.task || a.memory.role || '';
             return t === 'CombatMelee';
           }) || candidates[0];
         }
 
+        // Enforce medic cap per target
+        if (buddy && CONFIG.maxMedicsPerTarget > 0) {
+          var count = countMedicsFollowing(buddy.id);
+          if (count >= CONFIG.maxMedicsPerTarget) {
+            // pick another candidate with least medics attached
+            var alt = null, bestLoad = 999;
+            for (var i=0;i<candidates.length;i++){
+              var cand = candidates[i];
+              var load = countMedicsFollowing(cand.id);
+              if (load < bestLoad) { bestLoad = load; alt = cand; }
+            }
+            if (alt) buddy = alt;
+          }
+        }
+
         if (buddy) { creep.memory.followTarget = buddy.id; creep.memory.assignedAt = now; }
       }
     }
 
-    // 2) If still no buddy, hover at anchor/rally (but still try to heal someone nearby)
+    // ---------- 2) No buddy? hover at anchor/rally and still heal ----------
     if (!buddy) {
-      var anc = TaskSquad.getAnchor(creep);
-      if (anc) moveSmart(anc, 0);
-      // Opportunistic heal while hovering
-      if (!healedThisTick) {
-        var lr = lowestInRange(creep.pos, CONFIG.triageRange);
-        tryHeal(lr);
-      }
+      var anc = TaskSquad.getAnchor(creep) || Game.flags.MedicRally || Game.flags.Rally;
+      if (anc) moveSmart(anc.pos || anc, 1);
+      if (!healedThisTick) tryHeal(lowestInRange(creep.pos, CONFIG.triageRange));
       return;
     }
 
-    // 3) Flee logic if needed (but try to stay near buddy)
+    // ---------- 3) Flee logic (but keep heals going) ----------
     var underHp = (creep.hits / creep.hitsMax) < CONFIG.fleePct;
     var hostilesNear = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0; } });
     var needToFlee = underHp || (hostilesNear.length && this._inTowerDanger(creep.pos));
@@ -107,34 +144,49 @@ var TaskCombatMedic = {
       var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
       if (bad) {
         var flee = PathFinder.search(creep.pos, [{ pos: bad.pos, range: 4 }], { flee: true });
-        if (!flee.incomplete && flee.path.length) creep.move(creep.pos.getDirectionTo(flee.path[0]));
+        if (!flee.incomplete && flee.path.length) {
+          creep.move(creep.pos.getDirectionTo(flee.path[0]));
+        }
       } else {
         moveSmart(buddy.pos, 3);
       }
-      // heal while fleeing — pick best nearby (buddy is preferred)
-      var tf = null;
-      if (buddy && buddy.hits < buddy.hitsMax && creep.pos.inRangeTo(buddy, 3)) tf = buddy;
-      if (!tf) tf = lowestInRange(creep.pos, 3);
-      tryHeal(tf);
-      // If still not healed and we're bleeding badly, self-heal as last resort
-      if (!healedThisTick && canHeal && creep.hits < creep.hitsMax) {
-        if (creep.heal(creep) === OK) healedThisTick = true;
+      // heal while fleeing (prefer buddy, else any injured in 3, else self)
+      if (!healedThisTick) {
+        if (buddy.hits < buddy.hitsMax && creep.pos.inRangeTo(buddy, 3)) tryHeal(buddy);
+        if (!healedThisTick) tryHeal(lowestInRange(creep.pos, 3));
+        if (!healedThisTick && canHeal && creep.hits < creep.hitsMax) {
+          if (creep.heal(creep) === OK) healedThisTick = true;
+        }
       }
       return;
     }
 
-    // 4) Stay glued near buddy (rear position) with friendly swap
-    if (!creep.pos.inRangeTo(buddy, CONFIG.followRange)) {
-      TaskSquad.stepToward(creep, buddy.pos, CONFIG.followRange);
-      // Opportunistic heal during approach (always-on "heal while moving")
+    // ---------- 4) Stay glued near buddy with safe spacing ----------
+    // Do not step *onto* melee tiles if we can still heal from range.
+    var wantRange = CONFIG.followRange;
+    var meleeThreat = creep.pos.findInRange(FIND_HOSTILE_CREEPS, CONFIG.avoidMeleeRange, {
+      filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
+    }).length > 0;
+
+    if (!creep.pos.inRangeTo(buddy, wantRange)) {
+      TaskSquad.stepToward(creep, buddy.pos, wantRange);
+      // heal while approaching
       if (!healedThisTick) {
-        // Prefer buddy if hurt, else lowest injured in 3
         if (buddy.hits < buddy.hitsMax) tryHeal(buddy);
         if (!healedThisTick) tryHeal(lowestInRange(creep.pos, 3));
       }
+    } else if (meleeThreat) {
+      // small nudge away from closest melee if we're too close
+      var hm = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
+        filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
+      });
+      if (hm && creep.pos.getRangeTo(hm) < CONFIG.avoidMeleeRange) {
+        var dir = hm.pos.getDirectionTo(creep.pos); // step away
+        creep.move(dir);
+      }
     }
 
-    // 5) Damage-aware triage (injured-only set)
+    // ---------- 5) Damage-aware triage ----------
     var triageSet = creep.pos.findInRange(
       FIND_MY_CREEPS,
       CONFIG.triageRange,
@@ -148,44 +200,28 @@ var TaskCombatMedic = {
         return { a: a, key: exp / Math.max(1, a.hitsMax) };
       });
       var worst = _.min(scored, 'key');
-      var target = worst && worst.a;
+      var patient = worst && worst.a;
 
-      if (target && target.hits < target.hitsMax) {
-        // Move toward target AND cast while moving
-        moveSmart(target.pos, 1);
-        tryHeal(target); // rangedHeal during approach, heal if adjacent
+      if (patient) {
+        // Move toward patient but try not to step into melee range if rangedHeal suffices
+        var desired = creep.pos.inRangeTo(patient, 1) ? 1 : (creep.pos.inRangeTo(patient, 3) ? 3 : 1);
+        moveSmart(patient.pos, desired === 1 ? 1 : 2);
+        tryHeal(patient); // rangedHeal during approach, heal if adjacent
       }
     } else {
-      // 6) Fallback: buddy-first + standard lowest-in-range
-      // Prefer saving the heal for non-self criticals; only self-heal if nobody else needs it.
-      var crit = lowestInRange(creep.pos, CONFIG.triageRange);
-      if (crit && (crit.hits / crit.hitsMax) <= CONFIG.criticalPct && crit.id !== buddy.id) {
-        moveSmart(crit.pos, 1);
-        tryHeal(crit);
-      } else {
-        // Hold on buddy; heal buddy or other nearby, while moving if needed
-        if (!creep.pos.inRangeTo(buddy, CONFIG.followRange)) {
-          TaskSquad.stepToward(creep, buddy.pos, CONFIG.followRange);
-        }
-        if (!healedThisTick) {
-          if (buddy.hits < buddy.hitsMax) {
-            tryHeal(buddy);
-          } else {
-            tryHeal(lowestInRange(creep.pos, 3));
-          }
-        }
+      // ---------- 6) Fallback: buddy-first, then any nearby ----------
+      if (!creep.pos.inRangeTo(buddy, wantRange)) {
+        TaskSquad.stepToward(creep, buddy.pos, wantRange);
+      }
+      if (!healedThisTick) {
+        if (buddy.hits < buddy.hitsMax) tryHeal(buddy);
+        if (!healedThisTick) tryHeal(lowestInRange(creep.pos, 3));
       }
     }
 
-    // 7) LAST — only self-heal if we still haven’t used HEAL and we're actually injured
+    // ---------- 7) Last: self-heal if still unused ----------
     if (!healedThisTick && canHeal && creep.hits < creep.hitsMax) {
       if (creep.heal(creep) === OK) healedThisTick = true;
-    }
-
-    // 8) Refresh buddy assignment occasionally
-    if (creep.memory.assignedAt && (now - creep.memory.assignedAt) > CONFIG.stickiness) {
-      delete creep.memory.followTarget;
-      delete creep.memory.assignedAt;
     }
   },
 
@@ -210,7 +246,9 @@ var TaskCombatMedic = {
   _inTowerDanger: function (pos) {
     var room = Game.rooms[pos.roomName]; if (!room) return false;
     var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType===STRUCTURE_TOWER; } });
-    for (var i=0;i+towers.length;i++) if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
+    for (var i=0;i<towers.length;i++) {   // <-- bug fixed here
+      if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
+    }
     return false;
   }
 };

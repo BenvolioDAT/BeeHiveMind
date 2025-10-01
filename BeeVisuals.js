@@ -11,12 +11,17 @@ var _logLevel = (typeof currentLogLevel === 'number') ? currentLogLevel : LOG_LE
 
 // Config: draw every tick, but keep caps to avoid runaway CPU
 var CFG = {
-  maxCreepsRenderedDebug: 30, // cap per-creep debug lines
+  maxCreepsRenderedDebug: 30,
   showCpuStats: true,
   showRepairCounter: true,
-  drawDebugEachTick: true,    // set false to throttle debug lines later if needed
-  debugTickModulo: 1,         // 1 = every tick; raise if you want throttling later
-  tableTickModulo: 1          // 1 = every tick; raise if you want throttling later
+  drawDebugEachTick: true,
+  debugTickModulo: 1,
+  tableTickModulo: 1,
+
+  // World/overview map overlay throttles
+  worldDrawModulo: 0,          // 1 = every tick (raise to 2/3 if you want less)
+  worldMaxFlagMarkers: 600,    // hard cap marker count for safety
+  worldMaxPlannedTiles: 800    // hard cap for planned-road dots
 };
 
 // ---------- helpers ----------
@@ -32,7 +37,6 @@ function _getMainRoom() {
 }
 function _shouldDraw(mod, roomName) {
   if (mod <= 1) return true;
-  // staggered hash (unused when mod=1)
   var h = 0;
   for (var i = 0; i < roomName.length; i++) h = (h * 31 + roomName.charCodeAt(i)) | 0;
   return ((Game.time + (h & 3)) % mod) === 0;
@@ -47,7 +51,7 @@ var BeeVisuals = {
 
     var visual = new RoomVisual(room.name);
 
-    // DEBUG creep lines (draw every tick by default)
+    // DEBUG creep lines
     if (_logLevel >= LOG_LEVEL.DEBUG && (CFG.drawDebugEachTick || _shouldDraw(CFG.debugTickModulo, room.name))) {
       var yOffset = 1;
       var count = 0;
@@ -78,13 +82,11 @@ var BeeVisuals = {
         for (var p = 0; p < placements.length; p++) {
           var pl = placements[p];
           visual.circle(baseX + pl.x, baseY + pl.y, { radius: 0.4, opacity: 0.1, stroke: 'cyan' });
-          // Labels cost more CPU; keep off unless you really need them
-          // visual.text(String(pl.type).replace('STRUCTURE_', ''), baseX + pl.x, baseY + pl.y, { font: 0.3, color: 'cyan' });
         }
       }
     }
 
-    // CPU + bucket readouts (every tick so they stay visible)
+    // CPU + bucket readouts
     if (CFG.showCpuStats) {
       var used = Game.cpu.getUsed();
       var last = Memory.lastCpuUsage || 0;
@@ -94,17 +96,21 @@ var BeeVisuals = {
       visual.text('CPU Bucket: ' + Game.cpu.bucket, 20, 1, { color: 'white', font: 0.6, opacity: 1 });
       visual.text('CPU Used: ' + used.toFixed(2) + ' / Δ ' + delta.toFixed(2), 20, 2, { color: 'white', font: 0.6, opacity: 1 });
     }
-// Show planned roads (ghost-roads) when DEBUG is on
-BeeVisuals.drawPlannedRoadsDebug();
 
-    // Repair counter (every tick)
+    // In-room planned roads (DEBUG)
+    BeeVisuals.drawPlannedRoadsDebug();
+
+    // NEW: world/overview map overlays (flags + planned roads)
+    BeeVisuals.drawWorldOverview();
+
+    // Repair counter
     if (CFG.showRepairCounter) {
       var counter = Memory.GameTickRepairCounter || 0;
       visual.text('Repair Tick Count: ' + counter + '/5', 20, 3, { color: 'white', font: 0.6, opacity: 1 });
     }
   },
 
-  // Always draw each tick
+  // Energy bar
   drawEnergyBar: function () {
     var room = _getMainRoom();
     if (!room) return;
@@ -123,15 +129,14 @@ BeeVisuals.drawPlannedRoadsDebug();
     });
   },
 
-  // By default: every tick too; you can throttle with tableTickModulo later
+  // Task table
   drawWorkerBeeTaskTable: function () {
     var room = _getMainRoom();
     if (!room) return;
-    if (!_shouldDraw(CFG.tableTickModulo, room.name)) return; // 1 => always
+    if (!_shouldDraw(CFG.tableTickModulo, room.name)) return;
 
     var visual = new RoomVisual(room.name);
 
-    // collect counts
     var workerBees = [];
     for (var cn in Game.creeps) {
       if (!Game.creeps.hasOwnProperty(cn)) continue;
@@ -141,19 +146,10 @@ BeeVisuals.drawPlannedRoadsDebug();
     var totalCount = workerBees.length | 0;
 
     var maxTasks = {
-      baseharvest: 2,
-      builder: 1,
-      upgrader: 1,
-      repair: 0,
-      courier: 1,
-      remoteharvest: 2,
-      scout: 0,
-      queen: 1,
-      CombatArcher: 0,
-      CombatMelee: 0,
-      CombatMedic: 0,
-      Dismantler: 0,
-      Claimer: 0
+      baseharvest: 2, builder: 1, upgrader: 1, repair: 0,
+      courier: 1, remoteharvest: 8, scout: 1, queen: 2,
+      CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
+      Dismantler: 0, Claimer: 2
     };
 
     var tasks = {};
@@ -164,15 +160,12 @@ BeeVisuals.drawPlannedRoadsDebug();
       if (tasks.hasOwnProperty(t)) tasks[t] = (tasks[t] | 0) + 1;
     }
 
-    var maxTotal = 0;
-    for (k in maxTasks) if (maxTasks.hasOwnProperty(k)) maxTotal += (maxTasks[k] | 0);
+    var maxTotal = 0; for (k in maxTasks) if (maxTasks.hasOwnProperty(k)) maxTotal += (maxTasks[k] | 0);
 
-    // table drawing
     var x0 = 0, y0 = 20;
     var nameW = 4, valueW = 1.2, cellH = 0.7;
     var font = 0.5, fillColor = '#000000', strokeColor = '#000000', opacityLvl = 0.4;
 
-    // header
     visual.rect(x0, y0, nameW, cellH, { fill: fillColor, stroke: strokeColor, opacity: opacityLvl, radius: 0.05 });
     visual.rect(x0 + nameW, y0, valueW, cellH, { fill: fillColor, stroke: strokeColor, opacity: opacityLvl, radius: 0.05 });
     visual.text('Worker_Bee', x0 + 0.3, y0 + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'left', opacity: 1 });
@@ -193,42 +186,30 @@ BeeVisuals.drawPlannedRoadsDebug();
     }
   }
 };
-// --- Planned road overlay (DEBUG only) ---
-// Draws future/planned road tiles from Planner.Road's memory (even before sites exist).
-// ES5-safe; throttled + capped per room to stay CPU-friendly.
+
+// --- Planned road overlay (in-room, DEBUG only) ---
 BeeVisuals.drawPlannedRoadsDebug = function () {
-  // Only show at DEBUG level
   if (_logLevel < LOG_LEVEL.DEBUG) return;
-
-  // Pick a "home" room like other BeeVisuals helpers do
-  var room = _getMainRoom();
-  if (!room) return;
-
-  // Throttle a bit (change modulo for heavier/lighter draw)
-  var MOD = 1; // 1 = every tick; bump to 2/3 if you want fewer draws
-  if (((Game.time + 3) % MOD) !== 0) return;
+  var room = _getMainRoom(); if (!room) return;
+  var MOD = 1; if (((Game.time + 3) % MOD) !== 0) return;
 
   var v = new RoomVisual(room.name);
 
-  // Finder: this room's road planner memory bucket
   if (!Memory.rooms || !Memory.rooms[room.name] || !Memory.rooms[room.name].roadPlanner) return;
   var rp = Memory.rooms[room.name].roadPlanner;
   var paths = rp.paths || {};
   var key;
 
-  // Render caps per room for safety
-  var MAX_PATHS = 6;     // draw at most N paths per tick (per "home")
-  var MAX_TILES = 250;   // total tile dots/segments per tick cap
+  var MAX_PATHS = 6;
+  var MAX_TILES = 250;
 
   var drawnPaths = 0;
   var drawnTiles = 0;
 
-  // Cheap color defs
-  var COLOR_PLANNED = '#ffe066'; // amber/yellow for future road
-  var COLOR_BUILT   = '#99ff99'; // soft green for already-road
-  var COLOR_CURSOR  = '#66ccff'; // blue-ish for rec.i cursor pointer
+  var COLOR_PLANNED = '#ffe066';
+  var COLOR_BUILT   = '#99ff99';
+  var COLOR_CURSOR  = '#66ccff';
 
-  // Helper: quick presence check for existing/built road/site on a tile
   function _hasRoadOrSiteFast(roomObj, x, y) {
     var arr = roomObj.lookForAt(LOOK_STRUCTURES, x, y);
     for (var i = 0; i < arr.length; i++) if (arr[i].structureType === STRUCTURE_ROAD) return true;
@@ -237,7 +218,6 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
     return false;
   }
 
-  // Loop paths
   for (key in paths) {
     if (!paths.hasOwnProperty(key)) continue;
     if (drawnPaths >= MAX_PATHS) break;
@@ -245,10 +225,8 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
     var rec = paths[key];
     if (!rec || !rec.path || !rec.path.length) continue;
 
-    // Show light label for the path header in the home room
     v.text(key, 1, 5 + (drawnPaths * 0.6), { color: '#ffffff', font: 0.5, opacity: 0.6, align: 'left' });
 
-    // Iterate the stored tiles; only draw portions that are currently visible (cheap)
     var lastX = -1, lastY = -1, lastRoom = null;
 
     for (var idx = 0; idx < rec.path.length; idx++) {
@@ -258,25 +236,20 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
       var rname = step.roomName;
       var rx = step.x | 0, ry = step.y | 0;
       var theRoom = Game.rooms[rname];
-      if (!theRoom) continue; // no vision → skip drawing
+      if (!theRoom) continue;
 
-      // Cursor indicator (where drip-placer will continue)
       if (typeof rec.i === 'number' && idx === rec.i) {
-        // Outline circle to show current cursor
         new RoomVisual(rname).circle(rx, ry, { radius: 0.4, stroke: COLOR_CURSOR, fill: 'transparent', opacity: 0.7 });
       }
 
-      // If terrain is wall, skip visuals (the planner also skips)
       if (theRoom.getTerrain().get(rx, ry) === TERRAIN_MASK_WALL) continue;
 
       var already = _hasRoadOrSiteFast(theRoom, rx, ry);
       var color = already ? COLOR_BUILT : COLOR_PLANNED;
       var opacity = already ? 0.55 : 0.35;
 
-      // Dot for the tile
       new RoomVisual(rname).circle(rx, ry, { radius: 0.25, fill: color, opacity: opacity, stroke: undefined });
 
-      // Light line segment to previous step (same room only) for readability
       if (lastRoom === rname && lastX !== -1) {
         new RoomVisual(rname).line(lastX, lastY, rx, ry, { width: 0.09, color: color, opacity: opacity });
       }
@@ -286,7 +259,6 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
       if (drawnTiles >= MAX_TILES) break;
     }
 
-    // If planner marked as done, stamp a faint check on the last tile we drew in the home room (cheap)
     if (rec.done && lastRoom === room.name && lastX !== -1) {
       v.text('✓', lastX, lastY, { color: COLOR_BUILT, font: 0.6, opacity: 0.7, align: 'center' });
     }
@@ -295,5 +267,59 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
   }
 };
 
+// --- NEW: World/overview map overlays (flags + planned sites) ---
+BeeVisuals.drawWorldOverview = function () {
+  // Throttle
+  if ((Game.time % CFG.worldDrawModulo) !== 0) return;
+
+  var mv = Game.map.visual; // MapVisual
+
+  // 1) Source flags on the world map (any room, no vision required)
+  var drawn = 0;
+  for (var fname in Game.flags) {
+    if (!Game.flags.hasOwnProperty(fname)) continue;
+    if (fname.indexOf('SRC-') !== 0) continue; // your source-flag prefix
+    var f = Game.flags[fname];
+
+    // A visible yellow ring + small center dot
+    mv.circle(f.pos, { radius: 5.0, fill: 'transparent', stroke: '#ffd54f', opacity: 0.9, strokeWidth: 0.8 });
+    mv.circle(f.pos, { radius: 0.9, fill: '#ffd54f', opacity: 0.9 });
+
+    drawn++;
+    if (drawn >= CFG.worldMaxFlagMarkers) break;
+  }
+
+  // 2) Planned construction (roads) on the world map.
+  //    Uses the same Memory.rooms[*].roadPlanner.paths you already render in-room.
+  var tiles = 0;
+  if (Memory.rooms) {
+    for (var rn in Memory.rooms) {
+      if (!Memory.rooms.hasOwnProperty(rn)) continue;
+      var rm = Memory.rooms[rn];
+      if (!rm || !rm.roadPlanner || !rm.roadPlanner.paths) continue;
+
+      var paths = rm.roadPlanner.paths;
+      for (var key in paths) {
+        if (!paths.hasOwnProperty(key)) continue;
+        var rec = paths[key];
+        if (!rec || !rec.path || !rec.path.length) continue;
+
+        for (var i = 0; i < rec.path.length; i++) {
+          var step = rec.path[i];
+          var pos = new RoomPosition(step.x | 0, step.y | 0, step.roomName || rn);
+
+          // amber dot per planned tile
+          mv.circle(pos, { radius: 0.8, fill: '#ffe066', opacity: 0.6, stroke: undefined });
+
+          tiles++;
+          if (tiles >= CFG.worldMaxPlannedTiles) return; // stop early if we hit our cap
+        }
+      }
+    }
+  }
+
+  // (Optional) If you ever want to draw lines between rooms:
+  // Game.map.visual.connectRooms('W38S47', 'W39S47', { color: '#66ccff', width: 1, opacity: 0.4 });
+};
 
 module.exports = BeeVisuals;
