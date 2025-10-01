@@ -15,7 +15,7 @@
 var BeeToolbox = require('BeeToolbox');
 
 // ---------- Tunables ----------
-var EXPLORE_RADIUS     = 6;     // max linear distance (rooms) from home
+var EXPLORE_RADIUS     = 10;     // max linear distance (rooms) from home
 var RING_MAX           = 50;    // logical upper bound; we clamp by radius anyway
 var REVISIT_DELAY      = 1000;  // re-visit cadence per room
 var BLOCK_CHECK_DELAY  = 10000; // keep a room "blocked" this long
