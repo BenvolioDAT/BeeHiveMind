@@ -7,6 +7,7 @@
 // - Duplicate resolver elects 1 winner (oldest _assignTick, then name), losers yield
 // - Removes stale owners when creeps die or retarget
 // - FLAG PRUNING: removes source flags when unused or room locked (with grace TTL)
+// - Legacy fallback now HARD-CAPS to REMOTE_RADIUS (no wandering outside radius)
 // - Still ES5-safe (no const/let/arrow)
 //
 // ⚙️ Tuned for MAX_FORAGERS_PER_SOURCE = 1. Owner field can be extended later.
@@ -21,7 +22,11 @@ var BeeToolbox = require('BeeToolbox');
 // ============================
 // Tunables
 // ============================
-var REMOTE_RADIUS = 6;
+// NOTE: REMOTE_RADIUS is measured in "room hops" from the home room.
+// A hop = crossing one room exit. The BFS ring includes any direction
+// up to that many hops from home (not cycles, not ticks).
+var REMOTE_RADIUS = 5;
+
 var MAX_PF_OPS    = 3000;
 var PLAIN_COST    = 2;
 var SWAMP_COST    = 10;
@@ -310,11 +315,9 @@ function pruneUnusedSourceFlags(){
         var f = Game.flags[flagName];
         // Only remove if the flag still sits on the source tile; otherwise just clean memory.
         if (f) {
-          // Optional: verify it looks like one of *our* flags
           var prefix = 'SRC-' + roomName + '-';
           var looksLikeOurs = (typeof flagName === 'string' && flagName.indexOf(prefix) === 0);
           var posMatches = (!srec.x || !srec.y) ? true : (f.pos.x === srec.x && f.pos.y === srec.y);
-          // If we have the source object we can double-check its tile
           var srcObj = Game.getObjectById(sid);
           var tileOk = srcObj ? (f.pos.x === srcObj.pos.x && f.pos.y === srcObj.pos.y && f.pos.roomName === srcObj.pos.roomName) : true;
 
@@ -540,7 +543,7 @@ function pickRemoteSource(creep){
     return (a.cost-b.cost) || (a.lin-b.lin) || (a.id<b.id?-1:1);
   });
 
-  for (var k=0;k<candidates.length;k++){
+  for (var k=0;k+candidates.length>k;k++){
     var best=candidates[k];
     if (!tryClaimSourceForTick(creep, best.id)) continue;
 
@@ -710,11 +713,62 @@ var TaskRemoteHarvest = {
     this.harvestSource(creep);
   },
 
-  // Legacy fallback (no vision): still respects remoteAssignments owner
+  // ---- Legacy fallback (no vision) — now radius-bounded ----
+  getNearbyRoomsWithSources: function(creep){
+    var homeName = getHomeName(creep);
+
+    // Build an allowlist with BFS radius (room hops from home)
+    var inRadius = {};
+    var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+    for (var i=0; i<ring.length; i++) inRadius[ring[i]] = true;
+
+    var all = Object.keys(Memory.rooms||{});
+    var filtered = all.filter(function(roomName){
+      var rm = Memory.rooms[roomName];
+      if (!rm || !rm.sources) return false;
+      if (!inRadius[roomName]) return false;                 // ★ enforce radius here
+      if (rm.hostile) return false;
+      if (isRoomLockedByInvaderCore(roomName)) return false;
+      return roomName !== Memory.firstSpawnRoom;
+    });
+
+    // Sort by linear distance from home (cheap tiebreaker)
+    return filtered.sort(function(a,b){
+      return Game.map.getRoomLinearDistance(homeName, a) - Game.map.getRoomLinearDistance(homeName, b);
+    });
+  },
+
+  findRoomWithLeastForagers: function(rooms, homeName){
+    if (!rooms || !rooms.length) return null;
+
+    // Guard: enforce radius again (cheap insurance if caller changes later)
+    var inRadius = {};
+    var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+    for (var i=0; i<ring.length; i++) inRadius[ring[i]] = true;
+
+    var best=null, lowest=Infinity;
+    for (var j=0;j<rooms.length;j++){
+      var rn=rooms[j];
+      if (!inRadius[rn]) continue;                 // ★ radius fence
+      if (isRoomLockedByInvaderCore(rn)) continue;
+
+      var rm=Memory.rooms[rn]||{}, sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
+
+      var count=0;
+      for (var name in Game.creeps){
+        var c=Game.creeps[name];
+        if (c && c.memory && c.memory.task==='remoteharvest' && c.memory.targetRoom===rn) count++;
+      }
+      var avg = count / Math.max(1,sources.length);
+      if (avg < lowest){ lowest=avg; best=rn; }
+    }
+    return best;
+  },
+
   initializeAndAssign: function(creep){
-    var targetRooms = this.getNearbyRoomsWithSources(creep.room.name);
+    var targetRooms = this.getNearbyRoomsWithSources(creep);
     if (!creep.memory.targetRoom || !creep.memory.sourceId){
-      var least = this.findRoomWithLeastForagers(targetRooms);
+      var least = this.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
       if (!least){ if (Game.time%25===0) console.log('🚫 Forager '+creep.name+' found no suitable room with unclaimed sources.'); return; }
       creep.memory.targetRoom = least;
 
@@ -738,35 +792,6 @@ var TaskRemoteHarvest = {
         creep.memory.targetRoom=null; creep.memory.sourceId=null;
       }
     }
-  },
-
-  getNearbyRoomsWithSources: function(origin){
-    var all = Object.keys(Memory.rooms||{});
-    var filtered = all.filter(function(roomName){
-      var rm = Memory.rooms[roomName];
-      if (!rm || !rm.sources) return false;
-      if (rm.hostile) return false;
-      if (isRoomLockedByInvaderCore(roomName)) return false;
-      return roomName !== Memory.firstSpawnRoom;
-    });
-    return filtered.sort(function(a,b){ return Game.map.getRoomLinearDistance(origin,a) - Game.map.getRoomLinearDistance(origin,b); });
-  },
-
-  findRoomWithLeastForagers: function(rooms){
-    var best=null, lowest=Infinity;
-    for (var i=0;i<rooms.length;i++){
-      var rn=rooms[i]; if (isRoomLockedByInvaderCore(rn)) continue;
-      var rm=Memory.rooms[rn]||{}, sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
-
-      var count=0;
-      for (var name in Game.creeps){
-        var c=Game.creeps[name];
-        if (c && c.memory && c.memory.task==='remoteharvest' && c.memory.targetRoom===rn) count++;
-      }
-      var avg = count / Math.max(1,sources.length);
-      if (avg < lowest){ lowest=avg; best=rn; }
-    }
-    return best;
   },
 
   assignSource: function(creep, roomMemory){

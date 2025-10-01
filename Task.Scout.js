@@ -1,5 +1,7 @@
 // Task.Scout.cpu.es5.js
 // ES5-safe, CPU-lean scout with persistent caches and throttled intel.
+// Now also seeds Memory.rooms[roomName].sources from vision so harvesters
+// know about sources even without overlapping vision.
 
 'use strict';
 
@@ -177,6 +179,24 @@ function shouldLogIntel(room) {
   return (Game.time - lastScan) >= INTEL_INTERVAL;
 }
 
+// ---- NEW: seed sources from vision for harvesters ----
+function seedSourcesFromVision(room) {
+  if (!room) return;
+  var rmemAll = Memory.rooms = (Memory.rooms || {});
+  var rm = rmemAll[room.name] = (rmemAll[room.name] || {});
+  rm.sources = rm.sources || {};
+
+  var arr = room.find(FIND_SOURCES);
+  for (var i = 0; i < arr.length; i++) {
+    var s = arr[i];
+    var rec = rm.sources[s.id] = (rm.sources[s.id] || {});
+    rec.roomName = room.name;
+    rec.x = s.pos.x;
+    rec.y = s.pos.y;
+    rec.lastSeen = Game.time; // optional; helpful for pruning/aging
+  }
+}
+
 // ---- Scout memory helpers ----
 function ensureScoutMem(creep) {
   if (!creep.memory.scout) creep.memory.scout = {};
@@ -300,7 +320,7 @@ var TaskScout = {
     var M = ensureScoutMem(creep);      // { home, ring, queue, prevRoom? }
     if (!creep.memory.lastRoom) creep.memory.lastRoom = creep.room.name;
 
-    // On room entry: stamp & (throttled) intel
+    // On room entry: stamp, scan intel, and seed sources
     if (creep.memory.lastRoom !== creep.room.name) {
       if (!creep.memory.prevRoom) creep.memory.prevRoom = null;
       creep.memory.prevRoom = creep.memory.lastRoom;
@@ -309,7 +329,8 @@ var TaskScout = {
       M.prevRoom = creep.memory.prevRoom || null;
 
       stampVisit(creep.room.name);
-      logRoomIntel(creep.room); // full scan on entry
+      logRoomIntel(creep.room);
+      seedSourcesFromVision(creep.room); // <— NEW: populate Memory.rooms[room].sources
 
       // Clear target if we arrived at it; pause 1 tick
       if (creep.memory.targetRoom === creep.room.name) {
@@ -319,7 +340,10 @@ var TaskScout = {
     } else {
       // Same room: cheap stamp; only deep intel occasionally
       stampVisit(creep.room.name);
-      if (shouldLogIntel(creep.room)) logRoomIntel(creep.room);
+      if (shouldLogIntel(creep.room)) {
+        logRoomIntel(creep.room);
+        seedSourcesFromVision(creep.room); // <— NEW: refresh source tiles occasionally
+      }
     }
 
     // If we have a target and not there yet, go there
