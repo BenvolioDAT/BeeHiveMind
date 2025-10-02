@@ -87,13 +87,35 @@ function _idsToObjects(ids) {
 // -----------------------------
 // Small helpers (ES5-safe)
 // -----------------------------
+// -----------------------------
+// Movement helper (Traveler-first)
+// -----------------------------
 function go(creep, dest, range, reuse) {
   range = (range != null) ? range : 1;
   reuse = (reuse != null) ? reuse : 40; // higher reuse to cut pathing CPU
-  if (BeeToolbox && BeeToolbox.BeeTravel) {
-    try { BeeToolbox.BeeTravel(creep, dest, { range: range, reusePath: reuse }); return; } catch (e) {}
+
+  // Traveler always preferred
+  if (creep.travelTo) {
+    var tOpts = {
+      range: range,
+      reusePath: reuse,
+      ignoreCreeps: false,   // let Traveler traffic manager do its thing
+      stuckValue: 2,
+      repath: 0.05,
+      maxOps: 4000
+    };
+    // Allow BeeToolbox to inject a custom roomCallback if it exists
+    if (BeeToolbox && BeeToolbox.roomCallback) {
+      tOpts.roomCallback = BeeToolbox.roomCallback;
+    }
+    creep.travelTo((dest.pos || dest), tOpts);
+    return;
   }
-  if (creep.pos.getRangeTo(dest) > range) { creep.moveTo(dest, { reusePath: reuse, maxOps: 2000 }); }
+
+  // Fallback — only if Traveler somehow missing
+  if (creep.pos.getRangeTo(dest) > range) {
+    creep.moveTo(dest, { reusePath: reuse, maxOps: 2000 });
+  }
 }
 
 function isGoodContainer(c) {

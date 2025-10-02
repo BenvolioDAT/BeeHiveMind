@@ -6,11 +6,10 @@
 // - Creep memory always carries {sourceId, targetRoom}
 // - Duplicate resolver elects 1 winner (oldest _assignTick, then name), losers yield
 // - Removes stale owners when creeps die or retarget
-// - FLAG PRUNING: removes source flags when unused or room locked (with grace TTL)
-// - Legacy fallback now HARD-CAPS to REMOTE_RADIUS (no wandering outside radius)
-// - Still ES5-safe (no const/let/arrow)
-//
-// ⚙️ Tuned for MAX_FORAGERS_PER_SOURCE = 1. Owner field can be extended later.
+// - SOURCE FLAGS: create on source tile and prune when unused/locked (with grace TTL)
+// - NEW: CONTROLLER FLAGS: create a flag on the remote room's controller while the room is being worked;
+//        automatically remove it when there are no remote-harvest creeps assigned/in that room.
+// - Legacy fallback hard-caps to REMOTE_RADIUS; ES5-safe; Traveler/BeeTravel for movement.
 
 'use strict';
 
@@ -18,13 +17,12 @@
 // Dependencies
 // ============================
 var BeeToolbox = require('BeeToolbox');
+try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 
 // ============================
 // Tunables
 // ============================
 // NOTE: REMOTE_RADIUS is measured in "room hops" from the home room.
-// A hop = crossing one room exit. The BFS ring includes any direction
-// up to that many hops from home (not cycles, not ticks).
 var REMOTE_RADIUS = 5;
 
 var MAX_PF_OPS    = 3000;
@@ -44,9 +42,9 @@ var ASSIGN_STICKY_TTL = 50;
 // Anti-stuck
 var STUCK_WINDOW = 4;
 
-// Flag pruning cadence & grace
-var FLAG_PRUNE_PERIOD   = 25;   // how often to scan for flag deletions
-var FLAG_RETENTION_TTL  = 500;  // keep a flag this many ticks since last activity
+// Flag pruning cadence & grace (sources only)
+var FLAG_PRUNE_PERIOD   = 25;   // how often to scan for source-flag deletions
+var FLAG_RETENTION_TTL  = 500;  // keep a source-flag this many ticks since last activity
 
 // ============================
 // Helpers: short id, flags
@@ -56,8 +54,12 @@ function shortSid(id) {
   var n = id.length; return id.substr(n - 6);
 }
 
+function _roomMem(roomName){
+  Memory.rooms = Memory.rooms || {};
+  return (Memory.rooms[roomName] = (Memory.rooms[roomName] || {}));
+}
 function _sourceMem(roomName, sid) {
-  var rm = Memory.rooms[roomName] = (Memory.rooms[roomName] || {});
+  var rm = _roomMem(roomName);
   rm.sources = rm.sources || {};
   return (rm.sources[sid] = (rm.sources[sid] || {}));
 }
@@ -115,6 +117,58 @@ function ensureSourceFlag(source) {
 }
 
 // ============================
+// NEW: Controller flag helpers (Reserve:roomName style)
+// ============================
+function ensureControllerFlag(ctrl){
+  if (!ctrl) return;
+  var roomName = ctrl.pos.roomName;
+  var rm = _roomMem(roomName);
+
+  // Expected flag name for this room’s controller
+  var expect = 'Reserve:' + roomName;
+
+  // If we already know a flag name and it’s still valid, reuse
+  if (rm.controllerFlagName) {
+    var f0 = Game.flags[rm.controllerFlagName];
+    if (f0 &&
+        f0.pos.x === ctrl.pos.x &&
+        f0.pos.y === ctrl.pos.y &&
+        f0.pos.roomName === roomName) {
+      return; // still good
+    }
+  }
+
+  // Adopt any Reserve:roomName flag already sitting on this controller
+  var flagsHere = ctrl.pos.lookFor(LOOK_FLAGS) || [];
+  for (var i = 0; i < flagsHere.length; i++) {
+    if (flagsHere[i].name === expect) {
+      rm.controllerFlagName = expect;
+      return;
+    }
+  }
+
+  // Otherwise create a new one (idempotent: if it fails, we’ll adopt next tick)
+  var rc = ctrl.room.createFlag(ctrl.pos, expect, COLOR_WHITE, COLOR_PURPLE);
+  if (typeof rc === 'string') rm.controllerFlagName = rc;
+}
+
+function pruneControllerFlagIfNoForagers(roomName, roomCountMap){
+  var rm = _roomMem(roomName);
+  var fname = rm.controllerFlagName;
+  if (!fname) return;
+
+  // Only prune if no active foragers are assigned/in this room
+  var count = roomCountMap && roomCountMap[roomName] ? roomCountMap[roomName] : 0;
+  if (count > 0) return;
+
+  var f = Game.flags[fname];
+  if (f) {
+    try { f.remove(); } catch (e) {}
+  }
+  delete rm.controllerFlagName;
+}
+
+// ============================
 // Avoid-list (per creep)
 // ============================
 function _ensureAvoid(creep){ if (!creep.memory._avoid) creep.memory._avoid = {}; return creep.memory._avoid; }
@@ -135,12 +189,6 @@ function tryClaimSourceForTick(creep, sid){
 
 // ============================
 // remoteAssignments model
-//   Memory.remoteAssignments[sid] = {
-//     count: <number>,
-//     owner: <creepName or null>,
-//     roomName: <string or null>,
-//     since: <tick or null>
-//   }
 // ============================
 function ensureAssignmentsMem(){ if(!Memory.remoteAssignments) Memory.remoteAssignments={}; return Memory.remoteAssignments; }
 function _maEnsure(entry, roomName){
@@ -166,7 +214,7 @@ function maSetOwner(memAssign, sid, owner, roomName){
   var e = _maEnsure(memAssign[sid], roomName);
   e.owner = owner; e.roomName = roomName || e.roomName; e.since = Game.time;
   memAssign[sid] = e;
-  // PRUNE / lastActive: any time we set owner, bump activity so the flag isn't pruned
+  // PRUNE / lastActive: any time we set owner, bump activity so source-flag isn't pruned
   if (e.roomName) touchSourceActive(e.roomName, sid);
 }
 function maClearOwner(memAssign, sid){
@@ -215,7 +263,7 @@ function resolveOwnershipForSid(sid){
   // Bless the winner
   maSetOwner(memAssign, sid, winner.name, winner.memory.targetRoom||null);
 
-  // Force losers to yield (they'll obey in their own runs)
+  // Force losers to yield
   for (var i=1; i<contenders.length; i++){
     var loser = contenders[i];
     if (loser && loser.memory && loser.memory.sourceId === sid){
@@ -236,42 +284,54 @@ function auditRemoteAssignments(){
     memAssign[sid].count = 0;
   }
 
-  // Count live assignments
+  // Count live assignments + per-room counts (for controller flags)
+  var roomCounts = {}; // roomName -> number of remoteharvesters assigned/in that room
   for (var name in Game.creeps){
     var c = Game.creeps[name];
     if (!c || !c.memory) continue;
-    if (c.memory.task === 'remoteharvest' && c.memory.sourceId){
-      var sid2 = c.memory.sourceId;
-      var e2 = _maEnsure(memAssign[sid2], c.memory.targetRoom||null);
-      e2.count = (e2.count|0) + 1;
-      memAssign[sid2] = e2;
+    if (c.memory.task === 'remoteharvest') {
+      if (c.memory.sourceId){
+        var sid2 = c.memory.sourceId;
+        var e2 = _maEnsure(memAssign[sid2], c.memory.targetRoom||null);
+        e2.count = (e2.count|0) + 1;
+        memAssign[sid2] = e2;
+      }
+      if (c.memory.targetRoom){
+        var rn = c.memory.targetRoom;
+        roomCounts[rn] = (roomCounts[rn]|0) + 1;
+      }
     }
   }
 
-  // Scrub owners: dead, retargeted, or duplicates → resolve
+  // Scrub owners / resolve duplicates
   for (var sid3 in memAssign){
     var owner = maOwner(memAssign, sid3);
     if (owner){
       var oc = Game.creeps[owner];
       if (!oc || !oc.memory || oc.memory.sourceId !== sid3){
-        // stale owner → resolve fresh
         resolveOwnershipForSid(sid3);
       }else{
-        // Too many on this sid → resolve to one
         if (memAssign[sid3].count > MAX_FORAGERS_PER_SOURCE){
           resolveOwnershipForSid(sid3);
         }
       }
     }else{
-      // If no owner but count > 0, pick one as owner
       if (memAssign[sid3].count > 0){
         resolveOwnershipForSid(sid3);
       }
     }
   }
 
-  // PRUNE: run flag pruning on cadence
+  // PRUNE: source flags on cadence
   if ((Game.time % FLAG_PRUNE_PERIOD) === 0) pruneUnusedSourceFlags();
+
+  // NEW: Controller flag prune — remove the controller flag in rooms with zero foragers
+  // We do this every audit so it's snappy (no TTL needed).
+  var rooms = Memory.rooms || {};
+  for (var roomName in rooms) {
+    if (!rooms.hasOwnProperty(roomName)) continue;
+    pruneControllerFlagIfNoForagers(roomName, roomCounts);
+  }
 }
 
 function auditOncePerTick(){
@@ -282,7 +342,7 @@ function auditOncePerTick(){
 }
 
 // ============================
-// Flag pruning
+// Flag pruning (sources)
 // ============================
 function pruneUnusedSourceFlags(){
   var memAssign = ensureAssignmentsMem();
@@ -334,7 +394,7 @@ function pruneUnusedSourceFlags(){
 }
 
 // ============================
-// Pathing helpers
+// Pathing helpers (Traveler-first)
 // ============================
 if (!Memory._pfCost) Memory._pfCost = {};
 
@@ -370,11 +430,18 @@ function pfCost(anchorPos, targetPos) {
 }
 function go(creep, dest, opts){
   opts = opts || {};
-  if (BeeToolbox && BeeToolbox.BeeTravel){ BeeToolbox.BeeTravel(creep, dest, opts); return; }
   var desired = (opts.range!=null) ? opts.range : 1;
-  if (creep.pos.getRangeTo(dest) > desired){
-    creep.moveTo(dest, { reusePath: (opts.reusePath!=null?opts.reusePath:15) });
-  }
+  if (creep.pos.getRangeTo(dest) <= desired) return;
+  var tOpts = {
+    range: desired,
+    reusePath: (opts.reusePath!=null?opts.reusePath:15),
+    ignoreCreeps: true,
+    stuckValue: 2,
+    repath: 0.05,
+    maxOps: 6000
+  };
+  if (BeeToolbox && BeeToolbox.roomCallback) tOpts.roomCallback = BeeToolbox.roomCallback;
+  creep.travelTo((dest.pos||dest), tOpts);
 }
 
 // ============================
@@ -419,7 +486,7 @@ function bfsNeighborRooms(startName, radius){
 }
 
 // ============================
-// Flagging helper (optional)
+// Flagging helper (sources)
 // ============================
 function markValidRemoteSourcesForHome(homeName){
   var anchor=getAnchorPos(homeName);
@@ -428,7 +495,7 @@ function markValidRemoteSourcesForHome(homeName){
 
   for (var i=0;i<rooms.length;i++){
     var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
-    var rm = Memory.rooms[rn] = (Memory.rooms[rn] || {});
+    var rm = _roomMem(rn);
     if (rm.hostile) continue;
     if (isRoomLockedByInvaderCore(rn)) continue;
 
@@ -454,7 +521,7 @@ function markValidRemoteSourcesForHome(homeName){
 // ============================
 function isRoomLockedByInvaderCore(roomName){
   if (!roomName) return false;
-  var rm = Memory.rooms[roomName] = (Memory.rooms[roomName] || {});
+  var rm = _roomMem(roomName);
   var now = Game.time, room = Game.rooms[roomName];
 
   if (room){
@@ -516,7 +583,7 @@ function pickRemoteSource(creep){
   if (!candidates.length){
     for (i=0;i<neighborRooms.length;i++){
       rn=neighborRooms[i]; if (isRoomLockedByInvaderCore(rn)) continue;
-      var rm = Memory.rooms[rn]; if (!rm || !rm.sources) continue;
+      var rm = _roomMem(rn); if (!rm || !rm.sources) continue;
       for (var sid in rm.sources){
         if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
         var ownerNow2 = maOwner(memAssign, sid);
@@ -701,13 +768,17 @@ var TaskRemoteHarvest = {
     if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ BeeToolbox.logSourcesInRoom(targetRoomObj); }
 
     // Avoid rooms you marked hostile in Memory
-    var tmem = Memory.rooms[creep.memory.targetRoom];
+    var tmem = _roomMem(creep.memory.targetRoom);
     if (tmem && tmem.hostile){
       console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
       releaseAssignment(creep);
       return;
     }
     if (!tmem || !tmem.sources) return;
+
+    // NEW: while we’re actively working this room, ensure a controller flag exists
+    var ctl = targetRoomObj && targetRoomObj.controller;
+    if (ctl) ensureControllerFlag(ctl);
 
     // Work the source
     this.harvestSource(creep);
@@ -752,7 +823,7 @@ var TaskRemoteHarvest = {
       if (!inRadius[rn]) continue;                 // ★ radius fence
       if (isRoomLockedByInvaderCore(rn)) continue;
 
-      var rm=Memory.rooms[rn]||{}, sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
+      var rm=_roomMem(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
 
       var count=0;
       for (var name in Game.creeps){
@@ -772,7 +843,7 @@ var TaskRemoteHarvest = {
       if (!least){ if (Game.time%25===0) console.log('🚫 Forager '+creep.name+' found no suitable room with unclaimed sources.'); return; }
       creep.memory.targetRoom = least;
 
-      var roomMemory = Memory.rooms[creep.memory.targetRoom];
+      var roomMemory = _roomMem(creep.memory.targetRoom);
       var sid = this.assignSource(creep, roomMemory);
       if (sid){
         creep.memory.sourceId = sid;
@@ -865,7 +936,10 @@ var TaskRemoteHarvest = {
     // also remember tile for safer prune compare
     var srec = _sourceMem(creep.room.name, sid); srec.x = src.pos.x; srec.y = src.pos.y;
 
-    var rm = Memory.rooms[creep.memory.targetRoom] = (Memory.rooms[creep.memory.targetRoom] || {});
+    // NEW: keep controller flag fresh while active in the room
+    if (creep.room.controller) ensureControllerFlag(creep.room.controller);
+
+    var rm = _roomMem(creep.memory.targetRoom);
     rm.sources = rm.sources || {};
     if (rm.sources[sid] && rm.sources[sid].entrySteps == null){
       var res = PathFinder.search(creep.pos, { pos: src.pos, range: 1 }, { plainCost: PLAIN_COST, swampCost: SWAMP_COST, maxOps: MAX_PF_OPS });
