@@ -191,7 +191,7 @@ var BeeHiveMind = {
         var rn = list[i];
         remote += (C.roomSiteCounts[rn] | 0);
       }
-      return (local + remote) > 0 ? 3 : 0;
+      return (local + remote) > 0 ? 2 : 0;
     }
 
     // snapshot of counts (we mutate this as we schedule spawns to avoid double-filling)
@@ -219,14 +219,14 @@ var BeeHiveMind = {
         repair:        0,
         courier:       1,
         queen:         2,
-        remoteharvest: 12,
+        remoteharvest: 14,
         scout:         2,
         CombatArcher:  0,
         CombatMelee:   0,
         CombatMedic:   0,
         Dismantler:    0,
         Trucker:       0,
-        Claimer:       2,
+        Claimer:       3,
       };
 
       // find first underfilled task and try to spawn it

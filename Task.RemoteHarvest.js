@@ -23,7 +23,7 @@ try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 // Tunables
 // ============================
 // NOTE: REMOTE_RADIUS is measured in "room hops" from the home room.
-var REMOTE_RADIUS = 5;
+var REMOTE_RADIUS = 4;
 
 var MAX_PF_OPS    = 3000;
 var PLAIN_COST    = 2;
@@ -44,7 +44,7 @@ var STUCK_WINDOW = 4;
 
 // Flag pruning cadence & grace (sources only)
 var FLAG_PRUNE_PERIOD   = 25;   // how often to scan for source-flag deletions
-var FLAG_RETENTION_TTL  = 500;  // keep a source-flag this many ticks since last activity
+var FLAG_RETENTION_TTL  = 200;  // keep a source-flag this many ticks since last activity
 
 // ============================
 // Helpers: short id, flags

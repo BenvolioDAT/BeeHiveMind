@@ -5,10 +5,13 @@
 // + Visuals: gold line to destination, marker + label, path dots (low-CPU).
 // + On-path preference: favors road sites that lie along the current route,
 //   and lightly penalizes building targets sitting in swamp tiles.
+//
+// Traveler-first movement (BeeToolbox.BeeTravel or creep.travelTo), with graceful fallbacks.
 
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
+try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists if Traveler.js is in your codebase
 
 // =============================
 // Tunables
@@ -31,7 +34,7 @@ var ONPATH_CFG = {
 // =============================
 var VIS = {
   enabled: true,
-  drawPathDots: true,
+  drawPathDots: false,  // Traveler handles path; dots disabled to save CPU
   drawLineToDest: true,
   drawDestMarker: true,
   maxDots: 10,
@@ -259,7 +262,7 @@ function _drawMove(creep, dest, path, tag) {
   } catch (e) { /* visuals are best-effort; ignore */ }
 }
 
-// ========== Unified mover with visuals ==========
+// ========== Traveler-first mover with visuals ==========
 function go(creep, dest, opts) {
   if (!dest) return;
   opts = opts || {};
@@ -269,40 +272,38 @@ function go(creep, dest, opts) {
   var baseReuse = (opts.reusePath != null) ? opts.reusePath : 35;
   if (range <= 3) baseReuse = Math.min(baseReuse, 10);
   if (stuck >= 2) baseReuse = Math.min(baseReuse, 5);
-  var ignoreCreeps = (stuck >= 2) ? false : true;
 
   if (!_edgeSafe(creep.pos)) { _lateralNudge(creep); }
 
   var vTag = opts.vTag || (opts.range === 3 ? '🔨 build' : '➡');
-
-  var path = creep.pos.findPathTo(dest, {
-    ignoreCreeps: ignoreCreeps,
-    range: range,
-    maxOps: (stuck >= 3) ? 3000 : 1500,
-    plainCost: 2, swampCost: 6
-  });
-
-  if (path && path.length) {
-    _drawMove(creep, dest, path, vTag);
-    var step = path[0];
-    var dir = creep.pos.getDirectionTo(step.x, step.y);
-    var res = creep.move(dir);
-    if (res !== OK) {
-      if (_tryFriendlySwap(creep, dir)) return;
-      if (stuck >= 3) _lateralNudge(creep);
-    }
-    return;
-  }
-
-  if (BeeToolbox && BeeToolbox.BeeTravel) {
-    try {
-      _drawMove(creep, dest, null, vTag);
-      BeeToolbox.BeeTravel(creep, dest, { range: range, reusePath: baseReuse });
-      return;
-    } catch (e) {}
-  }
-
   _drawMove(creep, dest, null, vTag);
+
+  // Traveler/BeeTravel preferred
+  var tOpts = {
+    range: range,
+    reusePath: baseReuse,
+    ignoreCreeps: true,   // Traveler’s traffic manager will handle creeps
+    stuckValue: 2,        // consider stuck quickly to repath
+    repath: 0.05,         // small chance to refresh path
+    maxOps: 6000
+  };
+  if (BeeToolbox && BeeToolbox.roomCallback) tOpts.roomCallback = BeeToolbox.roomCallback;
+
+  try {
+    if (BeeToolbox && BeeToolbox.BeeTravel) {
+      BeeToolbox.BeeTravel(creep, (dest.pos || dest), tOpts);
+      return;
+    }
+    if (typeof creep.travelTo === 'function') {
+      creep.travelTo((dest.pos || dest), tOpts);
+      return;
+    }
+  } catch (e) {
+    // fall through to classic moveTo
+  }
+
+  // Classic moveTo fallback
+  var ignoreCreeps = (stuck >= 2) ? false : true;
   var moveRes = creep.moveTo(dest, {
     range: range,
     reusePath: baseReuse,
@@ -311,35 +312,35 @@ function go(creep, dest, opts) {
     plainCost: 2, swampCost: 6,
     visualizePathStyle: {}
   });
-  if (stuck >= 3 && moveRes === ERR_NO_PATH) _lateralNudge(creep);
+
+  // Optional friendly swap if we know our intended direction
+  if (moveRes !== OK && moveRes !== ERR_TIRED && creep.fatigue === 0) {
+    var dir = creep.pos.getDirectionTo(_asPos(dest));
+    _tryFriendlySwap(creep, dir);
+  }
 }
 
 // -----------------------------
 // NEW: Lock helpers
 // -----------------------------
 function _lockToSite(creep, site) {
-  // lock id + a position snapshot so we can path back even if we lose visibility for a bit
   creep.memory.tBuildId = site.id;
   creep.memory.tBuildPos = { x: site.pos.x, y: site.pos.y, roomName: site.pos.roomName, type: site.structureType };
   creep.memory.tLockSince = Game.time | 0;
-  creep.memory.tLockStuck = 0; // reset a separate stuck counter for the lock
+  creep.memory.tLockStuck = 0;
 }
-
 function _clearLock(creep) {
   delete creep.memory.tBuildId;
   delete creep.memory.tBuildPos;
   delete creep.memory.tLockSince;
   delete creep.memory.tLockStuck;
 }
-
 function _getLockedSite(creep) {
   var id = creep.memory.tBuildId;
   if (!id) return null;
   return Game.constructionSites[id] || null;
 }
-
 function _gotoLock(creep) {
-  // When we have no live site object (no vision or completed), move toward last known pos to confirm
   var p = creep.memory.tBuildPos;
   if (!p) return false;
   var pos = new RoomPosition(p.x, p.y, p.roomName);
@@ -427,7 +428,7 @@ function _pickReservableSite(creep, list, cap, weights, opts) {
         if (opts.corridorMap[key]) score += (opts.roadBonus | 0);
       }
 
-      // light swamp penalty for non-road targets (only if we have same-room terrain)
+      // light swamp penalty for non-road targets
       if (opts.swampPenalty && terr && s.pos.roomName === creep.pos.roomName) {
         if (s.structureType !== STRUCTURE_ROAD &&
             terr.get(s.pos.x, s.pos.y) === TERRAIN_MASK_SWAMP) {
@@ -436,7 +437,6 @@ function _pickReservableSite(creep, list, cap, weights, opts) {
       }
 
       var d = creep.pos.getRangeTo(s.pos);
-      // higher score wins; tie -> closer wins
       if (score > bestScore || (score === bestScore && d < bestDist)) {
         best = s; bestScore = score; bestIdx = i; bestDist = d;
       }
@@ -444,7 +444,7 @@ function _pickReservableSite(creep, list, cap, weights, opts) {
 
     if (!best) break;
     tried[bestIdx] = true;
-    if (_reserveSite(best.id, cap)) return best; // got a slot; use it
+    if (_reserveSite(best.id, cap)) return best;
   }
   return null;
 }
@@ -480,8 +480,8 @@ var TaskBuilder = {
       var here = creep.pos.roomName;
       var weights = TaskBuilder.siteWeights;
 
-      // (A) If we have a locked site, honor it first
-      locked = _getLockedSite(creep); // re-fetch after potential clear
+      // (A) Honor lock first
+      locked = _getLockedSite(creep); // re-fetch
       if (creep.memory.tBuildId && locked) {
         if (_reserveSite(locked.id, BUILDERS_PER_SITE_CAP)) {
           if (creep.pos.inRangeTo(locked.pos, 3)) {
@@ -508,7 +508,7 @@ var TaskBuilder = {
         }
       }
 
-      // (B) No lock: normal selection with reservation + on-path bias, then create a lock
+      // (B) No lock: select with reservation + on-path bias, then lock
       var localList = C.byRoom[here] || [];
       if (localList.length) {
         var corridor = _computeLocalCorridor(creep, localList);
@@ -533,7 +533,7 @@ var TaskBuilder = {
         }
       }
 
-      // (C) Otherwise go to the NEAREST room that has sites
+      // (C) Go to nearest room that has sites
       if (C.rooms.length) {
         var nearestRoom = null, bestDist = 1e9;
         for (var r2 = 0; r2 < C.rooms.length; r2++) {
