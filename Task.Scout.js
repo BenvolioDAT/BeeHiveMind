@@ -1,13 +1,14 @@
 // Task.Scout.spread.es5.js
-// ES5-safe, CPU-lean scout that fans out within EXPLORE_RADIUS, coordinates
-// across multiple scouts, and logs rich intel without orbiting home.
+// ES5-safe, Traveler-powered scout that fans out within EXPLORE_RADIUS,
+// coordinates across multiple scouts, and avoids exit deadlocks in low-exit rooms.
 
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
+try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 
 // ---------- Tunables ----------
-var EXPLORE_RADIUS     = 5;     // max linear distance (rooms) from home
+var EXPLORE_RADIUS     = 5;      // max linear distance (rooms) from home
 var REVISIT_DELAY      = 1000;   // re-visit cadence per room
 var BLOCK_CHECK_DELAY  = 10000;  // keep a room "blocked" this long
 var EXIT_BLOCK_TTL     = 600;    // cache exit-is-blocked checks
@@ -42,7 +43,7 @@ function toRoomName(x, y) {
   return hx + ax + vx + ay;
 }
 
-// Ring of rooms at manhattan radius r around centerName
+// Ring of rooms at manhattan radius r
 function coordinateRing(centerName, r) {
   var c = parseRoomName(centerName);
   if (!c || r < 1) return [];
@@ -243,7 +244,6 @@ function ensureScoutMem(creep) {
   var m = creep.memory.scout;
 
   if (!m.home) {
-    // prefer closest spawn; fall back to Memory.firstSpawnRoom or current room
     var spawns = [];
     for (var k in Game.spawns) if (Game.spawns.hasOwnProperty(k)) spawns.push(Game.spawns[k]);
     if (spawns.length) {
@@ -265,16 +265,27 @@ function ensureScoutMem(creep) {
   return m;
 }
 
-// ---------- Movement ----------
+// ---------- Movement (Traveler wrapper) ----------
 function go(creep, dest, opts) {
   opts = opts || {};
   var desired = (opts.range != null) ? opts.range : 1;
   var reuse   = (opts.reusePath != null) ? opts.reusePath : PATH_REUSE;
 
-  if (BeeToolbox && BeeToolbox.BeeTravel) {
-    try { BeeToolbox.BeeTravel(creep, dest, { range: desired, reusePath: reuse }); return; } catch (e) {}
-  }
-  if (creep.pos.getRangeTo(dest) > desired) creep.moveTo(dest, { reusePath: reuse, maxOps: 2000 });
+  if (creep.pos.getRangeTo(dest) <= desired) return OK;
+
+  var retData = {};
+  var tOpts = {
+    range: desired,
+    reusePath: reuse,
+    ignoreCreeps: true,
+    stuckValue: 2,
+    repath: 0.05,
+    maxOps: 6000,
+    returnData: retData
+  };
+  if (BeeToolbox && BeeToolbox.roomCallback) tOpts.roomCallback = BeeToolbox.roomCallback;
+
+  return creep.travelTo((dest.pos || dest), tOpts);
 }
 
 // ---------- Exit-block cache ----------
@@ -286,15 +297,19 @@ function isExitBlockedCached(room, exitDir) {
   var edge = room.find(exitDir);
   var blocked = true;
   if (edge && edge.length) {
+    // If there are ANY walkable edge tiles without solid structures, it's not blocked
     var samples = edge.length > 6 ? [ edge[1], edge[(edge.length/3)|0], edge[(2*edge.length/3)|0], edge[edge.length-2] ] : edge;
     for (var i = 0; i < samples.length; i++) {
       var p = samples[i];
-      var structs = p.lookFor(LOOK_STRUCTURES);
+      var look = p.look();
       var pass = true;
-      for (var j = 0; j < structs.length; j++) {
-        var s = structs[j];
-        if (s.structureType === STRUCTURE_WALL ||
-            (s.structureType === STRUCTURE_RAMPART && !s.isPublic && (!s.my))) { pass = false; break; }
+      for (var j = 0; j < look.length; j++) {
+        var o = look[j];
+        if (o.type === LOOK_TERRAIN && o.terrain === 'wall') { pass = false; break; }
+        if (o.type === LOOK_STRUCTURES) {
+          var st = o.structure.structureType;
+          if (st === STRUCTURE_WALL || (st === STRUCTURE_RAMPART && !o.structure.isPublic && !o.structure.my)) { pass = false; break; }
+        }
       }
       if (pass) { blocked = false; break; }
     }
@@ -340,7 +355,6 @@ function rebuildQueueAllRings(mem, creep) {
   var strideIdx = ci.idx;
   var strideN   = Math.max(1, ci.n);
 
-  // gather candidates from rings 1..EXPLORE_RADIUS
   var all = [];
   for (var r = 1; r <= EXPLORE_RADIUS; r++) {
     var layer = getRingCached(home, r);
@@ -352,7 +366,6 @@ function rebuildQueueAllRings(mem, creep) {
     }
   }
 
-  // freshness buckets
   var never = [];
   var seenOld = [];
   var seenFresh = [];
@@ -370,6 +383,7 @@ function rebuildQueueAllRings(mem, creep) {
     var out = [];
     var L = arr.length;
     if (!L) return out;
+    // NOTE: stride per bucket (never/old/fresh) — avoids biasing exits
     for (var s = strideIdx; s < L; s += strideN) out.push(arr[s]);
     if (!out.length && L) out.push(arr[0]);
     return out;
@@ -393,7 +407,7 @@ function rebuildQueueAllRings(mem, creep) {
   pushSkippingPrev(strideObjList(seenOld));
   pushSkippingPrev(strideObjList(seenFresh));
 
-  // worst-case fallback: immediate neighbors (still radius-clamped)
+  // fallback: immediate neighbors (radius-clamped)
   if (!queue.length) {
     var fb = exitsOrdered(creep.room.name);
     var filt = [];
@@ -409,7 +423,7 @@ function rebuildQueueAllRings(mem, creep) {
   mem.queue = queue;
 }
 
-// pick an inward neighbor if we somehow drift outside radius
+// pick an inward neighbor if we drift outside radius
 function inwardNeighborTowardHome(current, home) {
   var neigh = exitsOrdered(current);
   var best = null, bestD = 9999;
@@ -419,6 +433,31 @@ function inwardNeighborTowardHome(current, home) {
     if (d < bestD) { bestD = d; best = rn; }
   }
   return best;
+}
+
+// ---------- Gateway helpers ----------
+function homeNeighbors(home) { return exitsOrdered(home) || []; }
+function isAdjToHome(home, rn) {
+  var n = homeNeighbors(home);
+  for (var i=0;i<n.length;i++) if (n[i] === rn) return true;
+  return false;
+}
+function isGatewayHome(home) { return (homeNeighbors(home).length <= 2); }
+
+// ---------- Next-hop routing ----------
+function computeNextHop(fromRoom, toRoom) {
+  if (fromRoom === toRoom) return null;
+  var route = Game.map.findRoute(fromRoom, toRoom, {
+    routeCallback: function (roomName) {
+      if (!okRoomName(roomName) || isBlockedRecently(roomName)) return Infinity;
+      return 1;
+    }
+  });
+  if (route === ERR_NO_PATH || !route || !route.length) return null;
+  // first step tells us the next neighbor room name
+  var dir = route[0].exit; // FIND_EXIT_*
+  var desc = Game.map.describeExits(fromRoom) || {};
+  return desc[dir] || null;
 }
 
 // ---------- API ----------
@@ -435,10 +474,11 @@ var TaskScout = {
       var back = inwardNeighborTowardHome(creep.room.name, M.home);
       if (back) {
         creep.memory.targetRoom = back;
+        creep.memory.nextHop = back;
       }
     }
 
-    // Entered a new room: stamp & rich intel
+    // Entered a new room: stamp & intel
     if (creep.memory.lastRoom !== creep.room.name) {
       if (!creep.memory.prevRoom) creep.memory.prevRoom = null;
       creep.memory.prevRoom = creep.memory.lastRoom;
@@ -448,8 +488,10 @@ var TaskScout = {
       stampVisit(creep.room.name);
       logRoomIntel(creep.room);
 
+      // clear per-room waypoint on arrival
       if (creep.memory.targetRoom === creep.room.name) {
         creep.memory.targetRoom = null;
+        creep.memory.nextHop = null;
         return;
       }
     } else {
@@ -457,25 +499,36 @@ var TaskScout = {
       if (shouldLogIntel(creep.room)) logRoomIntel(creep.room);
     }
 
-    // If we have a target and we're not there yet, proceed
+    // If we have a target, ensure nextHop is set and go via waypoint
     if (creep.memory.targetRoom && creep.room.name !== creep.memory.targetRoom) {
-      var dir = creep.room.findExitTo(creep.memory.targetRoom);
-      if (dir < 0) {
+      // ensure we have a nextHop
+      var hop = creep.memory.nextHop;
+      if (!hop || hop === creep.room.name) {
+        hop = computeNextHop(creep.room.name, creep.memory.targetRoom);
+        creep.memory.nextHop = hop;
+      }
+      if (!hop) {
+        // route no longer valid; mark and drop
         markBlocked(creep.memory.targetRoom);
         creep.memory.targetRoom = null;
+        creep.memory.nextHop = null;
+        return;
+      }
+
+      var dir = creep.room.findExitTo(hop);
+      if (dir < 0) {
+        markBlocked(hop);
+        creep.memory.nextHop = null;
         return;
       }
       if (TaskScout.isExitBlocked(creep, dir)) {
-        markBlocked(creep.memory.targetRoom);
-        creep.memory.targetRoom = null;
+        markBlocked(hop);
+        creep.memory.nextHop = null;
         return;
       }
-      if (creep.pos.x === 0 && dir === FIND_EXIT_LEFT)   { creep.move(LEFT);  return; }
-      if (creep.pos.x === 49 && dir === FIND_EXIT_RIGHT) { creep.move(RIGHT); return; }
-      if (creep.pos.y === 0 && dir === FIND_EXIT_TOP)    { creep.move(TOP);   return; }
-      if (creep.pos.y === 49 && dir === FIND_EXIT_BOTTOM){ creep.move(BOTTOM);return; }
 
-      go(creep, new RoomPosition(25, 25, creep.memory.targetRoom), { range: 20, reusePath: PATH_REUSE });
+      // step toward the center of hop (waypoint)
+      go(creep, new RoomPosition(25, 25, hop), { range: 20, reusePath: PATH_REUSE });
       return;
     }
 
@@ -484,28 +537,52 @@ var TaskScout = {
       rebuildQueueAllRings(M, creep);
     }
 
-    // Pick next target; use same-tick claim to avoid duplicates
+    // Choose next target with same-tick claim — but allow shared gateways if home has ≤2 exits
+    var allowGatewayShare = isGatewayHome(M.home);
     while (M.queue.length) {
       var next = M.queue.shift();
       if (!okRoomName(next) || isBlockedRecently(next)) continue;
       if (Game.map.getRoomLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
       if (next === (M.prevRoom || null) && M.queue.length) continue;
-      if (!tryClaimRoomThisTick(creep, next)) continue;
+
+      var claimOK = tryClaimRoomThisTick(creep, next);
+      if (!claimOK) {
+        // If this is an adjacent gateway off a low-exit home, allow sharing
+        if (!(allowGatewayShare && isAdjToHome(M.home, next))) continue; // still skip if not a gateway
+      }
+
       creep.memory.targetRoom = next;
+      creep.memory.nextHop = computeNextHop(creep.room.name, next);
       break;
     }
 
-    // If nothing to do, idle slightly off-center
+    // If still nothing to do, idle slightly off-center
     if (!creep.memory.targetRoom) {
       go(creep, new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE });
       return;
     }
 
-    // Move toward target room
+    // Start moving toward first hop of the route
     if (creep.room.name !== creep.memory.targetRoom) {
-      go(creep, new RoomPosition(25, 25, creep.memory.targetRoom), { range: 20, reusePath: PATH_REUSE });
+      var nh = creep.memory.nextHop || computeNextHop(creep.room.name, creep.memory.targetRoom);
+      if (!nh) {
+        markBlocked(creep.memory.targetRoom);
+        creep.memory.targetRoom = null;
+        creep.memory.nextHop = null;
+        return;
+      }
+      creep.memory.nextHop = nh;
+
+      var dir2 = creep.room.findExitTo(nh);
+      if (dir2 < 0 || TaskScout.isExitBlocked(creep, dir2)) {
+        markBlocked(nh);
+        creep.memory.nextHop = null;
+        return;
+      }
+      go(creep, new RoomPosition(25, 25, nh), { range: 20, reusePath: PATH_REUSE });
     } else {
       creep.memory.targetRoom = null; // arrived
+      creep.memory.nextHop = null;
     }
   }
 };

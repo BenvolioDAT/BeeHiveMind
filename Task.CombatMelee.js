@@ -1,6 +1,5 @@
 // Task.CombatMelee.js — Vanguard + bodyguard + squad anchor (ES5-safe)
-// Updated: explicit Invader Core attack handling
-
+// Traveler/TaskSquad movement + polite traffic + invader core handling
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
@@ -29,10 +28,10 @@ var CombatMelee = {
       return;
     }
 
-    // --- quick self/buddy healing if we have HEAL
+    // quick self/buddy healing if we have HEAL
     this._auxHeal(creep);
 
-    // (1) emergency bail
+    // (1) emergency bail if low HP or in tower ring
     var lowHp = (creep.hits / creep.hitsMax) < CONFIG.fleeHpPct;
     if (lowHp || this._inTowerDanger(creep.pos)) {
       this._flee(creep);
@@ -41,14 +40,14 @@ var CombatMelee = {
       return;
     }
 
-    // --- bodyguard interpose
+    // (2) bodyguard: interpose for squishy squadmates
     if (this._guardSquadmate(creep)) {
       var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
       if (hugger) creep.attack(hugger);
       return;
     }
 
-    // (2) squad shared target (preferred)
+    // (3) squad shared target
     var target = TaskSquad.sharedTarget(creep);
     if (!target) {
       var anc = TaskSquad.getAnchor(creep);
@@ -56,18 +55,19 @@ var CombatMelee = {
       return;
     }
 
-    // (3) approach & strike
+    // (4) approach & strike
     if (creep.pos.isNearTo(target)) {
-      // --- NEW: explicit Invader Core handling ---
+      // Explicit Invader Core handling: stand and swing
       if (target.structureType && target.structureType === STRUCTURE_INVADER_CORE) {
         creep.say('⚔ core!');
         creep.attack(target);
-        return; // stand and swing; no sidestepping
+        return;
       }
 
-      // Normal attack logic
+      // Normal melee attack
       creep.attack(target);
 
+      // Micro-step to a safer/better adjacent tile (avoid tower/edges/melee stacks)
       var better = this._bestAdjacentTile(creep, target);
       if (better && (better.x !== creep.pos.x || better.y !== creep.pos.y)) {
         var dir = creep.pos.getDirectionTo(better);
@@ -76,7 +76,7 @@ var CombatMelee = {
       return;
     }
 
-    // door bash if gate at 1
+    // (5) door bash if a blocking wall/rampart is the nearer path at range 1
     if (CONFIG.doorBash) {
       var blocker = this._blockingDoor(creep, target);
       if (blocker && creep.pos.isNearTo(blocker)) {
@@ -85,21 +85,21 @@ var CombatMelee = {
       }
     }
 
-    // normal close-in via TaskSquad
+    // (6) close in via Traveler-powered TaskSquad (polite traffic + swaps)
     TaskSquad.stepToward(creep, target.pos, 1);
 
-    // opportunistic hit
+    // opportunistic hit if we brushed into melee
     var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
     if (adj) creep.attack(adj);
 
-    // occasional retarget
+    // (7) occasional opportunistic retarget to weaklings in 1..2
     if (Game.time % 3 === 0) {
       var weak = this._weakestIn1to2(creep);
       if (weak && (weak.hits / weak.hitsMax) < 0.5) target = weak;
     }
   },
 
-  // --- heal self/squad if possible
+  // --- heal self/squad if possible (keeps ES5 style, no double actions)
   _auxHeal: function (creep) {
     var healParts = creep.getActiveBodyparts(HEAL);
     if (!healParts) return;
@@ -120,7 +120,7 @@ var CombatMelee = {
     else if (creep.pos.inRangeTo(target, 3)) creep.rangedHeal(target);
   },
 
-  // --- interpose for allies ---
+  // --- interpose for allies (uses TaskSquad.swap + stepToward)
   _guardSquadmate: function (creep) {
     var sid = (creep.memory && creep.memory.squadId) || 'Alpha';
     var threatened = _.filter(Game.creeps, function (ally) {
@@ -137,7 +137,9 @@ var CombatMelee = {
     if (!buddy) return false;
 
     if (creep.pos.isNearTo(buddy)) {
-      if (TaskSquad.tryFriendlySwap(creep, buddy.pos)) return true;
+      // Try a same-squad friendly swap to put melee between buddy and threat
+      if (TaskSquad.tryFriendlySwap && TaskSquad.tryFriendlySwap(creep, buddy.pos)) return true;
+
       var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {filter: function (h){return h.getActiveBodyparts(ATTACK)>0;}})[0];
       if (bad) {
         var best = this._bestAdjacentTile(creep, bad);
@@ -153,34 +155,10 @@ var CombatMelee = {
     return false;
   },
 
+  // --- unified movement shim (Traveler via TaskSquad)
   _moveSmart: function (creep, targetPos, range) {
     if (!targetPos) return;
-    creep.moveTo(targetPos, {
-      range: range, reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms, maxOps: CONFIG.maxOps,
-      plainCost: 2, swampCost: 6,
-      costCallback: function (roomName, matrix) {
-        var room = Game.rooms[roomName]; if (!room) return matrix;
-        room.find(FIND_STRUCTURES, { filter: function (s){ return s.structureType === STRUCTURE_ROAD; } })
-            .forEach(function (r){ matrix.set(r.pos.x, r.pos.y, 1); });
-        var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType === STRUCTURE_TOWER; } });
-        for (var i=0;i<towers.length;i++){
-          var t=towers[i], r=CONFIG.towerAvoidRadius;
-          for (var dx=-r; dx<=r; dx++) for (var dy=-r; dy<=r; dy++){
-            var x=t.pos.x+dx, y=t.pos.y+dy; if (x<0||x>49||y<0||y>49) continue;
-            matrix.set(x,y, Math.max(matrix.get(x,y),255));
-          }
-        }
-        if (BeeToolbox && BeeToolbox.roomCallback) {
-          var m2 = BeeToolbox.roomCallback(roomName);
-          if (m2) {
-            for (var x=0;x<50;x++) for (var y=0;y<50;y++){
-              var v=m2.get(x,y); if (v) matrix.set(x,y, Math.max(matrix.get(x,y), v));
-            }
-          }
-        }
-        return matrix;
-      }
-    });
+    TaskSquad.stepToward(creep, (targetPos.pos || targetPos), range);
   },
 
   _inTowerDanger: function (pos) {
@@ -200,11 +178,14 @@ var CombatMelee = {
       if (x<=0||x>=49||y<=0||y>=49) continue;
       var pos = new RoomPosition(x,y, creep.room.name);
       if (!pos.isNearTo(target)) continue;
+
+      // passability & bonuses
       var look = pos.look();
-      var impass=false, onRoad=false;
-      for (var i=0;i<look.length;i++){
+      var impass=false, onRoad=false, i;
+      for (i=0;i<look.length;i++){
         var o=look[i];
         if (o.type===LOOK_TERRAIN && o.terrain==='wall') { impass=true; break; }
+        if (o.type===LOOK_CREEPS) { impass=true; break; } // don't choose an occupied tile
         if (o.type===LOOK_STRUCTURES) {
           var st=o.structure.structureType;
           if (st===STRUCTURE_ROAD) onRoad=true;

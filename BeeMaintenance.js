@@ -21,7 +21,7 @@ var BeeMaintenance = (function () {
     REPAIR_SCAN_INTERVAL:       5, // rebuild repair list every N ticks per room
     REPAIR_MAX_RAMPART:      30000,
     REPAIR_MAX_WALL:         30000,
-    LOG: true
+    LOG: false
   };
 
   // -----------------------------

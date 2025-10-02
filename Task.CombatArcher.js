@@ -23,13 +23,13 @@ var TaskCombatArcher = {
   run: function (creep) {
     if (creep.spawning) return;
 
-    // (0) Optional: wait for medic
+    // (0) Optional: wait for medic / rally
     if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
       var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
       if (rf) this._moveSmart(creep, (rf.pos || rf), 0);
       return;
     }
-    
+
     // (1) Acquire target or rally
     var target = TaskSquad.sharedTarget(creep);
     if (!target) {
@@ -73,8 +73,7 @@ var TaskCombatArcher = {
 
     // Cooldown: if we moved very recently, hold to prevent jitter
     if (typeof A.movedAt === 'number' && (Game.time - A.movedAt) < CONFIG.shuffleCooldown) {
-      // hold position
-      return;
+      return; // hold position
     }
 
     // If target is NOT moving and we are within a comfy band, HOLD.
@@ -82,7 +81,7 @@ var TaskCombatArcher = {
       return; // statuesque elegance achieved 🗿
     }
 
-    // If we have a good shot and no danger, also prefer holding even if target moved a bit
+    // If we have a good shot and no extra need to adjust, also prefer holding in the band
     var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
     if (hostilesIn3 && hostilesIn3.length && this._inHoldBand(range)) {
       return;
@@ -161,7 +160,7 @@ var TaskCombatArcher = {
       var step = res.path[0];
       if (step) {
         var np = new RoomPosition(step.x, step.y, creep.pos.roomName);
-        if (!TaskSquad.tryFriendlySwap(creep, np)) {
+        if (!TaskSquad.tryFriendlySwap || !TaskSquad.tryFriendlySwap(creep, np)) {
           creep.move(creep.pos.getDirectionTo(step));
         }
       }
@@ -178,10 +177,8 @@ var TaskCombatArcher = {
 
   _moveSmart: function (creep, targetPos, range) {
     if (!targetPos) return;
-    TaskSquad.stepToward(creep, targetPos, range);
+    TaskSquad.stepToward(creep, (targetPos.pos || targetPos), range);
   }
-  
 };
-
 
 module.exports = TaskCombatArcher;
