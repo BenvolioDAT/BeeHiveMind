@@ -191,7 +191,7 @@ var BeeHiveMind = {
         var rn = list[i];
         remote += (C.roomSiteCounts[rn] | 0);
       }
-      return (local + remote) > 0 ? 2 : 0;
+      return (local + remote) > 0 ? 3 : 0;
     }
 
     // snapshot of counts (we mutate this as we schedule spawns to avoid double-filling)
