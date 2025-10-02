@@ -1,29 +1,19 @@
 // Task.Scout.spread.es5.js
-// ES5-safe, CPU-lean scout that fans out around home within a fixed radius,
-// coordinates across multiple scouts, and seeds rich intel into Memory.
-//
-// - MULTI-SCOUT SPREAD: stride the ring by cohort index + same-tick room claim
-// - RADIUS-LIMITED: never targets beyond EXPLORE_RADIUS rooms from home
-// - INTEL: sources (coords), minerals, deposits, power banks, keeper lairs,
-//          invader core, portals, owner/reservation, player spawns/towers
-// - BLOCK/REVISIT throttles to keep CPU predictable
-//
-// Works standalone; optional BeeToolbox.BeeTravel if present.
+// ES5-safe, CPU-lean scout that fans out within EXPLORE_RADIUS, coordinates
+// across multiple scouts, and logs rich intel without orbiting home.
 
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 
 // ---------- Tunables ----------
-var EXPLORE_RADIUS     = 10;     // max linear distance (rooms) from home
-var RING_MAX           = 50;    // logical upper bound; we clamp by radius anyway
-var REVISIT_DELAY      = 1000;  // re-visit cadence per room
-var BLOCK_CHECK_DELAY  = 10000; // keep a room "blocked" this long
-var EXIT_BLOCK_TTL     = 600;   // cache exit-is-blocked checks
-var INTEL_INTERVAL     = 150;   // same-room deep intel cadence
-var PATH_REUSE         = 50;    // path reuse for inter-room moves
-
-var DIRS_CLOCKWISE = [RIGHT, BOTTOM, LEFT, TOP]; // E,S,W,N
+var EXPLORE_RADIUS     = 5;     // max linear distance (rooms) from home
+var REVISIT_DELAY      = 1000;   // re-visit cadence per room
+var BLOCK_CHECK_DELAY  = 10000;  // keep a room "blocked" this long
+var EXIT_BLOCK_TTL     = 600;    // cache exit-is-blocked checks
+var INTEL_INTERVAL     = 150;    // same-room deep intel cadence
+var PATH_REUSE         = 50;     // path reuse for inter-room moves
+var DIRS_CLOCKWISE     = [RIGHT, BOTTOM, LEFT, TOP]; // E,S,W,N
 
 // ---------- Global caches ----------
 if (!global.__SCOUT) {
@@ -165,7 +155,6 @@ function logRoomIntel(room) {
   intel.lastVisited = Game.time;
   intel.lastScanAt  = Game.time;
 
-  // Counts + presence
   intel.sources = room.find(FIND_SOURCES).length;
 
   var c = room.controller;
@@ -176,7 +165,6 @@ function logRoomIntel(room) {
     intel.safeMode    = c.safeMode || 0;
   }
 
-  // Invader stronghold / core (aka fortress)
   var cores = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_INVADER_CORE; } });
   if (cores.length) {
     var core = cores[0];
@@ -191,11 +179,9 @@ function logRoomIntel(room) {
     intel.invaderCore = intel.invaderCore && intel.invaderCore.present ? intel.invaderCore : { present: false, t: Game.time };
   }
 
-  // Keeper lairs (source keeper rooms)
   var lairs = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_KEEPER_LAIR; } });
   intel.keeperLairs = lairs.length;
 
-  // Minerals
   var mins = room.find(FIND_MINERALS);
   if (mins.length) {
     var m0 = mins[0];
@@ -207,7 +193,6 @@ function logRoomIntel(room) {
     };
   }
 
-  // Deposits (highways)
   var deps = [];
   if (typeof FIND_DEPOSITS !== 'undefined') {
     var dlist = room.find(FIND_DEPOSITS) || [];
@@ -218,7 +203,6 @@ function logRoomIntel(room) {
   }
   intel.deposits = deps;
 
-  // Power bank
   var pbs = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_POWER_BANK; } });
   if (pbs.length) {
     var pb = pbs[0];
@@ -227,7 +211,6 @@ function logRoomIntel(room) {
     intel.powerBank = null;
   }
 
-  // Portals
   var portals = room.find(FIND_STRUCTURES, { filter:function(s){return s.structureType===STRUCTURE_PORTAL;} });
   var plist = [];
   for (var p = 0; p < portals.length; p++) {
@@ -241,7 +224,6 @@ function logRoomIntel(room) {
   }
   intel.portals = plist;
 
-  // Player presence (basic): spawns + towers (non-me)
   var enemySpawns = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_SPAWN; } });
   var enemyTowers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_TOWER; } });
   var spArr = []; var twArr = [];
@@ -250,10 +232,8 @@ function logRoomIntel(room) {
   intel.enemySpawns = spArr;
   intel.enemyTowers = twArr;
 
-  // Hostile creeps count (cheap summary)
   intel.hostiles = room.find(FIND_HOSTILE_CREEPS).length;
 
-  // Also seed sources (coords) for harvesters
   seedSourcesFromVision(room);
 }
 
@@ -263,6 +243,7 @@ function ensureScoutMem(creep) {
   var m = creep.memory.scout;
 
   if (!m.home) {
+    // prefer closest spawn; fall back to Memory.firstSpawnRoom or current room
     var spawns = [];
     for (var k in Game.spawns) if (Game.spawns.hasOwnProperty(k)) spawns.push(Game.spawns[k]);
     if (spawns.length) {
@@ -274,11 +255,12 @@ function ensureScoutMem(creep) {
         if (d < bestD) { best = s; bestD = d; }
       }
       m.home = best.pos.roomName;
+    } else if (Memory.firstSpawnRoom) {
+      m.home = Memory.firstSpawnRoom;
     } else {
       m.home = creep.pos.roomName;
     }
   }
-  if (!m.ring) m.ring = 1;
   if (!Array.isArray(m.queue)) m.queue = [];
   return m;
 }
@@ -336,10 +318,8 @@ function listScouts() {
 function cohortIndex(creep) {
   var cohort = listScouts();
   for (var i = 0; i < cohort.length; i++) if (cohort[i].name === creep.name) return { idx: i, n: cohort.length };
-  // fallback stable-ish
   return { idx: (creep.name.charCodeAt(0) + creep.name.length) % 3, n: 3 };
 }
-// Same-tick room claim (prevents two scouts picking same next room)
 function _scoutClaimTable() {
   var sc = Memory._scoutClaim;
   if (!sc || sc.t !== Game.time) Memory._scoutClaim = { t: Game.time, m: {} };
@@ -353,31 +333,31 @@ function tryClaimRoomThisTick(creep, roomName) {
   return cur === creep.name;
 }
 
-// ---------- Queue building (radius limited + stride) ----------
-function rebuildQueue(mem, creep) {
+// ---------- Queue building (ALL rings up to radius) ----------
+function rebuildQueueAllRings(mem, creep) {
   var home = mem.home;
-  var ring = mem.ring;
   var ci = cohortIndex(creep);
   var strideIdx = ci.idx;
   var strideN   = Math.max(1, ci.n);
 
-  // choose current ring but clamp to radius
-  if (ring > EXPLORE_RADIUS) ring = EXPLORE_RADIUS;
-
-  var layer = getRingCached(home, ring);
-  // filter by explicit linear distance (safety) and not blocked
-  var candidates = [];
-  for (var i = 0; i < layer.length; i++) {
-    var rn = layer[i];
-    if (Game.map.getRoomLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn)) candidates.push(rn);
+  // gather candidates from rings 1..EXPLORE_RADIUS
+  var all = [];
+  for (var r = 1; r <= EXPLORE_RADIUS; r++) {
+    var layer = getRingCached(home, r);
+    for (var i = 0; i < layer.length; i++) {
+      var rn = layer[i];
+      if (Game.map.getRoomLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn)) {
+        all.push(rn);
+      }
+    }
   }
 
-  // priority buckets by freshness
+  // freshness buckets
   var never = [];
   var seenOld = [];
   var seenFresh = [];
-  for (var k = 0; k < candidates.length; k++) {
-    var name = candidates[k];
+  for (var k = 0; k < all.length; k++) {
+    var name = all[k];
     var lv = lastVisited(name);
     if (lv === -Infinity) never.push(name);
     else if (Game.time - lv >= REVISIT_DELAY) seenOld.push({ rn: name, last: lv });
@@ -386,24 +366,21 @@ function rebuildQueue(mem, creep) {
   seenOld.sort(function(a,b){ return a.last - b.last; });
   seenFresh.sort(function(a,b){ return a.last - b.last; });
 
-  function strideList(arr /* of strings */) {
+  function strideList(arr) {
     var out = [];
     var L = arr.length;
     if (!L) return out;
-    // start at index = strideIdx, then step by strideN (round-robin across cohort)
     for (var s = strideIdx; s < L; s += strideN) out.push(arr[s]);
-    // if cohort bigger than list we still need coverage
     if (!out.length && L) out.push(arr[0]);
     return out;
   }
-  function strideObjList(arr /* of {rn} */) {
+  function strideObjList(arr) {
     var just = []; for (var i = 0; i < arr.length; i++) just.push(arr[i].rn);
     return strideList(just);
   }
 
   var queue = [];
   var prev = mem.prevRoom || null;
-
   function pushSkippingPrev(list) {
     for (var t = 0; t < list.length; t++) {
       var nm = list[t];
@@ -416,7 +393,32 @@ function rebuildQueue(mem, creep) {
   pushSkippingPrev(strideObjList(seenOld));
   pushSkippingPrev(strideObjList(seenFresh));
 
+  // worst-case fallback: immediate neighbors (still radius-clamped)
+  if (!queue.length) {
+    var fb = exitsOrdered(creep.room.name);
+    var filt = [];
+    for (var i2 = 0; i2 < fb.length; i2++) {
+      var rn2 = fb[i2];
+      if (okRoomName(rn2) &&
+          Game.map.getRoomLinearDistance(home, rn2) <= EXPLORE_RADIUS &&
+          !isBlockedRecently(rn2)) filt.push(rn2);
+    }
+    queue = filt;
+  }
+
   mem.queue = queue;
+}
+
+// pick an inward neighbor if we somehow drift outside radius
+function inwardNeighborTowardHome(current, home) {
+  var neigh = exitsOrdered(current);
+  var best = null, bestD = 9999;
+  for (var i = 0; i < neigh.length; i++) {
+    var rn = neigh[i];
+    var d = Game.map.getRoomLinearDistance(home, rn);
+    if (d < bestD) { bestD = d; best = rn; }
+  }
+  return best;
 }
 
 // ---------- API ----------
@@ -424,8 +426,17 @@ var TaskScout = {
   isExitBlocked: function (creep, exitDir) { return isExitBlockedCached(creep.room, exitDir); },
 
   run: function (creep) {
-    var M = ensureScoutMem(creep); // {home, ring, queue, prevRoom?}
+    var M = ensureScoutMem(creep); // {home, queue, prevRoom?}
     if (!creep.memory.lastRoom) creep.memory.lastRoom = creep.room.name;
+
+    // leash: if we're outside radius, step one room inward first
+    var curDist = Game.map.getRoomLinearDistance(M.home, creep.room.name);
+    if (curDist > EXPLORE_RADIUS) {
+      var back = inwardNeighborTowardHome(creep.room.name, M.home);
+      if (back) {
+        creep.memory.targetRoom = back;
+      }
+    }
 
     // Entered a new room: stamp & rich intel
     if (creep.memory.lastRoom !== creep.room.name) {
@@ -435,15 +446,13 @@ var TaskScout = {
       M.prevRoom = creep.memory.prevRoom || null;
 
       stampVisit(creep.room.name);
-      logRoomIntel(creep.room);  // seeds sources too
+      logRoomIntel(creep.room);
 
-      // Clear target if we arrived exactly; yield the tick to avoid bounce
       if (creep.memory.targetRoom === creep.room.name) {
         creep.memory.targetRoom = null;
         return;
       }
     } else {
-      // same room: throttle deep intel
       stampVisit(creep.room.name);
       if (shouldLogIntel(creep.room)) logRoomIntel(creep.room);
     }
@@ -461,7 +470,6 @@ var TaskScout = {
         creep.memory.targetRoom = null;
         return;
       }
-      // edge nudges to get fully across if stuck on border
       if (creep.pos.x === 0 && dir === FIND_EXIT_LEFT)   { creep.move(LEFT);  return; }
       if (creep.pos.x === 49 && dir === FIND_EXIT_RIGHT) { creep.move(RIGHT); return; }
       if (creep.pos.y === 0 && dir === FIND_EXIT_TOP)    { creep.move(TOP);   return; }
@@ -471,32 +479,9 @@ var TaskScout = {
       return;
     }
 
-    // No target (or we just arrived) — ensure a queue
+    // No target (or we just arrived) — ensure a queue spanning all rings
     if (!M.queue.length) {
-      // Clamp ring to radius, then rebuild
-      if (M.ring < 1) M.ring = 1;
-      if (M.ring > EXPLORE_RADIUS) M.ring = EXPLORE_RADIUS;
-      rebuildQueue(M, creep);
-
-      // If empty, advance ring (wrap inside radius) and try again
-      if (!M.queue.length) {
-        M.ring = (M.ring % EXPLORE_RADIUS) + 1;
-        rebuildQueue(M, creep);
-
-        // Still empty → fall back to immediate neighbors (filtered)
-        if (!M.queue.length) {
-          var fb = exitsOrdered(creep.room.name);
-          var filt = [];
-          var home = M.home;
-          for (var i = 0; i < fb.length; i++) {
-            var rn = fb[i];
-            if (okRoomName(rn) &&
-                Game.map.getRoomLinearDistance(home, rn) <= EXPLORE_RADIUS &&
-                !isBlockedRecently(rn)) filt.push(rn);
-          }
-          M.queue = filt;
-        }
-      }
+      rebuildQueueAllRings(M, creep);
     }
 
     // Pick next target; use same-tick claim to avoid duplicates
@@ -505,12 +490,12 @@ var TaskScout = {
       if (!okRoomName(next) || isBlockedRecently(next)) continue;
       if (Game.map.getRoomLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
       if (next === (M.prevRoom || null) && M.queue.length) continue;
-      if (!tryClaimRoomThisTick(creep, next)) continue; // another scout grabbed it
+      if (!tryClaimRoomThisTick(creep, next)) continue;
       creep.memory.targetRoom = next;
       break;
     }
 
-    // If nothing to do, idle slightly off-center (keeps pathing cheap)
+    // If nothing to do, idle slightly off-center
     if (!creep.memory.targetRoom) {
       go(creep, new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE });
       return;

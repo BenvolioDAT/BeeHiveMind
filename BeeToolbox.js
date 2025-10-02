@@ -1,355 +1,464 @@
+// BeeToolbox.js — ES5-safe helpers shared across roles/tasks
+// NOTE: Compatible with Screeps runtime (no arrow funcs, no const/let, no includes, etc.)
+
+'use strict';
+
 var Traveler = require('Traveler');
 
+// Optional logging gates (won't crash if not defined elsewhere)
+var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
+var currentLogLevel = (typeof global !== 'undefined' && typeof global.currentLogLevel === 'number')
+  ? global.currentLogLevel
+  : LOG_LEVEL.NONE;
+
 var BeeToolbox = {
-    // Logs all sources in a room to memory
-    logSourcesInRoom: function(room) {
-        // Ensure the room's memory object exists
-        if (!Memory.rooms[room.name]) {
-            Memory.rooms[room.name] = {};
-        }
-        // Check if sources object already exists and has at least one key
-        if (Memory.rooms[room.name].sources) {
-            // Sources already logged, skip logging again
-            return;
-        }
-        // If sources object doesn't exist, initialize it
-        if (!Memory.rooms[room.name].sources) {
-            Memory.rooms[room.name].sources = {};
-        }
-        // Find all energy sources in the room
-        const sources = room.find(FIND_SOURCES);
-        // For each source, ensure it's logged as an array for creep assignments
-        sources.forEach(source => {
-            // If no array exists for this source, create it
-            if (!Array.isArray(Memory.rooms[room.name].sources[source.id])) {
-                Memory.rooms[room.name].sources[source.id] = {};
-                console.log(`[BeeToolbox] Logged source ${source.id} in room ${room.name}`);
-            }
-        });
-        // Optional: Log the full sources structure for debugging
-        console.log(`[BeeToolbox] Final sources in room ${room.name}:`, JSON.stringify(Memory.rooms[room.name].sources, null, 2));
-    },
 
-    // Logs containers near sources in a room to memory
-    logSourceContainersInRoom: function(room) {
-        if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-        if (!Memory.rooms[room.name].sourceContainers) Memory.rooms[room.name].sourceContainers = {};
-        const containers = room.find(FIND_STRUCTURES, {
-            filter: s => s.structureType === STRUCTURE_CONTAINER && s.pos.findInRange(FIND_SOURCES, 1).length > 0
-        });
-        for (const c of containers) {
-            if (!Memory.rooms[room.name].sourceContainers.hasOwnProperty(c.id)) {
-                Memory.rooms[room.name].sourceContainers[c.id] = null; // Unassigned initially
-                console.log(`[🐝 BeeToolbox] Registered container ${c.id} near source in ${room.name}`);
-            }
+  // ---------------------------------------------------------------------------
+  // 📒 SOURCE & CONTAINER INTEL
+  // ---------------------------------------------------------------------------
+
+  // Logs all sources in a room to Memory.rooms[room].sources (object keyed by source.id).
+  // (Comment fixed: we store an OBJECT per source id, not an "array".)
+  logSourcesInRoom: function (room) {
+    if (!room) return;
+
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+    if (!Memory.rooms[room.name].sources) Memory.rooms[room.name].sources = {};
+
+    // If already populated, skip (CPU hygiene)
+    var hasAny = false;
+    for (var k in Memory.rooms[room.name].sources) { if (Memory.rooms[room.name].sources.hasOwnProperty(k)) { hasAny = true; break; } }
+    if (hasAny) return;
+
+    var sources = room.find(FIND_SOURCES);
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i];
+      if (!Memory.rooms[room.name].sources[s.id]) {
+        Memory.rooms[room.name].sources[s.id] = {}; // room coords optional if you like
+        if (currentLogLevel >= LOG_LEVEL.BASIC) {
+          console.log('[BeeToolbox] Logged source ' + s.id + ' in room ' + room.name);
         }
-    },
+      }
+    }
+    if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+      try {
+        console.log('[BeeToolbox] Final sources in ' + room.name + ': ' + JSON.stringify(Memory.rooms[room.name].sources));
+      } catch (e) {}
+    }
+  },
 
-    // Assigns an unassigned container from memory to a Courier_Bee
-    assignContainerFromMemory: function(creep) {
-        if (!creep.memory.targetRoom || creep.memory.assignedContainer) return;
-        const roomMemory = Memory.rooms[creep.memory.targetRoom];
-        if (!roomMemory || !roomMemory.sourceContainers) return;
-        for (const [containerId, assigned] of Object.entries(roomMemory.sourceContainers)) {
-            if (!assigned || !Game.creeps[assigned]) { // Find an unassigned container or one whose creep has died
-                creep.memory.assignedContainer = containerId;
-                roomMemory.sourceContainers[containerId] = creep.name; // Assign the Courier to the container
-                console.log(`🚛 Courier ${creep.name} pre-assigned to container ${containerId} in ${creep.memory.targetRoom}`);
-                return;
-            }
+  // Logs containers that are within 1 tile of any source.
+  logSourceContainersInRoom: function (room) {
+    if (!room) return;
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+    if (!Memory.rooms[room.name].sourceContainers) Memory.rooms[room.name].sourceContainers = {};
+
+    var containers = room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        if (s.structureType !== STRUCTURE_CONTAINER) return false;
+        var near = s.pos.findInRange(FIND_SOURCES, 1);
+        return near && near.length > 0;
+      }
+    });
+
+    for (var i = 0; i < containers.length; i++) {
+      var c = containers[i];
+      if (!Memory.rooms[room.name].sourceContainers.hasOwnProperty(c.id)) {
+        Memory.rooms[room.name].sourceContainers[c.id] = null; // unassigned
+        if (currentLogLevel >= LOG_LEVEL.BASIC) {
+          console.log('[🐝 BeeToolbox] Registered container ' + c.id + ' near source in ' + room.name);
         }
-    },
+      }
+    }
+  },
 
-    // Logs hostile structures in a room (like Invader Cores)
-    logHostileStructures: function(room) {
-        const invaderCore = room.find(FIND_HOSTILE_STRUCTURES, {
-            filter: s => s.structureType === STRUCTURE_INVADER_CORE
-        });
-        if (invaderCore.length > 0) {
-            if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-            Memory.rooms[room.name].hostile = true;
-            console.log(`[BeeToolbox] Marked ${room.name} as hostile due to Invader Core.`);
+  // Assign an unclaimed container (or one whose courier died) to the calling creep.
+  assignContainerFromMemory: function (creep) {
+    if (!creep || creep.memory.assignedContainer) return;
+
+    var targetRoom = creep.memory.targetRoom;
+    if (!targetRoom || !Memory.rooms || !Memory.rooms[targetRoom]) return;
+
+    var mem = Memory.rooms[targetRoom];
+    if (!mem.sourceContainers) return;
+
+    for (var containerId in mem.sourceContainers) {
+      if (!mem.sourceContainers.hasOwnProperty(containerId)) continue;
+      var assigned = mem.sourceContainers[containerId];
+      if (!assigned || !Game.creeps[assigned]) {
+        creep.memory.assignedContainer = containerId;
+        mem.sourceContainers[containerId] = creep.name;
+        if (currentLogLevel >= LOG_LEVEL.BASIC) {
+          console.log('🚛 Courier ' + creep.name + ' pre-assigned to container ' + containerId + ' in ' + targetRoom);
         }
-    }, 
+        return;
+      }
+    }
+  },
 
-    // 🧠 Switch creep between harvesting and returning modes based on energy capacity
-    updateReturnState: function (creep) {
-        if (creep.memory.returning && creep.store[RESOURCE_ENERGY] === 0) {
-            creep.memory.returning = false;
+  // Mark room hostile if it contains an Invader Core.
+  logHostileStructures: function (room) {
+    if (!room) return;
+    var invaderCore = room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; }
+    });
+    if (invaderCore.length > 0) {
+      if (!Memory.rooms) Memory.rooms = {};
+      if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+      Memory.rooms[room.name].hostile = true;
+      if (currentLogLevel >= LOG_LEVEL.BASIC) {
+        console.log('[BeeToolbox] Marked ' + room.name + ' as hostile due to Invader Core.');
+      }
+    }
+  },
+
+  // ---------------------------------------------------------------------------
+  // 🔁 SIMPLE STATE HELPERS
+  // ---------------------------------------------------------------------------
+
+  // Toggle "returning" state based on store fullness
+  updateReturnState: function (creep) {
+    if (!creep) return;
+    if (creep.memory.returning && creep.store[RESOURCE_ENERGY] === 0) {
+      creep.memory.returning = false;
+    }
+    if (!creep.memory.returning && creep.store.getFreeCapacity() === 0) {
+      creep.memory.returning = true;
+    }
+  },
+
+  // Return nearby room names (within "range") that have Memory.rooms[r].sources entries
+  getNearbyRoomsWithSources: function (roomName, range) {
+    range = (typeof range === 'number') ? range : 1;
+    if (!roomName) return [];
+
+    var match = /([WE])(\d+)([NS])(\d+)/.exec(roomName);
+    if (!match) return [];
+
+    var ew = match[1], xStr = match[2], ns = match[3], yStr = match[4];
+    var x = parseInt(xStr, 10);
+    var y = parseInt(yStr, 10);
+    var out = [];
+
+    for (var dx = -range; dx <= range; dx++) {
+      for (var dy = -range; dy <= range; dy++) {
+        if (dx === 0 && dy === 0) continue;
+
+        var newX = (ew === 'W') ? (x - dx) : (x + dx);
+        var newY = (ns === 'N') ? (y - dy) : (y + dy);
+        var newEW = newX >= 0 ? 'E' : 'W';
+        var newNS = newY >= 0 ? 'S' : 'N';
+        var rn = newEW + Math.abs(newX) + newNS + Math.abs(newY);
+
+        var mem = (Memory.rooms && Memory.rooms[rn]) ? Memory.rooms[rn] : null;
+        if (mem && mem.sources) {
+          // has at least one key?
+          var hasKey = false;
+          for (var k in mem.sources) { if (mem.sources.hasOwnProperty(k)) { hasKey = true; break; } }
+          if (hasKey) out.push(rn);
         }
-        if (!creep.memory.returning && creep.store.getFreeCapacity() === 0) {
-            creep.memory.returning = true;
+      }
+    }
+    return out;
+  },
+
+  // ---------------------------------------------------------------------------
+  // ⚡ ENERGY GATHER & DELIVERY
+  // ---------------------------------------------------------------------------
+
+  collectEnergy: function (creep) {
+    if (!creep) return;
+
+    function tryWithdraw(targets, action) {
+      if (!targets || !targets.length) return false;
+
+      var target = creep.pos.findClosestByPath(targets);
+      if (!target) return false;
+
+      var result;
+      if (action === 'pickup') {
+        result = creep.pickup(target);
+      } else {
+        result = creep.withdraw(target, RESOURCE_ENERGY);
+      }
+      if (result === ERR_NOT_IN_RANGE) {
+        BeeToolbox.BeeTravel(creep, target, { range: 1, ignoreCreeps: true });
+      }
+      return result === OK;
+    }
+
+    // Ruins with energy
+    if (tryWithdraw(creep.room.find(FIND_RUINS, { filter: function (r) { return r.store && r.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
+    // Tombstones with energy
+    if (tryWithdraw(creep.room.find(FIND_TOMBSTONES, { filter: function (t) { return t.store && t.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
+    // Dropped energy
+    if (tryWithdraw(creep.room.find(FIND_DROPPED_RESOURCES, { filter: function (r) { return r.resourceType === RESOURCE_ENERGY; } }), 'pickup')) return;
+    // Containers with energy
+    if (tryWithdraw(creep.room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store && s.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
+
+    // Storage
+    var storage = creep.room.storage;
+    if (storage && storage.store && storage.store[RESOURCE_ENERGY] > 0) {
+      var res = creep.withdraw(storage, RESOURCE_ENERGY);
+      if (res === ERR_NOT_IN_RANGE) {
+        BeeToolbox.BeeTravel(creep, storage, { range: 1 });
+      }
+    }
+  },
+
+  deliverEnergy: function (creep, structureTypes) {
+    if (!creep) return ERR_INVALID_TARGET;
+    structureTypes = structureTypes || [];
+
+    var STRUCTURE_PRIORITY = {};
+    STRUCTURE_PRIORITY[STRUCTURE_EXTENSION] = 2;
+    STRUCTURE_PRIORITY[STRUCTURE_SPAWN]     = 3;
+    STRUCTURE_PRIORITY[STRUCTURE_TOWER]     = 4;
+    STRUCTURE_PRIORITY[STRUCTURE_STORAGE]   = 1;
+    STRUCTURE_PRIORITY[STRUCTURE_CONTAINER] = 5;
+
+    var sources = creep.room.find(FIND_SOURCES);
+
+    var targets = creep.room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        // filter by type list
+        var okType = false;
+        for (var i = 0; i < structureTypes.length; i++) {
+          if (s.structureType === structureTypes[i]) { okType = true; break; }
         }
-    },
+        if (!okType) return false;
 
-    // 🌍 Find nearby rooms that have source memory entries (within a range)
-    getNearbyRoomsWithSources: function (roomName, range = 1) {
-        const match = roomName.match(/([WE])(\d+)([NS])(\d+)/); // Regex parse room name (e.g., W8N3)
-        if (!match) return [];
-        const [, ew, xStr, ns, yStr] = match;
-        const x = parseInt(xStr, 10);
-        const y = parseInt(yStr, 10);
-        const candidates = [];
-        for (let dx = -range; dx <= range; dx++) {
-            for (let dy = -range; dy <= range; dy++) {
-                if (dx === 0 && dy === 0) continue;
-                const newX = ew === 'W' ? x - dx : x + dx;
-                const newY = ns === 'N' ? y - dy : y + dy;
-                const newEW = newX >= 0 ? 'E' : 'W';
-                const newNS = newY >= 0 ? 'S' : 'N';
-                const room = `${newEW}${Math.abs(newX)}${newNS}${Math.abs(newY)}`;
-                const mem = Memory.rooms[room];
-                if (mem && mem.sources && Object.keys(mem.sources).length > 0) {
-                    candidates.push(room);
-                }
-            }
+        // exclude source-adjacent containers
+        if (s.structureType === STRUCTURE_CONTAINER) {
+          for (var j = 0; j < sources.length; j++) {
+            if (s.pos.inRangeTo(sources[j].pos, 1)) return false;
+          }
         }
-        return candidates;
-    },
+        return s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+      }
+    });
 
-    // 🐝 Energy collection logic: tombstones, dropped energy, containers, storage
-    collectEnergy: function(creep) {
-        const tryWithdraw = (targets, action) => {
-            const target = creep.pos.findClosestByPath(targets);
-            if (!target) return false;
-            const result = (action === 'pickup') ? creep.pickup(target) : creep.withdraw(target, RESOURCE_ENERGY);
-            if (result === ERR_NOT_IN_RANGE) {
-                BeeToolbox.BeeTravel(creep, target, 1, 10);
-                //creep.moveTo(target);
-            }
-            return result === OK;
-        };
-        // Ruins with energy
-        if (tryWithdraw(creep.room.find(FIND_RUINS, { filter: r => r.store[RESOURCE_ENERGY] > 0 }), 'withdraw')) return;
-        // Tombstones with energy
-        if (tryWithdraw(creep.room.find(FIND_TOMBSTONES, { filter: t => t.store[RESOURCE_ENERGY] > 0 }), 'withdraw')) return;
-        // Dropped energy piles
-        if (tryWithdraw(creep.room.find(FIND_DROPPED_RESOURCES, { filter: r => r.resourceType === RESOURCE_ENERGY }), 'pickup')) return;
-        // Containers with energy
-        if (tryWithdraw(creep.room.find(FIND_STRUCTURES, { filter: s => s.structureType === STRUCTURE_CONTAINER && s.store[RESOURCE_ENERGY] > 0 }), 'withdraw')) return;
-        // Storage
-        const storage = creep.room.storage;
-        if (storage && storage.store[RESOURCE_ENERGY] > 0) {
-            if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                BeeToolbox.BeeTravel(creep, storage, 1, 10);
-                //creep.moveTo(storage, {reusePath: 10, visualizePathStyle:{opacity: .8 ,stroke: '#f29705',lineStyle: 'dashed'}});
-            }
-        }
-    },
+    // sort by priority then distance
+    targets.sort(function (a, b) {
+      var pa = STRUCTURE_PRIORITY[a.structureType] || 99;
+      var pb = STRUCTURE_PRIORITY[b.structureType] || 99;
+      if (pa !== pb) return pa - pb;
+      var da = creep.pos.getRangeTo(a);
+      var db = creep.pos.getRangeTo(b);
+      return da - db;
+    });
 
-    // Placeholder for advanced attack target finder logic
-    /*
-    findAttackTarget: function(creep) {
-        // Find nearest hostile creep
-        const target = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
-        if (target) return target;
+    if (targets.length) {
+      var t = targets[0];
+      var r = creep.transfer(t, RESOURCE_ENERGY);
+      if (r === ERR_NOT_IN_RANGE) {
+        BeeToolbox.BeeTravel(creep, t, { range: 1 });
+      }
+      return r;
+    }
+    return ERR_NOT_FOUND;
+  },
 
-        //Next, target invader core if present
-        const invaderCore = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-            filter: s => s.structureType === STRUCTURE_INVADER_CORE && s.hits > 0
-        });
-        if (invaderCore) return invaderCore;
+  // Ensure a CONTAINER exists 0–1 tiles from targetSource; place site if missing
+  ensureContainerNearSource: function (creep, targetSource) {
+    if (!creep || !targetSource) return;
 
-        
-         //If no hostile creeps, look for structures that block progress (walls, enemy ramparts)
-        const barrier = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-            filter: s => (s.structureType === STRUCTURE_WALL || (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic)) && s.hits > 0
-        });
-        return barrier;
-    },
-    */
-   // Replace the entire findAttackTarget with this:
-    findAttackTarget: function(creep) {
-    // 1) fight hostiles first
-    const hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
+    var sourcePos = targetSource.pos;
+
+    var containersNearby = sourcePos.findInRange(FIND_STRUCTURES, 1, {
+      filter: function (st) { return st.structureType === STRUCTURE_CONTAINER; }
+    });
+    if (containersNearby && containersNearby.length > 0) return;
+
+    var constructionSites = sourcePos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
+      filter: function (site) { return site.structureType === STRUCTURE_CONTAINER; }
+    });
+    if (constructionSites && constructionSites.length > 0) {
+      if (creep.build(constructionSites[0]) === ERR_NOT_IN_RANGE) {
+        BeeToolbox.BeeTravel(creep, constructionSites[0], { range: 1 });
+      }
+      return;
+    }
+
+    var roomTerrain = Game.map.getRoomTerrain(sourcePos.roomName);
+    var offsets = [
+      { x: -1, y:  0 }, { x:  1, y:  0 }, { x:  0, y: -1 }, { x:  0, y:  1 },
+      { x: -1, y: -1 }, { x:  1, y: -1 }, { x: -1, y:  1 }, { x:  1, y:  1 }
+    ];
+
+    for (var i = 0; i < offsets.length; i++) {
+      var pos = { x: sourcePos.x + offsets[i].x, y: sourcePos.y + offsets[i].y };
+      var terrain = roomTerrain.get(pos.x, pos.y);
+      if (terrain === TERRAIN_MASK_WALL) continue;
+
+      var result = creep.room.createConstructionSite(pos.x, pos.y, STRUCTURE_CONTAINER);
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+        console.log('Attempted to place container at (' + pos.x + ',' + pos.y + '): Result ' + result);
+      }
+      if (result === OK) {
+        BeeToolbox.BeeTravel(creep, new RoomPosition(pos.x, pos.y, sourcePos.roomName), { range: 0 });
+        return;
+      }
+    }
+  },
+
+  // ---------------------------------------------------------------------------
+  // 🎯 TARGET SELECTION (COMBAT)
+  // ---------------------------------------------------------------------------
+
+  // Priorities: hostiles → invader core → prio structures → other structures → (no walls/ramparts unless blocking)
+  findAttackTarget: function (creep) {
+    if (!creep) return null;
+
+    // 1) hostile creeps
+    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
     if (hostile) return hostile;
 
-    // 2) invader core next
-    const core = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-        filter: s => s.structureType === STRUCTURE_INVADER_CORE && s.hits > 0
+    // 2) invader core
+    var core = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+      filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE && s.hits > 0; }
     });
     if (core) return core;
 
-    // helper to find the first blocking wall/rampart along the path to a target
-    const firstBarrierOnPath = (from, to) => {
-        const path = from.room.findPath(from.pos, to.pos, {ignoreCreeps:true, maxOps:1000});
-        for (const step of path) {
-        const structs = from.room.lookForAt(LOOK_STRUCTURES, step.x, step.y);
-        const blocker = _.find(structs, s =>
-            s.structureType === STRUCTURE_WALL ||
-            (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic)
-        );
-        if (blocker) return blocker;
+    // helper: first blocking barrier on the path to "toTarget"
+    function firstBarrierOnPath(fromCreep, toTarget) {
+      if (!fromCreep || !toTarget || !toTarget.pos) return null;
+      var path = fromCreep.room.findPath(fromCreep.pos, toTarget.pos, { ignoreCreeps: true, maxOps: 1000 });
+      for (var i = 0; i < path.length; i++) {
+        var step = path[i];
+        var structs = fromCreep.room.lookForAt(LOOK_STRUCTURES, step.x, step.y);
+        for (var j = 0; j < structs.length; j++) {
+          var s = structs[j];
+          if (s.structureType === STRUCTURE_WALL) return s;
+          if (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic) return s;
         }
-        return null;
-    };
+      }
+      return null;
+    }
 
-    // 3) priority structures (ignore walls/ramparts for selection)
-    const prioTypes = [
-        STRUCTURE_TOWER, STRUCTURE_SPAWN, STRUCTURE_STORAGE, STRUCTURE_TERMINAL,
-        STRUCTURE_LAB, STRUCTURE_FACTORY, STRUCTURE_POWER_SPAWN, STRUCTURE_NUKER,
-        STRUCTURE_EXTENSION
-    ];
+    // 3) priority hostile structures
+    var prioTypes = {};
+    prioTypes[STRUCTURE_TOWER] = true;
+    prioTypes[STRUCTURE_SPAWN] = true;
+    prioTypes[STRUCTURE_STORAGE] = true;
+    prioTypes[STRUCTURE_TERMINAL] = true;
+    prioTypes[STRUCTURE_LAB] = true;
+    prioTypes[STRUCTURE_FACTORY] = true;
+    prioTypes[STRUCTURE_POWER_SPAWN] = true;
+    prioTypes[STRUCTURE_NUKER] = true;
+    prioTypes[STRUCTURE_EXTENSION] = true;
 
-    const prio = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
-        filter: s => prioTypes.includes(s.structureType)
+    var prio = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) { return prioTypes[s.structureType] === true; }
     });
     if (prio) {
-        return firstBarrierOnPath(creep, prio) || prio;
+      return firstBarrierOnPath(creep, prio) || prio;
     }
 
-    // 4) any other hostile structure (excluding controller/walls/ramparts)
-    const other = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
-        filter: s =>
-        s.structureType !== STRUCTURE_CONTROLLER &&
-        s.structureType !== STRUCTURE_WALL &&
-        !(s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic)
+    // 4) any other hostile structure (not controller/walls/closed ramparts)
+    var other = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) {
+        if (s.structureType === STRUCTURE_CONTROLLER) return false;
+        if (s.structureType === STRUCTURE_WALL) return false;
+        if (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic) return false;
+        return true;
+      }
     });
     if (other) {
-        return firstBarrierOnPath(creep, other) || other;
+      return firstBarrierOnPath(creep, other) || other;
     }
 
-    // 5) nothing sensible to hit -> return null (don’t randomly smack a wall)
+    // 5) nothing sensible
     return null;
-    },
+  },
 
+  // Should an attacker pause to let its medic catch up?
+  shouldWaitForMedic: function (attacker) {
+    if (!attacker) return false;
 
-    // Determines if an attacker should wait for a medic to catch up
-    shouldWaitForMedic: function(attacker) {
-        const medic = _.find(Game.creeps, c => c.memory.role === 'CombatMedic' && c.memory.followTarget === attacker.id);
-        if (!medic) return false;
-        if (attacker.memory.noWaitForMedic) return false; // Optional override
-        if (attacker.memory.waitTicks === undefined) attacker.memory.waitTicks = 0;
-        const onExit = (attacker.pos.x <= 1 || attacker.pos.x >= 48 || attacker.pos.y <= 1 || attacker.pos.y >= 48);
-        const nearExit = (attacker.pos.x <= 3 || attacker.pos.x >= 46 || attacker.pos.y <= 3 || attacker.pos.y >= 46);
-        if (!attacker.memory.advanceDone && !attacker.pos.inRangeTo(medic, 2)) {
-            attacker.memory.waitTicks = 2;
-            if (nearExit) {
-                const center = new RoomPosition(25, 25, attacker.room.name);
-                const dir = attacker.pos.getDirectionTo(center);
-                attacker.move(dir);
-                attacker.say('🚶 Clear exit');
-                return true;
-            }
-            return true;
-        }
-        if (attacker.memory.waitTicks > 0) {
-            attacker.memory.waitTicks--;
-            return true;
-        }
-        return false;
-    },
+    // find linked medic by role + followTarget
+    var medic = _.find(Game.creeps, function (c) {
+      return c.memory && c.memory.role === 'CombatMedic' && c.memory.followTarget === attacker.id;
+    });
+    if (!medic) return false;
+    if (attacker.memory && attacker.memory.noWaitForMedic) return false;
 
-    deliverEnergy: function(creep, structureTypes = []) {
-            const STRUCTURE_PRIORITY = {
-                 [STRUCTURE_EXTENSION]:  2,
-                 [STRUCTURE_SPAWN]:      3,
-                 [STRUCTURE_TOWER]:      4,
-                 [STRUCTURE_STORAGE]:    1,
-                 [STRUCTURE_CONTAINER]:  5
-                };
+    if (attacker.memory.waitTicks === undefined) attacker.memory.waitTicks = 0;
 
-        const sources = creep.room.find(FIND_SOURCES); // Get sources once
-        const targets = creep.room.find(FIND_STRUCTURES, {
-            filter: (s) => {
-                if (!structureTypes.includes(s.structureType)) return false;
-                if (s.structureType === STRUCTURE_CONTAINER) {
-                    // Exclude containers within 1 tile of any source
-                    for (const source of sources) {
-                        if (s.pos.inRangeTo(source.pos, 1)) return false;
-                    }
-                }
-                return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
-            }
-        });
-        // Sort targets by priority first, then by distance
-        targets.sort((a, b) => {
-            const prioA = STRUCTURE_PRIORITY[a.structureType] || 99;
-            const prioB = STRUCTURE_PRIORITY[b.structureType] || 99;
-            if (prioA !== prioB) return prioA - prioB;
-            return creep.pos.getRangeTo(a) - creep.pos.getRangeTo(b);
-        });
+    var nearExit = (attacker.pos.x <= 3 || attacker.pos.x >= 46 || attacker.pos.y <= 3 || attacker.pos.y >= 46);
 
-        if (targets.length) {
-            const target = targets[0];
-            const result = creep.transfer(target, RESOURCE_ENERGY);
-            if (result === ERR_NOT_IN_RANGE) {
-                BeeToolbox.BeeTravel(creep, target, 1, 10);
-                //creep.moveTo(target, {reusePath: 10, visualizePathStyle:{opacity: .8 ,stroke: '#ae34eb',lineStyle: 'dashed'}});
-            }
-                return result;
-            }
-        },
+    if (!attacker.memory.advanceDone && !attacker.pos.inRangeTo(medic, 2)) {
+      attacker.memory.waitTicks = 2;
+      if (nearExit) {
+        var center = new RoomPosition(25, 25, attacker.room.name);
+        var dir = attacker.pos.getDirectionTo(center);
+        attacker.move(dir);
+        attacker.say('🚶 Clear exit');
+        return true;
+      }
+      return true;
+    }
+    if (attacker.memory.waitTicks > 0) {
+      attacker.memory.waitTicks--;
+      return true;
+    }
+    return false;
+  },
 
+  // ---------------------------------------------------------------------------
+  // 🚚 MOVEMENT: Traveler wrapper
+  // ---------------------------------------------------------------------------
 
-        ensureContainerNearSource: function(creep, targetSource) {
-            const sourcePos = targetSource.pos;
-            // Check for existing containers at the source's adjacent positions
-            const containersNearby = sourcePos.findInRange(FIND_STRUCTURES, 1, {
-                filter: (structure) => structure.structureType === STRUCTURE_CONTAINER,
-            });
-            // If a container already exists nearby, return
-            if (containersNearby.length > 0) return;
-            // Check for existing construction sites near the source
-            const constructionSites = sourcePos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
-                filter: (site) => site.structureType === STRUCTURE_CONTAINER,
-            });
-            // If a construction site for the container exists, build it
-            if (constructionSites.length > 0) {
-                if (creep.build(constructionSites[0]) === ERR_NOT_IN_RANGE) {
-                    BeeToolbox.BeeTravel(creep, constructionSites[0]);
-                    //creep.moveTo(constructionSites[0], { reusePath: 10 });
-                }
-                return;
-            }
-            // Otherwise, attempt to create a construction site for a container
-            const roomTerrain = Game.map.getRoomTerrain(sourcePos.roomName);
-            const validPositions = [
-                { x: sourcePos.x - 1, y: sourcePos.y },     // Left
-                { x: sourcePos.x + 1, y: sourcePos.y },     // Right
-                { x: sourcePos.x, y: sourcePos.y - 1 },     // Top
-                { x: sourcePos.x, y: sourcePos.y + 1 },     // Bottom
-                { x: sourcePos.x - 1, y: sourcePos.y - 1 }, // Top-left
-                { x: sourcePos.x + 1, y: sourcePos.y - 1 }, // Top-right
-                { x: sourcePos.x - 1, y: sourcePos.y + 1 }, // Bottom-left
-                { x: sourcePos.x + 1, y: sourcePos.y + 1 }, // Bottom-right
-            ];
-            for (const pos of validPositions) {
-                const terrain = roomTerrain.get(pos.x, pos.y);
-                if (terrain !== TERRAIN_MASK_WALL) { // Only skip wall tiles
-                    const result = creep.room.createConstructionSite(pos.x, pos.y, STRUCTURE_CONTAINER);
-                    if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-                    console.log(`Attempted to place container at (${pos.x}, ${pos.y}): Result ${result}`);
-                    }            
-                    if (result === OK) {
-                        BeeToolbox.BeeTravel(creep, pos);
-                        //creep.moveTo(pos.x, pos.y, { reusePath: 10 }); // Move to the container position
-                        return;
-                    }
-                }
-            }  
-        },
+  /**
+   * BeeTravel — Unified wrapper around Traveler.
+   * Supports BOTH call styles:
+   *   BeeTravel(creep, target, { range: 1, ignoreCreeps: true })
+   *   BeeTravel(creep, target, 1, /* reuse= * / 30, { ignoreCreeps:true })
+   */
+  BeeTravel: function (creep, target, a3, a4, a5) {
+    if (!creep || !target) return ERR_INVALID_TARGET;
 
-    BeeTravel: function(creep, target, range = 1, reuse = 30, opts = {}) {
-  // Normalize target (Traveler accepts RoomPosition or object with .pos)
-  const destination = (target && target.pos) ? target.pos : target;
+    // Normalize destination
+    var destination = (target && target.pos) ? target.pos : target;
 
-  // Traveler options you probably want
-  const options = Object.assign({
-    range,                 // same meaning as before
-    ignoreCreeps: true,    // good default for smoother traffic
-     useFindRoute: true, // enable for multi-room routing when needed
-    ensurePath: true,   // try a second pass if short search failed
-    stuckValue: 2,      // repath when stuck this many ticks
-    repath: 0.05,       // 5% chance to randomly repath each tick
-    returnData: {}         // we’ll use this to optionally draw/flag
-  }, opts);
+    // Parse arguments (support old signature)
+    var opts = {};
+    if (typeof a3 === 'object') {
+      opts = a3 || {};
+    } else {
+      // legacy: (range, reuse, opts)
+      if (typeof a3 === 'number') opts.range = a3;
+      if (typeof a5 === 'object') {
+        // copy a5 into opts
+        for (var k5 in a5) { if (a5.hasOwnProperty(k5)) opts[k5] = a5[k5]; }
+      }
+      // a4 was "reusePath" in older code; Traveler manages caching itself.
+    }
 
-  // ---- Call Traveler ----
-  const res = creep.travelTo(destination, options);
-  return res;
-},
+    // Defaults (ES5 extend)
+    var options = {
+      range: (opts.range != null) ? opts.range : 1,
+      ignoreCreeps: (opts.ignoreCreeps != null) ? opts.ignoreCreeps : true,
+      useFindRoute: (opts.useFindRoute != null) ? opts.useFindRoute : true,
+      stuckValue: (opts.stuckValue != null) ? opts.stuckValue : 2,
+      repath: (opts.repath != null) ? opts.repath : 0.05,
+      returnData: {}
+    };
+    for (var k in opts) { if (opts.hasOwnProperty(k)) options[k] = opts[k]; }
 
-};
+    try {
+      return Traveler.travelTo(creep, destination, options);
+    } catch (e) {
+      // Fallback to vanilla moveTo if something odd happens
+      if (creep.pos && destination) {
+        var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
+        return creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
+      }
+    }
+  }
 
-module.exports = BeeToolbox; // Export the BeeToolbox module
+}; // end BeeToolbox
+
+module.exports = BeeToolbox;
