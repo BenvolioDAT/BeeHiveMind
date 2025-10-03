@@ -1,16 +1,10 @@
-var roleBuilder_Bee = require('role.Builder_Bee');
-const BeeToolbox = require('BeeToolbox');
-  // Logging Levels
-  const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
-  //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
-  const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
+// Logging Levels
+const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
+//if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
+const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
   
-var roleRepair = {
-  run: function (creep) {
-    // Skip execution if the creep is still spawning
-    if (creep.spawning) {
-      return;
-    }        
+var TaskRepair = {
+  run: function (creep) {    
     // Check if the creep has energy
     if (creep.store[RESOURCE_ENERGY] > 0) {
       // Check if there are structures to repair
@@ -57,8 +51,8 @@ var roleRepair = {
           Memory.rooms[creep.room.name].repairTargets.shift();
         }
       } else {
+        creep.memory.task = undefined;
         // No repair targets, log a message
-        roleBuilder_Bee.run(creep);
       }
     } else {
       // Find energy on the ground
@@ -95,4 +89,4 @@ var roleRepair = {
   },
 };
 
-module.exports = roleRepair;
+module.exports = TaskRepair;

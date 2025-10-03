@@ -1,5 +1,5 @@
 // TaskManager.js
-
+const TaskIdle = require('./Task.Idle');
 // -------------------------------------------
 // Importing task logic from other files
 // Each file exports an object with a `.run(creep)` method
@@ -11,7 +11,21 @@
 //  /tasks/build.js
 //  /tasks/repair.js
 // -------------------------------------------
-const BaseHarvest = require('./BaseHarvest');
+const TaskBaseHarvest = require('./Task.BaseHarvest');
+const TaskRemoteHarvest = require ('./Task.RemoteHarvest');
+const TaskBuilder = require ('./Task.Builder');
+const TaskCourier = require ('./Task.Courier');
+const TaskQueen = require ('./Task.Queen');
+const TaskScout = require ('./Task.Scout');
+const TaskRepair = require ('./Task.Repair');
+const TaskUpgrader = require ('./Task.Upgrader');
+const TaskCombatArcher = require ('./Task.CombatArcher');
+const TaskCombatMedic = require ('./Task.CombatMedic');
+const TaskCombatMelee = require ('./Task.CombatMelee');
+const TaskDismantler = require ('./Task.Dismantler');
+const TaskTrucker = require ('Task.Trucker');
+const TaskClaimer = require ('Task.Claimer');
+
 // -------------------------------------------
 // The task registry: A central lookup table
 // Maps task names (as strings) to their corresponding task modules
@@ -19,10 +33,45 @@ const BaseHarvest = require('./BaseHarvest');
 // For example, if you set `creep.memory.task = 'harvest'`, this will call the harvest module
 // -------------------------------------------
 const tasks = {
-  'baseharvest': BaseHarvest,
+  'baseharvest': TaskBaseHarvest,
+  'remoteharvest': TaskRemoteHarvest,
+  'builder': TaskBuilder,
+  'courier': TaskCourier,
+  'queen': TaskQueen,
+  'scout': TaskScout,
+  'repair': TaskRepair,
+  'upgrader': TaskUpgrader,
+  'CombatMedic': TaskCombatMedic,
+  'CombatMelee': TaskCombatMelee,
+  'CombatArcher': TaskCombatArcher,
+  'Dismantler': TaskDismantler,
+  'idle': TaskIdle,
+  'Trucker': TaskTrucker,
+  'Claimer': TaskClaimer,
   // You can add more tasks here as you create new modules
   // For example: 'upgrade': upgradeModule,
 };
+
+function colonyNeeds() {
+    // Count up all jobs for the colony this tick (simple version)
+    let need = {
+        harvest: 0,
+        builder: 2,
+        repair: 1,
+        courier: 2,
+        upgrader: 2,
+        scout: 1,
+        // Add more tasks as needed
+    };
+    let counts = _.countBy(Game.creeps, c => c.memory.task);
+    let shortage = {};
+    for (let key in need) {
+        if ((counts[key] || 0) < need[key]) {
+            shortage[key] = need[key] - (counts[key] || 0);
+        }
+    }
+    return shortage;
+}
 
 // -------------------------------------------
 // Export the TaskManager object as a module
@@ -46,5 +95,26 @@ module.exports = {
       // This is useful for debugging: you know the creep's task was not recognized
       creep.say('No task!');
     }
-  }
+  },
+    isTaskNeeded(taskName) {
+        // Only keep working if there are still needs for your task
+        let needs = colonyNeeds();
+        return (needs[taskName] || 0) > 0;
+    },
+
+    getHighestPriorityTask(creep) {
+        // Return the most needed task, or 'harvest' if all else fails
+        let needs = colonyNeeds();
+        for (let t of ['baseharvest','repair','builder','courier','upgrader']) {
+            if (needs[t] && needs[t] > 0) return t;
+        }
+        return 'idle';
+    },
+
+    clearTaskMemory: function (creep) {
+      // Add all task-specific fields here
+      delete creep.memory.assignedSource;
+      delete creep.memory.targetRoom;
+      // etc.
+  },
 };

@@ -5,19 +5,13 @@ var BeeHiveMind = require('BeeHiveMind');       // Central logic hub for managin
 var towerLogic = require('tower.logic');        // Tower management: defense and repairs
 var roleLinkManager = require('role.LinkManager'); // Logic for energy transfer between links
 var BeeToolbox = require('BeeToolbox');         // Utility functions for movement, energy, etc.
-
-// Initialize CPU usage tracking memory
-if (!Memory.cpuUsage) Memory.cpuUsage = []; // Array to store CPU usage data per tick
-
-// Capture the starting CPU usage for this tick (used for delta calculations)
-const tickStart = Game.cpu.getUsed();
-
+var Traveler = require('Traveler');
+var SquadFlagManager = require('SquadFlagManager');
 // Logging levels for controlling console output detail
 global.LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 }; // Define levels: NONE < BASIC < DEBUG
 global.currentLogLevel = LOG_LEVEL.NONE; // Default log level (adjust to DEBUG for more output)
-
 // Pixel generation flag (set to 1 to enable pixel generation when conditions met)
-const GenPixel = 1;
+const GenPixel = 0;
 // Main game loop function that runs every tick
 module.exports.loop = function () {
     // Every 3 ticks, log containers near sources in all rooms
@@ -37,7 +31,8 @@ module.exports.loop = function () {
     roleLinkManager.run();
     // Draw visuals such as CPU usage, creep data, and repair info
     BeeVisuals.drawVisuals();
-    BeeVisuals.drawEnergyBar('W39S47');
+    BeeVisuals.drawEnergyBar();    
+    BeeVisuals.drawWorkerBeeTaskTable();
     // Handle repair target list updates every 5 ticks
     if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
     Memory.GameTickRepairCounter++;
@@ -45,10 +40,15 @@ module.exports.loop = function () {
         Memory.GameTickRepairCounter = 0;
         for (const roomName in Game.rooms) {
             const room = Game.rooms[roomName];
+            if (!Memory.rooms) {
+                Memory.rooms = {};
+            }
+            if (!Memory.rooms[roomName]) {
+                Memory.rooms[roomName] = {};
+            }
             Memory.rooms[roomName].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
         }
     }
-
     // Track the first spawn's room in memory every 10 ticks
     if (Memory.GameTickCounter === undefined) Memory.GameTickCounter = 0;
     Memory.GameTickCounter++;
@@ -67,12 +67,14 @@ module.exports.loop = function () {
             console.log("No spawns found.");
         }
     }
-
+    
+    SquadFlagManager.ensureSquadFlags();
+    
+    BeeMaintenance.cleanStaleRooms();
     // Every 50 ticks, clean up stale room memory for rooms not seen in a while
     if (Game.time % 50 === 0) {
         BeeMaintenance.cleanStaleRooms();
     }
-
     // Generate pixels if enabled and CPU bucket is full
     if (GenPixel >= 1 && Game.cpu.bucket >= 9900 && Game.time % 5 === 0) {
         const result = Game.cpu.generatePixel();

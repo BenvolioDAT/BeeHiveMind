@@ -1,182 +1,265 @@
-// Importing all role modules - These are the logic files for each creep role
-var roleNurse_Bee = require('role.Nurse_Bee');
-var roleNectar_Bee = require('role.Nectar_Bee');
-var roleBuilder_Bee = require('role.Builder_Bee');
-var roleCourier_Bee = require('role.Courier_Bee');
-var roleQueen = require('role.Queen');
-var roleRepair = require('role.repair');
-var roleForager_Bee = require('role.Forager_Bee');
-var roleScout = require('role.Scout');
-var roleHoneyGuard = require('role.HoneyGuard');
-var roleWinged_Archer = require('role.Winged_Archer');
-var roleApiary_Medics = require('role.Apiary_Medics');
-var spawnLogic = require('spawn.logic');
-var roleSiege_Bee = require('role.Siege_Bee');
+// BeeHiveMind.cpu.es5.js
+// ES5-safe, CPU-minded hive brain:
+// - One-pass per-tick caches (rooms, spawns, creeps, roleCounts, siteCounts)
+// - TradeEnergy.runAll() once per tick (not per room)
+// - Spawning loops only spawns (no nested rooms×spawns×creeps hurricanes)
+// - NeedBuilder() uses cached global construction sites (no per-remote .find())
+// - Room/road planners still run per-room, but your versions are already tick-gated
 
-// Creep role function mappings, wrapping their run methods for easier execution
+'use strict';
+
+// -------- Logging --------
+var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
+// Toggle here:
+var currentLogLevel = LOG_LEVEL.NONE;
+
+// -------- Requires --------
+var spawnLogic      = require('spawn.logic');
+var roleWorker_Bee  = require('role.Worker_Bee');
+var TaskBuilder     = require('Task.Builder');
+var RoomPlanner     = require('Planner.Room');
+var RoadPlanner     = require('Planner.Road');
+var TradeEnergy     = require('Trade.Energy');
+
+// Map role name -> run function (extend as you add roles)
 var creepRoles = {
-    Builder_Bee: roleBuilder_Bee.run,
-    Courier_Bee: roleCourier_Bee.run,
-    Nurse_Bee: roleNurse_Bee.run,
-    Nectar_Bee: roleNectar_Bee.run,
-    Queen: roleQueen.run,
-    repair: roleRepair.run,
-    Forager_Bee: roleForager_Bee.run,
-    Scout: roleScout.run,
-    HoneyGuard: roleHoneyGuard.run,
-    Winged_Archer: roleWinged_Archer.run,
-    Apiary_Medics: roleApiary_Medics.run,
-    Siege_Bee: roleSiege_Bee.run,
+  Worker_Bee: roleWorker_Bee.run
 };
 
-// Core BeeHiveMind object to manage creeps, rooms, and spawning
-const BeeHiveMind = {
-    // Main entry point called each tick
-    run() {
-        BeeHiveMind.initializeMemory(); // Ensure room memory structure is initialized
+// Small logger
+function log(level, msg) { if (currentLogLevel >= level) console.log(msg); }
 
-        // Loop through all rooms, handling per-room logic
-        for (let roomName in Game.rooms) {
-            const room = Game.rooms[roomName];
-            BeeHiveMind.manageRoom(room);
-        }
+// ------- Per-tick global cache (cheap lookups, no double work) -------
+if (!global.__BHM) global.__BHM = {};
+function prepareTickCaches() {
+  var T = Game.time;
+  var C = global.__BHM;
+  if (C.tick === T) return C; // already prepared
 
-        // Loop through all creeps and run their role logic
-        for (let name in Game.creeps) {
-            const creep = Game.creeps[name];
-            BeeHiveMind.assignRole(creep);
-        }
+  C.tick = T;
 
-        // Handle spawning logic across rooms
-        BeeHiveMind.manageSpawns();
-
-        // Placeholder for managing remote operations (scouting, remote mining, claiming)
-        BeeHiveMind.manageRemoteOps();
-    },
-
-    // Placeholder function for any room-specific logic you'd like to add later
-    manageRoom(room) {
-        // No current room-specific logic
-    },
-
-    // BeeHiveMind.js
-
-    assignTask(creep) {
-    // Example: Assign default tasks based on role
-        if (!creep.memory.task) {
-            if (creep.memory.role === 'Nurse_Bee') {
-            creep.memory.task = 'baseharvest';
-            }// else if (creep.memory.role === 'Forager_Bee') {
-           // creep.memory.task = 'harvest';
-            //} else if (creep.memory.role === 'Courier_Bee') {
-           // creep.memory.task = 'pickup';
-            //} else {
-            // Default fallback
-            //creep.memory.task = 'idle';
-           // }
-        }
-    },
-
-    // Determines the role of a creep and executes its logic
-    assignRole(creep) {
-        
-        BeeHiveMind.assignTask(creep); // Assign a task if not already set
-        var roleFn = creepRoles[creep.memory.role]; // Get the role function from the role map
-        if (roleFn) {
-            roleFn(creep); // Run the creep's role function
-        } else {
-            const creepName = creep.name || 'unknown';
-            const role = creep.memory.role || 'undefined';
-            console.log(`🐝 Unknown role: ${role} (Creep: ${creepName})`, 'color: red; font-weight: bold;'); // Log unknown roles
-        }
-    },
-
-    // Manages spawning creeps based on room needs
-    manageSpawns() {
-        const spawner = _.find(Game.spawns, s => !s.spawning); // Find an idle spawner
-        if (!spawner) return; // Exit if no spawner available
-
-        const roomName = spawner.room.name; // The room of the spawner
-        const spawnResource = spawnLogic.Calculate_Spawn_Resource(); // Calculate resources for spawning
-        const limits = (Memory.rooms[roomName] && Memory.rooms[roomName].creepLimits) || {}; // Fetch room-specific creep limits
-
-        // Define bee roles and their spawn limits and body configurations
-        const beeTypes = [
-            { name: 'Nurse_Bee', limit: limits.Nurse_Bee_Number_Limit, Body: spawnLogic.Generate_Nurse_Bee_Body },
-            { name: 'Courier_Bee', limit: limits.Courier_Bee_Number_Limit, Body: spawnLogic.Generate_Courier_Bee_Body },
-            { name: 'Queen', limit: limits.Queen_Number_Limit, Body: spawnLogic.Generate_Queen_Body },
-            { name: 'Winged_Archer', limit: limits.Winged_Archer_Number_Limit, Body: spawnLogic.Generate_Winged_Archer_Body },
-            { name: 'Apiary_Medics', limit: limits.Apiary_Medics_Number_Limit, Body: spawnLogic.Generate_Apiary_Medic_Body },
-            { name: 'Builder_Bee', limit: limits.Builder_Bee_Number_Limit, Body: spawnLogic.Generate_Builder_Bee_Body },
-            { name: 'Nectar_Bee', limit: limits.Nectar_Bee_Number_Limit, Body: spawnLogic.Generate_Nectar_Bee_Body },
-            { name: 'repair', limit: limits.Repair_Number_Limit, Body: spawnLogic.Generate_Repair_Body },
-            { name: 'Scout', limit: limits.Scout_Number_Limit, Body: spawnLogic.Generate_Scout_Body },
-            { name: 'HoneyGuard', limit: limits.HoneyGuard_Number_Limit, Body: spawnLogic.Generate_HoneyGuard_Body },
-            { name: 'Siege_Bee', limit: limits.Siege_Bee_Number_Limit, Body: spawnLogic.Generate_Siege_Bee_Body },
-            { name: 'Forager_Bee', limit: limits.Forager_Bee_Number_Limit, Body: spawnLogic.Generate_Forager_Bee_Body },
-        ];
-
-        const roleCounts = _.countBy(Game.creeps, c => c.memory.role); // Count existing creeps by role
-
-        // Loop through bee roles, spawning if under limit
-        for (const bee of beeTypes) {
-            const count = roleCounts[bee.name] || 0;
-            if (count < bee.limit) {
-                const bodyConfig = bee.Body(spawnResource); // Get body configuration for this role
-                try {
-                    const result = spawnLogic.Spawn_Creep_Role(spawner, bee.name, () => bodyConfig, spawnResource, {
-                        memory: { role: bee.name, spawnRoom: spawner.room.name }
-                    });
-                    if (result === OK) {
-                        console.log(`${bee.name} spawned successfully.`);
-                    }
-                } catch (error) {
-                    console.error(`Failed to spawn ${bee.name}: ${error}`);
-                }
-                break; // Spawn one creep per tick
-            }
-        }
-    },
-
-    // Placeholder for remote operations like foraging, scouting, claiming
-    manageRemoteOps() {
-        // Forager assignment, scouting, room claiming logic
-    },
-
-    // Initializes creep limits and memory structure for each room
-    initializeMemory() {
-        if (!Memory.rooms) Memory.rooms = {}; // Initialize rooms memory if missing
-
-        for (const roomName in Memory.rooms) {
-            if (!Memory.rooms[roomName]) {
-                Memory.rooms[roomName] = {}; // Initialize room memory
-            }
-
-            // Set default creep limits if missing
-            if (!Memory.rooms[roomName].creepLimits) {
-                Memory.rooms[roomName].creepLimits = {
-                    Scout_Number_Limit: 0,
-                    Builder_Bee_Number_Limit: 1,
-                    Nurse_Bee_Number_Limit: 2,
-                    Nectar_Bee_Number_Limit: 1,
-                    Courier_Bee_Number_Limit: 0,
-                    Queen_Number_Limit: 1,
-                    Repair_Number_Limit: 0,
-                    Forager_Bee_Number_Limit: 0,
-                    HoneyGuard_Number_Limit: 0,
-                    Apiary_Medics_Number_Limit: 0,
-                    Winged_Archer_Number_Limit: 0,
-                    Siege_Bee_Number_Limit: 0,
-                };
-            }
-
-            // Update Courier_Bee limits based on available source containers
-            const sourceContainers = Memory.rooms[roomName].sourceContainers;
-            Memory.rooms[roomName].creepLimits.Courier_Bee_Number_Limit = sourceContainers
-                ? Object.keys(sourceContainers).length
-                : 0;
-        }
+  // Owned rooms list + map
+  var rooms = [];
+  var roomsMap = {};
+  for (var rn in Game.rooms) {
+    if (!Game.rooms.hasOwnProperty(rn)) continue;
+    var rr = Game.rooms[rn];
+    if (rr && rr.controller && rr.controller.my) {
+      rooms.push(rr);
+      roomsMap[rn] = rr;
     }
+  }
+  C.roomsOwned = rooms;
+  C.roomsMap = roomsMap;
+
+  // Spawns list
+  var spawns = [];
+  for (var sn in Game.spawns) {
+    if (!Game.spawns.hasOwnProperty(sn)) continue;
+    spawns.push(Game.spawns[sn]);
+  }
+  C.spawns = spawns;
+
+  // Creeps list + roleCounts (by creep.memory.task), skipping dying-soon
+  var DYING_SOON_TTL = 60;
+  var roleCounts = {};
+  var creeps = [];
+  for (var cn in Game.creeps) {
+    if (!Game.creeps.hasOwnProperty(cn)) continue;
+    var c = Game.creeps[cn];
+    creeps.push(c);
+    var ttl = c.ticksToLive;
+    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue; // let the next wave replace
+    var t = c.memory && c.memory.task;
+    if (t) roleCounts[t] = (roleCounts[t] || 0) + 1;
+  }
+  C.creeps = creeps;
+  C.roleCounts = roleCounts;
+
+  // Global construction site counts by room (my sites)
+  var roomSiteCounts = {};
+  var totalSites = 0;
+  for (var id in Game.constructionSites) {
+    if (!Game.constructionSites.hasOwnProperty(id)) continue;
+    var site = Game.constructionSites[id];
+    // Screeps Game.constructionSites are your sites; still check for robustness
+    if (site && site.my) {
+      totalSites++;
+      var rname = site.pos.roomName;
+      roomSiteCounts[rname] = (roomSiteCounts[rname] || 0) + 1;
+    }
+  }
+  C.roomSiteCounts = roomSiteCounts;
+  C.totalSites = totalSites;
+
+  // Active remote rooms by home (use RoadPlanner helper once per home)
+  var remotesByHome = {};
+  if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
+    for (var i = 0; i < rooms.length; i++) {
+      var home = rooms[i];
+      var list = RoadPlanner.getActiveRemoteRooms(home) || [];
+      remotesByHome[home.name] = list;
+    }
+  }
+  C.remotesByHome = remotesByHome;
+
+  return C;
+}
+
+var BeeHiveMind = {
+  // ---------------- Main tick ----------------
+  run: function () {
+    BeeHiveMind.initializeMemory();
+
+    var C = prepareTickCaches();
+
+    // Per-room management (planners already tick-gated in your CPU versions)
+    for (var i = 0; i < C.roomsOwned.length; i++) {
+      BeeHiveMind.manageRoom(C.roomsOwned[i], C);
+    }
+
+    // Per-creep roles
+    BeeHiveMind.runCreeps(C);
+
+    // Spawning — one pass over spawns, using cached counts and site info
+    BeeHiveMind.manageSpawns(C);
+
+    // Energy market decisions (once per tick, not per room)
+    if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
+      // gate a little if you want to: e.g., run every 3 ticks
+      // if (Game.time % 3 === 0) TradeEnergy.runAll();
+      TradeEnergy.runAll();
+    }
+  },
+
+  // ------------- Room loop -------------
+// lean room loop: planners only (no market spam)
+  manageRoom: function (room, C) {
+    if (!room) return;
+
+    if (RoomPlanner && RoomPlanner.ensureSites) RoomPlanner.ensureSites(room);
+    if (RoadPlanner && RoadPlanner.ensureRemoteRoads) RoadPlanner.ensureRemoteRoads(room);
+
+    // Add light per-room logic here if needed (avoid heavy .find loops per tick)
+  },
+
+  // ------------- Creep loop -------------
+  runCreeps: function (C) {
+    var map = creepRoles;
+    for (var i = 0; i < C.creeps.length; i++) {
+      var creep = C.creeps[i];
+      BeeHiveMind.assignTask(creep); // idempotent when already set
+      var roleName = creep.memory && creep.memory.role;
+      var roleFn = map[roleName];
+      if (typeof roleFn === 'function') {
+        try {
+          roleFn(creep);
+        } catch (e) {
+          if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+            console.log('⚠️ Role error for ' + (creep.name || 'unknown') + ' (' + roleName + '): ' + e);
+          }
+        }
+      } else {
+        if (currentLogLevel >= LOG_LEVEL.BASIC) {
+          var cName = creep.name || 'unknown';
+          var r = roleName || 'undefined';
+          console.log('🐝 Unknown role: ' + r + ' (Creep: ' + cName + ')');
+        }
+      }
+    }
+  },
+
+  // ------------- Task defaults -------------
+  assignTask: function (creep) {
+    if (!creep || (creep.memory && creep.memory.task)) return;
+    var role = creep.memory && creep.memory.role;
+    if (role === 'Queen') creep.memory.task = 'queen';
+    else if (role === 'Scout') creep.memory.task = 'scout';
+    else if (role === 'repair') creep.memory.task = 'repair';
+    // else leave undefined; spawner logic will create needed ones
+  },
+
+  // ------------- Spawning -------------
+  manageSpawns: function (C) {
+    // helper: builder need (local + remote) using per-tick cached site counts
+    function NeedBuilder(room) {
+      if (!room) return 0;
+      var local = C.roomSiteCounts[room.name] | 0;
+      var remote = 0;
+      var list = C.remotesByHome[room.name] || [];
+      for (var i = 0; i < list.length; i++) {
+        var rn = list[i];
+        remote += (C.roomSiteCounts[rn] | 0);
+      }
+      return (local + remote) > 0 ? 2 : 0;
+    }
+
+    // snapshot of counts (we mutate this as we schedule spawns to avoid double-filling)
+    var roleCounts = {};
+    for (var k in C.roleCounts) if (C.roleCounts.hasOwnProperty(k)) roleCounts[k] = C.roleCounts[k];
+
+    // Iterate each spawn once
+    for (var s = 0; s < C.spawns.length; s++) {
+      var spawner = C.spawns[s];
+      if (!spawner || spawner.spawning) continue;
+        // --- Squad spawning (run before normal quotas) ---
+        // Only the first spawn attempts squad maintenance to avoid double-spawning.
+        if (typeof spawnLogic.Spawn_Squad === 'function') {
+          if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
+          //if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
+          //if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
+          //if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
+        }
+      var room = spawner.room;
+      // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
+      var workerTaskLimits = {
+        baseharvest:   2,
+        builder:       NeedBuilder(room),
+        upgrader:      1,
+        repair:        0,
+        courier:       1,
+        queen:         2,
+        remoteharvest: 11,
+        scout:         2,
+        CombatArcher:  0,
+        CombatMelee:   0,
+        CombatMedic:   0,
+        Dismantler:    0,
+        Trucker:       0,
+        Claimer:       2,
+      };
+
+      // find first underfilled task and try to spawn it
+      var task;
+      for (task in workerTaskLimits) {
+        if (!workerTaskLimits.hasOwnProperty(task)) continue;
+        var limit = workerTaskLimits[task] | 0;
+        var count = roleCounts[task] | 0;
+        if (count < limit) {
+          var spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
+          var didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+          if (didSpawn) {
+            roleCounts[task] = count + 1; // reflect immediately so other spawns see the bump
+          }
+          break; // only one attempt per spawn per tick, either way
+        }
+      }
+    }
+  },
+
+  // ------------- Remote ops hook -------------
+  manageRemoteOps: function () {
+    // assignment, scouting, claiming, etc. (stub)
+  },
+
+  // ------------- Memory init -------------
+  initializeMemory: function () {
+    if (!Memory.rooms) Memory.rooms = {};
+    for (var roomName in Memory.rooms) {
+      if (!Memory.rooms.hasOwnProperty(roomName)) continue;
+      if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+    }
+  }
 };
 
-module.exports = BeeHiveMind; // Export the BeeHiveMind module for use in main.js
+module.exports = BeeHiveMind;

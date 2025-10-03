@@ -1,9 +1,6 @@
 var BeeToolbox = require('BeeToolbox');
-const roleNectar_Bee = {
+const TaskUpgrader = {
   run: function (creep) {
-    // Skip execution if the creep is still spawning
-    if (creep.spawning) {
-      return;    }
     // Check if the creep is upgrading and has no energy left
     if (creep.memory.upgrading && creep.store[RESOURCE_ENERGY] === 0) {
       creep.memory.upgrading = false;
@@ -99,9 +96,9 @@ function checkAndUpdateControllerSign(creep, controller) {
       // If the sign is not there or is different, update the sign
       const result = creep.signController(controller, newSignMessage);
       if (result === OK) {
-        console.log(`Nectar_Bee ${creep.name} updated the controller sign.`);
+        console.log(`Upgrader ${creep.name} updated the controller sign.`);
       } else {
-        console.log(`Nectar_Bee ${creep.name} failed to update the controller sign. Error: ${result}`);
+        console.log(`Upgrader ${creep.name} failed to update the controller sign. Error: ${result}`);
       }
     } else {
       // If not in range, move towards the controller
@@ -110,4 +107,4 @@ function checkAndUpdateControllerSign(creep, controller) {
     }
   }
 }
-module.exports = roleNectar_Bee;
+module.exports = TaskUpgrader;

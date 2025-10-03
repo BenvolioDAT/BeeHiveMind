@@ -1,363 +1,478 @@
-  // Logging Levels
-  const LOG_LEVEL = {NONE: 0,BASIC: 1,DEBUG: 2};
-  //if (currentLogLevel >= LOG_LEVEL.DEBUG) {}  
-  const currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
-var BODYPART_COST = {
-    [MOVE]: 50,
-    [WORK]: 100,
-    [CARRY]: 50,
-    [ATTACK]: 80,
-    [RANGED_ATTACK]: 150,
-    [HEAL]: 250,
-    [TOUGH]: 10,
-    [CLAIM]: 600,
-    // ... add other body parts and their costs
-  };
-  function getBodyForTask (task, Calculate_Spawn_Resource) {
-    switch (task) {
-      case 'build':
-        return Generate_Builder_Bee_Body(Calculate_Spawn_Resource);
-      case 'repair':
-        return Generate_Repair_Body(Calculate_Spawn_Resource);
-      case 'harvest':
-        return Generate_Forager_Bee_Body(Calculate_Spawn_Resource);
-      case 'upgrade':
-        return Generate_Nectar_Bee_Body(Calculate_Spawn_Resource);
-      case 'courier':
-        return Generate_Courier_Bee_Body(Calculate_Spawn_Resource);
-    }
-    
+// spawn.logic.js — cleaner, same behavior
+// --------------------------------------------------------
+// Purpose: Pick creep bodies by role/task from predefined configs,
+//          spawn creeps with consistent names and memory,
+//          and do it in a clean, beginner-friendly way.
+//
+// Notes for beginners:
+// - In Screeps, body parts are strings like 'work', 'carry', 'move'.
+// - BODYPART_COST is a global map: { move:50, work:100, carry:50, ... }.
+// - We choose the *largest* body config that fits available energy.
+// - Logging is gated by LOG_LEVEL; turn to DEBUG to see details.
+// --------------------------------------------------------
+
+// ---------- Logging Levels ----------
+const LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
+// Flip to LOG_LEVEL.DEBUG when you want verbose logs:
+const currentLogLevel = LOG_LEVEL.NONE;
+
+// ---------- Shorthand Body Builders ----------
+// B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
+const B  = (w, c, m) => [
+  ...Array(w).fill(WORK),
+  ...Array(c).fill(CARRY),
+  ...Array(m).fill(MOVE),
+];
+// CM(c,m) = [CARRY x c, MOVE x m]
+const CM = (c, m) => [...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+// WM(w,m) = [WORK x w, MOVE x m]
+const WM = (w, m) => [...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
+// MH(m,h) = [MOVE x m, HEAL x h]
+const MH = (m, h) => [...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
+// TAM(t,a,m) = [TOUGH x t, ATTACK x a, MOVE x m]
+const TAM = (t, a, m) => [...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
+// R(t,r,m) = [TOUGH x t, RANGED_ATTACK x r, MOVE x m]
+const R  = (t, r, m) => [...Array(t).fill(TOUGH), ...Array(r).fill(RANGED_ATTACK), ...Array(m).fill(MOVE)];
+// A(...) = mixed arms builder for quick experiments
+const A  = (t,a,r,h,w,c,m)=>[
+  ...Array(t).fill(TOUGH),
+  ...Array(a).fill(ATTACK),
+  ...Array(r).fill(RANGED_ATTACK),
+  ...Array(h).fill(HEAL),
+  ...Array(w).fill(WORK),
+  ...Array(c).fill(CARRY),
+  ...Array(m).fill(MOVE),
+];
+// C(c,m) = [CLAIM x c, MOVE x m]
+const C  = (c, m) => [...Array(c).fill(CLAIM), ...Array(m).fill(MOVE)];
+
+// ---------- Role Configs (largest first is preferred) ----------
+const CONFIGS = {
+  // Workers
+  baseharvest: [
+    B(6,0,5), 
+    B(5,1,5), 
+    B(4,1,4), 
+    B(3,1,3), 
+    B(2,1,2), 
+    B(1,1,1),
+  ],
+  courier: [
+    CM(30,15), 
+    CM(23,23), 
+    CM(22,22), 
+    CM(21,21), 
+    CM(20,20), 
+    CM(19,19),
+    CM(18,18),
+    CM(17,17), 
+    CM(16,16), 
+    CM(15,15), 
+    CM(14,14), 
+    CM(13,13), 
+    CM(12,12), 
+    CM(11,11),
+    CM(10,10), 
+    CM(9,9), 
+    CM(8,8), 
+    CM(7,7), 
+    CM(6,6), 
+    CM(5,5), 
+    CM(4,4), 
+    CM(3,3),
+    CM(2,2), 
+    CM(1,1),
+  ],
+  builder: [ 
+    B(6,12,18),
+    // Long-haul “road layer” — balanced for 2–3 rooms out
+    B(4, 8, 12),   // 1200 energy, 24 parts, 400 carry
+    // Mid-range — solid for 1–2 rooms out
+    B(3, 6, 9),    // 900 energy, 18 parts, 300 carry
+    // Budget scout/seed — starter road + container drop
+    B(2, 4, 6),    // 600 energy, 12 parts, 200 carry
+    // Emergency mini — drops a container + token road
+    B(2, 2, 4)     // 400 energy, 8 parts, 100 carry
+  ],
+  upgrader: [
+    //B(4,1,5), 
+    B(2,1,3),
+  ],
+  repair: [
+    B(5,2,7), 
+    B(4,1,5), 
+    B(2,1,3),
+  ],
+  Queen: [ // keeping capitalization to match your original key
+    B(0,22,22), 
+    B(0,21,21), 
+    B(0,20,20), 
+    B(0,19,19), 
+    B(0,18,18), 
+    B(0,17,17),
+    B(0,16,16), 
+    B(0,15,15), 
+    B(0,14,14), 
+    B(0,13,13), 
+    B(0,12,12), 
+    B(0,11,11),
+    B(0,10,10), 
+    B(0,9,9), 
+    B(0,8,8), 
+    B(0,7,7), 
+    B(0,6,6), 
+    B(0,5,5), 
+    B(0,4,4),
+    B(0,3,3), 
+    B(1,2,3), 
+    B(1,1,2), 
+    B(1,1,1),
+  ],
+  remoteharvest: [
+    //B(8,25,17), 
+    //B(5,10,8), 
+    //B(5,8,4),
+    //B(5,8,13), 
+    //B(5,6,11), 
+    //B(5,4,9),
+    //B(5,2,7), 
+    //B(4,2,6),
+    B(3,6,5), 
+    B(3,5,4), 
+    B(3,4,3), 
+    B(3,3,3), 
+    B(3,2,2,), 
+    B(2,2,2), 
+    B(1,1,1),
+  ],
+  Scout: [
+    B(0,0,1),
+  ],
+
+  // Combat
+  CombatMelee: [
+    TAM(6,6,12), 
+    TAM(4,4,8), 
+    TAM(1,1,2),
+  ],
+  CombatArcher: [
+    //R(6,8,14), 
+    //R(4,6,10),//1140 
+    R(2,4,6), 
+    R(1,2,3),
+  ],
+  CombatMedic: [
+   // MH(12,12), 
+   // MH(10,10), 
+    //MH(8,8), 
+    //MH(6,6), 
+   // MH(5,5), 
+    //MH(4,4), 
+    //MH(3,3), 
+    MH(2,2), 
+    MH(1,1),
+  ],
+  Dismantler: [
+    //WM(25,25), 
+    //WM(20,20), 
+    //WM(15,15),
+    WM(5,5),
+  ],
+
+  // Special
+  Claimer: [
+    C(4,4),
+    C(3,3), 
+    C(2,2), 
+    C(1,1),
+  ],
+};
+
+// ---------- Task Aliases (normalize user-facing names) ----------
+// This lets getBodyForTask('Trucker') resolve to courier configs, etc.
+const TASK_ALIAS = {
+  trucker: 'courier',
+  queen: 'Queen',
+  scout: 'Scout',
+  claimer: 'Claimer',
+  // pass-throughs (lowercased) will resolve automatically if present
+};
+
+// ---------- Energy Accounting ----------
+// Returns *total available* energy across all spawns + extensions.
+// Returns energy available for spawning.
+// - If you pass a spawn, room, or roomName => returns that ROOM's energy (spawns + extensions).
+// - If you pass nothing => falls back to empire-wide total (old behavior).
+function Calculate_Spawn_Resource(spawnOrRoom) {
+  // Per-room mode
+  if (spawnOrRoom) {
+    let room =
+      (spawnOrRoom.room && spawnOrRoom.room) ||           // a spawn (or structure)
+      (typeof spawnOrRoom === 'string' ? Game.rooms[spawnOrRoom] : spawnOrRoom); // roomName or Room
+    if (!room) return 0;
+
+    // Fast, built-in sum of spawns+extensions for this room
+    return room.energyAvailable;
+
+    // If you ever want the manual sum instead, uncomment:
+    /*
+    let spawnEnergy = _.sum(room.find(FIND_MY_SPAWNS), s => s.store[RESOURCE_ENERGY] || 0);
+    let extEnergy   = _.sum(room.find(FIND_MY_STRUCTURES, {filter: s => s.structureType === STRUCTURE_EXTENSION}),
+                            s => s.store[RESOURCE_ENERGY] || 0);
+    return spawnEnergy + extEnergy;
+    */
   }
 
-  function Spawn_Worker_Bee(spawn, neededTask, Calculate_Spawn_Resource) {
-    let body = getBodyForTask(neededTask, Calculate_Spawn_Resource);
-    let name = Generate_Creep_Name('Worker_Bee');
-    let memory = { role: 'Worker_Bee', task: neededTask };
-    let result = spawn.spawnCreep(body, name, { memory: memory }); 
-    if (result === OK ) {
-      console.log(`🟢 Spawned Worker_Bee: ${name} for task ${neededTask}`);
-      return true;
-    }
-    return false; // If spawning failed, return false
+  // ---- Backward-compat (empire-wide) ----
+  let spawnEnergy = 0;
+  for (const name in Game.spawns) {
+    spawnEnergy += Game.spawns[name].store[RESOURCE_ENERGY] || 0;
   }
+  const extensionEnergy = _.sum(Game.structures, s =>
+    s.structureType === STRUCTURE_EXTENSION ? (s.store[RESOURCE_ENERGY] || 0) : 0
+  );
+  return spawnEnergy + extensionEnergy;
+}
 
-  // Function to generate a creep name based on the set number value
-  function Generate_Creep_Name(role) {
-    for (var i = 1; i <= 10; i++) {
-      var newName = role + '_' + i;
-      if (!_.some(Game.creeps, (creep) => creep.name === newName)) {
-        return newName;
-      }
-    }
-    return null; // No available name found
-  }
-  function Calculate_Spawn_Resource() {
-    let totalSpawnEnergy = 0;
-    // Loop through all spawns and calculate their energy
-    for (let spawnName in Game.spawns) {
-        totalSpawnEnergy += Game.spawns[spawnName].store[RESOURCE_ENERGY];
-    }    
-    // Use _.sum to calculate the total energy from all extensions
-    const extensionEnergy = _.sum(Game.structures, structure =>
-        structure.structureType === STRUCTURE_EXTENSION ? structure.store[RESOURCE_ENERGY] : 0
-    );  
-    return totalSpawnEnergy + extensionEnergy;
-}
-if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-console.log(`Current Calculate_Spawn_Resource: ${Calculate_Spawn_Resource()}`);
-}
-// 🧱 Body configurations per role
-// Each role has a list of possible body arrays. The spawn will choose the most powerful one it can afford.
-// Role-specific configurations
-const Nurse_Bee_Config = [
-  [WORK, WORK, WORK, WORK, WORK, WORK, WORK, MOVE,  MOVE, MOVE, MOVE, MOVE, CARRY],
-  [WORK, WORK, WORK, WORK, WORK, WORK,  MOVE, MOVE, MOVE, MOVE, CARRY],
-  [WORK, WORK, WORK, WORK, WORK, MOVE, MOVE, MOVE, CARRY],
-  [WORK, WORK, WORK, WORK, MOVE, MOVE, CARRY],
-  [WORK, WORK, WORK, MOVE, MOVE, CARRY],
-  [WORK, WORK, MOVE, MOVE, CARRY],
-  [WORK, WORK, MOVE, CARRY],
-  [WORK, MOVE, CARRY],
-];
-// Role-specific configurations
-const Courier_Bee_Config = [
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, MOVE, MOVE],
-  [CARRY, MOVE],
-];
-// Role-specific configurations
-const Builder_Bee_Config = [
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE],
-  [WORK, WORK, CARRY, MOVE, MOVE,],
-  [WORK, WORK, CARRY, MOVE],
-  [WORK, CARRY, MOVE],
-];
-// Role-specific configurations
-const Nectar_Bee_Config = [
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE],
-  [WORK, WORK, CARRY, MOVE, MOVE,],
-  [WORK, WORK, CARRY, MOVE],
-  [WORK, CARRY, MOVE],
-];
-// Role-specific configurations
-const Repair_Config = [
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],//700E
-  //[WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE],//550
-  //[WORK, WORK, CARRY, MOVE, MOVE,],//350E
-  //[WORK, WORK, CARRY, MOVE],//300E
-  [WORK, CARRY, MOVE],//200E
-];
-// Role-specific configurations
-const Queen_Config = [
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, CARRY, MOVE, MOVE],
-  [CARRY, CARRY, CARRY, MOVE, MOVE],
-  [CARRY, CARRY, MOVE],
-  [CARRY, MOVE],
-];
-// Role-specific configurations
-const Forager_Bee_Config = [
-  //[WORK, WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE],
-  //[WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE],
-  //[WORK, CARRY, CARRY, MOVE, MOVE, MOVE],
-  [WORK, WORK, CARRY, CARRY, MOVE, MOVE],
-  [WORK, CARRY, CARRY, MOVE, MOVE],
-  [WORK, CARRY, MOVE, MOVE],
-];
-const Scout_Config = [
-[MOVE],
-];
-const HoneyGuard_Config = [
-  //[TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, MOVE, TOUGH, MOVE, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, MOVE, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[TOUGH, TOUGH, TOUGH, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[TOUGH, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [TOUGH, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [TOUGH, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE],
-  [TOUGH, ATTACK, ATTACK, MOVE, MOVE, MOVE],
-  [TOUGH, ATTACK, MOVE],
-];
-const Winged_Archer_Config = [
-  //[TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  //[TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE],
-  [TOUGH, TOUGH, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE, MOVE],
-  [TOUGH, RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE],
-  [TOUGH, RANGED_ATTACK, MOVE],
-];
-const Apiary_Medic_Config = [
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL, HEAL],
-  //[MOVE, MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL, HEAL],
-  [MOVE, MOVE, MOVE, MOVE, HEAL, HEAL, HEAL, HEAL],
-  [MOVE, MOVE, MOVE, HEAL, HEAL, HEAL],
-  [MOVE, MOVE, HEAL, HEAL],
-  [MOVE, HEAL,],
-];
-const Siege_Bee_Config = [
-  [WORK, MOVE],
-];
-// Array containing all role configurations
-const configurations = [
-  { role: 'Nurse_Bee', body: Nurse_Bee_Config },
-  { role: 'Courier_Bee', body: Courier_Bee_Config },
-  { role: 'Builder_Bee', body: Builder_Bee_Config },
-  { role: 'Nectar_Bee', body: Nectar_Bee_Config },
-  { role: 'Forager_Bee', body: Forager_Bee_Config },
-  { role: 'Queen', body: Queen_Config },
-  { role: 'repair', body: Repair_Config },
-  { role: 'Scout', body: Scout_Config },
-  { role: 'HoneyGuard' , body: HoneyGuard_Config },
-  { role: 'Winged_Archer' , body: Winged_Archer_Config },
-  { role: 'Apiary_Medic' , body: Apiary_Medic_Config },
-  { role: 'Siege_Bee' , body: Siege_Bee_Config },
-];
-// 🔍 Selects the largest body config that fits within current available energy
-function Generate_Body_From_Config(role,Calculate_Spawn_Resource) {
-  const config = configurations.find(entry => entry.role === role);
-  if (config) {
-    let selectedConfig;
-    let bodyCost; // Declare bodyCost here
-    for (const bodyConfig of config.body) {
-      bodyCost = bodyConfig.reduce((totalCost, part) => {
-        const partCost = BODYPART_COST[part.toLowerCase()];  // Convert to lowercase
-        return totalCost + (partCost ? partCost : 0);
-      }, 0);
-      if (bodyCost <=Calculate_Spawn_Resource) {
-        selectedConfig = bodyConfig;
-        break;
-      }
-    }
-    if (selectedConfig) {
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`Available energy for ${role}: ${Calculate_Spawn_Resource}`);
-      }
-      return selectedConfig;
-    } else {
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`Insufficient energy to spawn ${role}.`);
-      }
-    }
-  } else {
+// Optional: tweak your debug line to show per-room when you have a spawner handy
+// if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+//   const anySpawn = Object.values(Game.spawns)[0];
+//   console.log(`[spawn] Energy empire=${Calculate_Spawn_Resource()} | room=${anySpawn ? Calculate_Spawn_Resource(anySpawn) : 0}`);
+// }
+
+
+// ---------- Body Selection ----------
+// Returns the largest body from CONFIGS[taskKey] that fits energyAvailable.
+function Generate_Body_From_Config(taskKey, energyAvailable) {
+  const list = CONFIGS[taskKey];
+  if (!list) {
     if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`Configuration not found for role: ${role}`);
+      console.log(`[spawn] No config for task: ${taskKey}`);
     }
+    return [];
+  }
+  for (const body of list) {
+    const cost = _.sum(body, part => BODYPART_COST[part]); // Screeps global
+    if (cost <= energyAvailable) {
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+        console.log(`[spawn] Picked ${taskKey} body: [${body}] @ cost ${cost} (avail ${energyAvailable})`);
+      }
+      return body;
+    }
+  }
+  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+    console.log(`[spawn] Insufficient energy for ${taskKey} (need at least ${_.sum(_.last(list), p => BODYPART_COST[p])})`);
   }
   return [];
 }
-// Function to generate creep bodys form configs
-// 🔧 Role-specific body generators, used by main loop
-function Generate_Courier_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Courier_Bee',Calculate_Spawn_Resource);
-}
-function Generate_Nurse_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Nurse_Bee',Calculate_Spawn_Resource);
-}
-function Generate_Builder_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Builder_Bee',Calculate_Spawn_Resource);
-}
-function Generate_Repair_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('repair',Calculate_Spawn_Resource);
-} 
-function Generate_Queen_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Queen',Calculate_Spawn_Resource);
-}
-function Generate_Forager_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Forager_Bee',Calculate_Spawn_Resource);
-}
-function Generate_Nectar_Bee_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Nectar_Bee',Calculate_Spawn_Resource);
-}
-function Generate_Scout_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('Scout', Calculate_Spawn_Resource);
-}
-function Generate_HoneyGuard_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('HoneyGuard', Calculate_Spawn_Resource);
-}
-function Generate_Winged_Archer_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('Winged_Archer' , Calculate_Spawn_Resource);
-}
-function Generate_Apiary_Medic_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('Apiary_Medic' , Calculate_Spawn_Resource);
-}
-function Generate_Siege_Bee_Body(Calculate_Spawn_Resource){
-  return Generate_Body_From_Config('Siege_Bee' , Calculate_Spawn_Resource);
+
+// Helper to normalize a requested task into a CONFIGS key.
+function normalizeTask(task) {
+  if (!task) return task;
+  const key = TASK_ALIAS[task] || TASK_ALIAS[task.toLowerCase()] || task;
+  return key;
 }
 
-// Function to spawn a creep of a specific role
-function Spawn_Creep_Role(spawn, role_name, generateBodyFunction, Spawn_Resource, memory = {}) {
-  const bodyParts = generateBodyFunction(Spawn_Resource);
-  const newName = Generate_Creep_Name(role_name);
-  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`Trying to spawn ${role_name}: ${newName}, Body: [${bodyParts}]`);
+// ---------- Role-specific wrappers (kept for API compatibility) ----------
+const Generate_Courier_Body          = (e) => Generate_Body_From_Config('courier', e);
+const Generate_BaseHarvest_Body      = (e) => Generate_Body_From_Config('baseharvest', e);
+const Generate_Builder_Body          = (e) => Generate_Body_From_Config('builder', e);
+const Generate_Repair_Body           = (e) => Generate_Body_From_Config('repair', e);
+const Generate_Queen_Body            = (e) => Generate_Body_From_Config('Queen', e);
+const Generate_RemoteHarvest_Body    = (e) => Generate_Body_From_Config('remoteharvest', e);
+const Generate_Upgrader_Body         = (e) => Generate_Body_From_Config('upgrader', e);
+const Generate_Scout_Body            = (e) => Generate_Body_From_Config('Scout', e);
+const Generate_CombatMelee_Body      = (e) => Generate_Body_From_Config('CombatMelee', e);
+const Generate_CombatArcher_Body     = (e) => Generate_Body_From_Config('CombatArcher', e);
+const Generate_CombatMedic_Body      = (e) => Generate_Body_From_Config('CombatMedic', e);
+const Generate_Dismantler_Config_Body= (e) => Generate_Body_From_Config('Dismantler', e);
+const Generate_Claimer_Body          = (e) => Generate_Body_From_Config('Claimer', e);
+
+// ---------- Task → Body helper (kept for API compatibility) ----------
+function getBodyForTask(task, energyAvailable) {
+  const key = normalizeTask(task);
+  switch (key) {
+    case 'builder':        return Generate_Builder_Body(energyAvailable);
+    case 'repair':         return Generate_Repair_Body(energyAvailable);
+    case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable);
+    case 'upgrader':       return Generate_Upgrader_Body(energyAvailable);
+    case 'courier':        return Generate_Courier_Body(energyAvailable);
+    case 'remoteharvest':  return Generate_RemoteHarvest_Body(energyAvailable);
+    case 'Scout':          return Generate_Scout_Body(energyAvailable);
+    case 'Queen':          return Generate_Queen_Body(energyAvailable);
+    case 'CombatArcher':   return Generate_CombatArcher_Body(energyAvailable);
+    case 'CombatMelee':    return Generate_CombatMelee_Body(energyAvailable);
+    case 'CombatMedic':    return Generate_CombatMedic_Body(energyAvailable);
+    case 'Dismantler':     return Generate_Dismantler_Config_Body(energyAvailable);
+    case 'Claimer':        return Generate_Claimer_Body(energyAvailable);
+    // Aliases
+    case 'trucker':        return Generate_Courier_Body(energyAvailable);
+    default:
+      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+        console.log(`[spawn] Unknown task: ${task}`);
+      }
+      return [];
   }
-  const bodyCost = _.sum(bodyParts, (part) => BODYPART_COST[part]);
+}
+
+// ---------- Naming ----------
+function Generate_Creep_Name(role, max = 70) {
+  for (let i = 1; i <= max; i++) {
+    const name = `${role}_${i}`;
+    if (!Game.creeps[name]) return name;
+  }
+  return null; // ran out of slots
+}
+
+// ---------- Spawn Helpers ----------
+// Spawns a role using a provided body-gen function; merges memory.role automatically.
+function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory = {}) {
+  const body = generateBodyFn(availableEnergy);
+  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
+
   if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`${role_name} - Spawn Energy: ${Spawn_Resource}`);
-  }  
-  if (Spawn_Resource >= bodyCost) {
-    if (newName) {
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`Trying to spawn ${role_name}: ${newName}, Body: [${bodyParts.join(', ')}], Cost: ${bodyCost}`);
-      }
+    console.log(`[spawn] Attempt ${roleName} body=[${body}] cost=${bodyCost} avail=${availableEnergy}`);
+  }
 
-      // 👇 Merge the role into the provided memory object
-      memory.role = role_name;
-
-      const result = spawn.spawnCreep(bodyParts.map(String), newName, { memory: memory });
-
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`Spawn result for ${role_name}: ${result}`);
-      }
-
-      if (result === OK) {
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-          console.log(`🟢 Spawned ${role_name}: ${newName}`);
-        }
-        return true;
-      } else if (result === ERR_NOT_ENOUGH_ENERGY) {
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-          console.log(`🔴 F spawn ${role_name}: ${newName}. Insufficient energy. Result: ${result}`);
-        }
-      } else {
-        if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-          console.log(`🔴 F spawn ${role_name}: ${newName}. Unknown error. Result: ${result}`);
-        }
-      }
-    }
-  } else {
+  if (!body.length || availableEnergy < bodyCost) {
     if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`Insufficient energy to spawn ${role_name}. Required: ${bodyCost}`);
+      console.log(`[spawn] Not enough energy for ${roleName}. Need ${bodyCost}, have ${availableEnergy}.`);
     }
+    return false;
+  }
+
+  const name = Generate_Creep_Name(roleName);
+  if (!name) return false;
+
+  memory.role = roleName; // ensure role is set
+  const result = spawn.spawnCreep(body, name, { memory });
+
+  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+    console.log(`[spawn] Result ${roleName}/${name}: ${result}`);
+  }
+  if (result === OK) {
+    if (currentLogLevel >= LOG_LEVEL.BASIC) {
+      console.log(`🟢 Spawned ${roleName}: ${name}`);
+    }
+    return true;
   }
   return false;
 }
 
-  module.exports = {
-    Generate_Creep_Name,
-    Calculate_Spawn_Resource,
-    configurations,
-    Generate_Body_From_Config,
-    Spawn_Creep_Role,
-    Generate_Courier_Bee_Body,
-    Generate_Nurse_Bee_Body,
-    Generate_Nectar_Bee_Body,
-    Generate_Builder_Bee_Body,
-    Generate_Repair_Body,
-    Generate_Queen_Body,
-    Generate_Forager_Bee_Body,
-    Generate_Scout_Body,
-    Generate_HoneyGuard_Body,
-    Generate_Winged_Archer_Body,
-    Generate_Apiary_Medic_Body,
-    Generate_Siege_Bee_Body,
-    getBodyForTask,
-    Spawn_Worker_Bee,
+// Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
+function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
+  const body = getBodyForTask(neededTask, availableEnergy);
+  const name = Generate_Creep_Name(neededTask || 'Worker');
+  const memory = {
+    role: 'Worker_Bee',
+    task: neededTask,
+    bornTask: neededTask,
+    birthBody: body.slice(),
   };
+  if (extraMemory) Object.assign(memory, extraMemory);
+  const res = spawn.spawnCreep(body, name, { memory });
+  if (res === OK) {
+    if (currentLogLevel >= LOG_LEVEL.BASIC) {
+      console.log(`🟢 Spawned Creep: ${name} for task ${neededTask}`);
+    }
+    return true;
+  }
+  return false;
+}
+
+
+// --- REPLACE your existing Spawn_Squad with this hardened version ---
+function Spawn_Squad(spawn, squadId = 'Alpha') {
+  if (!spawn || spawn.spawning) return false;
+
+  // Per-squad memory book-keeping to avoid rapid duplicate spawns
+  if (!Memory.squads) Memory.squads = {};
+  if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
+  const S = Memory.squads[squadId];
+  const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
+
+  // Desired layout (exact counts)
+  const layout = [
+    { role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
+    { role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 1 },
+    { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 1 },
+  ];
+
+  // Count squad members by role (includes spawning eggs)
+function haveCount(taskName) {
+    // count live creeps
+    var live = _.sum(Game.creeps, function(c){
+      return c.my && c.memory && c.memory.squadId === squadId && c.memory.task === taskName ? 1 : 0;
+    });
+    // count "eggs" currently spawning (Memory is set immediately when you spawn)
+    var hatching = _.sum(Memory.creeps, function(mem, name){
+      if (!mem) return 0;
+      if (mem.squadId !== squadId) return 0;
+      if (mem.task !== taskName) return 0;
+      // Only count if not yet in Game.creeps (i.e., still spawning)
+      return Game.creeps[name] ? 0 : 1;
+    });
+    return live + hatching;
+  }
+
+  // Simple cooldown guard
+  if (S.lastSpawnAt && (Game.time - S.lastSpawnAt) < COOLDOWN_TICKS) {
+    return false;
+  }
+
+  const avail = Calculate_Spawn_Resource(spawn);
+
+  // Find the first underfilled slot (in order) and spawn exactly one
+  for (let i = 0; i < layout.length; i++) {
+    const plan = layout[i];
+    const have = haveCount(plan.role);
+
+    if (have < plan.need) {
+      const memory = { task: plan.role, squadId: squadId, role: plan.role }; // role is set again defensively
+      const ok = Spawn_Worker_Bee(spawn, plan.role, avail, { squadId: squadId });
+      if (ok) {
+        S.lastSpawnAt = Game.time;
+        S.lastSpawnRole = plan.role;
+        return true;
+      } else {
+        // If we failed due to energy, bail; don’t try other roles this tick
+        return false;
+      }
+    }
+  }
+
+  // Nothing missing → ensure cooldown resets slowly (optional)
+  return false;
+}
+
+
+
+// ---------- Exports ----------
+module.exports = {
+  // utilities
+  Generate_Creep_Name,
+  Calculate_Spawn_Resource,
+  configurations: Object.entries(CONFIGS).map(([task, body]) => ({ task, body })), // preserve your original shape
+  Generate_Body_From_Config,
+  Spawn_Creep_Role,
+    // + new helper
+  Spawn_Squad,
+  // role generators (compat)
+  Generate_Courier_Body,
+  Generate_BaseHarvest_Body,
+  Generate_Upgrader_Body,
+  Generate_Builder_Body,
+  Generate_Repair_Body,
+  Generate_Queen_Body,
+  Generate_RemoteHarvest_Body,
+  Generate_Scout_Body,
+  Generate_CombatMelee_Body,
+  Generate_CombatArcher_Body,
+  Generate_CombatMedic_Body,
+  Generate_Dismantler_Config_Body,
+  Generate_Claimer_Body,
+
+  // existing helpers
+  getBodyForTask,
+  Spawn_Worker_Bee,
+};
