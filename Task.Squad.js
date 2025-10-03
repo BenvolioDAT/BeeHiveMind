@@ -1,4 +1,4 @@
-// Task.Squad.js — Traveler-powered movement + polite traffic shim (ES5-safe)
+// Task.Squad.js — Traveler-powered movement + polite traffic shim + tile reservations (ES5-safe)
 'use strict';
 
 /**
@@ -22,23 +22,70 @@ var TaskSquad = (function () {
   // Target scoring
   var HEALER_WEIGHT = -500, RANGED_WEIGHT = -260, MELEE_WEIGHT = -140, HURT_WEIGHT = -160, TOUGH_PENALTY = +25;
 
-  // Traveler defaults (tweak if you like)
+  // Traveler defaults for combat
   var TRAVELER_DEFAULTS = {
-    ignoreCreeps: true,    // start optimistic; Traveler flips when stuck
-    stuckValue: 2,         // lower = repath sooner on micro-stalls
-    repath: 0.05,          // small randomized refresh to avoid herd ruts
-    maxOps: 6000,          // tune to your CPU budget
-    allowHostile: false    // don’t hug red rooms unless told
-    // preferHighway: true, // uncomment if your paths cross a lot of highways
+    ignoreCreeps: false,   // start conservative for squads; Traveler flips when stuck
+    stuckValue: 2,
+    repath: 0.05,
+    maxOps: 6000,
+    allowHostile: false
   };
 
-  // Simple role gates (edit names to match your codebase if different)
+  // Role priority (higher number = higher right-of-way)
+  var ROLE_PRI = {
+    'CombatMelee': 90,
+    'Dismantler':  80,
+    'CombatArcher':70,
+    'CombatMedic': 60
+  };
+
   var COMBAT_ROLES = {
     'CombatMelee': 1,
     'CombatArcher': 1,
     'CombatMedic': 1,
     'Dismantler': 1
   };
+
+  // -----------------------------
+  // Per-tick move reservation map
+  // -----------------------------
+  if (!global.__MOVE_RES__) global.__MOVE_RES__ = { tick: -1, rooms: {} };
+
+  function _resetReservations() {
+    if (global.__MOVE_RES__.tick !== Game.time) {
+      global.__MOVE_RES__.tick = Game.time;
+      global.__MOVE_RES__.rooms = {};
+    }
+  }
+
+  function _key(x, y) { return x + '_' + y; }
+
+  function _reserveTile(creep, pos, priority) {
+    _resetReservations();
+    var roomName = pos.roomName || (pos.pos && pos.pos.roomName);
+    if (!roomName) return true; // nothing to do
+
+    var roomMap = global.__MOVE_RES__.rooms[roomName];
+    if (!roomMap) roomMap = (global.__MOVE_RES__.rooms[roomName] = {});
+
+    var k = _key(pos.x || pos.pos.x, pos.y || pos.pos.y);
+    var cur = roomMap[k];
+    if (!cur) {
+      roomMap[k] = { name: creep.name, pri: priority|0 };
+      return true;
+    }
+
+    // If the same creep, ok
+    if (cur.name === creep.name) return true;
+
+    // Higher priority wins
+    if ((priority|0) > (cur.pri|0)) {
+      roomMap[k] = { name: creep.name, pri: priority|0 };
+      return true;
+    }
+
+    return false; // someone stronger already owns it this tick
+  }
 
   // -----------------------------
   // Utilities
@@ -48,6 +95,12 @@ var TaskSquad = (function () {
   }
   function _isCombat(creep) { return !!COMBAT_ROLES[_roleOf(creep)]; }
   function _isCivilian(creep) { return !_isCombat(creep); }
+  function _rolePri(creep) {
+    var r = _roleOf(creep);
+    var p = ROLE_PRI[r];
+    return (p == null) ? 10 : p; // default low priority for unknown roles
+  }
+  function _movedThisTick(creep) { return creep && creep.memory && creep.memory._movedAt === Game.time; }
 
   function getSquadId(creep) {
     return (creep.memory && creep.memory.squadId) || 'Alpha';
@@ -80,7 +133,6 @@ var TaskSquad = (function () {
   function _chooseRoomTarget(me) {
     var room = me.room; if (!room) return null;
 
-    // Priority: enemy creeps (weighted)
     var hostiles = room.find(FIND_HOSTILE_CREEPS);
     if (hostiles && hostiles.length) {
       var scored = _.map(hostiles, function (h) { return { h: h, s: _scoreHostile(me, h) }; });
@@ -88,13 +140,11 @@ var TaskSquad = (function () {
       if (best && best.h) return best.h;
     }
 
-    // Next: key hostile structures (towers/spawns)
     var key = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
       return s.structureType === STRUCTURE_TOWER || s.structureType === STRUCTURE_SPAWN;
     }});
     if (key.length) return me.pos.findClosestByRange(key);
 
-    // Lastly: any hostile structure
     var others = room.find(FIND_HOSTILE_STRUCTURES);
     if (others.length) return me.pos.findClosestByRange(others);
 
@@ -139,9 +189,8 @@ var TaskSquad = (function () {
   }
 
   // -----------------------------
-  // Polite traffic shim
+  // Polite traffic shim (priority aware)
   // -----------------------------
-  // Small helper so soldiers (or same-squad members) can move through friendly civilians without deadlocking.
   function _politelyYieldFor(mover, nextPos) {
     if (!nextPos) return;
 
@@ -149,14 +198,23 @@ var TaskSquad = (function () {
     if (!blockers || !blockers.length) return;
 
     var ally = blockers[0];
-    if (!ally.my) return; // Only coordinate with our creeps
+    if (!ally || !ally.my) return;
+
+    // If ally already moved this tick, don't disturb
+    if (_movedThisTick(ally)) return;
 
     var sameSquad = (mover.memory && ally.memory &&
                      mover.memory.squadId && ally.memory.squadId &&
                      mover.memory.squadId === ally.memory.squadId);
 
-    var soldierHasROW = _isCombat(mover) && _isCivilian(ally); // right-of-way
-    if (!sameSquad && !soldierHasROW) return;
+    var moverPri = _rolePri(mover);
+    var allyPri  = _rolePri(ally);
+
+    // Only try to move ally if:
+    //   - same squad and mover has >= priority, or
+    //   - mover is combat and ally is civilian (ROW)
+    var allow = (sameSquad && moverPri >= allyPri) || (_isCombat(mover) && _isCivilian(ally));
+    if (!allow) return;
 
     // Compute direction mover -> ally tile
     var dir = mover.pos.getDirectionTo(nextPos);
@@ -164,14 +222,8 @@ var TaskSquad = (function () {
 
     var off = [
       [0, 0],
-      [0, -1],  // 1: TOP
-      [1, -1],  // 2: TOP_RIGHT
-      [1, 0],   // 3: RIGHT
-      [1, 1],   // 4: BOTTOM_RIGHT
-      [0, 1],   // 5: BOTTOM
-      [-1, 1],  // 6: BOTTOM_LEFT
-      [-1, 0],  // 7: LEFT
-      [-1, -1]  // 8: TOP_LEFT
+      [0, -1],  [1, -1],  [1, 0],   [1, 1],
+      [0, 1],   [-1, 1],  [-1, 0],  [-1, -1]
     ];
 
     function _isTileFree(pos) {
@@ -190,14 +242,14 @@ var TaskSquad = (function () {
       return true;
     }
 
-    // Try: ally back-step
+    // Try ally back-step
     var bx = ally.pos.x + off[back][0], by = ally.pos.y + off[back][1];
     if (bx >= 0 && bx <= 49 && by >= 0 && by <= 49) {
       var bpos = new RoomPosition(bx, by, ally.pos.roomName);
-      if (_isTileFree(bpos)) { ally.move(back); return; }
+      if (_isTileFree(bpos) && _reserveTile(ally, bpos, allyPri)) { ally.move(back); ally.memory._movedAt = Game.time; return; }
     }
 
-    // Try: ally side-step (left/right relative to mover direction)
+    // Try side-steps (left/right)
     var left  = ((dir + 6 - 1) % 8) + 1; // -2
     var right = ((dir + 2 - 1) % 8) + 1; // +2
     var sides = [left, right];
@@ -206,20 +258,24 @@ var TaskSquad = (function () {
       var sx = ally.pos.x + off[sd][0], sy = ally.pos.y + off[sd][1];
       if (sx < 0 || sx > 49 || sy < 0 || sy > 49) continue;
       var spos = new RoomPosition(sx, sy, ally.pos.roomName);
-      if (_isTileFree(spos)) { ally.move(sd); return; }
+      if (_isTileFree(spos) && _reserveTile(ally, spos, allyPri)) { ally.move(sd); ally.memory._movedAt = Game.time; return; }
     }
   }
 
   // -----------------------------
-  // Traveler-backed stepToward
+  // Traveler-backed stepToward with reservations
   // -----------------------------
   function stepToward(creep, pos, range) {
     if (!creep || !pos) return ERR_NO_PATH;
 
-    // Ret data lets us see the planned next tile so we can coordinate yield in the same tick.
+    // Already close enough?
+    var tgtPos = (pos.pos || pos);
+    var needRange = (typeof range === 'number' ? range : 0);
+    if (creep.pos.getRangeTo(tgtPos) <= needRange) return OK;
+
     var retData = {};
     var opts = {
-      range: (typeof range === 'number' ? range : 0),
+      range: needRange,
       ignoreCreeps: TRAVELER_DEFAULTS.ignoreCreeps,
       stuckValue: TRAVELER_DEFAULTS.stuckValue,
       repath: TRAVELER_DEFAULTS.repath,
@@ -229,21 +285,34 @@ var TaskSquad = (function () {
       returnData: retData
     };
 
-    // Traveler drives the move; it may flip ignoreCreeps internally when stuck.
-    var code = creep.travelTo((pos.pos || pos), opts);
+    // Ask Traveler to plan + possibly move
+    var code = creep.travelTo(tgtPos, opts);
 
-    // If our planned next tile is a friendly civilian, ask them to scoot
+    var myPri = _rolePri(creep);
+
+    // If a nextPos is planned, try to claim it. If we lose the reservation race to
+    // a higher-priority unit, stop this tick (prevents “dance”).
     if (retData && retData.nextPos) {
+      // If another creep is physically there, try to politely yield them first
       _politelyYieldFor(creep, retData.nextPos);
+
+      // Re-check reservation after yield attempt
+      if (!_reserveTile(creep, retData.nextPos, myPri)) {
+        // Could not reserve (someone more important got it) → do nothing this tick
+        return ERR_BUSY;
+      }
     }
 
-    // Lightweight unstick (rare with Traveler, but harmless)
-    var mem = creep.memory || (creep.memory = {});
-    var stuck = (creep.fatigue === 0 && mem._lx === creep.pos.x && mem._ly === creep.pos.y);
-    if (stuck && creep.pos.getRangeTo((pos.pos || pos)) > (opts.range || 0)) {
-      _unstickWiggle(creep, (pos.pos || pos));
+    // Mark that we issued movement this tick (helps yield logic)
+    creep.memory = creep.memory || {};
+    creep.memory._movedAt = Game.time;
+
+    // Lightweight unstick (rare)
+    var stuck = (creep.fatigue === 0 && creep.memory._lx === creep.pos.x && creep.memory._ly === creep.pos.y);
+    if (stuck && creep.pos.getRangeTo(tgtPos) > needRange) {
+      _unstickWiggle(creep, tgtPos);
     }
-    mem._lx = creep.pos.x; mem._ly = creep.pos.y;
+    creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y;
 
     return code;
   }
@@ -257,7 +326,6 @@ var TaskSquad = (function () {
                          d === TOP    || d === TOP_LEFT   || d === TOP_RIGHT    ? -1 : 0);
       if (x < 0 || x > 49 || y < 0 || y > 49) continue;
       p = new RoomPosition(x, y, creep.pos.roomName);
-      // Only step onto passable tiles without creeps/solid structs
       var pass = true, look = p.look(), i;
       for (i = 0; i < look.length; i++) {
         var o = look[i];

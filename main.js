@@ -40,6 +40,12 @@ module.exports.loop = function () {
         Memory.GameTickRepairCounter = 0;
         for (const roomName in Game.rooms) {
             const room = Game.rooms[roomName];
+            if (!Memory.rooms) {
+                Memory.rooms = {};
+            }
+            if (!Memory.rooms[roomName]) {
+                Memory.rooms[roomName] = {};
+            }
             Memory.rooms[roomName].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
         }
     }
