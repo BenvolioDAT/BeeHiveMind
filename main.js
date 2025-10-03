@@ -6,6 +6,7 @@ var towerLogic = require('tower.logic');        // Tower management: defense and
 var roleLinkManager = require('role.LinkManager'); // Logic for energy transfer between links
 var BeeToolbox = require('BeeToolbox');         // Utility functions for movement, energy, etc.
 var Traveler = require('Traveler');
+var SquadFlagManager = require('SquadFlagManager');
 // Logging levels for controlling console output detail
 global.LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 }; // Define levels: NONE < BASIC < DEBUG
 global.currentLogLevel = LOG_LEVEL.NONE; // Default log level (adjust to DEBUG for more output)
@@ -60,7 +61,10 @@ module.exports.loop = function () {
             console.log("No spawns found.");
         }
     }
-BeeMaintenance.cleanStaleRooms();
+    
+    SquadFlagManager.ensureSquadFlags();
+    
+    BeeMaintenance.cleanStaleRooms();
     // Every 50 ticks, clean up stale room memory for rooms not seen in a while
     if (Game.time % 50 === 0) {
         BeeMaintenance.cleanStaleRooms();

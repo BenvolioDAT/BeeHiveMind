@@ -219,7 +219,7 @@ var BeeHiveMind = {
         repair:        0,
         courier:       1,
         queen:         2,
-        remoteharvest: 14,
+        remoteharvest: 11,
         scout:         2,
         CombatArcher:  0,
         CombatMelee:   0,
