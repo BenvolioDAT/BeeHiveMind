@@ -184,9 +184,10 @@ var SquadFlagManager = (function () {
       if ((tick + _roomHashMod(rn, 4)) % (CFG.scanModulo || 1)) continue; // stagger
 
       var info = _scoreRoom(room);
-      var rec = mem.rooms[rn] || (mem.rooms[rn] = { lastSeen: 0, lastThreatAt: 0, lastPos: null });
+      var rec = mem.rooms[rn] || (mem.rooms[rn] = { lastSeen: 0, lastThreatAt: 0, lastPos: null, lastScore: 0 });
 
       rec.lastSeen = tick;
+      rec.lastScore = info.score | 0;
       if (info.score >= CFG.minThreatScore) {
         rec.lastThreatAt = tick;
         rec.lastPos = { x: info.pos.x, y: info.pos.y, roomName: info.pos.roomName };

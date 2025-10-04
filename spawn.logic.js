@@ -391,15 +391,56 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   const S = Memory.squads[squadId];
   const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
 
-  // Desired layout (exact counts)
-  const layout = [
-    { role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
-    //{ role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 1 },
-    { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 1 },
-  ];
+  function desiredLayout(score) {
+    const threat = score | 0;
+    let melee = 1;
+    let medic = 1;
+    let archer = 0;
+
+    if (threat >= 12) melee = 2;
+    if (threat >= 18) medic = 2;
+    if (threat >= 10 && threat < 22) archer = 1;
+    else if (threat >= 22) archer = 2;
+
+    const order = [
+      { role: 'CombatMelee', need: melee },
+    ];
+    if (archer > 0) order.push({ role: 'CombatArcher', need: archer });
+    order.push({ role: 'CombatMedic', need: medic });
+    return order;
+  }
+
+  const flagName = 'Squad' + squadId;
+  const altFlagName = 'Squad_' + squadId;
+  const flag = Game.flags[flagName] || Game.flags[altFlagName] || Game.flags[squadId] || null;
+  const squadFlagsMem = Memory.squadFlags || {};
+  const bindings = squadFlagsMem.bindings || {};
+
+  let targetRoom = bindings[flagName] || bindings[altFlagName] || bindings[squadId] || null;
+  if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
+  if (!targetRoom) return false;
+
+  if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
+    const dist = Game.map.getRoomLinearDistance(spawn.room.name, targetRoom, true);
+    if (typeof dist === 'number' && dist > 3) return false; // too far to be considered "nearby"
+  }
+
+  const roomInfo = (squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom]) || null;
+  const threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
+  const layout = desiredLayout(threatScore);
+  if (!layout.length) return false;
+
+  S.targetRoom = targetRoom;
+  S.lastKnownScore = threatScore;
+  S.flagName = flag ? flag.name : null;
+  S.desiredCounts = {};
+  for (let li = 0; li < layout.length; li++) {
+    S.desiredCounts[layout[li].role] = layout[li].need | 0;
+  }
+  S.lastEvaluated = Game.time;
 
   // Count squad members by role (includes spawning eggs)
-function haveCount(taskName) {
+  function haveCount(taskName) {
     // count live creeps
     var live = _.sum(Game.creeps, function(c){
       return c.my && c.memory && c.memory.squadId === squadId && c.memory.task === taskName ? 1 : 0;
@@ -425,11 +466,12 @@ function haveCount(taskName) {
   // Find the first underfilled slot (in order) and spawn exactly one
   for (let i = 0; i < layout.length; i++) {
     const plan = layout[i];
+    if ((plan.need | 0) <= 0) continue;
     const have = haveCount(plan.role);
 
     if (have < plan.need) {
-      const memory = { task: plan.role, squadId: squadId, role: plan.role }; // role is set again defensively
-      const ok = Spawn_Worker_Bee(spawn, plan.role, avail, { squadId: squadId });
+      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: targetRoom };
+      const ok = Spawn_Worker_Bee(spawn, plan.role, avail, extraMemory);
       if (ok) {
         S.lastSpawnAt = Game.time;
         S.lastSpawnRole = plan.role;
