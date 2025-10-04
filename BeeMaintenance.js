@@ -8,27 +8,33 @@
 
 'use strict';
 
+var CoreConfig = require('core.config');
+var Logger = require('core.logger');
+var LOG_LEVEL = Logger.LOG_LEVEL;
+var maintLog = Logger.createLogger('Maintenance', LOG_LEVEL.DEBUG);
+
 var BeeMaintenance = (function () {
   // -----------------------------
   // Tunables (all ES5-safe)
   // -----------------------------
+  var maintCfg = CoreConfig.settings.maintenance || {};
   var CFG = {
     ROOM_STALE_TICKS:        600,  // prune room if unseen this long
-    ROOM_PRUNE_INTERVAL:      200, // run stale-room cleanup every N ticks
+    ROOM_PRUNE_INTERVAL:      maintCfg.roomSweepInterval || 200,
     MEMORY_SWEEP_INTERVAL:      10, // run heavy creep/assignment sweeps every N ticks
     EMPTY_ROOM_GRACE_TICKS:   300, // if a room mem is "empty-ish" this long, delete it
     BLOCK_MARK_TTL:         10000, // drop old "blocked" stamps after this long
-    REPAIR_SCAN_INTERVAL:       5, // rebuild repair list every N ticks per room
+    REPAIR_SCAN_INTERVAL:       maintCfg.repairScanInterval || 5,
     REPAIR_MAX_RAMPART:      30000,
     REPAIR_MAX_WALL:         30000,
-    LOG: false
+    LOG: Logger.shouldLog(LOG_LEVEL.DEBUG)
   };
 
   // -----------------------------
   // Small helpers
   // -----------------------------
   function _now() { return Game.time | 0; }
-  function _log(msg) { if (CFG.LOG) console.log(msg); }
+  function _log(msg) { if (CFG.LOG) maintLog.debug(msg); }
 
   function _hasOwn(obj, k) { return obj && Object.prototype.hasOwnProperty.call(obj, k); }
   function _isObject(x) { return x && typeof x === 'object'; }
