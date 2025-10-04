@@ -269,8 +269,10 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
 
 // --- NEW: World/overview map overlays (flags + planned sites) ---
 BeeVisuals.drawWorldOverview = function () {
-  // Throttle
-  if ((Game.time % CFG.worldDrawModulo) !== 0) return;
+  // Throttle — treat 0/false as "disabled"
+  var mod = CFG.worldDrawModulo | 0;
+  if (mod <= 0) return;
+  if ((Game.time % mod) !== 0) return;
 
   var mv = Game.map.visual; // MapVisual
 

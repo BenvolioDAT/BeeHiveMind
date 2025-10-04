@@ -5,6 +5,11 @@
 
 var Traveler = require('Traveler');
 
+// Interval (in ticks) before we rescan containers adjacent to sources.
+// Kept small enough to react to construction/destruction, but large enough
+// to avoid expensive FIND_STRUCTURES work every few ticks.
+var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
+
 // Optional logging gates (won't crash if not defined elsewhere)
 var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
 var currentLogLevel = (typeof global !== 'undefined' && typeof global.currentLogLevel === 'number')
@@ -55,6 +60,18 @@ var BeeToolbox = {
     if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
     if (!Memory.rooms[room.name].sourceContainers) Memory.rooms[room.name].sourceContainers = {};
 
+    var roomMem = Memory.rooms[room.name];
+    if (!roomMem._toolbox) roomMem._toolbox = {};
+    if (!roomMem._toolbox.sourceContainerScan) roomMem._toolbox.sourceContainerScan = {};
+
+    var scanState = roomMem._toolbox.sourceContainerScan;
+    var now = Game.time | 0;
+    var nextScan = scanState.nextScan | 0;
+
+    if (nextScan && now < nextScan) {
+      return; // recently scanned; skip heavy find work
+    }
+
     var containers = room.find(FIND_STRUCTURES, {
       filter: function (s) {
         if (s.structureType !== STRUCTURE_CONTAINER) return false;
@@ -63,15 +80,29 @@ var BeeToolbox = {
       }
     });
 
+    var found = {};
     for (var i = 0; i < containers.length; i++) {
       var c = containers[i];
-      if (!Memory.rooms[room.name].sourceContainers.hasOwnProperty(c.id)) {
-        Memory.rooms[room.name].sourceContainers[c.id] = null; // unassigned
+      found[c.id] = true;
+      if (!roomMem.sourceContainers.hasOwnProperty(c.id)) {
+        roomMem.sourceContainers[c.id] = null; // unassigned
         if (currentLogLevel >= LOG_LEVEL.BASIC) {
           console.log('[🐝 BeeToolbox] Registered container ' + c.id + ' near source in ' + room.name);
         }
       }
     }
+
+    // Remove containers that no longer exist next to sources (destroyed / moved).
+    for (var cid in roomMem.sourceContainers) {
+      if (!roomMem.sourceContainers.hasOwnProperty(cid)) continue;
+      if (!found[cid]) {
+        delete roomMem.sourceContainers[cid];
+      }
+    }
+
+    scanState.lastScanTick = now;
+    scanState.nextScan = now + SOURCE_CONTAINER_SCAN_INTERVAL;
+    scanState.lastKnownCount = containers.length;
   },
 
   // Assign an unclaimed container (or one whose courier died) to the calling creep.
