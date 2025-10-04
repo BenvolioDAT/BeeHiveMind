@@ -4,17 +4,14 @@
 'use strict';
 
 var Traveler = require('Traveler');
+var Logger = require('core.logger');
+var LOG_LEVEL = Logger.LOG_LEVEL;
+var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
 // to avoid expensive FIND_STRUCTURES work every few ticks.
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
-
-// Optional logging gates (won't crash if not defined elsewhere)
-var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
-var currentLogLevel = (typeof global !== 'undefined' && typeof global.currentLogLevel === 'number')
-  ? global.currentLogLevel
-  : LOG_LEVEL.NONE;
 
 var BeeToolbox = {
 
@@ -41,14 +38,14 @@ var BeeToolbox = {
       var s = sources[i];
       if (!Memory.rooms[room.name].sources[s.id]) {
         Memory.rooms[room.name].sources[s.id] = {}; // room coords optional if you like
-        if (currentLogLevel >= LOG_LEVEL.BASIC) {
-          console.log('[BeeToolbox] Logged source ' + s.id + ' in room ' + room.name);
+        if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+          toolboxLog.info('Logged source', s.id, 'in room', room.name);
         }
       }
     }
-    if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       try {
-        console.log('[BeeToolbox] Final sources in ' + room.name + ': ' + JSON.stringify(Memory.rooms[room.name].sources));
+        toolboxLog.debug('Final sources in', room.name + ':', JSON.stringify(Memory.rooms[room.name].sources));
       } catch (e) {}
     }
   },
@@ -86,8 +83,8 @@ var BeeToolbox = {
       found[c.id] = true;
       if (!roomMem.sourceContainers.hasOwnProperty(c.id)) {
         roomMem.sourceContainers[c.id] = null; // unassigned
-        if (currentLogLevel >= LOG_LEVEL.BASIC) {
-          console.log('[🐝 BeeToolbox] Registered container ' + c.id + ' near source in ' + room.name);
+        if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+          toolboxLog.info('Registered container', c.id, 'near source in', room.name);
         }
       }
     }
@@ -121,8 +118,8 @@ var BeeToolbox = {
       if (!assigned || !Game.creeps[assigned]) {
         creep.memory.assignedContainer = containerId;
         mem.sourceContainers[containerId] = creep.name;
-        if (currentLogLevel >= LOG_LEVEL.BASIC) {
-          console.log('🚛 Courier ' + creep.name + ' pre-assigned to container ' + containerId + ' in ' + targetRoom);
+        if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+          toolboxLog.info('Courier', creep.name, 'pre-assigned to container', containerId, 'in', targetRoom);
         }
         return;
       }
@@ -139,8 +136,8 @@ var BeeToolbox = {
       if (!Memory.rooms) Memory.rooms = {};
       if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
       Memory.rooms[room.name].hostile = true;
-      if (currentLogLevel >= LOG_LEVEL.BASIC) {
-        console.log('[BeeToolbox] Marked ' + room.name + ' as hostile due to Invader Core.');
+      if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+        toolboxLog.warn('Marked', room.name, 'as hostile due to Invader Core.');
       }
     }
   },
@@ -448,8 +445,8 @@ var BeeToolbox = {
       if (terrain === TERRAIN_MASK_WALL) continue;
 
       var result = creep.room.createConstructionSite(pos.x, pos.y, STRUCTURE_CONTAINER);
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log('Attempted to place container at (' + pos.x + ',' + pos.y + '): Result ' + result);
+      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+        toolboxLog.debug('Attempted to place container at (' + pos.x + ',' + pos.y + '): Result ' + result);
       }
       if (result === OK) {
         BeeToolbox.BeeTravel(creep, new RoomPosition(pos.x, pos.y, sourcePos.roomName), { range: 0 });
