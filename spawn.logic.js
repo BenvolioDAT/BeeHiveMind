@@ -365,6 +365,12 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
 // Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
 function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   const body = getBodyForTask(neededTask, availableEnergy);
+  if (!body || body.length === 0) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('Spawn_Worker_Bee: no valid body for', neededTask, 'with energy', availableEnergy);
+    }
+    return false;
+  }
   const name = Generate_Creep_Name(neededTask || 'Worker');
   const memory = {
     role: 'Worker_Bee',
@@ -395,7 +401,10 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
 
   function desiredLayout(score) {
-    const threat = score | 0;
+    const threat = Math.max(0, score | 0);
+    if (threat <= 0) {
+      return [];
+    }
     let melee = 1;
     let medic = 1;
     let archer = 0;
