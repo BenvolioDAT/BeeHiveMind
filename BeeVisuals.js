@@ -145,7 +145,7 @@ var BeeVisuals = {
 
     var maxTasks = {
       baseharvest: 2, builder: 1, upgrader: 1, repair: 0,
-      courier: 1, remoteharvest: 8, scout: 1, queen: 2,
+      courier: 1, luna: 8, scout: 1, queen: 2,
       CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
       Dismantler: 0, Claimer: 2
     };
