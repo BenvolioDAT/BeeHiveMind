@@ -8,10 +8,9 @@
 
 'use strict';
 
-// -------- Logging --------
-var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
-// Toggle here:
-var currentLogLevel = LOG_LEVEL.NONE;
+var CoreLogger = require('core.logger');
+var LOG_LEVEL = CoreLogger.LOG_LEVEL;
+var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
 // -------- Requires --------
 var spawnLogic      = require('spawn.logic');
@@ -25,9 +24,6 @@ var TradeEnergy     = require('Trade.Energy');
 var creepRoles = {
   Worker_Bee: roleWorker_Bee.run
 };
-
-// Small logger
-function log(level, msg) { if (currentLogLevel >= level) console.log(msg); }
 
 // ------- Per-tick global cache (cheap lookups, no double work) -------
 if (!global.__BHM) global.__BHM = {};
@@ -155,16 +151,12 @@ var BeeHiveMind = {
         try {
           roleFn(creep);
         } catch (e) {
-          if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-            console.log('⚠️ Role error for ' + (creep.name || 'unknown') + ' (' + roleName + '): ' + e);
-          }
+          hiveLog.debug('⚠️ Role error for', (creep.name || 'unknown'), '(' + roleName + '):', e);
         }
       } else {
-        if (currentLogLevel >= LOG_LEVEL.BASIC) {
-          var cName = creep.name || 'unknown';
-          var r = roleName || 'undefined';
-          console.log('🐝 Unknown role: ' + r + ' (Creep: ' + cName + ')');
-        }
+        var cName = creep.name || 'unknown';
+        var r = roleName || 'undefined';
+        hiveLog.info('🐝 Unknown role:', r, '(Creep:', cName + ')');
       }
     }
   },
