@@ -6,7 +6,7 @@ const taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
 
 const TaskIdle = require('./Task.Idle');
 const TaskBaseHarvest = require('./Task.BaseHarvest');
-const TaskRemoteHarvest = require('./Task.RemoteHarvest');
+const TaskLuna = require('./Task.Luna');
 const TaskBuilder = require('./Task.Builder');
 const TaskCourier = require('./Task.Courier');
 const TaskQueen = require('./Task.Queen');
@@ -50,7 +50,7 @@ function registerTask(name, module) {
 }
 
 registerTask('baseharvest', TaskBaseHarvest);
-registerTask('remoteharvest', TaskRemoteHarvest);
+registerTask('luna', TaskLuna);
 registerTask('builder', TaskBuilder);
 registerTask('courier', TaskCourier);
 registerTask('queen', TaskQueen);

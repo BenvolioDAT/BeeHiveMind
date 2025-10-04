@@ -633,7 +633,7 @@ const RoadPlanner = {
     const set = new Set();
     for (const name in Game.creeps) {
       const c = Game.creeps[name];
-      if (c && c.memory && c.memory.task === 'remoteharvest' && c.memory.targetRoom) {
+      if (c && c.memory && c.memory.task === 'luna' && c.memory.targetRoom) {
         set.add(c.memory.targetRoom);
       }
     }
@@ -1006,7 +1006,7 @@ var BeeHiveMind = {
         upgrader:      1,
         repair:        0,
         courier:       1,
-        remoteharvest: 6,
+        luna: 6,
         scout:         1,
         queen:         2,
         CombatArcher:  1,
@@ -1230,7 +1230,7 @@ const BeeVisuals = {
             upgrader: 1,
             repair: 0,
             courier: 1,
-            remoteharvest: 2,
+            luna: 2,
             scout: 0,
             queen: 1,
             CombatArcher: 0,

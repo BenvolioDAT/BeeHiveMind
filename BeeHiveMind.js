@@ -19,6 +19,7 @@ var TaskBuilder     = require('Task.Builder');
 var RoomPlanner     = require('Planner.Room');
 var RoadPlanner     = require('Planner.Road');
 var TradeEnergy     = require('Trade.Energy');
+var TaskLuna        = require('Task.Luna');
 
 // Map role name -> run function (extend as you add roles)
 var creepRoles = {
@@ -59,6 +60,7 @@ function prepareTickCaches() {
   // Creeps list + roleCounts (by creep.memory.task), skipping dying-soon
   var DYING_SOON_TTL = 60;
   var roleCounts = {};
+  var lunaCountsByHome = {};
   var creeps = [];
   for (var cn in Game.creeps) {
     if (!Game.creeps.hasOwnProperty(cn)) continue;
@@ -67,10 +69,25 @@ function prepareTickCaches() {
     var ttl = c.ticksToLive;
     if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue; // let the next wave replace
     var t = c.memory && c.memory.task;
-    if (t) roleCounts[t] = (roleCounts[t] || 0) + 1;
+    if (t === 'remoteharvest' && c.memory) {
+      t = 'luna';
+      c.memory.task = 'luna';
+    }
+    if (t) {
+      roleCounts[t] = (roleCounts[t] || 0) + 1;
+      if (t === 'luna') {
+        var homeName = (c.memory && c.memory.home) || null;
+        if (!homeName && c.memory && c.memory._home) homeName = c.memory._home;
+        if (!homeName && c.room) homeName = c.room.name;
+        if (homeName) {
+          lunaCountsByHome[homeName] = (lunaCountsByHome[homeName] || 0) + 1;
+        }
+      }
+    }
   }
   C.creeps = creeps;
   C.roleCounts = roleCounts;
+  C.lunaCountsByHome = lunaCountsByHome;
 
   // Global construction site counts by room (my sites)
   var roomSiteCounts = {};
@@ -186,9 +203,86 @@ var BeeHiveMind = {
       return (local + remote) > 0 ? 2 : 0;
     }
 
+    function DetermineLunaQuota(room) {
+      if (!room) return 0;
+
+      var remotes = C.remotesByHome[room.name] || [];
+      if (!remotes.length) return 0;
+
+      var remoteSet = {};
+      for (var r = 0; r < remotes.length; r++) {
+        remoteSet[remotes[r]] = true;
+      }
+
+      var roomsMem = Memory.rooms || {};
+      var totalSources = 0;
+      var perSource = (TaskLuna && TaskLuna.MAX_LUNA_PER_SOURCE) || 1;
+
+      for (var j = 0; j < remotes.length; j++) {
+        var remoteName = remotes[j];
+        var mem = roomsMem[remoteName] || {};
+
+        if (mem.hostile) continue;
+
+        if (mem._invaderLock && mem._invaderLock.locked) {
+          var lockTick = typeof mem._invaderLock.t === 'number' ? mem._invaderLock.t : null;
+          if (lockTick == null || (Game.time - lockTick) <= 1500) {
+            continue;
+          }
+        }
+
+        var sourceCount = 0;
+        var remoteRoom = Game.rooms[remoteName];
+        if (remoteRoom) {
+          var found = remoteRoom.find(FIND_SOURCES);
+          sourceCount = found ? found.length : 0;
+        }
+
+        if (sourceCount === 0 && mem.sources) {
+          for (var sid in mem.sources) {
+            if (mem.sources.hasOwnProperty(sid)) sourceCount++;
+          }
+        }
+
+        if (sourceCount === 0 && mem.intel && typeof mem.intel.sources === 'number') {
+          sourceCount = mem.intel.sources | 0;
+        }
+
+        totalSources += sourceCount;
+      }
+
+      if (totalSources <= 0 && remotes.length > 0) {
+        totalSources = remotes.length;
+      }
+
+      var assignments = Memory.remoteAssignments || {};
+      var active = 0;
+      for (var aid in assignments) {
+        if (!assignments.hasOwnProperty(aid)) continue;
+        var entry = assignments[aid];
+        if (!entry) continue;
+        var remoteRoomName = entry.roomName || entry.room;
+        if (!remoteRoomName || !remoteSet[remoteRoomName]) continue;
+        var count = entry.count | 0;
+        if (!count && entry.owner) count = 1;
+        if (count > 0) active += count;
+      }
+
+      var desired = totalSources * perSource;
+      if (active > desired) desired = active;
+
+      return desired;
+    }
+
     // snapshot of counts (we mutate this as we schedule spawns to avoid double-filling)
     var roleCounts = {};
     for (var k in C.roleCounts) if (C.roleCounts.hasOwnProperty(k)) roleCounts[k] = C.roleCounts[k];
+    var lunaCountsByHome = {};
+    if (C.lunaCountsByHome) {
+      for (var hk in C.lunaCountsByHome) {
+        if (C.lunaCountsByHome.hasOwnProperty(hk)) lunaCountsByHome[hk] = C.lunaCountsByHome[hk];
+      }
+    }
 
     // Iterate each spawn once
     for (var s = 0; s < C.spawns.length; s++) {
@@ -211,7 +305,7 @@ var BeeHiveMind = {
         repair:        0,
         courier:       1,
         queen:         2,
-        remoteharvest: 15,
+        luna:          DetermineLunaQuota(room),
         scout:         2,
         CombatArcher:  0,
         CombatMelee:   0,
@@ -227,11 +321,17 @@ var BeeHiveMind = {
         if (!workerTaskLimits.hasOwnProperty(task)) continue;
         var limit = workerTaskLimits[task] | 0;
         var count = roleCounts[task] | 0;
+        if (task === 'luna') {
+          count = lunaCountsByHome[room.name] | 0;
+        }
         if (count < limit) {
           var spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
           var didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
           if (didSpawn) {
             roleCounts[task] = count + 1; // reflect immediately so other spawns see the bump
+            if (task === 'luna') {
+              lunaCountsByHome[room.name] = (lunaCountsByHome[room.name] | 0) + 1;
+            }
           }
           break; // only one attempt per spawn per tick, either way
         }

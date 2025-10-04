@@ -1,5 +1,5 @@
-// TaskRemoteHarvest.clean.js
-// Remote-harvester ("forager"): mines a remote source and hauls energy home.
+// TaskLuna.clean.js
+// Luna harvester ("forager"): mines a remote source and hauls energy home.
 //
 // This revision:
 // - Stores count + owner per source in Memory.remoteAssignments[sourceId] = {count, owner, roomName, since}
@@ -8,7 +8,7 @@
 // - Removes stale owners when creeps die or retarget
 // - SOURCE FLAGS: create on source tile and prune when unused/locked (with grace TTL)
 // - NEW: CONTROLLER FLAGS: create a flag on the remote room's controller while the room is being worked;
-//        automatically remove it when there are no remote-harvest creeps assigned/in that room.
+//        automatically remove it when there are no Luna creeps assigned/in that room.
 // - Legacy fallback hard-caps to REMOTE_RADIUS; ES5-safe; Traveler/BeeTravel for movement.
 
 'use strict';
@@ -28,7 +28,7 @@ var REMOTE_RADIUS = 4;
 var MAX_PF_OPS    = 3000;
 var PLAIN_COST    = 2;
 var SWAMP_COST    = 10;
-var MAX_FORAGERS_PER_SOURCE = 1;
+var MAX_LUNA_PER_SOURCE = 1;
 
 var PF_CACHE_TTL = 150;
 var INVADER_LOCK_MEMO_TTL = 1500;
@@ -241,7 +241,7 @@ function resolveOwnershipForSid(sid){
   for (var name in Game.creeps){
     var c = Game.creeps[name];
     if (!c || !c.memory) continue;
-    if (c.memory.task === 'remoteharvest' && c.memory.sourceId === sid){
+    if (c.memory.task === 'luna' && c.memory.sourceId === sid){
       contenders.push(c);
     }
   }
@@ -285,11 +285,11 @@ function auditRemoteAssignments(){
   }
 
   // Count live assignments + per-room counts (for controller flags)
-  var roomCounts = {}; // roomName -> number of remoteharvesters assigned/in that room
+  var roomCounts = {}; // roomName -> number of Luna harvesters assigned/in that room
   for (var name in Game.creeps){
     var c = Game.creeps[name];
     if (!c || !c.memory) continue;
-    if (c.memory.task === 'remoteharvest') {
+    if (c.memory.task === 'luna') {
       if (c.memory.sourceId){
         var sid2 = c.memory.sourceId;
         var e2 = _maEnsure(memAssign[sid2], c.memory.targetRoom||null);
@@ -311,7 +311,7 @@ function auditRemoteAssignments(){
       if (!oc || !oc.memory || oc.memory.sourceId !== sid3){
         resolveOwnershipForSid(sid3);
       }else{
-        if (memAssign[sid3].count > MAX_FORAGERS_PER_SOURCE){
+        if (memAssign[sid3].count > MAX_LUNA_PER_SOURCE){
           resolveOwnershipForSid(sid3);
         }
       }
@@ -506,7 +506,7 @@ function markValidRemoteSourcesForHome(homeName){
     for (var j=0;j<sources.length;j++){
       var s=sources[j];
       var e=_maEnsure(memAssign[s.id], rn);
-      if (maCount(memAssign, s.id) >= MAX_FORAGERS_PER_SOURCE) continue;
+      if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
       var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
       ensureSourceFlag(s);
       // record tile for safer prune compares
@@ -572,7 +572,7 @@ function pickRemoteSource(creep){
       // Skip if another owner is active
       var ownerNow = maOwner(memAssign, s.id);
       if (ownerNow && ownerNow !== creep.name) continue;
-      if (maCount(memAssign, s.id) >= MAX_FORAGERS_PER_SOURCE) continue;
+      if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
 
       var sticky = (creep.memory.sourceId===s.id) ? 1 : 0;
       candidates.push({ id:s.id, roomName:rn, cost:cost, lin:lin, sticky:sticky });
@@ -588,7 +588,7 @@ function pickRemoteSource(creep){
         if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
         var ownerNow2 = maOwner(memAssign, sid);
         if (ownerNow2 && ownerNow2 !== creep.name) continue;
-        if (maCount(memAssign, sid) >= MAX_FORAGERS_PER_SOURCE) continue;
+        if (maCount(memAssign, sid) >= MAX_LUNA_PER_SOURCE) continue;
 
         var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
         var synth = (lin2*200)+800;
@@ -663,11 +663,11 @@ function validateExclusiveSource(creep){
   var winners=[];
   for (var name in Game.creeps){
     var c=Game.creeps[name];
-    if (c && c.memory && c.memory.task==='remoteharvest' && c.memory.sourceId===sid){
+    if (c && c.memory && c.memory.task==='luna' && c.memory.sourceId===sid){
       winners.push(c);
     }
   }
-  if (winners.length <= MAX_FORAGERS_PER_SOURCE){
+  if (winners.length <= MAX_LUNA_PER_SOURCE){
     // become/keep owner if none set
     if (!owner) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
     return true;
@@ -693,8 +693,11 @@ function validateExclusiveSource(creep){
 // ============================
 // Main role
 // ============================
-var TaskRemoteHarvest = {
+var TaskLuna = {
   run: function(creep){
+    if (creep && creep.memory && creep.memory.task === 'remoteharvest') {
+      creep.memory.task = 'luna';
+    }
     auditOncePerTick();
     if (!creep.memory.home) getHomeName(creep);
 
@@ -828,7 +831,7 @@ var TaskRemoteHarvest = {
       var count=0;
       for (var name in Game.creeps){
         var c=Game.creeps[name];
-        if (c && c.memory && c.memory.task==='remoteharvest' && c.memory.targetRoom===rn) count++;
+        if (c && c.memory && c.memory.task==='luna' && c.memory.targetRoom===rn) count++;
       }
       var avg = count / Math.max(1,sources.length);
       if (avg < lowest){ lowest=avg; best=rn; }
@@ -877,7 +880,7 @@ var TaskRemoteHarvest = {
       var owner = maOwner(memAssign, sid);
       var cnt   = maCount(memAssign, sid);
       if (owner && owner !== creep.name) continue;           // taken
-      if (cnt >= MAX_FORAGERS_PER_SOURCE) continue;          // full
+      if (cnt >= MAX_LUNA_PER_SOURCE) continue;          // full
 
       if (creep.memory.sourceId===sid) sticky.push(sid);
       else if (!owner) free.push(sid);
@@ -957,4 +960,6 @@ var TaskRemoteHarvest = {
   }
 };
 
-module.exports = TaskRemoteHarvest;
+TaskLuna.MAX_LUNA_PER_SOURCE = MAX_LUNA_PER_SOURCE;
+
+module.exports = TaskLuna;
