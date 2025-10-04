@@ -70,7 +70,6 @@ module.exports.loop = function () {
     
     SquadFlagManager.ensureSquadFlags();
     
-    BeeMaintenance.cleanStaleRooms();
     // Every 50 ticks, clean up stale room memory for rooms not seen in a while
     if (Game.time % 50 === 0) {
         BeeMaintenance.cleanStaleRooms();
