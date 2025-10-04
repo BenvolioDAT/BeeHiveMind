@@ -191,7 +191,7 @@ var BeeHiveMind = {
         var rn = list[i];
         remote += (C.roomSiteCounts[rn] | 0);
       }
-      return (local + remote) > 0 ? 2 : 0;
+      return (local + remote) > 0 ? 1 : 0;
     }
 
     // snapshot of counts (we mutate this as we schedule spawns to avoid double-filling)
@@ -207,8 +207,8 @@ var BeeHiveMind = {
         if (typeof spawnLogic.Spawn_Squad === 'function') {
           if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
           if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
-          if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
-          if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
+          //if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
+          //if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
         }
       var room = spawner.room;
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
@@ -219,7 +219,7 @@ var BeeHiveMind = {
         repair:        0,
         courier:       1,
         queen:         2,
-        remoteharvest: 15,
+        remoteharvest: 6,
         scout:         2,
         CombatArcher:  0,
         CombatMelee:   0,
