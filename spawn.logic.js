@@ -151,7 +151,7 @@ const CONFIGS = {
 
   // Combat
   CombatMelee: [
-    TAM(6,6,12), 
+    //TAM(6,6,12), 
     TAM(4,4,8), 
     TAM(1,1,2),
   ],
@@ -394,7 +394,7 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   // Desired layout (exact counts)
   const layout = [
     { role: 'CombatMelee',   gen: Generate_CombatMelee_Body,   need: 1 },
-    { role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 1 },
+    //{ role: 'CombatArcher',  gen: Generate_CombatArcher_Body,  need: 1 },
     { role: 'CombatMedic',   gen: Generate_CombatMedic_Body,   need: 1 },
   ];
 

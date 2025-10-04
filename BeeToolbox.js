@@ -168,6 +168,115 @@ var BeeToolbox = {
   // ⚡ ENERGY GATHER & DELIVERY
   // ---------------------------------------------------------------------------
 
+ _ensureGlobalEnergyCache: function () {
+    if (typeof global === 'undefined') return null;
+    if (!global.__energyTargets || global.__energyTargets.tick !== Game.time) {
+      global.__energyTargets = { tick: Game.time, rooms: {} };
+    }
+    if (!global.__energyTargets.rooms) {
+      global.__energyTargets.rooms = {};
+    }
+    return global.__energyTargets;
+  },
+
+ _buildEnergyCacheForRoom: function (room) {
+    var cache = { ruins: [], tombstones: [], dropped: [], containers: [] };
+    if (!room) return cache;
+
+    var ruins = room.find(FIND_RUINS, {
+      filter: function (r) { return r.store && r.store[RESOURCE_ENERGY] > 0; }
+    });
+    for (var i = 0; i < ruins.length; i++) {
+      cache.ruins.push(ruins[i].id);
+    }
+
+    var tombstones = room.find(FIND_TOMBSTONES, {
+      filter: function (t) { return t.store && t.store[RESOURCE_ENERGY] > 0; }
+    });
+    for (var j = 0; j < tombstones.length; j++) {
+      cache.tombstones.push(tombstones[j].id);
+    }
+
+    var dropped = room.find(FIND_DROPPED_RESOURCES, {
+      filter: function (r) { return r.resourceType === RESOURCE_ENERGY && r.amount > 0; }
+    });
+    for (var k = 0; k < dropped.length; k++) {
+      cache.dropped.push(dropped[k].id);
+    }
+
+    var containers = room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        return s.structureType === STRUCTURE_CONTAINER && s.store && s.store[RESOURCE_ENERGY] > 0;
+      }
+    });
+    for (var m = 0; m < containers.length; m++) {
+      cache.containers.push(containers[m].id);
+    }
+
+    return cache;
+  },
+
+  _getRoomEnergyCache: function (room) {
+    if (!room) return { ruins: [], tombstones: [], dropped: [], containers: [] };
+    var globalCache = BeeToolbox._ensureGlobalEnergyCache();
+    if (!globalCache) {
+      return BeeToolbox._buildEnergyCacheForRoom(room);
+    }
+
+    var roomCache = globalCache.rooms[room.name];
+    if (!roomCache) {
+      roomCache = BeeToolbox._buildEnergyCacheForRoom(room);
+      globalCache.rooms[room.name] = roomCache;
+    }
+    return roomCache;
+  },
+
+  _refreshRoomEnergyCache: function (room) {
+    if (!room) return { ruins: [], tombstones: [], dropped: [], containers: [] };
+    var globalCache = BeeToolbox._ensureGlobalEnergyCache();
+    var newCache = BeeToolbox._buildEnergyCacheForRoom(room);
+    if (globalCache) {
+      globalCache.rooms[room.name] = newCache;
+    }
+    return newCache;
+  },
+
+  _getEnergyTargetsFromCache: function (room, key, validator) {
+    var cache = BeeToolbox._getRoomEnergyCache(room);
+    var ids = cache[key] || [];
+    var valid = [];
+    var updatedIds = [];
+
+    for (var i = 0; i < ids.length; i++) {
+      var obj = Game.getObjectById(ids[i]);
+      if (!obj || (validator && !validator(obj))) {
+        continue;
+      }
+      valid.push(obj);
+      updatedIds.push(ids[i]);
+    }
+
+    cache[key] = updatedIds;
+
+    if (valid.length === 0) {
+      cache = BeeToolbox._refreshRoomEnergyCache(room);
+      ids = cache[key] || [];
+      valid = [];
+      updatedIds = [];
+      for (var j = 0; j < ids.length; j++) {
+        var refreshedObj = Game.getObjectById(ids[j]);
+        if (!refreshedObj || (validator && !validator(refreshedObj))) {
+          continue;
+        }
+        valid.push(refreshedObj);
+        updatedIds.push(ids[j]);
+      }
+      cache[key] = updatedIds;
+    }
+
+    return valid;
+  },
+  
   collectEnergy: function (creep) {
     if (!creep) return;
 
@@ -189,15 +298,29 @@ var BeeToolbox = {
       return result === OK;
     }
 
+    var room = creep.room;
+    
     // Ruins with energy
-    if (tryWithdraw(creep.room.find(FIND_RUINS, { filter: function (r) { return r.store && r.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
+    //if (tryWithdraw(creep.room.find(FIND_RUINS, { filter: function (r) { return r.store && r.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
+    if (tryWithdraw(BeeToolbox._getEnergyTargetsFromCache(room, 'ruins', function (target) {
+      return target.store && target.store[RESOURCE_ENERGY] > 0;
+    }), 'withdraw')) return;
     // Tombstones with energy
-    if (tryWithdraw(creep.room.find(FIND_TOMBSTONES, { filter: function (t) { return t.store && t.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
+    //if (tryWithdraw(creep.room.find(FIND_TOMBSTONES, { filter: function (t) { return t.store && t.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
+    if (tryWithdraw(BeeToolbox._getEnergyTargetsFromCache(room, 'tombstones', function (target) {
+      return target.store && target.store[RESOURCE_ENERGY] > 0;
+    }), 'withdraw')) return;
     // Dropped energy
-    if (tryWithdraw(creep.room.find(FIND_DROPPED_RESOURCES, { filter: function (r) { return r.resourceType === RESOURCE_ENERGY; } }), 'pickup')) return;
+    //if (tryWithdraw(creep.room.find(FIND_DROPPED_RESOURCES, { filter: function (r) { return r.resourceType === RESOURCE_ENERGY; } }), 'pickup')) return;
+    if (tryWithdraw(BeeToolbox._getEnergyTargetsFromCache(room, 'dropped', function (target) {
+      return target.resourceType === RESOURCE_ENERGY && target.amount > 0;
+    }), 'pickup')) return;
     // Containers with energy
-    if (tryWithdraw(creep.room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store && s.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
-
+    //if (tryWithdraw(creep.room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store && s.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
+    if (tryWithdraw(BeeToolbox._getEnergyTargetsFromCache(room, 'containers', function (target) {
+      return target.structureType === STRUCTURE_CONTAINER && target.store && target.store[RESOURCE_ENERGY] > 0;
+    }), 'withdraw')) return;
+    
     // Storage
     var storage = creep.room.storage;
     if (storage && storage.store && storage.store[RESOURCE_ENERGY] > 0) {
