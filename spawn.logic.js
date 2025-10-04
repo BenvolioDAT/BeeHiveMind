@@ -130,7 +130,7 @@ const CONFIGS = {
     B(1,1,2), 
     B(1,1,1),
   ],
-  remoteharvest: [
+  luna: [
     //B(8,25,17), 
     //B(5,10,8), 
     //B(5,8,4),
@@ -197,6 +197,7 @@ const TASK_ALIAS = {
   queen: 'Queen',
   scout: 'Scout',
   claimer: 'Claimer',
+  remoteharvest: 'luna',
   // pass-throughs (lowercased) will resolve automatically if present
 };
 
@@ -281,7 +282,7 @@ const Generate_BaseHarvest_Body      = (e) => Generate_Body_From_Config('basehar
 const Generate_Builder_Body          = (e) => Generate_Body_From_Config('builder', e);
 const Generate_Repair_Body           = (e) => Generate_Body_From_Config('repair', e);
 const Generate_Queen_Body            = (e) => Generate_Body_From_Config('Queen', e);
-const Generate_RemoteHarvest_Body    = (e) => Generate_Body_From_Config('remoteharvest', e);
+const Generate_Luna_Body             = (e) => Generate_Body_From_Config('luna', e);
 const Generate_Upgrader_Body         = (e) => Generate_Body_From_Config('upgrader', e);
 const Generate_Scout_Body            = (e) => Generate_Body_From_Config('Scout', e);
 const Generate_CombatMelee_Body      = (e) => Generate_Body_From_Config('CombatMelee', e);
@@ -299,7 +300,7 @@ function getBodyForTask(task, energyAvailable) {
     case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable);
     case 'upgrader':       return Generate_Upgrader_Body(energyAvailable);
     case 'courier':        return Generate_Courier_Body(energyAvailable);
-    case 'remoteharvest':  return Generate_RemoteHarvest_Body(energyAvailable);
+    case 'luna':           return Generate_Luna_Body(energyAvailable);
     case 'Scout':          return Generate_Scout_Body(energyAvailable);
     case 'Queen':          return Generate_Queen_Body(energyAvailable);
     case 'CombatArcher':   return Generate_CombatArcher_Body(energyAvailable);
@@ -508,7 +509,7 @@ module.exports = {
   Generate_Builder_Body,
   Generate_Repair_Body,
   Generate_Queen_Body,
-  Generate_RemoteHarvest_Body,
+  Generate_Luna_Body,
   Generate_Scout_Body,
   Generate_CombatMelee_Body,
   Generate_CombatArcher_Body,

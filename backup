@@ -25,8 +25,8 @@ var BODYPART_COST = {
         return Generate_Upgrader_Body(Calculate_Spawn_Resource);
       case 'courier':
         return Generate_Courier_Body(Calculate_Spawn_Resource);
-      case 'remoteharvest':
-        return Generate_RemoteHarvest_Body(Calculate_Spawn_Resource);
+      case 'luna':
+        return Generate_Luna_Body(Calculate_Spawn_Resource);
       case 'scout':
         return Generate_Scout_Body(Calculate_Spawn_Resource);
       case 'queen':
@@ -203,7 +203,7 @@ const Queen_Config = [
   B(1,1,1),//50
 ];
 
-const RemoteHarvest_Config = [
+const Luna_Config = [
   //B(5,20,25), // 50 parts: 5W 20C 25M  (1,000 carry cap)
   //B(5,18,23), // 46 900 carry cap
   //B(5,16,21), // 42 800 carry cap
@@ -271,7 +271,7 @@ const configurations = [
   { task: 'courier', body: Courier_Config },
   { task: 'builder', body: Builder_Config },
   { task: 'upgrader', body: Upgrader_Config },
-  { task: 'remoteharvest', body: RemoteHarvest_Config },
+  { task: 'luna', body: Luna_Config },
   { task: 'Queen', body: Queen_Config },
   { task: 'repair', body: Repair_Config },
   { task: 'Scout', body: Scout_Config },
@@ -333,8 +333,8 @@ function Generate_Repair_Body(Calculate_Spawn_Resource) {
 function Generate_Queen_Body(Calculate_Spawn_Resource) {
   return Generate_Body_From_Config('Queen',Calculate_Spawn_Resource);
 }
-function Generate_RemoteHarvest_Body(Calculate_Spawn_Resource) {
-  return Generate_Body_From_Config('remoteharvest',Calculate_Spawn_Resource);
+function Generate_Luna_Body(Calculate_Spawn_Resource) {
+  return Generate_Body_From_Config('luna',Calculate_Spawn_Resource);
 }
 function Generate_Upgrader_Body(Calculate_Spawn_Resource) {
   return Generate_Body_From_Config('upgrader',Calculate_Spawn_Resource);
@@ -419,7 +419,7 @@ function Spawn_Creep_Role(spawn, role_name, generateBodyFunction, Spawn_Resource
     Generate_Builder_Body,
     Generate_Repair_Body,
     Generate_Queen_Body,
-    Generate_RemoteHarvest_Body,
+    Generate_Luna_Body,
     Generate_Scout_Body,
     Generate_CombatMelee_Body,
     Generate_CombatArcher_Body,
@@ -513,7 +513,7 @@ const CONFIGS = {
     B(0,10,10), B(0,9,9), B(0,8,8), B(0,7,7), B(0,6,6), B(0,5,5), B(0,4,4),
     B(0,3,3), B(1,2,3), B(1,1,2), B(1,1,1),
   ],
-  remoteharvest: [
+  luna: [
     B(5,12,9), B(5,8,4), B(5,8,13), B(5,6,11), B(5,4,9),
     B(5,2,7), B(4,2,6), B(3,2,5), B(2,2,4), B(1,1,2),
   ],
@@ -606,7 +606,7 @@ const Generate_BaseHarvest_Body      = (e) => Generate_Body_From_Config('basehar
 const Generate_Builder_Body          = (e) => Generate_Body_From_Config('builder', e);
 const Generate_Repair_Body           = (e) => Generate_Body_From_Config('repair', e);
 const Generate_Queen_Body            = (e) => Generate_Body_From_Config('Queen', e);
-const Generate_RemoteHarvest_Body    = (e) => Generate_Body_From_Config('remoteharvest', e);
+const Generate_Luna_Body    = (e) => Generate_Body_From_Config('luna', e);
 const Generate_Upgrader_Body         = (e) => Generate_Body_From_Config('upgrader', e);
 const Generate_Scout_Body            = (e) => Generate_Body_From_Config('Scout', e);
 const Generate_CombatMelee_Body      = (e) => Generate_Body_From_Config('CombatMelee', e);
@@ -624,7 +624,7 @@ function getBodyForTask(task, energyAvailable) {
     case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable);
     case 'upgrader':       return Generate_Upgrader_Body(energyAvailable);
     case 'courier':        return Generate_Courier_Body(energyAvailable);
-    case 'remoteharvest':  return Generate_RemoteHarvest_Body(energyAvailable);
+    case 'luna':  return Generate_Luna_Body(energyAvailable);
     case 'Scout':          return Generate_Scout_Body(energyAvailable);
     case 'Queen':          return Generate_Queen_Body(energyAvailable);
     case 'CombatArcher':   return Generate_CombatArcher_Body(energyAvailable);
@@ -722,7 +722,7 @@ module.exports = {
   Generate_Builder_Body,
   Generate_Repair_Body,
   Generate_Queen_Body,
-  Generate_RemoteHarvest_Body,
+  Generate_Luna_Body,
   Generate_Scout_Body,
   Generate_CombatMelee_Body,
   Generate_CombatArcher_Body,
@@ -754,7 +754,7 @@ module.exports = {
 //////////////////////////////////////////////
 
 
-// TaskRemoteHarvest.clean.js
+// TaskLuna.clean.js
 // Remote-harvester ("forager"): mines a remote source and hauls energy home.
 // Same behavior as your original, but simplified for readability and with
 // small fixes (noted below). No lodash required.
@@ -778,7 +778,7 @@ function auditRemoteAssignments() {
   const live = {};
   for (const name in Game.creeps) {
     const c = Game.creeps[name];
-    if (c && c.memory && c.memory.task === 'remoteharvest') {
+    if (c && c.memory && c.memory.task === 'luna') {
       const sid = c.memory.sourceId;
       if (sid) live[sid] = (live[sid] || 0) + 1;
     }
@@ -964,7 +964,7 @@ function releaseAssignment(creep) {
 // ============================
 // Main role
 // ============================
-const TaskRemoteHarvest = {
+const TaskLuna = {
   run(creep) {
     auditRemoteAssignments();
     // Ensure home memo exists
@@ -1107,7 +1107,7 @@ const TaskRemoteHarvest = {
       let foragersInRoom = 0;
       for (const name in Game.creeps) {
         const c = Game.creeps[name];
-        if (c && c.memory && c.memory.task === 'remoteharvest' && c.memory.targetRoom === roomName) {
+        if (c && c.memory && c.memory.task === 'luna' && c.memory.targetRoom === roomName) {
           foragersInRoom++;
         }
       }
@@ -1134,7 +1134,7 @@ const TaskRemoteHarvest = {
       for (const name in Game.creeps) {
         const c = Game.creeps[name];
         if (
-          c && c.memory && c.memory.task === 'remoteharvest' &&
+          c && c.memory && c.memory.task === 'luna' &&
           c.memory.targetRoom === creep.memory.targetRoom &&
           c.memory.sourceId === sid
         ) { cnt++; }
@@ -1243,7 +1243,7 @@ const TaskRemoteHarvest = {
   }
 };
 
-module.exports = TaskRemoteHarvest;
+module.exports = TaskLuna;
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -2460,7 +2460,7 @@ const BeeHiveMind = {
             upgrader: 1,
             repair: 0,
             courier: 1,
-            remoteharvest: 8,
+            luna: 8,
             scout: 1,
             queen: 2,
             CombatArcher: 1,

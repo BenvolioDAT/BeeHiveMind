@@ -76,7 +76,7 @@ var SIGN_DAY_TICKS = 1500;
 var RESERVE_CONFIG = {
   desired: 2500,      // aim to keep rooms near this; max is 5000
   rotateAt: 1000,     // once >= this, head to next target
-  scanRoleNames: ['remoteharvest', 'remoteMiner','remoteHarvest'], // tweak to your codebase
+  scanRoleNames: ['luna', 'remoteMiner','remoteHarvest'], // tweak to your codebase
   maxTargets: 8       // safety cap
 };
 
@@ -333,8 +333,8 @@ var TaskClaimer = {
     rememberReservationIntel(creep.room);
 
     var plan = gatherReserveTargets();
-    if (RESERVE_CONFIG.scanRoleNames.indexOf('remoteHarvester') === -1)
-      RESERVE_CONFIG.scanRoleNames.push('remoteHarvester');
+    if (RESERVE_CONFIG.scanRoleNames.indexOf('luna') === -1)
+      RESERVE_CONFIG.scanRoleNames.push('luna');
 
     if (creep.memory.targetRoom && plan.indexOf(creep.memory.targetRoom) === -1) {
       releaseRoomLock(creep.memory.targetRoom, creep);
