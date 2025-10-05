@@ -46,9 +46,6 @@ var TaskSquad = (function () {
     'Dismantler': 1
   };
 
-  var STANDDOWN_SCORE_THRESHOLD = 3;
-  var STANDDOWN_GRACE_TICKS = 25;
-
   // -----------------------------
   // Per-tick move reservation map
   // -----------------------------
@@ -113,95 +110,6 @@ var TaskSquad = (function () {
     if (!Memory.squads) Memory.squads = {};
     if (!Memory.squads[id]) Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
     return Memory.squads[id];
-  }
-
-  function _resolveTargetRoom(creep) {
-    if (!creep) return null;
-    var id = getSquadId(creep);
-    var S = _ensureSquadBucket(id);
-    if (creep.memory && creep.memory.targetRoom) return creep.memory.targetRoom;
-    if (S && S.targetRoom) return S.targetRoom;
-    var mem = Memory.squadFlags || {};
-    var bindings = mem.bindings || {};
-    if (S && S.flagName && bindings[S.flagName]) return bindings[S.flagName];
-    if (S && S.flagName && Game.flags[S.flagName] && Game.flags[S.flagName].pos) {
-      return Game.flags[S.flagName].pos.roomName;
-    }
-    return null;
-  }
-
-  function _bindingActiveFor(roomName) {
-    if (!roomName) return false;
-    var mem = Memory.squadFlags || {};
-    var bindings = mem.bindings || {};
-    for (var flag in bindings) {
-      if (!bindings.hasOwnProperty(flag)) continue;
-      if (bindings[flag] === roomName) return true;
-    }
-    return false;
-  }
-
-  function shouldRecycle(creep) {
-    if (!creep || creep.spawning) return false;
-    var targetRoom = _resolveTargetRoom(creep);
-    if (!targetRoom) return false;
-
-    var mem = Memory.squadFlags || {};
-    var roomInfo = (mem.rooms && mem.rooms[targetRoom]) || {};
-    var score = roomInfo.lastScore || 0;
-    var lastThreatAt = roomInfo.lastThreatAt || 0;
-    var bindingActive = _bindingActiveFor(targetRoom);
-    var hasVision = !!Game.rooms[targetRoom];
-
-    if (hasVision) {
-      var hostiles = Game.rooms[targetRoom].find(FIND_HOSTILE_CREEPS) || [];
-      if (hostiles.length) return false;
-    }
-
-    if (bindingActive) {
-      if (score > STANDDOWN_SCORE_THRESHOLD) return false;
-      if ((Game.time - lastThreatAt) <= STANDDOWN_GRACE_TICKS) return false;
-    } else {
-      if ((Game.time - lastThreatAt) <= STANDDOWN_GRACE_TICKS) return false;
-    }
-
-    if (!hasVision && bindingActive) return false;
-
-    if (creep.room && creep.room.find(FIND_HOSTILE_CREEPS).length) return false;
-
-    return true;
-  }
-
-  function recycleToHome(creep) {
-    if (!creep) return false;
-    if (creep.memory) creep.memory.recycling = true;
-
-    var homeName = (creep.memory && creep.memory.homeRoom) || Memory.firstSpawnRoom || null;
-    var targetSpawn = null;
-
-    if (homeName && Game.rooms[homeName]) {
-      var spawns = Game.rooms[homeName].find(FIND_MY_SPAWNS);
-      if (spawns && spawns.length) targetSpawn = spawns[0];
-    }
-    if (!targetSpawn) {
-      targetSpawn = creep.pos.findClosestByRange(FIND_MY_SPAWNS);
-    }
-
-    if (targetSpawn) {
-      if (!creep.pos.isNearTo(targetSpawn)) {
-        stepToward(creep, targetSpawn.pos, 1);
-      } else {
-        targetSpawn.recycleCreep(creep);
-      }
-      return true;
-    }
-
-    if (homeName && creep.pos.roomName !== homeName) {
-      stepToward(creep, new RoomPosition(25, 25, homeName), 1);
-      return true;
-    }
-
-    return false;
   }
 
   function _rallyFlagFor(id) {
@@ -443,8 +351,6 @@ var TaskSquad = (function () {
   API.sharedTarget = sharedTarget;
   API.getAnchor    = getAnchor;
   API.stepToward   = stepToward;
-  API.shouldRecycle = shouldRecycle;
-  API.recycleToHome = recycleToHome;
 
   return API;
 })();
