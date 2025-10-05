@@ -273,7 +273,7 @@ const BeeHiveMind = {
         builder: needBuilder(room, cache),
         repair: 0,
         luna: determineLunaQuota(room, cache),
-        scout: 0,
+        scout: 1,
         CombatArcher: 0,
         CombatMelee: 0,
         CombatMedic: 0,
