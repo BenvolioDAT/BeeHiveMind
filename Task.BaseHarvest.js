@@ -353,9 +353,26 @@ var TaskBaseHarvest = {
     if (creep.store.getFreeCapacity() === 0) {
       var cont = getContainerAtOrAdjacent(creep.pos);
       if (cont) {
+        var free = 0;
+        if (cont.store && typeof cont.store.getFreeCapacity === 'function') {
+          free = cont.store.getFreeCapacity(RESOURCE_ENERGY);
+        } else if (cont.store && typeof cont.store.getCapacity === 'function') {
+          free = cont.store.getCapacity(RESOURCE_ENERGY);
+          if (typeof cont.store[RESOURCE_ENERGY] === 'number') {
+            free -= cont.store[RESOURCE_ENERGY];
+          }
+        }
+
+        if (free === 0) {
+          creep.drop(RESOURCE_ENERGY);
+          return;
+        }
+
         var tr = creep.transfer(cont, RESOURCE_ENERGY);
         if (tr === ERR_NOT_IN_RANGE) {
           BeeToolbox.BeeTravel(creep, cont.pos || cont, 1);
+        } else if (tr === ERR_FULL) {
+          creep.drop(RESOURCE_ENERGY);
         }
         return;
       }
