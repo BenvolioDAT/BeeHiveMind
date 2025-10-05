@@ -4,10 +4,8 @@
 'use strict';
 
 var TaskBuilder = require('Task.Builder'); // guarded below
-
-// Logging fallback (uses your global currentLogLevel if present)
-var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
-var _logLevel = (typeof currentLogLevel === 'number') ? currentLogLevel : LOG_LEVEL.NONE;
+var Logger = require('core.logger');
+var LOG_LEVEL = Logger.LOG_LEVEL;
 
 // Config: draw every tick, but keep caps to avoid runaway CPU
 var CFG = {
@@ -52,7 +50,7 @@ var BeeVisuals = {
     var visual = new RoomVisual(room.name);
 
     // DEBUG creep lines
-    if (_logLevel >= LOG_LEVEL.DEBUG && (CFG.drawDebugEachTick || _shouldDraw(CFG.debugTickModulo, room.name))) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG) && (CFG.drawDebugEachTick || _shouldDraw(CFG.debugTickModulo, room.name))) {
       var yOffset = 1;
       var count = 0;
       for (var cname in Game.creeps) {
@@ -147,7 +145,7 @@ var BeeVisuals = {
 
     var maxTasks = {
       baseharvest: 2, builder: 1, upgrader: 1, repair: 0,
-      courier: 1, remoteharvest: 8, scout: 1, queen: 2,
+      courier: 1, luna: 8, scout: 1, queen: 2,
       CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
       Dismantler: 0, Claimer: 2
     };
@@ -189,7 +187,7 @@ var BeeVisuals = {
 
 // --- Planned road overlay (in-room, DEBUG only) ---
 BeeVisuals.drawPlannedRoadsDebug = function () {
-  if (_logLevel < LOG_LEVEL.DEBUG) return;
+  if (!Logger.shouldLog(LOG_LEVEL.DEBUG)) return;
   var room = _getMainRoom(); if (!room) return;
   var MOD = 1; if (((Game.time + 3) % MOD) !== 0) return;
 

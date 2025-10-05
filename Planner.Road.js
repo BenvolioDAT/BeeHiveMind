@@ -67,7 +67,7 @@ function activeRemotesOncePerTick() {
   const set = new Set();
   for (const name in Game.creeps) {
     const c = Game.creeps[name];
-    if (c && c.memory && c.memory.task === 'remoteharvest' && c.memory.targetRoom) {
+    if (c && c.memory && c.memory.task === 'luna' && c.memory.targetRoom) {
       set.add(c.memory.targetRoom);
     }
   }
