@@ -19,123 +19,6 @@ const LOG_LEVEL = Logger.LOG_LEVEL;
 const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 const EconomyManager = require('EconomyManager');
 
-const SQUAD_NAME_ORDER = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
-const HEAVY_THREAT_SCORE = 18;
-const MIN_THREAT_SCORE = 5;
-const STALE_THREAT_WINDOW = 150; // ticks after last threat sighting before we consider room calm
-
-function _squadIndex(id) {
-  if (!id) return -1;
-  const key = id.replace(/^Squad/i, '').replace(/^_/, '');
-  return SQUAD_NAME_ORDER.indexOf(key);
-}
-
-function _normalizeSquadId(id) {
-  if (!id) return null;
-  const idx = _squadIndex(id);
-  return idx === -1 ? null : SQUAD_NAME_ORDER[idx];
-}
-
-function _gatherThreats() {
-  const mem = Memory.squadFlags || {};
-  const bindings = mem.bindings || {};
-  const rooms = mem.rooms || {};
-  const threats = [];
-
-  for (const flagName in bindings) {
-    if (!bindings.hasOwnProperty(flagName)) continue;
-    const squadId = _normalizeSquadId(flagName);
-    if (!squadId) continue;
-    const roomName = bindings[flagName];
-    const info = rooms[roomName] || {};
-    const score = info.lastScore || 0;
-    const lastThreatAt = info.lastThreatAt || 0;
-    const recent = Game.time - lastThreatAt <= STALE_THREAT_WINDOW;
-    if (score >= MIN_THREAT_SCORE || recent) {
-      threats.push({
-        squadId,
-        flagName,
-        roomName,
-        score,
-        lastThreatAt,
-      });
-    }
-  }
-
-  threats.sort(function (a, b) {
-    if (b.score !== a.score) return b.score - a.score;
-    return (b.lastThreatAt || 0) - (a.lastThreatAt || 0);
-  });
-
-  return threats;
-}
-
-function _desiredSquadCount(threats) {
-  if (!threats || !threats.length) return 0;
-  const top = threats[0];
-  if (threats.length === 1) {
-    return top.score >= HEAVY_THREAT_SCORE ? 2 : 1;
-  }
-  // Multiple simultaneous threats → at least two if we have them
-  return Math.min(2, threats.length);
-}
-
-function _allowedSquadCount(room, threats) {
-  const desired = _desiredSquadCount(threats);
-  if (!EconomyManager || typeof EconomyManager.getLedger !== 'function') {
-    return desired;
-  }
-
-  const ledger = EconomyManager.getLedger(room);
-  if (!ledger) return desired;
-
-  const stored = ledger.currentStored || 0;
-  const avgNet = ledger.averageNet || 0;
-  const avgIncome = ledger.averageIncome || 0;
-  const avgSpend = ledger.averageSpend || 0;
-  const historyLength = ledger.history ? ledger.history.length : 0;
-
-  let allowed = desired;
-  if (historyLength >= 5) {
-    if (stored < 1500 || avgNet < 0) {
-      allowed = Math.min(allowed, 1);
-    }
-    if (stored < 600 && avgIncome <= avgSpend) {
-      allowed = Math.min(allowed, 1);
-    }
-    if (stored < 400 && avgNet <= 0) {
-      allowed = Math.max(allowed, threats.length ? 1 : 0);
-    }
-  }
-
-  return allowed;
-}
-
-function _currentSquadPlan(room) {
-  if (!global.__squadSpawnPlan || global.__squadSpawnPlan.tick !== Game.time) {
-    global.__squadSpawnPlan = { tick: Game.time, data: {} };
-  }
-
-  const cache = global.__squadSpawnPlan.data;
-  const roomName = room && room.name;
-  if (!roomName) return { allowed: 0, threats: [], bySquad: {}, desired: 0 };
-
-  if (cache[roomName]) return cache[roomName];
-
-  const threats = _gatherThreats();
-  const desired = _desiredSquadCount(threats);
-  const allowed = _allowedSquadCount(room, threats);
-  const bySquad = {};
-
-  for (let i = 0; i < threats.length; i++) {
-    bySquad[threats[i].squadId] = threats[i];
-  }
-
-  const plan = { allowed, threats, bySquad, desired, highestThreat: threats.length ? threats[0].score : 0 };
-  cache[roomName] = plan;
-  return plan;
-}
-
 // ---------- Shorthand Body Builders ----------
 // B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
 const B  = (w, c, m) => [
@@ -503,7 +386,7 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory, optio
     return false;
   }
 
-  if (!options.force && EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
     if (!EconomyManager.shouldSpawn(spawn.room, neededTask, bodyCost)) {
       return false;
     }
