@@ -1,85 +1,112 @@
-// Import core modules for different logic areas
-var BeeMaintenance = require('BeeMaintenance'); // Handles memory cleanup and repair target tracking
-var BeeVisuals = require('BeeVisuals');         // Handles visuals and overlays in the room
-var BeeHiveMind = require('BeeHiveMind');       // Central logic hub for managing creeps, spawns, and roles
-var towerLogic = require('tower.logic');        // Tower management: defense and repairs
-var roleLinkManager = require('role.LinkManager'); // Logic for energy transfer between links
-var BeeToolbox = require('BeeToolbox');         // Utility functions for movement, energy, etc.
-var Traveler = require('Traveler');
-var SquadFlagManager = require('SquadFlagManager');
-// Logging levels for controlling console output detail
-global.LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 }; // Define levels: NONE < BASIC < DEBUG
-global.currentLogLevel = LOG_LEVEL.NONE; // Default log level (adjust to DEBUG for more output)
-// Pixel generation flag (set to 1 to enable pixel generation when conditions met)
-const GenPixel = 0;
-// Main game loop function that runs every tick
-module.exports.loop = function () {
-    // Every 3 ticks, log containers near sources in all rooms
-    if (Game.time % 3 === 0) { 
-        for (const roomName in Game.rooms) { 
-            const room = Game.rooms[roomName];
-            BeeToolbox.logSourceContainersInRoom(room); // Logs containers near sources for Courier_Bee logic
-        }
+"use strict";
+
+const CoreConfig = require('core.config');
+const Logger = require('core.logger');
+
+const BeeMaintenance = require('BeeMaintenance');
+const BeeVisuals = require('BeeVisuals');
+const BeeHiveMind = require('BeeHiveMind');
+const towerLogic = require('tower.logic');
+const roleLinkManager = require('role.LinkManager');
+const BeeToolbox = require('BeeToolbox');
+require('Traveler');
+const SquadFlagManager = require('SquadFlagManager');
+
+const LOG_LEVEL = CoreConfig.LOG_LEVEL;
+
+// Maintain backwards compatibility: expose log level helpers on global.
+global.LOG_LEVEL = LOG_LEVEL;
+Object.defineProperty(global, 'currentLogLevel', {
+    configurable: true,
+    get() {
+        return Logger.getLogLevel();
+    },
+    set(value) {
+        Logger.setLogLevel(value);
     }
-    // Perform routine memory cleanup for creeps and rooms
-    BeeMaintenance.cleanUpMemory();
-    // Run the core creep and room logic through the HiveMind system
-    BeeHiveMind.run();
-    // Execute tower logic: defense and repair
-    towerLogic.run();
-    // Run link management logic for transferring energy
-    roleLinkManager.run();
-    // Draw visuals such as CPU usage, creep data, and repair info
-    BeeVisuals.drawVisuals();
-    BeeVisuals.drawEnergyBar();    
-    BeeVisuals.drawWorkerBeeTaskTable();
-    // Handle repair target list updates every 5 ticks
-    if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
-    Memory.GameTickRepairCounter++;
-    if (Memory.GameTickRepairCounter >= 5) {
-        Memory.GameTickRepairCounter = 0;
-        for (const roomName in Game.rooms) {
-            const room = Game.rooms[roomName];
-            if (!Memory.rooms) {
-                Memory.rooms = {};
-            }
-            if (!Memory.rooms[roomName]) {
-                Memory.rooms[roomName] = {};
-            }
-            Memory.rooms[roomName].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
-        }
-    }
-    // Track the first spawn's room in memory every 10 ticks
+});
+
+const mainLog = Logger.createLogger('Main', LOG_LEVEL.BASIC);
+
+function ensureFirstSpawnMemory() {
     if (Memory.GameTickCounter === undefined) Memory.GameTickCounter = 0;
     Memory.GameTickCounter++;
-    if (Memory.GameTickCounter >= 10) {
-        Memory.GameTickCounter = 0;
-        const spawns = Object.values(Game.spawns);
-        if (spawns.length > 0) {
-            const currentRoom = spawns[0].room.name;
-            if (currentRoom !== Memory.firstSpawnRoom) {
-                Memory.firstSpawnRoom = currentRoom;
-                if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-                    console.log("Updated Memory.firstSpawnRoom to:", currentRoom);
-                }
-            }
-        } else if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-            console.log("No spawns found.");
+    if (Memory.GameTickCounter < 10) return;
+
+    Memory.GameTickCounter = 0;
+    const spawns = Object.values(Game.spawns);
+    if (!spawns.length) {
+        if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+            mainLog.debug('No owned spawns detected.');
+        }
+        return;
+    }
+
+    const primaryRoom = spawns[0].room.name;
+    if (Memory.firstSpawnRoom !== primaryRoom) {
+        Memory.firstSpawnRoom = primaryRoom;
+        if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+            mainLog.debug('Updated Memory.firstSpawnRoom to', primaryRoom);
         }
     }
-    
+}
+
+function maintainRepairTargets() {
+    if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
+    Memory.GameTickRepairCounter++;
+    if (Memory.GameTickRepairCounter < CoreConfig.settings.maintenance.repairScanInterval) return;
+
+    Memory.GameTickRepairCounter = 0;
+    if (!Memory.rooms) Memory.rooms = {};
+
+    for (const roomName in Game.rooms) {
+        if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
+        const room = Game.rooms[roomName];
+        if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+        Memory.rooms[roomName].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
+    }
+}
+
+function refreshSourceIntel() {
+    if (Game.time % 3 !== 0) return;
+    for (const roomName in Game.rooms) {
+        if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
+        const room = Game.rooms[roomName];
+        BeeToolbox.logSourceContainersInRoom(room);
+    }
+}
+
+function maybeGeneratePixel() {
+    const pixelCfg = CoreConfig.settings.pixels;
+    if (!pixelCfg.enabled) return;
+    if (Game.cpu.bucket < pixelCfg.bucketThreshold) return;
+    if (pixelCfg.tickModulo > 1 && (Game.time % pixelCfg.tickModulo) !== 0) return;
+
+    const result = Game.cpu.generatePixel();
+    if (result === OK) {
+        mainLog.info('Pixel generated successfully.');
+    }
+}
+
+module.exports.loop = function () {
+    refreshSourceIntel();
+    BeeMaintenance.cleanUpMemory();
+    BeeHiveMind.run();
+    towerLogic.run();
+    roleLinkManager.run();
+
+    BeeVisuals.drawVisuals();
+    BeeVisuals.drawEnergyBar();
+    BeeVisuals.drawWorkerBeeTaskTable();
+
+    maintainRepairTargets();
+    ensureFirstSpawnMemory();
     SquadFlagManager.ensureSquadFlags();
-    
-    // Every 50 ticks, clean up stale room memory for rooms not seen in a while
-    if (Game.time % 50 === 0) {
+
+    if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {
         BeeMaintenance.cleanStaleRooms();
     }
-    // Generate pixels if enabled and CPU bucket is full
-    if (GenPixel >= 1 && Game.cpu.bucket >= 9900 && Game.time % 5 === 0) {
-        const result = Game.cpu.generatePixel();
-        if (result === OK && currentLogLevel >= LOG_LEVEL.BASIC) {
-            console.log("Pixel generated successfully.");
-        }
-    };
-}
+
+    maybeGeneratePixel();
+};
 

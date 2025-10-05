@@ -1,3 +1,5 @@
+"use strict";
+
 // spawn.logic.js — cleaner, same behavior
 // --------------------------------------------------------
 // Purpose: Pick creep bodies by role/task from predefined configs,
@@ -11,10 +13,10 @@
 // - Logging is gated by LOG_LEVEL; turn to DEBUG to see details.
 // --------------------------------------------------------
 
-// ---------- Logging Levels ----------
-const LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
-// Flip to LOG_LEVEL.DEBUG when you want verbose logs:
-const currentLogLevel = LOG_LEVEL.NONE;
+// ---------- Logging ----------
+const Logger = require('core.logger');
+const LOG_LEVEL = Logger.LOG_LEVEL;
+const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 
 // ---------- Shorthand Body Builders ----------
 // B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
@@ -128,7 +130,7 @@ const CONFIGS = {
     B(1,1,2), 
     B(1,1,1),
   ],
-  remoteharvest: [
+  luna: [
     //B(8,25,17), 
     //B(5,10,8), 
     //B(5,8,4),
@@ -195,6 +197,7 @@ const TASK_ALIAS = {
   queen: 'Queen',
   scout: 'Scout',
   claimer: 'Claimer',
+  remoteharvest: 'luna',
   // pass-throughs (lowercased) will resolve automatically if present
 };
 
@@ -235,9 +238,9 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 }
 
 // Optional: tweak your debug line to show per-room when you have a spawner handy
-// if (currentLogLevel >= LOG_LEVEL.DEBUG) {
+// if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
 //   const anySpawn = Object.values(Game.spawns)[0];
-//   console.log(`[spawn] Energy empire=${Calculate_Spawn_Resource()} | room=${anySpawn ? Calculate_Spawn_Resource(anySpawn) : 0}`);
+//   spawnLog.debug(`[Energy empire=${Calculate_Spawn_Resource()} | room=${anySpawn ? Calculate_Spawn_Resource(anySpawn) : 0}]`);
 // }
 
 
@@ -246,22 +249,22 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 function Generate_Body_From_Config(taskKey, energyAvailable) {
   const list = CONFIGS[taskKey];
   if (!list) {
-    if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`[spawn] No config for task: ${taskKey}`);
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('No config for task:', taskKey);
     }
     return [];
   }
   for (const body of list) {
     const cost = _.sum(body, part => BODYPART_COST[part]); // Screeps global
     if (cost <= energyAvailable) {
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`[spawn] Picked ${taskKey} body: [${body}] @ cost ${cost} (avail ${energyAvailable})`);
+      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+        spawnLog.debug('Picked', taskKey, 'body:', '[' + body + ']', 'cost', cost, '(avail', energyAvailable + ')');
       }
       return body;
     }
   }
-  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`[spawn] Insufficient energy for ${taskKey} (need at least ${_.sum(_.last(list), p => BODYPART_COST[p])})`);
+  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+    spawnLog.debug('Insufficient energy for', taskKey, '(need at least', _.sum(_.last(list), p => BODYPART_COST[p]), ')');
   }
   return [];
 }
@@ -279,7 +282,7 @@ const Generate_BaseHarvest_Body      = (e) => Generate_Body_From_Config('basehar
 const Generate_Builder_Body          = (e) => Generate_Body_From_Config('builder', e);
 const Generate_Repair_Body           = (e) => Generate_Body_From_Config('repair', e);
 const Generate_Queen_Body            = (e) => Generate_Body_From_Config('Queen', e);
-const Generate_RemoteHarvest_Body    = (e) => Generate_Body_From_Config('remoteharvest', e);
+const Generate_Luna_Body             = (e) => Generate_Body_From_Config('luna', e);
 const Generate_Upgrader_Body         = (e) => Generate_Body_From_Config('upgrader', e);
 const Generate_Scout_Body            = (e) => Generate_Body_From_Config('Scout', e);
 const Generate_CombatMelee_Body      = (e) => Generate_Body_From_Config('CombatMelee', e);
@@ -297,7 +300,7 @@ function getBodyForTask(task, energyAvailable) {
     case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable);
     case 'upgrader':       return Generate_Upgrader_Body(energyAvailable);
     case 'courier':        return Generate_Courier_Body(energyAvailable);
-    case 'remoteharvest':  return Generate_RemoteHarvest_Body(energyAvailable);
+    case 'luna':           return Generate_Luna_Body(energyAvailable);
     case 'Scout':          return Generate_Scout_Body(energyAvailable);
     case 'Queen':          return Generate_Queen_Body(energyAvailable);
     case 'CombatArcher':   return Generate_CombatArcher_Body(energyAvailable);
@@ -308,8 +311,8 @@ function getBodyForTask(task, energyAvailable) {
     // Aliases
     case 'trucker':        return Generate_Courier_Body(energyAvailable);
     default:
-      if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-        console.log(`[spawn] Unknown task: ${task}`);
+      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+        spawnLog.debug('Unknown task:', task);
       }
       return [];
   }
@@ -330,13 +333,13 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
   const body = generateBodyFn(availableEnergy);
   const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
 
-  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`[spawn] Attempt ${roleName} body=[${body}] cost=${bodyCost} avail=${availableEnergy}`);
+  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+    spawnLog.debug('Attempt', roleName, 'body=[' + body + ']', 'cost=' + bodyCost, 'avail=' + availableEnergy);
   }
 
   if (!body.length || availableEnergy < bodyCost) {
-    if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-      console.log(`[spawn] Not enough energy for ${roleName}. Need ${bodyCost}, have ${availableEnergy}.`);
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('Not enough energy for', roleName + '.', 'Need', bodyCost, 'have', availableEnergy + '.');
     }
     return false;
   }
@@ -347,12 +350,12 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
   memory.role = roleName; // ensure role is set
   const result = spawn.spawnCreep(body, name, { memory });
 
-  if (currentLogLevel >= LOG_LEVEL.DEBUG) {
-    console.log(`[spawn] Result ${roleName}/${name}: ${result}`);
+  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+    spawnLog.debug('Result', roleName + '/' + name + ':', result);
   }
   if (result === OK) {
-    if (currentLogLevel >= LOG_LEVEL.BASIC) {
-      console.log(`🟢 Spawned ${roleName}: ${name}`);
+    if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+      spawnLog.info('🟢 Spawned', roleName + ':', name);
     }
     return true;
   }
@@ -372,8 +375,8 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   if (extraMemory) Object.assign(memory, extraMemory);
   const res = spawn.spawnCreep(body, name, { memory });
   if (res === OK) {
-    if (currentLogLevel >= LOG_LEVEL.BASIC) {
-      console.log(`🟢 Spawned Creep: ${name} for task ${neededTask}`);
+    if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+      spawnLog.info('🟢 Spawned Creep:', name, 'for task', neededTask);
     }
     return true;
   }
@@ -506,7 +509,7 @@ module.exports = {
   Generate_Builder_Body,
   Generate_Repair_Body,
   Generate_Queen_Body,
-  Generate_RemoteHarvest_Body,
+  Generate_Luna_Body,
   Generate_Scout_Body,
   Generate_CombatMelee_Body,
   Generate_CombatArcher_Body,
