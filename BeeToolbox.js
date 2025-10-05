@@ -559,6 +559,541 @@ var BeeToolbox = {
   },
 
   // ---------------------------------------------------------------------------
+  // 🛡️ COMBAT HELPERS
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Determine if a position is within danger range of any hostile tower.
+   * @param {RoomPosition} pos Screeps position to inspect.
+   * @param {number} radius Maximum range from a tower considered dangerous.
+   * @returns {boolean} True if any hostile tower is within the radius.
+   * @sideeffects None.
+   * @example
+   * if (BeeToolbox.isInTowerDanger(creep.pos, 20)) { creep.say('⚠'); }
+   */
+  isInTowerDanger: function (pos, radius) {
+    if (!pos) return false;
+    var room = Game.rooms[pos.roomName];
+    if (!room) return false;
+    var limit = (typeof radius === 'number') ? radius : 20;
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+    });
+    for (var i = 0; i < towers.length; i++) {
+      if (towers[i].pos.getRangeTo(pos) <= limit) {
+        return true;
+      }
+    }
+    return false;
+  },
+
+  /**
+   * Estimate per-tick damage from hostile towers focused on a position.
+   * @param {Room} room The room containing the position.
+   * @param {RoomPosition} pos Target position for damage estimation.
+   * @returns {number} Estimated damage for one tick.
+   * @sideeffects None.
+   * @example
+   * var dmg = BeeToolbox.estimateTowerDamage(creep.room, creep.pos);
+   */
+  estimateTowerDamage: function (room, pos) {
+    if (!room || !pos) return 0;
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+    });
+    var total = 0;
+    for (var i = 0; i < towers.length; i++) {
+      var dist = towers[i].pos.getRangeTo(pos);
+      if (dist <= TOWER_OPTIMAL_RANGE) {
+        total += TOWER_POWER_ATTACK;
+      } else {
+        var capped = Math.min(dist, TOWER_FALLOFF_RANGE);
+        var frac = (capped - TOWER_OPTIMAL_RANGE) / Math.max(1, (TOWER_FALLOFF_RANGE - TOWER_OPTIMAL_RANGE));
+        var fall = TOWER_POWER_ATTACK * (1 - (TOWER_FALLOFF * frac));
+        total += Math.max(0, Math.floor(fall));
+      }
+    }
+    return total;
+  },
+
+  /**
+   * Check if a range sits inside the configured hold band for archer behavior.
+   * @param {number} range Current distance to target.
+   * @param {number} desiredRange Preferred range to hold.
+   * @param {number} holdBand Acceptable slack range above desired.
+   * @returns {boolean} True if range lies inside the hold band.
+   * @sideeffects None.
+   * @example
+   * if (BeeToolbox.combatInHoldBand(range, 2, 1)) { return; }
+   */
+  combatInHoldBand: function (range, desiredRange, holdBand) {
+    if (typeof range !== 'number') return false;
+    var desired = (typeof desiredRange === 'number') ? desiredRange : 1;
+    var band = (typeof holdBand === 'number') ? holdBand : 0;
+    if (range < desired) return false;
+    if (range > (desired + band)) return false;
+    return true;
+  },
+
+  /**
+   * List hostile threats (attackers and towers) in a room.
+   * @param {Room} room Screeps room to scan.
+   * @returns {Array} Array of hostile creeps/structures threatening the room.
+   * @sideeffects None.
+   * @example
+   * var threats = BeeToolbox.combatThreats(creep.room);
+   */
+  combatThreats: function (room) {
+    if (!room) return [];
+    var creeps = room.find(FIND_HOSTILE_CREEPS, {
+      filter: function (h) {
+        return h.getActiveBodyparts(ATTACK) > 0 || h.getActiveBodyparts(RANGED_ATTACK) > 0;
+      }
+    });
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+    });
+    return creeps.concat(towers);
+  },
+
+  /**
+   * Fire at the closest valid hostile within ranged distance.
+   * @param {Creep} creep Acting ranged creep.
+   * @returns {boolean} True if an attack was attempted.
+   * @sideeffects Performs ranged attack orders.
+   * @example
+   * BeeToolbox.combatShootOpportunistic(creep);
+   */
+  combatShootOpportunistic: function (creep) {
+    if (!creep) return false;
+    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    if (closer && creep.pos.inRangeTo(closer, 3)) {
+      creep.rangedAttack(closer);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * Primary archer attack logic with mass-attack fallback.
+   * @param {Creep} creep Archer creep issuing attacks.
+   * @param {RoomObject} target Preferred target.
+   * @param {Object} config Behavior configuration ({ desiredRange, massAttackThreshold }).
+   * @returns {boolean} True if any attack order was issued.
+   * @sideeffects Issues ranged attacks.
+   * @example
+   * BeeToolbox.combatShootPrimary(creep, hostile, { desiredRange: 2 });
+   */
+  combatShootPrimary: function (creep, target, config) {
+    if (!creep || !target) return false;
+    var opts = config || {};
+    var threshold = (opts.massAttackThreshold != null) ? opts.massAttackThreshold : 3;
+    var hostiles = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
+    if (hostiles.length >= threshold) {
+      creep.rangedMassAttack();
+      return true;
+    }
+    var range = creep.pos.getRangeTo(target);
+    if (range <= 3) {
+      creep.rangedAttack(target);
+      return true;
+    }
+    return BeeToolbox.combatShootOpportunistic(creep);
+  },
+
+  /**
+   * Attempt a flee path away from threats, with TaskSquad-friendly swap support.
+   * @param {Creep} creep Creep that should flee.
+   * @param {Array} fromThings Array of hostile objects to avoid.
+   * @param {number} safeRange Desired separation distance.
+   * @param {Object} options Extra knobs ({ maxOps, taskSquad, roomCallback }).
+   * @returns {boolean} True if a flee move was attempted.
+   * @sideeffects Orders movement and may swap tiles via TaskSquad.
+   * @example
+   * BeeToolbox.combatFlee(creep, [hostile], 3, { maxOps: 2000, taskSquad: TaskSquad });
+   */
+  combatFlee: function (creep, fromThings, safeRange, options) {
+    if (!creep) return false;
+    var goals = [];
+    var i;
+    var fleeRange = (typeof safeRange === 'number') ? safeRange : 3;
+    var opts = options || {};
+    var taskSquad = opts.taskSquad;
+    var maxOps = (opts.maxOps != null) ? opts.maxOps : 2000;
+    var roomCallback = opts.roomCallback || BeeToolbox.roomCallback;
+
+    if (fromThings && fromThings.length) {
+      for (i = 0; i < fromThings.length; i++) {
+        if (!fromThings[i] || !fromThings[i].pos) continue;
+        goals.push({ pos: fromThings[i].pos, range: fleeRange });
+      }
+    }
+
+    var search = PathFinder.search(creep.pos, goals, {
+      flee: true,
+      maxOps: maxOps,
+      roomCallback: function (roomName) {
+        if (roomCallback) {
+          var custom = roomCallback(roomName);
+          if (custom !== undefined && custom !== null) return custom;
+        }
+        var room = Game.rooms[roomName];
+        if (!room) return false;
+        var costs = new PathFinder.CostMatrix();
+        var structures = room.find(FIND_STRUCTURES);
+        for (var s = 0; s < structures.length; s++) {
+          var structure = structures[s];
+          if (structure.structureType === STRUCTURE_ROAD) {
+            costs.set(structure.pos.x, structure.pos.y, 1);
+          } else if (structure.structureType !== STRUCTURE_CONTAINER && (structure.structureType !== STRUCTURE_RAMPART || !structure.my)) {
+            costs.set(structure.pos.x, structure.pos.y, 0xFF);
+          }
+        }
+        return costs;
+      }
+    });
+
+    if (search && search.path && search.path.length) {
+      var step = search.path[0];
+      if (step) {
+        var np = new RoomPosition(step.x, step.y, creep.pos.roomName);
+        if (!taskSquad || !taskSquad.tryFriendlySwap || !taskSquad.tryFriendlySwap(creep, np)) {
+          creep.move(creep.pos.getDirectionTo(step));
+        }
+        return true;
+      }
+    }
+
+    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    if (bad) {
+      var dir = creep.pos.getDirectionTo(bad);
+      var zero = (dir - 1 + 8) % 8;
+      var back = ((zero + 4) % 8) + 1;
+      creep.move(back);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * TaskSquad-aware step helper (Traveler shim).
+   * @param {Creep} creep Unit to move.
+   * @param {RoomPosition|RoomObject} targetPos Destination position or object.
+   * @param {number} range Desired range to stop at.
+   * @param {Object} taskSquad Optional Task.Squad module for stepToward usage.
+   * @returns {number|undefined} Traveler/stepToward result when available.
+   * @sideeffects Moves the creep.
+   * @example
+   * BeeToolbox.combatStepToward(creep, hostile.pos, 1, TaskSquad);
+   */
+  combatStepToward: function (creep, targetPos, range, taskSquad) {
+    if (!creep || !targetPos) return ERR_INVALID_TARGET;
+    var destination = (targetPos.pos || targetPos);
+    var desiredRange = (typeof range === 'number') ? range : 1;
+    if (taskSquad && taskSquad.stepToward) {
+      return taskSquad.stepToward(creep, destination, desiredRange);
+    }
+    return BeeToolbox.BeeTravel(creep, destination, { range: desiredRange });
+  },
+
+  /**
+   * Heal self or squadmates opportunistically when HEAL parts exist.
+   * @param {Creep} creep Healer or hybrid creep.
+   * @param {string} squadId Optional squad identifier override.
+   * @returns {boolean} True if any heal command issued.
+   * @sideeffects Executes heal/rangedHeal calls.
+   * @example
+   * BeeToolbox.combatAuxHeal(creep, 'Alpha');
+   */
+  combatAuxHeal: function (creep, squadId) {
+    if (!creep) return false;
+    var healParts = creep.getActiveBodyparts(HEAL);
+    if (!healParts) return false;
+
+    if (creep.hits < creep.hitsMax) {
+      creep.heal(creep);
+      return true;
+    }
+
+    var sid = squadId || (creep.memory && creep.memory.squadId) || 'Alpha';
+    var mates = _.filter(Game.creeps, function (c) {
+      return c && c.my && c.id !== creep.id && c.memory && c.memory.squadId === sid && c.hits < c.hitsMax;
+    });
+    if (!mates.length) return false;
+    var target = _.min(mates, function (c) { return c.hits / Math.max(1, c.hitsMax); });
+    if (!target) return false;
+
+    if (creep.pos.isNearTo(target)) {
+      creep.heal(target);
+      return true;
+    }
+    if (creep.pos.inRangeTo(target, 3)) {
+      creep.rangedHeal(target);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * Guard vulnerable squadmates by swapping or stepping toward them.
+   * @param {Creep} creep Melee protector.
+   * @param {Object} options Options ({ taskSquad, squadId, protectRoles, threatFilter }).
+   * @returns {boolean} True if guard action executed.
+   * @sideeffects May move or swap tiles.
+   * @example
+   * BeeToolbox.combatGuardSquadmate(creep, { taskSquad: TaskSquad });
+   */
+  combatGuardSquadmate: function (creep, options) {
+    if (!creep) return false;
+    var opts = options || {};
+    var squadId = opts.squadId || (creep.memory && creep.memory.squadId) || 'Alpha';
+    var taskSquad = opts.taskSquad;
+    var protectRoles = opts.protectRoles || { CombatArcher: true, CombatMedic: true, Dismantler: true };
+    var threatFilter = opts.threatFilter || function (h) {
+      return h.getActiveBodyparts(ATTACK) > 0;
+    };
+
+    var threatened = _.filter(Game.creeps, function (ally) {
+      if (!ally || !ally.my || !ally.memory || ally.memory.squadId !== squadId) return false;
+      var role = ally.memory.task || ally.memory.role || '';
+      if (!protectRoles[role]) return false;
+      var nearThreats = ally.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: threatFilter });
+      return nearThreats.length > 0;
+    });
+    if (!threatened.length) return false;
+
+    var buddy = creep.pos.findClosestByRange(threatened);
+    if (!buddy) return false;
+
+    if (creep.pos.isNearTo(buddy)) {
+      if (taskSquad && taskSquad.tryFriendlySwap && taskSquad.tryFriendlySwap(creep, buddy.pos)) {
+        return true;
+      }
+      var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: threatFilter })[0];
+      if (bad) {
+        var best = BeeToolbox.combatBestAdjacentTile(creep, bad, {
+          edgePenalty: opts.edgePenalty,
+          towerRadius: opts.towerRadius
+        });
+        if (best && creep.pos.getRangeTo(best) === 1) {
+          creep.move(creep.pos.getDirectionTo(best));
+          return true;
+        }
+      }
+      return false;
+    }
+
+    BeeToolbox.combatStepToward(creep, buddy.pos, 1, taskSquad);
+    return true;
+  },
+
+  /**
+   * Score adjacent tiles for melee positioning.
+   * @param {Creep} creep Melee creep evaluating movement.
+   * @param {RoomObject} target Target to remain adjacent to.
+   * @param {Object} options Extra options ({ edgePenalty, towerRadius }).
+   * @returns {RoomPosition} Best adjacent position (may equal current).
+   * @sideeffects None.
+   * @example
+   * var pos = BeeToolbox.combatBestAdjacentTile(creep, hostile, { edgePenalty: 8 });
+   */
+  combatBestAdjacentTile: function (creep, target, options) {
+    if (!creep || !target) return creep && creep.pos;
+    var room = creep.room;
+    var opts = options || {};
+    var edgePenalty = (opts && opts.edgePenalty != null) ? opts.edgePenalty : 8;
+    var towerRadius = (opts && opts.towerRadius != null) ? opts.towerRadius : 20;
+    var best = creep.pos;
+    var bestScore = 1e9;
+    var threats = room ? room.find(FIND_HOSTILE_CREEPS, {
+      filter: function (h) {
+        return h.getActiveBodyparts(ATTACK) > 0 && h.hits > 0;
+      }
+    }) : [];
+
+    for (var dx = -1; dx <= 1; dx++) {
+      for (var dy = -1; dy <= 1; dy++) {
+        if (!dx && !dy) continue;
+        var x = creep.pos.x + dx;
+        var y = creep.pos.y + dy;
+        if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
+        var pos = new RoomPosition(x, y, creep.room.name);
+        if (!pos.isNearTo(target)) continue;
+
+        var look = pos.look();
+        var impass = false;
+        var onRoad = false;
+        for (var i = 0; i < look.length; i++) {
+          var o = look[i];
+          if (o.type === LOOK_TERRAIN && o.terrain === 'wall') { impass = true; break; }
+          if (o.type === LOOK_CREEPS) { impass = true; break; }
+          if (o.type === LOOK_STRUCTURES) {
+            var st = o.structure.structureType;
+            if (st === STRUCTURE_ROAD) onRoad = true;
+            else if (st !== STRUCTURE_CONTAINER && (st !== STRUCTURE_RAMPART || !o.structure.my)) { impass = true; break; }
+          }
+        }
+        if (impass) continue;
+
+        var score = 0;
+        for (var t = 0; t < threats.length; t++) {
+          if (threats[t].pos.getRangeTo(pos) <= 1) score += 20;
+        }
+        if (BeeToolbox.isInTowerDanger(pos, towerRadius)) score += 50;
+        if (x === 0 || x === 49 || y === 0 || y === 49) score += edgePenalty;
+        if (onRoad) score -= 1;
+
+        if (score < bestScore) {
+          bestScore = score;
+          best = pos;
+        }
+      }
+    }
+    return best;
+  },
+
+  /**
+   * Identify a hostile structure blocking melee pathing right next to the creep.
+   * @param {Creep} creep Acting melee creep.
+   * @param {RoomObject} target Target the creep wants to reach.
+   * @returns {Structure|null} Blocking wall or rampart if one exists.
+   * @sideeffects None.
+   * @example
+   * var blocker = BeeToolbox.combatBlockingDoor(creep, target);
+   */
+  combatBlockingDoor: function (creep, target) {
+    if (!creep || !target) return null;
+    var closeStructs = creep.pos.findInRange(FIND_STRUCTURES, 1, {
+      filter: function (s) {
+        return (s.structureType === STRUCTURE_RAMPART && !s.my) || s.structureType === STRUCTURE_WALL;
+      }
+    });
+    if (!closeStructs.length) return null;
+    var best = _.min(closeStructs, function (s) { return s.pos.getRangeTo(target); });
+    if (!best) return null;
+    var distNow = creep.pos.getRangeTo(target);
+    var distThru = best.pos.getRangeTo(target);
+    return distThru < distNow ? best : null;
+  },
+
+  /**
+   * Return the weakest hostile within a given range band.
+   * @param {Creep} creep Reference creep.
+   * @param {number} range Maximum range to consider.
+   * @returns {Creep|null} Hostile creep with lowest health fraction.
+   * @sideeffects None.
+   * @example
+   * var weak = BeeToolbox.combatWeakestHostile(creep, 2);
+   */
+  combatWeakestHostile: function (creep, range) {
+    if (!creep) return null;
+    var maxRange = (typeof range === 'number') ? range : 2;
+    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, maxRange);
+    if (!xs.length) return null;
+    return _.min(xs, function (c) { return c.hits / Math.max(1, c.hitsMax); });
+  },
+
+  /**
+   * Retreat toward rally flags or anchor, else back away from closest hostile.
+   * @param {Creep} creep Creep that should retreat.
+   * @param {Object} options Options ({ taskSquad, anchorProvider, range }).
+   * @returns {boolean} True if any retreat movement occurred.
+   * @sideeffects Issues movement commands.
+   * @example
+   * BeeToolbox.combatRetreatToRally(creep, { taskSquad: TaskSquad });
+   */
+  combatRetreatToRally: function (creep, options) {
+    if (!creep) return false;
+    var opts = options || {};
+    var range = (opts.range != null) ? opts.range : 1;
+    var anchorProvider = opts.anchorProvider;
+    var rally = opts.rallyFlag || Game.flags.MedicRally || Game.flags.Rally;
+    if (!rally && typeof anchorProvider === 'function') {
+      rally = anchorProvider(creep);
+    }
+    if (rally) {
+      BeeToolbox.combatStepToward(creep, rally.pos || rally, range, opts.taskSquad);
+      return true;
+    }
+    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    if (bad) {
+      var dir = creep.pos.getDirectionTo(bad);
+      var zero = (dir - 1 + 8) % 8;
+      var back = ((zero + 4) % 8) + 1;
+      creep.move(back);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * Find the most injured ally within range of a position.
+   * @param {RoomPosition} origin Center position for the scan.
+   * @param {number} range Maximum search radius.
+   * @returns {Creep|null} Ally with lowest health fraction.
+   * @sideeffects None.
+   * @example
+   * var target = BeeToolbox.findLowestInjuredAlly(creep.pos, 3);
+   */
+  findLowestInjuredAlly: function (origin, range) {
+    if (!origin) return null;
+    var rad = (typeof range === 'number') ? range : 3;
+    var allies = origin.findInRange(FIND_MY_CREEPS, rad, {
+      filter: function (ally) { return ally.hits < ally.hitsMax; }
+    });
+    if (!allies.length) return null;
+    return _.min(allies, function (ally) { return ally.hits / Math.max(1, ally.hitsMax); });
+  },
+
+  /**
+   * Attempt to heal or ranged-heal a target.
+   * @param {Creep} creep Healer creep.
+   * @param {Creep} target Patient to heal.
+   * @returns {boolean} True if a heal command succeeded.
+   * @sideeffects Issues heal or rangedHeal.
+   * @example
+   * if (!BeeToolbox.tryHealTarget(creep, buddy)) { creep.say('No heal'); }
+   */
+  tryHealTarget: function (creep, target) {
+    if (!creep || !target) return false;
+    if (target.hits >= target.hitsMax) return false;
+    if (creep.pos.isNearTo(target)) {
+      return creep.heal(target) === OK;
+    }
+    if (creep.pos.inRangeTo(target, 3)) {
+      return creep.rangedHeal(target) === OK;
+    }
+    return false;
+  },
+
+  /**
+   * Count creeps of a given role following a target within a squad.
+   * @param {string} squadId Squad identifier.
+   * @param {string} targetId Target creep id to follow.
+   * @param {string} roleName Role or task name to match.
+   * @returns {number} Number of creeps following the target.
+   * @sideeffects None.
+   * @example
+   * var medics = BeeToolbox.countRoleFollowingTarget('Alpha', buddy.id, 'CombatMedic');
+   */
+  countRoleFollowingTarget: function (squadId, targetId, roleName) {
+    if (!targetId) return 0;
+    var sid = squadId || 'Alpha';
+    var role = roleName || '';
+    var count = 0;
+    for (var name in Game.creeps) {
+      if (!Game.creeps.hasOwnProperty(name)) continue;
+      var creep = Game.creeps[name];
+      if (!creep || !creep.my || !creep.memory) continue;
+      if ((creep.memory.squadId || 'Alpha') !== sid) continue;
+      var r = creep.memory.task || creep.memory.role;
+      if (r !== role) continue;
+      if (creep.memory.followTarget === targetId) count++;
+    }
+    return count;
+  },
+
+  // ---------------------------------------------------------------------------
   // 🚚 MOVEMENT: Traveler wrapper
   // ---------------------------------------------------------------------------
 
