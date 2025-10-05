@@ -415,6 +415,7 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
 const SQUAD_ORDER = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
 const MIN_THREAT_FOR_SQUAD = 5;
 const RECENT_THREAT_WINDOW = 50;
+const ROOM_INFO_STALE_TICKS = 150; // if we have no vision this long, treat threat intel as stale
 
 function normalizeSquadId(raw) {
   if (!raw) return null;
@@ -471,10 +472,22 @@ function computeSquadContext() {
       const sid = SQUAD_ORDER[i];
       infoById[sid] = resolveSquadBinding(sid);
       const binding = infoById[sid];
-      const threatScore = binding ? (binding.threatScore | 0) : 0;
-      const recent = binding && binding.roomInfo && typeof binding.roomInfo.lastThreatAt === 'number'
-        ? (Game.time - binding.roomInfo.lastThreatAt) <= RECENT_THREAT_WINDOW
-        : false;
+      const roomInfo = binding && binding.roomInfo;
+      const lastSeen = roomInfo && typeof roomInfo.lastSeen === 'number' ? roomInfo.lastSeen : 0;
+      const seenAgo = lastSeen ? (Game.time - lastSeen) : Infinity;
+      const seenRecently = seenAgo <= ROOM_INFO_STALE_TICKS;
+      const rawScore = binding ? (binding.threatScore | 0) : 0;
+      const threatScore = seenRecently ? rawScore : 0;
+      const lastThreatAt = roomInfo && typeof roomInfo.lastThreatAt === 'number' ? roomInfo.lastThreatAt : 0;
+      const recent = seenRecently && lastThreatAt ? (Game.time - lastThreatAt) <= RECENT_THREAT_WINDOW : false;
+
+      if (binding) {
+        binding.effectiveThreat = threatScore;
+        binding.seenRecently = seenRecently;
+        binding.isRecent = recent;
+        binding.lastSeen = lastSeen;
+      }
+
       if (binding && binding.targetRoom && (threatScore >= MIN_THREAT_FOR_SQUAD || recent)) {
         roomsNeeding.push({ id: sid, threat: Math.max(threatScore, recent ? MIN_THREAT_FOR_SQUAD : threatScore) });
       }
@@ -599,11 +612,12 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   const squadCap = determineSquadCap(spawn.room, ctx);
   const prioritizedIds = ctx.prioritized || [];
   const allowedIds = prioritizedIds.slice(0, squadCap);
-  const threatScore = binding.threatScore | 0;
-  const isRecentThreat = binding && binding.roomInfo && typeof binding.roomInfo.lastThreatAt === 'number'
-    ? (Game.time - binding.roomInfo.lastThreatAt) <= RECENT_THREAT_WINDOW
-    : false;
-  const shouldEngage = (threatScore >= MIN_THREAT_FOR_SQUAD || isRecentThreat) && allowedIds.indexOf(squadId) !== -1;
+  const threatScore = binding
+    ? (binding.effectiveThreat != null ? binding.effectiveThreat : (binding.threatScore | 0))
+    : 0;
+  const isRecentThreat = binding && binding.isRecent === true;
+  const seenRecently = binding && binding.seenRecently;
+  const shouldEngage = seenRecently && (threatScore >= MIN_THREAT_FOR_SQUAD || isRecentThreat) && allowedIds.indexOf(squadId) !== -1;
 
   if (!shouldEngage) {
     S.targetRoom = binding.targetRoom;
