@@ -116,6 +116,7 @@ function prepareTickCaches() {
     }
   }
   C.remotesByHome = remotesByHome;
+  C.workerTaskLimitsByRoom = {};
 
   return C;
 }
@@ -335,6 +336,9 @@ var BeeHiveMind = {
         Claimer:       0,
       };
 
+      if (!C.workerTaskLimitsByRoom) C.workerTaskLimitsByRoom = {};
+      C.workerTaskLimitsByRoom[room.name] = workerTaskLimits;
+
       // find first underfilled task and try to spawn it
       var task;
       for (task in workerTaskLimits) {
@@ -371,6 +375,27 @@ var BeeHiveMind = {
       if (!Memory.rooms.hasOwnProperty(roomName)) continue;
       if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
     }
+  },
+
+  getWorkerTaskLimits: function (room) {
+    var roomName = null;
+    if (room) {
+      if (typeof room === 'string') roomName = room;
+      else if (room.name) roomName = room.name;
+    }
+    if (!roomName) return null;
+
+    var C = prepareTickCaches();
+    var map = C.workerTaskLimitsByRoom || {};
+    var limits = map[roomName];
+    if (!limits) return null;
+
+    var copy = {};
+    for (var key in limits) {
+      if (!limits.hasOwnProperty(key)) continue;
+      copy[key] = limits[key];
+    }
+    return copy;
   }
 };
 
