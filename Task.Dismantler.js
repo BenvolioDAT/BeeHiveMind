@@ -1,112 +1,132 @@
-// Task.Dismantler.js — siege with Invader Core handling (ES5-safe)
+// Task.Dismantler.js — Tower window aware siege (ES5)
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
+var TaskSquad  = require('Task.Squad');
+
+var CONFIG = {
+  commitMargin: 48,
+  delayFlag: 'DismantleHold'
+};
 
 var TaskDismantler = {
   run: function (creep) {
-    if (creep.spawning) return;
+    if (!creep || creep.spawning) return;
 
-    // Optional “wait behind decoy” start delay
-    if (creep.memory.delay && Game.time < creep.memory.delay) return;
+    if (this._shouldDelay(creep)) return;
 
-    var target = Game.getObjectById(creep.memory.tid);
-
-    // Small helper: pathable closest-by-path from a list
-    function closest(arr) { return (arr && arr.length) ? creep.pos.findClosestByPath(arr) : null; }
-
-    // -------- A) Acquire target --------
+    var target = this._resolveTarget(creep);
     if (!target) {
-      // 1) High-priority threats first
-      var towers = creep.room.find(FIND_HOSTILE_STRUCTURES, {
-        filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
-      });
-      var spawns = creep.room.find(FIND_HOSTILE_SPAWNS);
-
-      // 2) Explicitly include Invader Cores
-      var cores = creep.room.find(FIND_HOSTILE_STRUCTURES, {
-        filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; }
-      });
-
-      // 3) Everything else that’s dismantle-worthy
-      var others = creep.room.find(FIND_HOSTILE_STRUCTURES, {
-        filter: function (s) {
-          if (s.hits === undefined) return false;
-          // exclude types we don't want to waste time dismantling
-          if (s.structureType === STRUCTURE_CONTROLLER) return false;
-          if (s.structureType === STRUCTURE_ROAD)        return false;
-          if (s.structureType === STRUCTURE_CONTAINER)   return false;
-          if (s.structureType === STRUCTURE_EXTENSION)   return false;
-          if (s.structureType === STRUCTURE_LINK)        return false;
-          if (s.structureType === STRUCTURE_TOWER)       return false;
-          if (s.structureType === STRUCTURE_SPAWN)       return false;
-          if (s.structureType === STRUCTURE_INVADER_CORE) return false; // handled separately
-          return true;
-        }
-      });
-
-      // Priority: towers → spawns → cores → others
-      target = closest(towers) || closest(spawns) || closest(cores) || closest(others);
-
-      // If the path is blocked, hit the first blocking wall/rampart
-      if (target) {
-        var path = creep.room.findPath(creep.pos, target.pos, { maxOps: 500, ignoreCreeps: true });
-        for (var i = 0; i < path.length; i++) {
-          var step = path[i];
-          var structs = creep.room.lookForAt(LOOK_STRUCTURES, step.x, step.y);
-          for (var j = 0; j < structs.length; j++) {
-            var st = structs[j];
-            if (st && st.structureType) {
-              if (st.structureType === STRUCTURE_WALL) { target = st; break; }
-              if (st.structureType === STRUCTURE_RAMPART && !st.my) { target = st; break; }
-            }
-          }
-          if (target.id === (st && st.id)) break;
-        }
-        creep.memory.tid = target.id;
-      }
+      this._rally(creep);
+      return;
     }
 
-    // -------- B) Execute action --------
-    if (target) {
-      var inMelee = creep.pos.isNearTo(target);
-      var range = creep.pos.getRangeTo(target);
-
-      // Special case: Invader Core must be attacked (not dismantled)
-      if (target.structureType === STRUCTURE_INVADER_CORE) {
-        // Try ranged if we have it and are in range 3
-        if (range <= 3 && creep.getActiveBodyparts(RANGED_ATTACK) > 0) {
-          creep.rangedAttack(target);
-        }
-        // Close in to melee and attack if possible
-        if (inMelee && creep.getActiveBodyparts(ATTACK) > 0) {
-          creep.attack(target);
-        }
-        if (!inMelee) {
-          creep.moveTo(target, { reusePath: 10, maxRooms: 1 });
-        }
-        // If we have no ATTACK parts at all, keep ID so escorts can kill it,
-        // or you can spawn a proper smasher for cores.
-        return;
-      }
-
-      // Normal hostile structure: dismantle is most efficient
-      if (inMelee) {
-        var rc = creep.dismantle(target);
-        // If dismantle is invalid for any reason, try attack as a fallback
-        if (rc === ERR_INVALID_TARGET) {
-          if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
-        }
-        // Retarget early when low hits to avoid idle ticks on empty swings
-        if (target.hits && target.hits <= 1000) delete creep.memory.tid;
-      } else {
-        creep.moveTo(target, { reusePath: 10, maxRooms: 1 });
-      }
-    } else {
-      // No targets: rally
-      var rally = Game.flags.Rally || Game.flags.Attack;
-      if (rally) creep.moveTo(rally, { reusePath: 20 });
+    if (!this._towerWindowOpen(creep, target)) {
+      this._rally(creep);
+      return;
     }
+
+    if (!creep.pos.isNearTo(target)) {
+      TaskSquad.stepToward(creep, target.pos, 1);
+      return;
+    }
+
+    var rc = creep.dismantle(target);
+    if (rc === ERR_INVALID_TARGET && creep.getActiveBodyparts(ATTACK) > 0) {
+      creep.attack(target);
+    }
+    if (!target.hits || target.hits <= 1000) {
+      delete creep.memory.tid;
+    }
+  },
+
+  _shouldDelay: function (creep) {
+    if (creep.memory && creep.memory.delay && Game.time < creep.memory.delay) return true;
+    var flag = Game.flags[CONFIG.delayFlag];
+    if (flag && flag.room && flag.room.name === creep.pos.roomName) {
+      if (flag.color === COLOR_YELLOW) return true;
+    }
+    return false;
+  },
+
+  _rally: function (creep) {
+    var anchor = TaskSquad.getAnchor ? TaskSquad.getAnchor(creep) : null;
+    if (!anchor) {
+      var fallback = Game.flags.Rally || Game.flags.Attack;
+      if (fallback) anchor = fallback.pos;
+    }
+    if (anchor) TaskSquad.stepToward(creep, anchor, 1);
+  },
+
+  _resolveTarget: function (creep) {
+    var id = creep.memory ? creep.memory.tid : null;
+    var existing = id ? Game.getObjectById(id) : null;
+    if (existing && existing.hits > 0) return existing;
+    var room = creep.room;
+    if (!room) return null;
+    var priority = this._priorityStructures(room);
+    var choice = creep.pos.findClosestByPath(priority);
+    if (choice) {
+      creep.memory.tid = choice.id;
+      return choice;
+    }
+    delete creep.memory.tid;
+    return null;
+  },
+
+  _priorityStructures: function (room) {
+    var list = [];
+    function _push(arr) {
+      if (!arr) return;
+      for (var i = 0; i < arr.length; i++) list.push(arr[i]);
+    }
+    _push(room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_TOWER; } }));
+    _push(room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_SPAWN; } }));
+    _push(room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; } }));
+    _push(room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) {
+        if (!s || s.hits == null) return false;
+        if (s.structureType === STRUCTURE_CONTROLLER) return false;
+        if (s.structureType === STRUCTURE_ROAD) return false;
+        if (s.structureType === STRUCTURE_CONTAINER) return false;
+        return true;
+      }
+    }));
+    return list;
+  },
+
+  _towerWindowOpen: function (creep, target) {
+    var dps = BeeToolbox.calcTowerDps(creep.room, target.pos || target);
+    if (dps <= 0) return true;
+    if (this._hasCover(creep.pos)) return true;
+    var hps = this._nearbyHps(creep);
+    creep.memory = creep.memory || {};
+    creep.memory.expectedHps = hps;
+    return (hps - dps) >= CONFIG.commitMargin;
+  },
+
+  _hasCover: function (pos) {
+    var look = pos.lookFor(LOOK_STRUCTURES);
+    for (var i = 0; i < look.length; i++) {
+      var st = look[i];
+      if (st.structureType === STRUCTURE_RAMPART && st.my) return true;
+    }
+    return false;
+  },
+
+  _nearbyHps: function (creep) {
+    var sum = 0;
+    var medics = creep.pos.findInRange(FIND_MY_CREEPS, 3, {
+      filter: function (c) {
+        var role = c.memory && (c.memory.task || c.memory.role);
+        return role === 'CombatMedic';
+      }
+    });
+    for (var i = 0; i < medics.length; i++) {
+      sum += medics[i].getActiveBodyparts(HEAL) * 12;
+    }
+    sum += creep.getActiveBodyparts(HEAL) * 12;
+    return sum;
   }
 };
 

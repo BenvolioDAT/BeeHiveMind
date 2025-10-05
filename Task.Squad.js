@@ -108,7 +108,7 @@ var TaskSquad = (function () {
 
   function _ensureSquadBucket(id) {
     if (!Memory.squads) Memory.squads = {};
-    if (!Memory.squads[id]) Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
+    if (!Memory.squads[id]) Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0, intent: 'RALLY', intentAt: 0 };
     return Memory.squads[id];
   }
 
@@ -166,9 +166,37 @@ var TaskSquad = (function () {
   }
 
   function _rallyFlagFor(id) {
-    return Game.flags[RALLY_FLAG_PREFIX + id] ||
-           Game.flags[RALLY_FLAG_PREFIX + '_' + id] ||
-           Game.flags[id] || null;
+    var flag = Game.flags[RALLY_FLAG_PREFIX + id] ||
+               Game.flags[RALLY_FLAG_PREFIX + '_' + id] ||
+               Game.flags[id] || null;
+    if (!flag) return null;
+    if (BeeToolbox && BeeToolbox.decodeSquadFlag) {
+      var decoded = BeeToolbox.decodeSquadFlag(flag);
+      if (decoded && decoded.intent) {
+        var S = _ensureSquadBucket(id);
+        S.intent = decoded.intent;
+        S.intentAt = Game.time;
+      }
+    }
+    return flag;
+  }
+
+  function getIntent(creep) {
+    var id = getSquadId(creep);
+    var S = _ensureSquadBucket(id);
+    var flag = _rallyFlagFor(id);
+    if (flag && BeeToolbox && BeeToolbox.decodeSquadFlag) {
+      var decoded = BeeToolbox.decodeSquadFlag(flag);
+      if (decoded && decoded.intent) {
+        S.intent = decoded.intent;
+        S.intentAt = Game.time;
+        return decoded.intent;
+      }
+    }
+    if (S.intent && (Game.time - (S.intentAt || 0)) <= 50) {
+      return S.intent;
+    }
+    return 'RALLY';
   }
 
   function _isGood(obj) { return obj && obj.hits != null && obj.hits > 0 && obj.pos && obj.pos.roomName; }
@@ -213,7 +241,15 @@ var TaskSquad = (function () {
       if (_isGood(keep) && creep.pos.getRangeTo(keep) <= MAX_TARGET_RANGE) return keep;
     }
     var nxt = _chooseRoomTarget(creep);
-    if (nxt) { S.targetId = nxt.id; S.targetAt = Game.time; return nxt; }
+    if (nxt) {
+      if (BeeToolbox && BeeToolbox.ensureUniqueReservation) {
+        var key = 'squadTarget:' + nxt.id;
+        if (!BeeToolbox.ensureUniqueReservation(key, 1)) {
+          return Game.getObjectById(S.targetId);
+        }
+      }
+      S.targetId = nxt.id; S.targetAt = Game.time; return nxt;
+    }
     S.targetId = null; S.targetAt = Game.time;
     return null;
   }
@@ -403,6 +439,7 @@ var TaskSquad = (function () {
   API.getSquadId   = getSquadId;
   API.sharedTarget = sharedTarget;
   API.getAnchor    = getAnchor;
+  API.getIntent    = getIntent;
   API.stepToward   = stepToward;
   API.shouldRecycle = shouldRecycle;
   API.recycle = recycle;

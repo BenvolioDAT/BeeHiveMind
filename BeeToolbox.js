@@ -16,6 +16,284 @@ var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
 var BeeToolbox = {
 
   // ---------------------------------------------------------------------------
+  // ⚔️ COMBAT HELPERS (shared by combat/squad/spawn/flag systems)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Estimate combined hostile tower DPS on a position.
+   * Uses the Screeps damage interpolation (600 @ ≤5, 150 @ ≥20, linear between).
+   * Cached per room/tick via memo() to avoid iterating towers repeatedly.
+   */
+  calcTowerDps: function (room, pos) {
+    if (!room || !pos) return 0;
+    var key = 'towerDps:' + room.name + ':' + pos.x + ':' + pos.y + ':' + Game.time;
+    return this.memo(key, 1, function () {
+      var towers = room.find(FIND_HOSTILE_STRUCTURES, {
+        filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+      }) || [];
+      if (!towers.length) return 0;
+      var total = 0;
+      for (var i = 0; i < towers.length; i++) {
+        var tower = towers[i];
+        var range = tower.pos.getRangeTo(pos);
+        var dmg;
+        if (range <= 5) dmg = 600;
+        else if (range >= 20) dmg = 150;
+        else dmg = 600 - ((range - 5) * 30);
+        total += dmg;
+      }
+      return total;
+    });
+  },
+
+  /**
+   * Check whether a creep can withstand tower fire at its current tile.
+   * Considers the creep's own active HEAL parts and optional squad support hints.
+   * Uses creep.memory.expectedHps (ally heals) and creep.memory.towerMargin (extra buffer).
+   */
+  isTowerFireSafe: function (room, creep) {
+    if (!room || !creep) return true;
+    var dps = this.calcTowerDps(room, creep.pos);
+    if (dps <= 0) return true;
+    var healParts = creep.getActiveBodyparts(HEAL) || 0;
+    var selfHps = healParts * 12; // 12/tick per active heal part
+    var squadHps = (creep.memory && creep.memory.expectedHps) || 0;
+    var margin = (creep.memory && creep.memory.towerMargin) || 0;
+    return (selfHps + squadHps + margin) >= dps;
+  },
+
+  /**
+   * Focus-fire selection with stickiness: prefer the hostile with lowest EHP
+   * but keep current focus if still valid to minimize target churn.
+   */
+  pickFocusTarget: function (creep, hostiles) {
+    if (!creep || !hostiles || !hostiles.length) return null;
+    var mem = creep.memory || {};
+    var currentId = mem.focusTargetId;
+    var current = currentId ? Game.getObjectById(currentId) : null;
+    if (current && current.hits > 0 && current.pos.roomName === creep.pos.roomName) {
+      return current;
+    }
+    var best = null;
+    var bestScore = Infinity;
+    for (var i = 0; i < hostiles.length; i++) {
+      var hostile = hostiles[i];
+      if (!hostile || !hostile.hits) continue;
+      var range = creep.pos.getRangeTo(hostile);
+      var towerMitigation = this.calcTowerDps(creep.room, hostile.pos) / 600;
+      var score = (hostile.hits / Math.max(1, hostile.hitsMax)) + (range * 0.05) + towerMitigation;
+      if (score < bestScore) {
+        bestScore = score;
+        best = hostile;
+      }
+    }
+    if (best && mem) mem.focusTargetId = best.id;
+    return best;
+  },
+
+  /**
+   * Unified flee heuristic. cfg expects:
+   *  - fleeHitsPct: hp threshold (fraction of max)
+   *  - fleeTowerMargin: minimum surplus HPS over DPS required to stay
+   *  - threatRange: hostile range that triggers evasive steps
+   */
+  shouldFlee: function (creep, cfg) {
+    if (!creep) return false;
+    var opt = cfg || {};
+    var pct = opt.fleeHitsPct || 0;
+    if (pct > 0) {
+      var frac = creep.hits / Math.max(1, creep.hitsMax);
+      if (frac <= pct) return true;
+    }
+    if (opt.considerTowers) {
+      var safe = this.isTowerFireSafe(creep.room, creep);
+      if (!safe) {
+        if (typeof opt.fleeTowerMargin === 'number') {
+          var dps = this.calcTowerDps(creep.room, creep.pos);
+          var healParts = creep.getActiveBodyparts(HEAL) || 0;
+          var selfHps = healParts * 12;
+          var squadHps = (creep.memory && creep.memory.expectedHps) || 0;
+          var margin = (selfHps + squadHps) - dps;
+          if (margin < opt.fleeTowerMargin) return true;
+        } else {
+          return true;
+        }
+      }
+    }
+    if (opt.threatRange) {
+      var near = creep.pos.findInRange(FIND_HOSTILE_CREEPS, opt.threatRange, {
+        filter: function (h) {
+          return h.getActiveBodyparts(ATTACK) > 0 || h.getActiveBodyparts(RANGED_ATTACK) > 0;
+        }
+      });
+      if (near && near.length) return true;
+    }
+    return false;
+  },
+
+  /**
+   * Heal the highest priority target near the medic.
+   * Returns true if a heal/rangedHeal was executed.
+   */
+  healBestTarget: function (medic) {
+    if (!medic) return false;
+    var canHeal = medic.getActiveBodyparts(HEAL) > 0;
+    if (!canHeal) return false;
+    var candidates = medic.pos.findInRange(FIND_MY_CREEPS, 3, {
+      filter: function (c) { return c.hits < c.hitsMax; }
+    });
+    if (!candidates.length) {
+      if (medic.hits < medic.hitsMax) {
+        return medic.heal(medic) === OK;
+      }
+      return false;
+    }
+    var best = null;
+    var bestScore = Infinity;
+    for (var i = 0; i < candidates.length; i++) {
+      var ally = candidates[i];
+      var frac = ally.hits / Math.max(1, ally.hitsMax);
+      var towerPressure = this.calcTowerDps(medic.room, ally.pos) / 600;
+      var score = frac + (towerPressure * 0.25);
+      if (score < bestScore) {
+        bestScore = score;
+        best = ally;
+      }
+    }
+    if (!best) return false;
+    if (medic.pos.isNearTo(best)) {
+      return medic.heal(best) === OK;
+    }
+    return medic.rangedHeal(best) === OK;
+  },
+
+  /**
+   * Attempt to swap with a friendly creep on destination tile.
+   * Returns true if swap request issued.
+   */
+  friendlySwap: function (creep, destPos) {
+    if (!creep || !destPos) return false;
+    var room = Game.rooms[destPos.roomName];
+    if (!room) return false;
+    var there = destPos.lookFor(LOOK_CREEPS) || [];
+    if (!there.length) return false;
+    var other = there[0];
+    if (!other.my) return false;
+    if (other.fatigue > 0) return false;
+    var dir = other.pos.getDirectionTo(creep.pos);
+    other.move(dir);
+    creep.move(creep.pos.getDirectionTo(destPos));
+    return true;
+  },
+
+  /**
+   * Decode a squad flag into intent + metadata.
+   * Expects primary/secondary color pairs per Squad.Intents.es5.js.
+   */
+  decodeSquadFlag: function (flag) {
+    if (!flag) return null;
+    var intents = require('Squad.Intents.es5');
+    if (!intents || !intents.lookup) return null;
+    var key = flag.color + ':' + flag.secondaryColor;
+    var intent = intents.lookup[key];
+    if (!intent) return null;
+    return {
+      intent: intent,
+      flagName: flag.name,
+      pos: flag.pos
+    };
+  },
+
+  /**
+   * Reserve a key for ttl ticks. Prevents duplicate spawns/targets in same tick.
+   */
+  ensureUniqueReservation: function (key, ttl) {
+    if (!key) return true;
+    var bucket = Memory._reservations;
+    if (!bucket) {
+      bucket = {};
+      Memory._reservations = bucket;
+    }
+    var now = Game.time | 0;
+    var rec = bucket[key];
+    if (rec && rec.expires >= now) {
+      return false;
+    }
+    bucket[key] = { expires: now + (ttl || 1) };
+    return true;
+  },
+
+  /**
+   * Build the largest body for a role that fits the available energy.
+   * tiers = [{name:'low', body:[...parts...]}, ...] sorted ascending.
+   */
+  buildBodyByBudget: function (role, energy, tiers) {
+    if (!tiers || !tiers.length) return [];
+    var chosen = tiers[0];
+    for (var i = 0; i < tiers.length; i++) {
+      var tier = tiers[i];
+      var cost = this._bodyCost(tier.body);
+      if (cost <= energy) {
+        chosen = tier;
+      } else {
+        break;
+      }
+    }
+    if (role && Memory.debugBuildBodies) {
+      var Logger = require('core.logger');
+      var LOG_LEVEL = Logger.LOG_LEVEL;
+      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+        Logger.createLogger('Spawn', LOG_LEVEL.DEBUG).debug('buildBodyByBudget', role, energy, chosen.name);
+      }
+    }
+    return chosen.body.slice(0);
+  },
+
+  /**
+   * Execute fn() at most every modulo ticks for key.
+   */
+  throttle: function (key, modulo) {
+    if (!modulo || modulo <= 1) return true;
+    var tick = Game.time | 0;
+    var hash = 0;
+    var str = key || 'global';
+    for (var i = 0; i < str.length; i++) {
+      hash = ((hash * 33) + str.charCodeAt(i)) | 0;
+    }
+    hash = Math.abs(hash);
+    return ((tick + hash) % modulo) === 0;
+  },
+
+  /**
+   * TTL memoizer stored in Memory._memo (lightweight CPU hygiene).
+   */
+  memo: function (key, ttl, fn) {
+    if (!key) return fn ? fn() : undefined;
+    var bucket = Memory._memo;
+    if (!bucket) {
+      bucket = {};
+      Memory._memo = bucket;
+    }
+    var rec = bucket[key];
+    var now = Game.time | 0;
+    if (rec && rec.expires >= now) {
+      return rec.value;
+    }
+    var val = fn ? fn() : undefined;
+    bucket[key] = { value: val, expires: now + (ttl || 1) };
+    return val;
+  },
+
+  _bodyCost: function (parts) {
+    if (!parts || !parts.length) return 0;
+    var total = 0;
+    for (var i = 0; i < parts.length; i++) {
+      total += BODYPART_COST[parts[i]] || 0;
+    }
+    return total;
+  },
+
+  // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL
   // ---------------------------------------------------------------------------
 

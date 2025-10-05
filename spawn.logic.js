@@ -1,758 +1,291 @@
-"use strict";
+'use strict';
 
-// spawn.logic.js — cleaner, same behavior
-// --------------------------------------------------------
-// Purpose: Pick creep bodies by role/task from predefined configs,
-//          spawn creeps with consistent names and memory,
-//          and do it in a clean, beginner-friendly way.
-//
-// Notes for beginners:
-// - In Screeps, body parts are strings like 'work', 'carry', 'move'.
-// - BODYPART_COST is a global map: { move:50, work:100, carry:50, ... }.
-// - We choose the *largest* body config that fits available energy.
-// - Logging is gated by LOG_LEVEL; turn to DEBUG to see details.
-// --------------------------------------------------------
+var Logger = require('core.logger');
+var LOG_LEVEL = Logger.LOG_LEVEL;
+var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 
-// ---------- Logging ----------
-const Logger = require('core.logger');
-const LOG_LEVEL = Logger.LOG_LEVEL;
-const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
-const EconomyManager = require('EconomyManager');
+var BeeToolbox = require('BeeToolbox');
+var EconomyManager = require('EconomyManager');
+var CombatConfigs = require('bodyConfigs.combat.es5');
 
-// ---------- Shorthand Body Builders ----------
-// B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
-const B  = (w, c, m) => [
-  ...Array(w).fill(WORK),
-  ...Array(c).fill(CARRY),
-  ...Array(m).fill(MOVE),
-];
-// CM(c,m) = [CARRY x c, MOVE x m]
-const CM = (c, m) => [...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
-// WM(w,m) = [WORK x w, MOVE x m]
-const WM = (w, m) => [...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
-// MH(m,h) = [MOVE x m, HEAL x h]
-const MH = (m, h) => [...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
-// TAM(t,a,m) = [TOUGH x t, ATTACK x a, MOVE x m]
-const TAM = (t, a, m) => [...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
-// R(t,r,m) = [TOUGH x t, RANGED_ATTACK x r, MOVE x m]
-const R  = (t, r, m) => [...Array(t).fill(TOUGH), ...Array(r).fill(RANGED_ATTACK), ...Array(m).fill(MOVE)];
-// A(...) = mixed arms builder for quick experiments
-const A  = (t,a,r,h,w,c,m)=>[
-  ...Array(t).fill(TOUGH),
-  ...Array(a).fill(ATTACK),
-  ...Array(r).fill(RANGED_ATTACK),
-  ...Array(h).fill(HEAL),
-  ...Array(w).fill(WORK),
-  ...Array(c).fill(CARRY),
-  ...Array(m).fill(MOVE),
-];
-// C(c,m) = [CLAIM x c, MOVE x m]
-const C  = (c, m) => [...Array(c).fill(CLAIM), ...Array(m).fill(MOVE)];
-
-// ---------- Role Configs (largest first is preferred) ----------
-const CONFIGS = {
-  // Workers
+var WORKER_TIERS = {
   baseharvest: [
-    B(6,0,5), 
-    B(5,1,5), 
-    B(4,1,4), 
-    B(3,1,3), 
-    B(2,1,2), 
-    B(1,1,1),
+    { name: 'low',  body: [WORK, WORK, CARRY, MOVE] },
+    { name: 'mid',  body: [WORK, WORK, WORK, CARRY, MOVE, MOVE] },
+    { name: 'high', body: [WORK, WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE] }
   ],
   courier: [
-    CM(30,15), 
-    CM(23,23), 
-    CM(22,22), 
-    CM(21,21), 
-    CM(20,20), 
-    CM(19,19),
-    CM(18,18),
-    CM(17,17), 
-    CM(16,16), 
-    CM(15,15), 
-    CM(14,14), 
-    CM(13,13), 
-    CM(12,12), 
-    CM(11,11),
-    CM(10,10), 
-    CM(9,9), 
-    CM(8,8), 
-    CM(7,7), 
-    CM(6,6), 
-    CM(5,5), 
-    CM(4,4), 
-    CM(3,3),
-    CM(2,2), 
-    CM(1,1),
+    { name: 'low', body: [CARRY, CARRY, MOVE, MOVE] },
+    { name: 'mid', body: [CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE] },
+    { name: 'high', body: [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE] }
   ],
-  builder: [ 
-    B(6,12,18),
-    // Long-haul “road layer” — balanced for 2–3 rooms out
-    B(4, 8, 12),   // 1200 energy, 24 parts, 400 carry
-    // Mid-range — solid for 1–2 rooms out
-    B(3, 6, 9),    // 900 energy, 18 parts, 300 carry
-    // Budget scout/seed — starter road + container drop
-    B(2, 4, 6),    // 600 energy, 12 parts, 200 carry
-    // Emergency mini — drops a container + token road
-    B(2, 2, 4)     // 400 energy, 8 parts, 100 carry
-  ],
-  upgrader: [
-    //B(4,1,5), 
-    B(2,1,3),
+  builder: [
+    { name: 'low', body: [WORK, CARRY, CARRY, MOVE, MOVE] },
+    { name: 'mid', body: [WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE] },
+    { name: 'high', body: [WORK, WORK, WORK, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE] }
   ],
   repair: [
-    B(5,2,7), 
-    B(4,1,5), 
-    B(2,1,3),
+    { name: 'low', body: [WORK, CARRY, MOVE] },
+    { name: 'mid', body: [WORK, WORK, CARRY, CARRY, MOVE, MOVE] },
+    { name: 'high', body: [WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE] }
   ],
-  Queen: [ // keeping capitalization to match your original key
-    B(0,22,22), 
-    B(0,21,21), 
-    B(0,20,20), 
-    B(0,19,19), 
-    B(0,18,18), 
-    B(0,17,17),
-    B(0,16,16), 
-    B(0,15,15), 
-    B(0,14,14), 
-    B(0,13,13), 
-    B(0,12,12), 
-    B(0,11,11),
-    B(0,10,10), 
-    B(0,9,9), 
-    B(0,8,8), 
-    B(0,7,7), 
-    B(0,6,6), 
-    B(0,5,5), 
-    B(0,4,4),
-    B(0,3,3), 
-    B(1,2,3), 
-    B(1,1,2), 
-    B(1,1,1),
+  upgrader: [
+    { name: 'low', body: [WORK, WORK, CARRY, MOVE] },
+    { name: 'mid', body: [WORK, WORK, WORK, CARRY, CARRY, MOVE, MOVE] },
+    { name: 'high', body: [WORK, WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE] }
+  ],
+  Queen: [
+    { name: 'low', body: [CARRY, CARRY, MOVE] },
+    { name: 'mid', body: [CARRY, CARRY, CARRY, CARRY, MOVE, MOVE] },
+    { name: 'high', body: [CARRY, CARRY, CARRY, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE] }
   ],
   luna: [
-    //B(8,25,17), 
-    //B(5,10,8), 
-    //B(5,8,4),
-    //B(5,8,13), 
-    //B(5,6,11), 
-    //B(5,4,9),
-    //B(5,2,7), 
-    //B(4,2,6),
-    B(3,6,5), 
-    B(3,5,4), 
-    B(3,4,3), 
-    B(3,3,3), 
-    B(3,2,2,), 
-    B(2,2,2), 
-    B(1,1,1),
+    { name: 'low', body: [WORK, CARRY, MOVE, MOVE] },
+    { name: 'mid', body: [WORK, WORK, CARRY, CARRY, MOVE, MOVE, MOVE] },
+    { name: 'high', body: [WORK, WORK, WORK, CARRY, CARRY, CARRY, MOVE, MOVE, MOVE, MOVE] }
   ],
   Scout: [
-    B(0,0,1),
+    { name: 'low', body: [MOVE] }
   ],
-
-  // Combat
-  CombatMelee: [
-    //TAM(6,6,12), 
-    TAM(4,4,8), 
-    TAM(1,1,2),
-  ],
-  CombatArcher: [
-    //R(6,8,14), 
-    //R(4,6,10),//1140 
-    R(2,4,6), 
-    R(1,2,3),
-  ],
-  CombatMedic: [
-   // MH(12,12), 
-   // MH(10,10), 
-    //MH(8,8), 
-    //MH(6,6), 
-   // MH(5,5), 
-    //MH(4,4), 
-    //MH(3,3), 
-    MH(2,2), 
-    MH(1,1),
-  ],
-  Dismantler: [
-    //WM(25,25), 
-    //WM(20,20), 
-    //WM(15,15),
-    WM(5,5),
-  ],
-
-  // Special
   Claimer: [
-    C(4,4),
-    C(3,3), 
-    C(2,2), 
-    C(1,1),
-  ],
+    { name: 'low', body: [CLAIM, MOVE] },
+    { name: 'mid', body: [CLAIM, CLAIM, MOVE, MOVE] }
+  ]
 };
 
-// ---------- Task Aliases (normalize user-facing names) ----------
-// This lets getBodyForTask('Trucker') resolve to courier configs, etc.
-const TASK_ALIAS = {
+var configurations = [];
+function _populateConfigurations() {
+  configurations.length = 0;
+  var task;
+  for (task in WORKER_TIERS) {
+    if (!WORKER_TIERS.hasOwnProperty(task)) continue;
+    configurations.push({ task: task, body: WORKER_TIERS[task][0].body });
+  }
+  for (task in CombatConfigs) {
+    if (!CombatConfigs.hasOwnProperty(task)) continue;
+    var tiers = CombatConfigs[task];
+    if (tiers && tiers.length) configurations.push({ task: task, body: tiers[0].body });
+  }
+}
+_populateConfigurations();
+
+var TASK_ALIAS = {
   trucker: 'courier',
   queen: 'Queen',
   scout: 'Scout',
-  claimer: 'Claimer',
-  remoteharvest: 'luna',
-  // pass-throughs (lowercased) will resolve automatically if present
+  claimer: 'Claimer'
 };
 
-// ---------- Energy Accounting ----------
-// Returns *total available* energy across all spawns + extensions.
-// Returns energy available for spawning.
-// - If you pass a spawn, room, or roomName => returns that ROOM's energy (spawns + extensions).
-// - If you pass nothing => falls back to empire-wide total (old behavior).
-function Calculate_Spawn_Resource(spawnOrRoom) {
-  // Per-room mode
-  if (spawnOrRoom) {
-    let room =
-      (spawnOrRoom.room && spawnOrRoom.room) ||           // a spawn (or structure)
-      (typeof spawnOrRoom === 'string' ? Game.rooms[spawnOrRoom] : spawnOrRoom); // roomName or Room
-    if (!room) return 0;
-
-    // Fast, built-in sum of spawns+extensions for this room
-    return room.energyAvailable;
-
-    // If you ever want the manual sum instead, uncomment:
-    /*
-    let spawnEnergy = _.sum(room.find(FIND_MY_SPAWNS), s => s.store[RESOURCE_ENERGY] || 0);
-    let extEnergy   = _.sum(room.find(FIND_MY_STRUCTURES, {filter: s => s.structureType === STRUCTURE_EXTENSION}),
-                            s => s.store[RESOURCE_ENERGY] || 0);
-    return spawnEnergy + extEnergy;
-    */
-  }
-
-  // ---- Backward-compat (empire-wide) ----
-  let spawnEnergy = 0;
-  for (const name in Game.spawns) {
-    spawnEnergy += Game.spawns[name].store[RESOURCE_ENERGY] || 0;
-  }
-  const extensionEnergy = _.sum(Game.structures, s =>
-    s.structureType === STRUCTURE_EXTENSION ? (s.store[RESOURCE_ENERGY] || 0) : 0
-  );
-  return spawnEnergy + extensionEnergy;
+function _clone(arr) {
+  var out = [];
+  for (var i = 0; i < arr.length; i++) out.push(arr[i]);
+  return out;
 }
 
-// Optional: tweak your debug line to show per-room when you have a spawner handy
-// if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-//   const anySpawn = Object.values(Game.spawns)[0];
-//   spawnLog.debug(`[Energy empire=${Calculate_Spawn_Resource()} | room=${anySpawn ? Calculate_Spawn_Resource(anySpawn) : 0}]`);
-// }
-
-
-// ---------- Body Selection ----------
-// Returns the largest body from CONFIGS[taskKey] that fits energyAvailable.
-function Generate_Body_From_Config(taskKey, energyAvailable) {
-  const list = CONFIGS[taskKey];
-  if (!list) {
-    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-      spawnLog.debug('No config for task:', taskKey);
-    }
-    return [];
-  }
-  for (const body of list) {
-    const cost = _.sum(body, part => BODYPART_COST[part]); // Screeps global
-    if (cost <= energyAvailable) {
-      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-        spawnLog.debug('Picked', taskKey, 'body:', '[' + body + ']', 'cost', cost, '(avail', energyAvailable + ')');
-      }
-      return body;
-    }
-  }
-  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-    spawnLog.debug('Insufficient energy for', taskKey, '(need at least', _.sum(_.last(list), p => BODYPART_COST[p]), ')');
-  }
-  return [];
+function _bodyCost(parts) {
+  var total = 0;
+  for (var i = 0; i < parts.length; i++) total += BODYPART_COST[parts[i]] || 0;
+  return total;
 }
 
-// Helper to normalize a requested task into a CONFIGS key.
-function normalizeTask(task) {
-  if (!task) return task;
-  const key = TASK_ALIAS[task] || TASK_ALIAS[task.toLowerCase()] || task;
-  return key;
+function Calculate_Spawn_Resource(target) {
+  if (target) {
+    var room = target.room || (Game.rooms[target] || target);
+    if (room && room.energyAvailable != null) {
+      return room.energyAvailable;
+    }
+  }
+  var total = 0;
+  for (var name in Game.spawns) {
+    if (!Game.spawns.hasOwnProperty(name)) continue;
+    var sp = Game.spawns[name];
+    total += sp.store[RESOURCE_ENERGY] || 0;
+  }
+  for (var id in Game.structures) {
+    if (!Game.structures.hasOwnProperty(id)) continue;
+    var st = Game.structures[id];
+    if (st.structureType === STRUCTURE_EXTENSION) {
+      total += st.store[RESOURCE_ENERGY] || 0;
+    }
+  }
+  return total;
 }
 
-// ---------- Role-specific wrappers (kept for API compatibility) ----------
-const Generate_Courier_Body          = (e) => Generate_Body_From_Config('courier', e);
-const Generate_BaseHarvest_Body      = (e) => Generate_Body_From_Config('baseharvest', e);
-const Generate_Builder_Body          = (e) => Generate_Body_From_Config('builder', e);
-const Generate_Repair_Body           = (e) => Generate_Body_From_Config('repair', e);
-const Generate_Queen_Body            = (e) => Generate_Body_From_Config('Queen', e);
-const Generate_Luna_Body             = (e) => Generate_Body_From_Config('luna', e);
-const Generate_Upgrader_Body         = (e) => Generate_Body_From_Config('upgrader', e);
-const Generate_Scout_Body            = (e) => Generate_Body_From_Config('Scout', e);
-const Generate_CombatMelee_Body      = (e) => Generate_Body_From_Config('CombatMelee', e);
-const Generate_CombatArcher_Body     = (e) => Generate_Body_From_Config('CombatArcher', e);
-const Generate_CombatMedic_Body      = (e) => Generate_Body_From_Config('CombatMedic', e);
-const Generate_Dismantler_Config_Body= (e) => Generate_Body_From_Config('Dismantler', e);
-const Generate_Claimer_Body          = (e) => Generate_Body_From_Config('Claimer', e);
-
-// ---------- Task → Body helper (kept for API compatibility) ----------
-function getBodyForTask(task, energyAvailable) {
-  const key = normalizeTask(task);
-  switch (key) {
-    case 'builder':        return Generate_Builder_Body(energyAvailable);
-    case 'repair':         return Generate_Repair_Body(energyAvailable);
-    case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable);
-    case 'upgrader':       return Generate_Upgrader_Body(energyAvailable);
-    case 'courier':        return Generate_Courier_Body(energyAvailable);
-    case 'luna':           return Generate_Luna_Body(energyAvailable);
-    case 'Scout':          return Generate_Scout_Body(energyAvailable);
-    case 'Queen':          return Generate_Queen_Body(energyAvailable);
-    case 'CombatArcher':   return Generate_CombatArcher_Body(energyAvailable);
-    case 'CombatMelee':    return Generate_CombatMelee_Body(energyAvailable);
-    case 'CombatMedic':    return Generate_CombatMedic_Body(energyAvailable);
-    case 'Dismantler':     return Generate_Dismantler_Config_Body(energyAvailable);
-    case 'Claimer':        return Generate_Claimer_Body(energyAvailable);
-    // Aliases
-    case 'trucker':        return Generate_Courier_Body(energyAvailable);
-    default:
-      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-        spawnLog.debug('Unknown task:', task);
-      }
-      return [];
+function _tiersFor(taskKey) {
+  if (CombatConfigs[taskKey]) {
+    return CombatConfigs[taskKey];
   }
+  if (WORKER_TIERS[taskKey]) return WORKER_TIERS[taskKey];
+  return null;
 }
 
-// ---------- Naming ----------
-function Generate_Creep_Name(role, max = 70) {
-  for (let i = 1; i <= max; i++) {
-    const name = `${role}_${i}`;
-    if (!Game.creeps[name]) return name;
+function Generate_Body_From_Config(taskKey, energy) {
+  var tiers = _tiersFor(taskKey);
+  if (!tiers || !tiers.length) return [];
+  if (CombatConfigs[taskKey]) {
+    return BeeToolbox.buildBodyByBudget(taskKey, energy, tiers);
   }
-  return null; // ran out of slots
-}
-
-// ---------- Spawn Helpers ----------
-// Spawns a role using a provided body-gen function; merges memory.role automatically.
-function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory = {}) {
-  const body = generateBodyFn(availableEnergy);
-  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
-
-  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-    spawnLog.debug('Attempt', roleName, 'body=[' + body + ']', 'cost=' + bodyCost, 'avail=' + availableEnergy);
-  }
-
-  if (!body.length || availableEnergy < bodyCost) {
-    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-      spawnLog.debug('Not enough energy for', roleName + '.', 'Need', bodyCost, 'have', availableEnergy + '.');
-    }
-    return false;
-  }
-
-  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
-    if (!EconomyManager.shouldSpawn(spawn.room, roleName, bodyCost)) {
-      return false;
-    }
-  }
-
-  const name = Generate_Creep_Name(roleName);
-  if (!name) return false;
-
-  memory.role = roleName; // ensure role is set
-  const result = spawn.spawnCreep(body, name, { memory });
-
-  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-    spawnLog.debug('Result', roleName + '/' + name + ':', result);
-  }
-  if (result === OK) {
-    if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
-      EconomyManager.recordSpawnCost(spawn.room, bodyCost);
-    }
-    if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
-      spawnLog.info('🟢 Spawned', roleName + ':', name);
-    }
-    return true;
-  }
-  return false;
-}
-
-// Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
-function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
-  const body = getBodyForTask(neededTask, availableEnergy);
-  const name = Generate_Creep_Name(neededTask || 'Worker');
-  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
-
-  if (!body || !body.length) {
-    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-      spawnLog.debug('No body available for task', neededTask, 'with energy', availableEnergy);
-    }
-    return false;
-  }
-
-  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
-    if (!EconomyManager.shouldSpawn(spawn.room, neededTask, bodyCost)) {
-      return false;
-    }
-  }
-
-  const memory = {
-    role: 'Worker_Bee',
-    task: neededTask,
-    bornTask: neededTask,
-    birthBody: body.slice(),
-  };
-  if (extraMemory) Object.assign(memory, extraMemory);
-  const res = spawn.spawnCreep(body, name, { memory });
-  if (res === OK) {
-    if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
-      EconomyManager.recordSpawnCost(spawn.room, bodyCost);
-    }
-    if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
-      spawnLog.info('🟢 Spawned Creep:', name, 'for task', neededTask);
-    }
-    return true;
-  }
-  return false;
-}
-
-
-const SQUAD_ORDER = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
-const MIN_THREAT_FOR_SQUAD = 5;
-const RECENT_THREAT_WINDOW = 50;
-const ROOM_INFO_STALE_TICKS = 150; // if we have no vision this long, treat threat intel as stale
-
-function normalizeSquadId(raw) {
-  if (!raw) return null;
-  if (raw.indexOf('Squad') === 0) {
-    return raw.replace(/^Squad_?/, '');
-  }
-  return raw;
-}
-
-function resolveSquadBinding(id) {
-  const squadFlagsMem = Memory.squadFlags || {};
-  const bindings = squadFlagsMem.bindings || {};
-  const names = ['Squad' + id, 'Squad_' + id, id];
-  let chosenName = null;
-  let targetRoom = null;
-  for (let i = 0; i < names.length; i++) {
-    const n = names[i];
-    if (bindings[n]) {
-      chosenName = n;
-      targetRoom = bindings[n];
+  var chosen = tiers[0].body;
+  for (var i = 0; i < tiers.length; i++) {
+    var cost = _bodyCost(tiers[i].body);
+    if (cost <= energy) {
+      chosen = tiers[i].body;
+    } else {
       break;
     }
   }
-  let flag = null;
-  if (chosenName) flag = Game.flags[chosenName] || null;
-  if (!flag) {
-    for (let j = 0; j < names.length; j++) {
-      const f = Game.flags[names[j]];
-      if (f) { flag = f; if (!chosenName) chosenName = f.name; if (!targetRoom && f.pos) targetRoom = f.pos.roomName; break; }
-    }
-  }
-  if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
-  const roomsMem = squadFlagsMem.rooms || {};
-  const roomInfo = targetRoom ? roomsMem[targetRoom] || null : null;
-  const threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
-  return { flagName: chosenName, flag: flag || null, targetRoom, roomInfo, threatScore };
+  return _clone(chosen);
 }
 
-function computeSquadContext() {
-  if (!global.__SQUAD_SPAWN_CTX__ || global.__SQUAD_SPAWN_CTX__.tick !== Game.time) {
-    const infoById = {};
-    const roomsNeeding = [];
-    const roleCountBySquad = {};
-    const activeById = {};
-
-    function noteRole(sid, role) {
-      if (!sid || !role) return;
-      if (!roleCountBySquad[sid]) roleCountBySquad[sid] = {};
-      roleCountBySquad[sid][role] = (roleCountBySquad[sid][role] || 0) + 1;
-      activeById[sid] = (activeById[sid] || 0) + 1;
-    }
-
-    for (let i = 0; i < SQUAD_ORDER.length; i++) {
-      const sid = SQUAD_ORDER[i];
-      infoById[sid] = resolveSquadBinding(sid);
-      const binding = infoById[sid];
-      const roomInfo = binding && binding.roomInfo;
-      const lastSeen = roomInfo && typeof roomInfo.lastSeen === 'number' ? roomInfo.lastSeen : 0;
-      const seenAgo = lastSeen ? (Game.time - lastSeen) : Infinity;
-      const seenRecently = seenAgo <= ROOM_INFO_STALE_TICKS;
-      const rawScore = binding ? (binding.threatScore | 0) : 0;
-      const threatScore = seenRecently ? rawScore : 0;
-      const lastThreatAt = roomInfo && typeof roomInfo.lastThreatAt === 'number' ? roomInfo.lastThreatAt : 0;
-      const recent = seenRecently && lastThreatAt ? (Game.time - lastThreatAt) <= RECENT_THREAT_WINDOW : false;
-
-      if (binding) {
-        binding.effectiveThreat = threatScore;
-        binding.seenRecently = seenRecently;
-        binding.isRecent = recent;
-        binding.lastSeen = lastSeen;
-      }
-
-      if (binding && binding.targetRoom && (threatScore >= MIN_THREAT_FOR_SQUAD || recent)) {
-        roomsNeeding.push({ id: sid, threat: Math.max(threatScore, recent ? MIN_THREAT_FOR_SQUAD : threatScore) });
-      }
-    }
-
-    const names = Object.keys(Game.creeps);
-    for (let idx = 0; idx < names.length; idx++) {
-      const c = Game.creeps[names[idx]];
-      if (!c || !c.my || !c.memory) continue;
-      const sid = normalizeSquadId(c.memory.squadId || c.memory.SquadId);
-      if (!sid) continue;
-      const role = c.memory.task || c.memory.role;
-      noteRole(sid, role);
-    }
-
-    for (const cname in Memory.creeps) {
-      if (!Memory.creeps.hasOwnProperty(cname)) continue;
-      if (Game.creeps[cname]) continue;
-      const mem = Memory.creeps[cname];
-      if (!mem) continue;
-      const sid = normalizeSquadId(mem.squadId || mem.SquadId);
-      if (!sid) continue;
-      const role = mem.task || mem.role;
-      noteRole(sid, role);
-    }
-
-    roomsNeeding.sort(function (a, b) { return b.threat - a.threat; });
-    const prioritized = roomsNeeding.map(function (e) { return e.id; });
-
-    const incompleteById = {};
-    if (Memory.squads) {
-      for (let i = 0; i < SQUAD_ORDER.length; i++) {
-        const sid = SQUAD_ORDER[i];
-        const squadMem = Memory.squads[sid];
-        if (!squadMem || !squadMem.desiredCounts) continue;
-        const desired = squadMem.desiredCounts;
-        const counts = roleCountBySquad[sid] || {};
-        let missing = false;
-        for (const role in desired) {
-          if (!desired.hasOwnProperty(role)) continue;
-          const have = counts[role] || 0;
-          if (have < (desired[role] | 0)) { missing = true; break; }
-        }
-        if (missing) incompleteById[sid] = true;
-      }
-    }
-
-    global.__SQUAD_SPAWN_CTX__ = {
-      tick: Game.time,
-      data: {
-        infoById,
-        roomsNeeding,
-        prioritized,
-        roleCountBySquad,
-        activeById,
-        incompleteById,
-      }
-    };
-  }
-  return global.__SQUAD_SPAWN_CTX__.data;
+function normalizeTask(task) {
+  if (!task) return task;
+  var lower = task.toLowerCase ? task.toLowerCase() : task;
+  return TASK_ALIAS[lower] || TASK_ALIAS[task] || task;
 }
 
-function determineSquadCap(room, ctx) {
-  const needed = ctx.roomsNeeding.length;
-  if (needed <= 0) return 0;
-
-  let stored = 0;
-  let avgNet = 0;
-  if (EconomyManager && typeof EconomyManager.getLedger === 'function') {
-    const ledger = EconomyManager.getLedger(room);
-    if (ledger) {
-      stored = ledger.currentStored || 0;
-      avgNet = ledger.averageNet || 0;
-    }
-  }
-
-  if (!stored) {
-    stored = room.energyAvailable || 0;
-    if (room.storage && room.storage.store) stored += room.storage.store[RESOURCE_ENERGY] || 0;
-    if (room.terminal && room.terminal.store) stored += room.terminal.store[RESOURCE_ENERGY] || 0;
-  }
-
-  let cap = Math.min(needed, SQUAD_ORDER.length);
-
-  if (stored < 2000 || avgNet < -200) {
-    cap = Math.min(cap, 1);
-  } else if (stored < 6000 || avgNet < 0) {
-    cap = Math.min(cap, 2);
-  }
-
-  if (cap <= 0 && needed > 0) cap = 1;
-  return cap;
+function getBodyForTask(task, energy) {
+  var key = normalizeTask(task);
+  return Generate_Body_From_Config(key, energy);
 }
 
-// --- REPLACE your existing Spawn_Squad with this hardened version ---
-function Spawn_Squad(spawn, squadId = 'Alpha') {
+function Generate_Creep_Name(role, max) {
+  var limit = max || 70;
+  for (var i = 1; i <= limit; i++) {
+    var name = role + '_' + i;
+    if (!Game.creeps[name]) return name;
+  }
+  return null;
+}
+
+function _shouldSpawn(spawn, roleName, cost) {
+  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+    return EconomyManager.shouldSpawn(spawn.room, roleName, cost);
+  }
+  return true;
+}
+
+function _recordCost(spawn, cost) {
+  if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
+    EconomyManager.recordSpawnCost(spawn.room, cost);
+  }
+}
+
+function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory) {
   if (!spawn || spawn.spawning) return false;
-
-  // Per-squad memory book-keeping to avoid rapid duplicate spawns
-  if (!Memory.squads) Memory.squads = {};
-  if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
-  const S = Memory.squads[squadId];
-  const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
-
-  const ctx = computeSquadContext();
-  const binding = ctx.infoById[squadId] || resolveSquadBinding(squadId);
-  if (!binding || !binding.targetRoom) {
-    S.targetRoom = null;
-    S.recall = true;
-    S.desiredCounts = {};
-    return false;
-  }
-
-  if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
-    const dist = Game.map.getRoomLinearDistance(spawn.room.name, binding.targetRoom, true);
-    if (typeof dist === 'number' && dist > 3) {
-      S.recall = true;
-      return false; // too far to be considered "nearby"
+  if (!BeeToolbox.ensureUniqueReservation('spawn:' + spawn.name, 1)) return false;
+  var body = generateBodyFn(availableEnergy);
+  if (!body || !body.length) return false;
+  var cost = _bodyCost(body);
+  if (availableEnergy < cost) return false;
+  if (!_shouldSpawn(spawn, roleName, cost)) return false;
+  var name = Generate_Creep_Name(roleName);
+  if (!name) return false;
+  var mem = memory || {};
+  mem.role = roleName;
+  var result = spawn.spawnCreep(body, name, { memory: mem });
+  if (result === OK) {
+    _recordCost(spawn, cost);
+    if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+      spawnLog.info('spawned', roleName, '→', name);
     }
+    return true;
   }
-
-  const squadCap = determineSquadCap(spawn.room, ctx);
-  const prioritizedIds = ctx.prioritized || [];
-  const allowedIds = prioritizedIds.slice(0, squadCap);
-  const threatScore = binding
-    ? (binding.effectiveThreat != null ? binding.effectiveThreat : (binding.threatScore | 0))
-    : 0;
-  const isRecentThreat = binding && binding.isRecent === true;
-  const seenRecently = binding && binding.seenRecently;
-  const shouldEngage = seenRecently && (threatScore >= MIN_THREAT_FOR_SQUAD || isRecentThreat) && allowedIds.indexOf(squadId) !== -1;
-
-  if (!shouldEngage) {
-    S.targetRoom = binding.targetRoom;
-    S.lastKnownScore = threatScore;
-    S.flagName = binding.flag ? binding.flag.name : (binding.flagName || null);
-    S.desiredCounts = {};
-    S.recall = true;
-    S.lastEvaluated = Game.time;
-    return false;
-  }
-
-  // Block later squads until earlier priorities are fully staffed
-  const orderIndex = SQUAD_ORDER.indexOf(squadId);
-  if (orderIndex > -1) {
-    for (let idx = 0; idx < orderIndex; idx++) {
-      const priorId = SQUAD_ORDER[idx];
-      if (allowedIds.indexOf(priorId) === -1) continue;
-      if (ctx.incompleteById[priorId]) {
-        return true; // signal blockage so other squads wait their turn
-      }
-    }
-  }
-
-  function desiredLayout(score) {
-    const threat = score | 0;
-    let melee = 1;
-    let medic = 1;
-    let archer = 0;
-
-    if (threat >= 12) melee = 2;
-    if (threat >= 18) medic = 2;
-    if (threat >= 10 && threat < 22) archer = 1;
-    else if (threat >= 22) archer = 2;
-
-    const order = [
-      { role: 'CombatMelee', need: melee },
-    ];
-    if (archer > 0) order.push({ role: 'CombatArcher', need: archer });
-    order.push({ role: 'CombatMedic', need: medic });
-    return order;
-  }
-
-  const layout = desiredLayout(threatScore);
-  if (!layout.length) {
-    S.recall = true;
-    return false;
-  }
-
-  S.recall = false;
-  S.targetRoom = binding.targetRoom;
-  S.lastKnownScore = threatScore;
-  S.flagName = binding.flag ? binding.flag.name : (binding.flagName || null);
-  S.desiredCounts = {};
-  for (let li = 0; li < layout.length; li++) {
-    S.desiredCounts[layout[li].role] = layout[li].need | 0;
-  }
-  S.homeRoom = spawn.room.name;
-  S.lastEvaluated = Game.time;
-
-  // Count squad members by role (includes spawning eggs)
-  function haveCount(taskName) {
-    // count live creeps
-    var live = _.sum(Game.creeps, function(c){
-      return c.my && c.memory && c.memory.squadId === squadId && c.memory.task === taskName ? 1 : 0;
-    });
-    // count "eggs" currently spawning (Memory is set immediately when you spawn)
-    var hatching = _.sum(Memory.creeps, function(mem, name){
-      if (!mem) return 0;
-      if (mem.squadId !== squadId) return 0;
-      if (mem.task !== taskName) return 0;
-      // Only count if not yet in Game.creeps (i.e., still spawning)
-      return Game.creeps[name] ? 0 : 1;
-    });
-    return live + hatching;
-  }
-
-  // Simple cooldown guard
-  if (S.lastSpawnAt && (Game.time - S.lastSpawnAt) < COOLDOWN_TICKS) {
-    return false;
-  }
-
-  const avail = Calculate_Spawn_Resource(spawn);
-
-  // Find the first underfilled slot (in order) and spawn exactly one
-  for (let i = 0; i < layout.length; i++) {
-    const plan = layout[i];
-    if ((plan.need | 0) <= 0) continue;
-    const have = haveCount(plan.role);
-
-    if (have < plan.need) {
-      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: binding.targetRoom, homeRoom: spawn.room.name };
-      const ok = Spawn_Worker_Bee(spawn, plan.role, avail, extraMemory);
-      if (ok) {
-        S.lastSpawnAt = Game.time;
-        S.lastSpawnRole = plan.role;
-        return true;
-      } else {
-        // Block other squads this tick so we finish this team first
-        return true;
-      }
-    }
-  }
-
-  // Nothing missing → ensure cooldown resets slowly (optional)
   return false;
 }
 
+function Spawn_Worker_Bee(spawn, task, energy, extraMemory) {
+  var mem = extraMemory || {};
+  mem.role = 'Worker_Bee';
+  mem.task = task;
+  mem.bornTask = task;
+  return Spawn_Creep_Role(spawn, 'Worker_Bee', function (avail) {
+    return getBodyForTask(task, avail);
+  }, energy, mem);
+}
 
+function _countSquadMembers(squadId, taskName) {
+  var count = 0;
+  for (var cname in Game.creeps) {
+    if (!Game.creeps.hasOwnProperty(cname)) continue;
+    var c = Game.creeps[cname];
+    if (!c || !c.my || !c.memory) continue;
+    if ((c.memory.squadId || 'Alpha') !== squadId) continue;
+    if ((c.memory.task || c.memory.role) !== taskName) continue;
+    count++;
+  }
+  for (var n in Memory.creeps) {
+    if (!Memory.creeps.hasOwnProperty(n)) continue;
+    if (Game.creeps[n]) continue;
+    var mem = Memory.creeps[n];
+    if (!mem) continue;
+    if ((mem.squadId || 'Alpha') !== squadId) continue;
+    if ((mem.task || mem.role) !== taskName) continue;
+    count++;
+  }
+  return count;
+}
 
-// ---------- Exports ----------
+function _planLayout(energy, threatType, threatScore) {
+  var layout = [];
+  var melee = 1;
+  var medic = 1;
+  var archer = 0;
+  if (threatType === 'FORTRESS') {
+    if (energy >= 2600) { melee = 2; medic = 2; archer = 1; }
+    else if (energy >= 1800) { melee = 2; medic = 1; archer = 1; }
+    else { melee = 1; medic = 1; archer = 1; }
+  } else {
+    if (threatScore >= 15 || energy >= 1600) { melee = 1; medic = 1; archer = 1; }
+  }
+  layout.push({ role: 'CombatMelee', need: melee });
+  if (archer > 0) layout.push({ role: 'CombatArcher', need: archer });
+  layout.push({ role: 'CombatMedic', need: medic });
+  layout.push({ role: 'Dismantler', need: threatType === 'FORTRESS' ? 1 : 0 });
+  return layout;
+}
+
+function Spawn_Squad(spawn, binding) {
+  if (!spawn || !binding) return false;
+  var squadId = binding.squadId || 'Alpha';
+  var threatScore = binding.threatScore || 0;
+  var threatType = binding.threatType || 'NPC';
+  var layout = _planLayout(Calculate_Spawn_Resource(spawn), threatType, threatScore);
+  var energy = Calculate_Spawn_Resource(spawn);
+  for (var i = 0; i < layout.length; i++) {
+    var need = layout[i];
+    if ((need.need || 0) <= 0) continue;
+    var have = _countSquadMembers(squadId, need.role);
+    if (have >= need.need) continue;
+    var mem = { squadId: squadId, task: need.role, homeRoom: spawn.room.name, targetRoom: binding.targetRoom, threatType: threatType };
+    var ok = Spawn_Creep_Role(spawn, need.role, function (avail) {
+      return getBodyForTask(need.role, avail);
+    }, energy, mem);
+    if (ok) return true;
+    return true;
+  }
+  return false;
+}
+
 module.exports = {
-  // utilities
-  Generate_Creep_Name,
-  Calculate_Spawn_Resource,
-  configurations: Object.entries(CONFIGS).map(([task, body]) => ({ task, body })), // preserve your original shape
-  Generate_Body_From_Config,
-  Spawn_Creep_Role,
-    // + new helper
-  Spawn_Squad,
-  // role generators (compat)
-  Generate_Courier_Body,
-  Generate_BaseHarvest_Body,
-  Generate_Upgrader_Body,
-  Generate_Builder_Body,
-  Generate_Repair_Body,
-  Generate_Queen_Body,
-  Generate_Luna_Body,
-  Generate_Scout_Body,
-  Generate_CombatMelee_Body,
-  Generate_CombatArcher_Body,
-  Generate_CombatMedic_Body,
-  Generate_Dismantler_Config_Body,
-  Generate_Claimer_Body,
-
-  // existing helpers
-  getBodyForTask,
-  Spawn_Worker_Bee,
+  Generate_Creep_Name: Generate_Creep_Name,
+  Calculate_Spawn_Resource: Calculate_Spawn_Resource,
+  configurations: configurations,
+  Generate_Body_From_Config: Generate_Body_From_Config,
+  Spawn_Creep_Role: Spawn_Creep_Role,
+  Spawn_Squad: Spawn_Squad,
+  Generate_Courier_Body: function (e) { return Generate_Body_From_Config('courier', e); },
+  Generate_BaseHarvest_Body: function (e) { return Generate_Body_From_Config('baseharvest', e); },
+  Generate_Upgrader_Body: function (e) { return Generate_Body_From_Config('upgrader', e); },
+  Generate_Builder_Body: function (e) { return Generate_Body_From_Config('builder', e); },
+  Generate_Repair_Body: function (e) { return Generate_Body_From_Config('repair', e); },
+  Generate_Queen_Body: function (e) { return Generate_Body_From_Config('Queen', e); },
+  Generate_Luna_Body: function (e) { return Generate_Body_From_Config('luna', e); },
+  Generate_Scout_Body: function (e) { return Generate_Body_From_Config('Scout', e); },
+  Generate_CombatMelee_Body: function (e) { return Generate_Body_From_Config('CombatMelee', e); },
+  Generate_CombatArcher_Body: function (e) { return Generate_Body_From_Config('CombatArcher', e); },
+  Generate_CombatMedic_Body: function (e) { return Generate_Body_From_Config('CombatMedic', e); },
+  Generate_Dismantler_Config_Body: function (e) { return Generate_Body_From_Config('Dismantler', e); },
+  Generate_Claimer_Body: function (e) { return Generate_Body_From_Config('Claimer', e); },
+  getBodyForTask: getBodyForTask,
+  Spawn_Worker_Bee: Spawn_Worker_Bee
 };
