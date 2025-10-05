@@ -1,5 +1,5 @@
-// SquadFlagManager.es5.js (intent-aware version)
-// Places squad intent flags (Rally/Assault) on threatened rooms and KEEPS them
+// SquadFlagManager.es5.js (sticky version)
+// Places SquadAlpha/Bravo/Charlie/Delta on threatened rooms and KEEPS them
 // until we SEE the room and confirm the threat is gone for a grace period.
 // Only considers rooms with your non-scout creeps. ES5-safe.
 
@@ -36,17 +36,11 @@ var SquadFlagManager = (function () {
     // last threat was seen within this window (helps with stagger & brief vision gaps).
     assignRecentWindow: 20,
 
-    // Squad IDs managed (priority order)
-    squads: ['Alpha', 'Bravo', 'Charlie', 'Delta'],
+    // Flag names managed (priority order)
+    names: ['SquadAlpha', 'SquadBravo', 'SquadCharlie', 'SquadDelta'],
 
-    // Hard cap (normally just squads.length)
+    // Hard cap (normally just names.length)
     maxFlags: 4
-  };
-
-  // Intent palette so Task.Squad can resolve behavior via Squad.Intents.
-  var INTENT_COLOR = {
-    ASSAULT: { color: COLOR_RED, secondary: COLOR_RED },
-    RALLY: { color: COLOR_WHITE, secondary: COLOR_BLUE }
   };
 
   // ------------- Memory bucket -------------
@@ -61,72 +55,10 @@ var SquadFlagManager = (function () {
   //   bindings: { 'SquadAlpha': 'W1N1', 'SquadBravo': 'W2N3', ... }
   // }
   function _mem() {
-    if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {}, version: 0 };
+    if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
     if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
     if (!Memory.squadFlags.bindings) Memory.squadFlags.bindings = {};
     return Memory.squadFlags;
-  }
-
-  // Legacy bindings used flag names; upgrade them to squad-focused objects once.
-  function _upgradeBindings(mem) {
-    if (!mem || mem.version >= 1) return;
-
-    var oldBindings = mem.bindings || {};
-    var converted = {};
-    var key;
-
-    for (key in oldBindings) {
-      if (!oldBindings.hasOwnProperty(key)) continue;
-      var value = oldBindings[key];
-      if (typeof value === 'string') {
-        var squadId = key;
-        if (squadId.indexOf('Squad') === 0) {
-          squadId = squadId.substring(5);
-        }
-        converted[squadId] = {
-          squadId: squadId,
-          room: value,
-          intent: 'ASSAULT',
-          flagName: null,
-          lastIntentAt: 0
-        };
-      } else if (value && value.room) {
-        if (!value.squadId) value.squadId = key;
-        converted[value.squadId] = value;
-      }
-    }
-
-    mem.bindings = converted;
-    mem.version = 1;
-  }
-
-  // Ensure we always have an object to track intent/room for a squad slot.
-  function _bindingFor(mem, squadId) {
-    var b = mem.bindings[squadId];
-    if (!b) {
-      b = {
-        squadId: squadId,
-        room: null,
-        intent: 'RALLY',
-        flagName: null,
-        lastIntentAt: 0
-      };
-      mem.bindings[squadId] = b;
-    }
-    return b;
-  }
-
-  // Decide the current intent: active threat -> ASSAULT, otherwise stage at RALLY.
-  function _intentFor(rec) {
-    if (!rec) return 'RALLY';
-    if ((rec.lastScore | 0) >= CFG.minThreatScore) return 'ASSAULT';
-    return 'RALLY';
-  }
-
-  // Prefix names for Task.Squad flag discovery (matches Squad.Intents mappings).
-  function _intentFlagName(intent, squadId) {
-    if (intent === 'ASSAULT') return 'Assault' + squadId;
-    return 'Rally' + squadId;
   }
 
   // ------------- Helpers -------------
@@ -207,24 +139,14 @@ var SquadFlagManager = (function () {
   }
 
   // Ensure a flag is at a position (idempotent, slight nudge if tile blocked)
-  // Maintain (or create) a flag at the desired anchor with the correct intent colors.
-  function _ensureFlagAt(name, pos, intent) {
-    var colors = INTENT_COLOR[intent] || INTENT_COLOR.RALLY;
+  function _ensureFlagAt(name, pos) {
     var f = Game.flags[name];
     if (f) {
-      if (colors && (f.color !== colors.color || f.secondaryColor !== colors.secondary)) {
-        try { f.setColor(colors.color, colors.secondary); } catch (e) {}
-      }
       if (f.pos.roomName === pos.roomName && f.pos.x === pos.x && f.pos.y === pos.y) return;
-      try {
-        f.setPosition(pos);
-        return;
-      } catch (errSet) {
-        try { f.remove(); } catch (errRem) {}
-      }
+      try { f.remove(); } catch (e) {}
     }
     var rc = pos.roomName && Game.rooms[pos.roomName]
-      ? Game.rooms[pos.roomName].createFlag(pos, name, colors.color, colors.secondary)
+      ? Game.rooms[pos.roomName].createFlag(pos, name)
       : ERR_INVALID_TARGET;
 
     if (rc !== OK && Game.rooms[pos.roomName]) {
@@ -235,7 +157,7 @@ var SquadFlagManager = (function () {
             if (Math.abs(dx) !== i && Math.abs(dy) !== i) continue;
             x = pos.x + dx; y = pos.y + dy;
             if (x < 1 || x > 48 || y < 1 || y > 48) continue;
-            if (Game.rooms[pos.roomName].createFlag(x, y, name, colors.color, colors.secondary) === OK) return;
+            if (Game.rooms[pos.roomName].createFlag(x, y, name) === OK) return;
           }
         }
       }
@@ -250,7 +172,6 @@ var SquadFlagManager = (function () {
   // ------------- Core logic -------------
   function ensureSquadFlags() {
     var mem = _mem();
-    _upgradeBindings(mem);
     var tick = Game.time | 0;
 
     // 1) Scan rooms where we have non-scout creeps (staggered)
@@ -279,42 +200,36 @@ var SquadFlagManager = (function () {
     }
 
     // 2) Maintain existing bindings (flags already assigned to rooms)
-    var nameIdx, squadId, binding;
+    var boundNames = {};
+    var nameIdx, fname, boundRoom;
 
-    for (nameIdx = 0; nameIdx < CFG.squads.length; nameIdx++) {
-      squadId = CFG.squads[nameIdx];
-      binding = _bindingFor(mem, squadId);
-      if (!binding.room) continue;
+    for (nameIdx = 0; nameIdx < CFG.names.length; nameIdx++) {
+      fname = CFG.names[nameIdx];
+      boundRoom = mem.bindings[fname];
 
-      var rrec = mem.rooms[binding.room];
+      if (!boundRoom) continue; // unbound, will assign later
+
+      boundNames[fname] = true;
+
+      var rrec = mem.rooms[boundRoom]; // may be undefined if we never scanned it yet
       var keep = true;
 
-      if (Game.rooms[binding.room]) {
+      if (Game.rooms[boundRoom]) {
+        // We have vision: drop only if threat has NOT been seen for > dropGrace
         var lastAt = rrec && rrec.lastThreatAt || 0;
         if ((tick - lastAt) > CFG.dropGrace) {
-          if (binding.flagName) { _removeFlag(binding.flagName); }
-          binding.room = null;
-          binding.flagName = null;
+          // Confirmed clear long enough -> remove binding + flag
+          _removeFlag(fname);
+          delete mem.bindings[fname];
           keep = false;
         }
       }
       if (keep) {
-        // Refresh intent based on current intel so squads switch between staging and pushing.
-        var intent = _intentFor(rrec);
-        if (binding.intent !== intent) {
-          binding.intent = intent;
-          binding.lastIntentAt = tick;
-          if (binding.flagName && binding.flagName !== _intentFlagName(intent, squadId)) {
-            _removeFlag(binding.flagName);
-            binding.flagName = null;
-          }
-        }
+        // Ensure the flag exists and is near the last known threat position (if we have it)
         var pos = (rrec && rrec.lastPos)
           ? new RoomPosition(rrec.lastPos.x, rrec.lastPos.y, rrec.lastPos.roomName)
-          : new RoomPosition(25, 25, binding.room);
-        var desiredName = _intentFlagName(binding.intent, squadId);
-        _ensureFlagAt(desiredName, pos, binding.intent);
-        binding.flagName = desiredName;
+          : new RoomPosition(25, 25, boundRoom);
+        _ensureFlagAt(fname, pos);
       }
     }
 
@@ -330,13 +245,7 @@ var SquadFlagManager = (function () {
         // Avoid double-binding: if already bound by any flag, skip
         var already = false;
         for (var n2 in mem.bindings) {
-          if (!mem.bindings.hasOwnProperty(n2)) continue;
-          var bindRec = mem.bindings[n2];
-          var boundRoom = null;
-          if (!bindRec) boundRoom = null;
-          else if (typeof bindRec === 'string') boundRoom = bindRec;
-          else boundRoom = bindRec.room;
-          if (boundRoom === rn) { already = true; break; }
+          if (mem.bindings[n2] === rn) { already = true; break; }
         }
         if (!already) {
           // Prefer rooms that were seen more recently; tie-break by lastThreatAt
@@ -352,53 +261,34 @@ var SquadFlagManager = (function () {
     });
 
     // Assign each unbound flag up to maxFlags
-    var maxN = Math.min(CFG.maxFlags, CFG.squads.length);
+    var maxN = Math.min(CFG.maxFlags, CFG.names.length);
+    var usedCount = 0;
     for (nameIdx = 0; nameIdx < maxN; nameIdx++) {
-      squadId = CFG.squads[nameIdx];
-      binding = _bindingFor(mem, squadId);
-      if (binding.room) continue;
+      fname = CFG.names[nameIdx];
+      if (mem.bindings[fname]) { usedCount++; continue; }
 
       var pick = candidates.shift();
       if (!pick) break;
 
-      binding.room = pick.rn;
-      binding.intent = 'ASSAULT';
-      binding.lastIntentAt = tick;
-      binding.flagName = null;
+      mem.bindings[fname] = pick.rn;
+      usedCount++;
 
-      // Spawn a fresh Assault flag so the squad knows to mobilize immediately.
+      // Drop it at last known position (or center as fallback)
       var rec3 = mem.rooms[pick.rn];
       var placePos = (rec3 && rec3.lastPos)
         ? new RoomPosition(rec3.lastPos.x, rec3.lastPos.y, rec3.lastPos.roomName)
         : new RoomPosition(25,25,pick.rn);
-      var desired = _intentFlagName('ASSAULT', squadId);
-      _ensureFlagAt(desired, placePos, 'ASSAULT');
-      binding.flagName = desired;
+      _ensureFlagAt(fname, placePos);
     }
 
     // 4) Cleanup: remove flags beyond managed list or unconfigured names
     // (Not strictly required if you only use these names.)
-    var allowed = {};
-    var legacy = {};
-    for (nameIdx = 0; nameIdx < CFG.squads.length; nameIdx++) {
-      squadId = CFG.squads[nameIdx];
-      allowed['Rally' + squadId] = true;
-      allowed['Assault' + squadId] = true;
-      legacy['Squad' + squadId] = true;
-    }
-
     for (var fName in Game.flags) {
       if (!Game.flags.hasOwnProperty(fName)) continue;
-      // Clear legacy static flags so new intent-aware markers do not conflict.
-      if (legacy[fName] && !allowed[fName]) { _removeFlag(fName); continue; }
-      if (!allowed[fName]) continue;
-      var stillBound = false;
-      for (nameIdx = 0; nameIdx < CFG.squads.length; nameIdx++) {
-        squadId = CFG.squads[nameIdx];
-        binding = mem.bindings[squadId];
-        if (binding && binding.flagName === fName) { stillBound = true; break; }
-      }
-      if (!stillBound) {
+      if (CFG.names.indexOf(fName) === -1) continue; // not ours
+      // If we somehow ended with a flag present without a binding, keep it only if we rebind it now.
+      if (!mem.bindings[fName]) {
+        // Unbound and not assigned -> remove to avoid drift
         _removeFlag(fName);
       }
     }
