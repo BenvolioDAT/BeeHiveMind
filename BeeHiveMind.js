@@ -274,6 +274,43 @@ var BeeHiveMind = {
       return desired;
     }
 
+    function hasCriticalDeficit(limits, counts) {
+      var CRITICAL_TASKS = ['baseharvest', 'courier', 'queen'];
+      for (var i = 0; i < CRITICAL_TASKS.length; i++) {
+        var taskName = CRITICAL_TASKS[i];
+        var limit = limits[taskName] | 0;
+        if (limit <= 0) continue;
+        var current = counts[taskName] | 0;
+        if (current < limit) return true;
+      }
+      return false;
+    }
+
+    function minimumCombatEnergy(room) {
+      if (!room) return 400;
+      var capacity = room.energyCapacityAvailable | 0;
+      if (capacity <= 0) return 400;
+      var scaled = Math.max(300, Math.floor(capacity * 0.6));
+      return Math.min(800, scaled);
+    }
+
+    function shouldDelayForFullStrength(task, count, room, energyAvailable) {
+      if (!room) return false;
+      if (task !== 'baseharvest' && task !== 'courier' && task !== 'queen') return false;
+      if ((count | 0) <= 0) return false;
+
+      var capacity = room.energyCapacityAvailable | 0;
+      if (capacity <= 0 || energyAvailable >= capacity) return false;
+
+      var preferredBody = spawnLogic.getBodyForTask(task, capacity);
+      if (!preferredBody || !preferredBody.length) return false;
+
+      var preferredCost = spawnLogic.calculateBodyCost(preferredBody);
+      if (!preferredCost || preferredCost > capacity) return false;
+
+      return energyAvailable < preferredCost;
+    }
+
     // snapshot of counts (we mutate this as we schedule spawns to avoid double-filling)
     var roleCounts = {};
     for (var k in C.roleCounts) if (C.roleCounts.hasOwnProperty(k)) roleCounts[k] = C.roleCounts[k];
@@ -288,14 +325,6 @@ var BeeHiveMind = {
     for (var s = 0; s < C.spawns.length; s++) {
       var spawner = C.spawns[s];
       if (!spawner || spawner.spawning) continue;
-        // --- Squad spawning (run before normal quotas) ---
-        // Only the first spawn attempts squad maintenance to avoid double-spawning.
-        if (typeof spawnLogic.Spawn_Squad === 'function') {
-          if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
-          if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
-          if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
-          if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
-        }
       var room = spawner.room;
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
       var workerTaskLimits = {
@@ -315,6 +344,7 @@ var BeeHiveMind = {
         Claimer:       2,
       };
 
+      var workerSpawned = false;
       // find first underfilled task and try to spawn it
       var task;
       for (task in workerTaskLimits) {
@@ -326,15 +356,34 @@ var BeeHiveMind = {
         }
         if (count < limit) {
           var spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
+          if (shouldDelayForFullStrength(task, count, room, spawnResource)) {
+            break;
+          }
           var didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
           if (didSpawn) {
             roleCounts[task] = count + 1; // reflect immediately so other spawns see the bump
             if (task === 'luna') {
               lunaCountsByHome[room.name] = (lunaCountsByHome[room.name] | 0) + 1;
             }
+            workerSpawned = true;
           }
           break; // only one attempt per spawn per tick, either way
         }
+      }
+      if (workerSpawned || spawner.spawning) continue;
+
+      // --- Squad spawning (after critical workforce is satisfied) ---
+      var hasCritical = hasCriticalDeficit(workerTaskLimits, roleCounts);
+      if (hasCritical) continue;
+
+      var availableEnergy = spawnLogic.Calculate_Spawn_Resource(spawner);
+      if (availableEnergy < minimumCombatEnergy(room)) continue;
+
+      if (typeof spawnLogic.Spawn_Squad === 'function') {
+        if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
+        if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
+        if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
+        if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
       }
     }
   },
