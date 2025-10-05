@@ -20,6 +20,7 @@ var RoomPlanner     = require('Planner.Room');
 var RoadPlanner     = require('Planner.Road');
 var TradeEnergy     = require('Trade.Energy');
 var TaskLuna        = require('Task.Luna');
+var EconomyManager  = require('EconomyManager');
 
 // Map role name -> run function (extend as you add roles)
 var creepRoles = {
@@ -149,6 +150,10 @@ var BeeHiveMind = {
 // lean room loop: planners only (no market spam)
   manageRoom: function (room, C) {
     if (!room) return;
+
+    if (EconomyManager && typeof EconomyManager.updateRoom === 'function') {
+      EconomyManager.updateRoom(room);
+    }
 
     if (RoomPlanner && RoomPlanner.ensureSites) RoomPlanner.ensureSites(room);
     if (RoadPlanner && RoadPlanner.ensureRemoteRoads) RoadPlanner.ensureRemoteRoads(room);
