@@ -17,6 +17,19 @@
 const Logger = require('core.logger');
 const LOG_LEVEL = Logger.LOG_LEVEL;
 const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
+const EconomyManager = require('EconomyManager');
+
+// --- Squad orchestration tunables ---
+const SQUAD_ORDER = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
+const SQUAD_INDEX = SQUAD_ORDER.reduce((map, id, idx) => {
+  map[id] = idx;
+  return map;
+}, {});
+const MIN_THREAT_SCORE_FOR_DEPLOY = 5;
+const HEAVY_THREAT_SCORE = 22;
+const RECENT_THREAT_MEMORY = 100;
+const MIN_BUFFER_SECOND_SQUAD = 3000;
+const MIN_BUFFER_THIRD_SQUAD = 8000;
 
 // ---------- Shorthand Body Builders ----------
 // B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
@@ -344,6 +357,12 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
     return false;
   }
 
+  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+    if (!EconomyManager.shouldSpawn(spawn.room, roleName, bodyCost)) {
+      return false;
+    }
+  }
+
   const name = Generate_Creep_Name(roleName);
   if (!name) return false;
 
@@ -354,6 +373,9 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
     spawnLog.debug('Result', roleName + '/' + name + ':', result);
   }
   if (result === OK) {
+    if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
+      EconomyManager.recordSpawnCost(spawn.room, bodyCost);
+    }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('🟢 Spawned', roleName + ':', name);
     }
@@ -363,9 +385,82 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
 }
 
 // Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
-function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
+function squadIndex(id) {
+  const idx = SQUAD_INDEX[id];
+  return typeof idx === 'number' ? idx : 0;
+}
+
+function countActiveSquads(excludeId) {
+  if (!Memory.squads) return 0;
+  let count = 0;
+  for (let i = 0; i < SQUAD_ORDER.length; i++) {
+    const id = SQUAD_ORDER[i];
+    if (excludeId && id === excludeId) continue;
+    const data = Memory.squads[id];
+    if (data && data.active) count++;
+  }
+  return count;
+}
+
+function priorSquadsComplete(id) {
+  const idx = squadIndex(id);
+  if (idx <= 0) return true;
+  if (!Memory.squads) return true;
+  for (let i = 0; i < idx; i++) {
+    const priorId = SQUAD_ORDER[i];
+    const data = Memory.squads[priorId];
+    if (data && data.active && data.isComplete === false) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function countActiveForRoom(roomName, excludeId) {
+  if (!roomName || !Memory.squads) return 0;
+  let count = 0;
+  for (let i = 0; i < SQUAD_ORDER.length; i++) {
+    const id = SQUAD_ORDER[i];
+    if (excludeId && id === excludeId) continue;
+    const data = Memory.squads[id];
+    if (data && data.active && data.targetRoom === roomName) count++;
+  }
+  return count;
+}
+
+function economySquadCap(room) {
+  const fullCap = SQUAD_ORDER.length;
+  if (!EconomyManager || typeof EconomyManager.getLedger !== 'function') return fullCap;
+  const ledger = EconomyManager.getLedger(room);
+  if (!ledger) return fullCap;
+  const stored = ledger.currentStored || 0;
+  const avgNet = ledger.averageNet || 0;
+  if (stored < MIN_BUFFER_SECOND_SQUAD || avgNet < 0) return 1;
+  if (stored < MIN_BUFFER_THIRD_SQUAD) return 2;
+  return fullCap;
+}
+
+function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory, options) {
+  options = options || {};
   const body = getBodyForTask(neededTask, availableEnergy);
   const name = Generate_Creep_Name(neededTask || 'Worker');
+  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
+
+  if (!body || !body.length) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('No body available for task', neededTask, 'with energy', availableEnergy);
+    }
+    return false;
+  }
+
+  const bypassEconomy = !!options.bypassEconomy;
+
+  if (!bypassEconomy && EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+    if (!EconomyManager.shouldSpawn(spawn.room, neededTask, bodyCost)) {
+      return false;
+    }
+  }
+
   const memory = {
     role: 'Worker_Bee',
     task: neededTask,
@@ -375,6 +470,9 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   if (extraMemory) Object.assign(memory, extraMemory);
   const res = spawn.spawnCreep(body, name, { memory });
   if (res === OK) {
+    if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
+      EconomyManager.recordSpawnCost(spawn.room, bodyCost);
+    }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('🟢 Spawned Creep:', name, 'for task', neededTask);
     }
@@ -386,13 +484,17 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
 
 // --- REPLACE your existing Spawn_Squad with this hardened version ---
 function Spawn_Squad(spawn, squadId = 'Alpha') {
-  if (!spawn || spawn.spawning) return false;
+  if (!spawn || spawn.spawning) return null;
 
-  // Per-squad memory book-keeping to avoid rapid duplicate spawns
   if (!Memory.squads) Memory.squads = {};
   if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
+
   const S = Memory.squads[squadId];
-  const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
+  const COOLDOWN_TICKS = 3;
+  const homeName = spawn.room && spawn.room.name;
+  if (homeName && !S.homeRoom) S.homeRoom = homeName;
+
+  const result = { spawned: false, defer: false };
 
   function desiredLayout(score) {
     const threat = score | 0;
@@ -421,73 +523,145 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
 
   let targetRoom = bindings[flagName] || bindings[altFlagName] || bindings[squadId] || null;
   if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
-  if (!targetRoom) return false;
 
-  if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
-    const dist = Game.map.getRoomLinearDistance(spawn.room.name, targetRoom, true);
-    if (typeof dist === 'number' && dist > 3) return false; // too far to be considered "nearby"
-  }
-
-  const roomInfo = (squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom]) || null;
+  const roomInfo = (squadFlagsMem.rooms && targetRoom) ? squadFlagsMem.rooms[targetRoom] : null;
   const threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
-  const layout = desiredLayout(threatScore);
-  if (!layout.length) return false;
+  const lastThreatAt = roomInfo && typeof roomInfo.lastThreatAt === 'number' ? roomInfo.lastThreatAt : 0;
+  const threatRecent = lastThreatAt && (Game.time - lastThreatAt) <= RECENT_THREAT_MEMORY;
 
-  S.targetRoom = targetRoom;
-  S.lastKnownScore = threatScore;
-  S.flagName = flag ? flag.name : null;
-  S.desiredCounts = {};
-  for (let li = 0; li < layout.length; li++) {
-    S.desiredCounts[layout[li].role] = layout[li].need | 0;
+  const squadRank = squadIndex(squadId);
+  const squadNumber = squadRank + 1;
+  const econCap = economySquadCap(spawn.room);
+  const activeOthers = countActiveSquads(squadId);
+  const activeInRoom = countActiveForRoom(targetRoom, squadId);
+
+  let distanceLimited = false;
+  if (Game.map && targetRoom && typeof Game.map.getRoomLinearDistance === 'function') {
+    const dist = Game.map.getRoomLinearDistance(spawn.room.name, targetRoom, true);
+    if (typeof dist === 'number' && dist > 3) {
+      targetRoom = null; // too far to stage from here
+      distanceLimited = true;
+    }
   }
+
+  const threatActive = targetRoom && (threatScore >= MIN_THREAT_SCORE_FOR_DEPLOY || threatRecent);
+  let desiredSquads = 0;
+  if (threatActive) {
+    desiredSquads = threatScore >= HEAVY_THREAT_SCORE ? 2 : 1;
+  }
+
+  let shouldActivate = !!targetRoom && desiredSquads > 0;
+  if (shouldActivate && !S.active && activeInRoom >= desiredSquads) shouldActivate = false;
+  if (shouldActivate && S.active && (activeInRoom + 1) > desiredSquads) shouldActivate = false;
+  if (shouldActivate && !S.active && (activeOthers + 1) > econCap) shouldActivate = false;
+  if (shouldActivate && S.active && (activeOthers + 1) > econCap && squadRank >= econCap) shouldActivate = false;
+
+  if (!shouldActivate) {
+    const hadTarget = !!targetRoom;
+    const reason = !hadTarget ? (distanceLimited ? 'distance' : 'no-target') : (desiredSquads === 0 ? 'no-threat' : 'economy');
+    S.active = false;
+    S.targetRoom = null;
+    S.desiredCounts = {};
+    S.isComplete = true;
+    S.pendingRole = null;
+    S.pendingNeed = 0;
+    S.flagName = null;
+    S.standDownReason = reason;
+    S.lastEvaluated = Game.time;
+    S.lastKnownScore = threatScore;
+    S.lastThreatAt = lastThreatAt;
+    return null;
+  }
+
+  S.active = true;
+  S.standDownReason = null;
+  S.targetRoom = targetRoom;
+  S.flagName = flag ? flag.name : null;
+  S.lastKnownScore = threatScore;
+  S.lastThreatAt = lastThreatAt;
   S.lastEvaluated = Game.time;
 
-  // Count squad members by role (includes spawning eggs)
+  const layout = desiredLayout(threatScore);
+  if (!layout.length) {
+    S.desiredCounts = {};
+    S.isComplete = true;
+    return null;
+  }
+
   function haveCount(taskName) {
-    // count live creeps
-    var live = _.sum(Game.creeps, function(c){
+    const live = _.sum(Game.creeps, function (c) {
       return c.my && c.memory && c.memory.squadId === squadId && c.memory.task === taskName ? 1 : 0;
     });
-    // count "eggs" currently spawning (Memory is set immediately when you spawn)
-    var hatching = _.sum(Memory.creeps, function(mem, name){
+    const hatching = _.sum(Memory.creeps, function (mem, name) {
       if (!mem) return 0;
       if (mem.squadId !== squadId) return 0;
       if (mem.task !== taskName) return 0;
-      // Only count if not yet in Game.creeps (i.e., still spawning)
       return Game.creeps[name] ? 0 : 1;
     });
     return live + hatching;
   }
 
-  // Simple cooldown guard
+  S.desiredCounts = {};
+  let allMet = true;
+  let missingPlan = null;
+  for (let li = 0; li < layout.length; li++) {
+    const plan = layout[li];
+    const need = plan.need | 0;
+    S.desiredCounts[plan.role] = need;
+    if (need <= 0) continue;
+    const have = haveCount(plan.role);
+    if (have < need) {
+      allMet = false;
+      if (!missingPlan) missingPlan = { role: plan.role, need: need };
+    }
+  }
+  S.isComplete = allMet;
+
+  if (!priorSquadsComplete(squadId)) {
+    result.defer = true;
+    return result;
+  }
+
+  if (allMet) {
+    S.pendingRole = null;
+    S.pendingNeed = 0;
+    return null;
+  }
+
+  if (!missingPlan) {
+    result.defer = true;
+    return result;
+  }
+
+  S.pendingRole = missingPlan.role;
+  S.pendingNeed = missingPlan.need;
+
   if (S.lastSpawnAt && (Game.time - S.lastSpawnAt) < COOLDOWN_TICKS) {
-    return false;
+    result.defer = true;
+    return result;
   }
 
   const avail = Calculate_Spawn_Resource(spawn);
-
-  // Find the first underfilled slot (in order) and spawn exactly one
-  for (let i = 0; i < layout.length; i++) {
-    const plan = layout[i];
-    if ((plan.need | 0) <= 0) continue;
-    const have = haveCount(plan.role);
-
-    if (have < plan.need) {
-      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: targetRoom };
-      const ok = Spawn_Worker_Bee(spawn, plan.role, avail, extraMemory);
-      if (ok) {
-        S.lastSpawnAt = Game.time;
-        S.lastSpawnRole = plan.role;
-        return true;
-      } else {
-        // If we failed due to energy, bail; don’t try other roles this tick
-        return false;
-      }
-    }
+  const bypassEconomy = squadNumber === 1;
+  const extraMemory = {
+    squadId: squadId,
+    role: missingPlan.role,
+    targetRoom: targetRoom,
+    home: homeName,
+    homeRoom: homeName,
+  };
+  const ok = Spawn_Worker_Bee(spawn, missingPlan.role, avail, extraMemory, { bypassEconomy });
+  if (ok) {
+    S.lastSpawnAt = Game.time;
+    S.lastSpawnRole = missingPlan.role;
+    S.isComplete = false;
+    S.pendingNeed = Math.max(0, (missingPlan.need | 0) - 1);
+    result.spawned = true;
+    return result;
   }
 
-  // Nothing missing → ensure cooldown resets slowly (optional)
-  return false;
+  result.defer = true;
+  return result;
 }
 
 
