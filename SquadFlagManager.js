@@ -3,7 +3,11 @@
 // until we SEE the room and confirm the threat is gone for a grace period.
 // Only considers rooms with your non-scout creeps. ES5-safe.
 
+
 'use strict';
+
+var SquadIntents = require('Squad.Intents.es5');
+var ThreatAnalyzer = require('Combat.ThreatAnalyzer.es5');
 
 var SquadFlagManager = (function () {
 
@@ -43,13 +47,18 @@ var SquadFlagManager = (function () {
     maxFlags: 4
   };
 
+  var DEFAULT_INTENT = SquadIntents && SquadIntents.DEFAULT_INTENT ? SquadIntents.DEFAULT_INTENT : 'RALLY';
+
   // ------------- Memory bucket -------------
   // Memory.squadFlags = {
   //   rooms: {
   //     [roomName]: {
   //       lastSeen: <tick we had vision>,
   //       lastThreatAt: <tick we saw threat>,
-  //       lastPos: {x,y,roomName} // last known threat anchor
+  //       lastScore: <cached threat score>,
+  //       lastPos: {x,y,roomName} // last known threat anchor,
+  //       lastIntent: <recommended squad intent>,
+  //       lastTags: <lightweight threat tags>
   //     }
   //   },
   //   bindings: { 'SquadAlpha': 'W1N1', 'SquadBravo': 'W2N3', ... }
@@ -62,6 +71,29 @@ var SquadFlagManager = (function () {
   }
 
   // ------------- Helpers -------------
+
+  // Look up the color pairing for a squad intent so we keep flags synchronized
+  function _colorsForIntent(intent) {
+    var fallback = { color: COLOR_WHITE, secondary: COLOR_BLUE };
+    if (!SquadIntents || !SquadIntents.FLAG_RULES) return fallback;
+    var rules = SquadIntents.FLAG_RULES;
+    for (var i = 0; i < rules.length; i++) {
+      if (rules[i].intent === intent) {
+        return { color: rules[i].color, secondary: rules[i].secondaryColor };
+      }
+    }
+    return fallback;
+  }
+
+  // Basic heuristics: breach when fortifications + towers present, kite for high micro threat, assault otherwise
+  function _recommendIntent(tags) {
+    if (!tags) return DEFAULT_INTENT;
+    if (tags.hasFortress) return 'BREACH';
+    if (tags.towers > 0 || tags.spawns > 0 || tags.invaderCore) return 'ASSAULT';
+    if (tags.healers > 0 || tags.ranged > 0) return 'KITE';
+    if (tags.hostiles > 0) return 'ASSAULT';
+    return DEFAULT_INTENT;
+  }
 
   // Rooms that currently have at least one of YOUR non-scout creeps
   function _roomsWithNonScoutCreeps() {
@@ -88,65 +120,128 @@ var SquadFlagManager = (function () {
 
   // Compute threat score + a representative position (anchor)
   function _scoreRoom(room) {
-    if (!room) return { score: 0, pos: null };
+    if (!room) {
+      return { score: 0, pos: null, tags: {}, intent: DEFAULT_INTENT };
+    }
 
     var s = 0;
     var pos = null;
+    // Build a light threat profile so we can color the flag with the right intent hint
+    var tags = {
+      hostiles: 0,
+      invaders: 0,
+      others: 0,
+      healers: 0,
+      ranged: 0,
+      melee: 0,
+      towers: 0,
+      spawns: 0,
+      invaderCore: false,
+      ramparts: 0,
+      walls: 0,
+      hasFortress: false,
+    };
 
     var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
     var i, invCount = 0, otherCount = 0;
-
     for (i = 0; i < hostiles.length; i++) {
       var h = hostiles[i];
+      if (!h) continue;
       var inv = (h.owner && h.owner.username === 'Invader');
       if (inv) invCount++;
       else if (CFG.includeNonInvaderHostiles) otherCount++;
+
+      // Count combat part types so we can distinguish kite vs push scenarios
+      var hasHeal = false;
+      var hasRanged = false;
+      var hasMelee = false;
+      var body = h.body || [];
+      for (var b = 0; b < body.length; b++) {
+        var part = body[b];
+        if (!part || part.hits <= 0) continue;
+        if (part.type === HEAL) hasHeal = true;
+        else if (part.type === RANGED_ATTACK) hasRanged = true;
+        else if (part.type === ATTACK) hasMelee = true;
+      }
+      if (hasHeal) tags.healers++;
+      if (hasRanged) tags.ranged++;
+      if (hasMelee) tags.melee++;
+
+      if (!pos) pos = h.pos;
     }
+    tags.hostiles = hostiles.length;
+    tags.invaders = invCount;
+    tags.others = otherCount;
 
     if (invCount > 0) {
       s += invCount * CFG.score.invaderCreep;
-      if (!pos) {
-        for (i = 0; i < hostiles.length; i++) {
-          if (hostiles[i].owner && hostiles[i].owner.username === 'Invader') { pos = hostiles[i].pos; break; }
-        }
-      }
     }
     if (otherCount > 0) {
       s += otherCount * CFG.score.otherHostileCreep;
-      if (!pos && hostiles.length) pos = hostiles[0].pos;
     }
 
-    var cores = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_INVADER_CORE; } }) || [];
+    var cores = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_INVADER_CORE; } }) || [];
     if (cores.length) {
       s += CFG.score.invaderCore;
+      tags.invaderCore = true;
       if (!pos) pos = cores[0].pos;
     }
 
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_TOWER; } }) || [];
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_TOWER; } }) || [];
+    tags.towers = towers.length;
     if (towers.length) {
       s += towers.length * CFG.score.hostileTower;
       if (!pos) pos = towers[0].pos;
     }
 
-    var spawns = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_SPAWN; } }) || [];
+    var spawns = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_SPAWN; } }) || [];
+    tags.spawns = spawns.length;
     if (spawns.length) {
       s += spawns.length * CFG.score.hostileSpawn;
       if (!pos) pos = spawns[0].pos;
     }
 
+    // Pull cached fortress data so we do not rescan ramparts/walls every tick
+    var intel = ThreatAnalyzer && ThreatAnalyzer.getIntel ? ThreatAnalyzer.getIntel(room.name) : null;
+    if (intel && intel.ramparts && intel.ramparts.length) tags.ramparts = intel.ramparts.length;
+    if (intel && intel.walls && intel.walls.length) tags.walls = intel.walls.length;
+    if (!intel) {
+      var ramps = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_RAMPART && !s.my; } }) || [];
+      var walls = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_WALL; } }) || [];
+      tags.ramparts = ramps.length;
+      tags.walls = walls.length;
+    }
+
+    tags.hasFortress = (tags.ramparts > 0) && (tags.towers > 0 || tags.spawns > 0);
+
+    var intent = _recommendIntent(tags);
+
     if (!pos) pos = new RoomPosition(25, 25, room.name);
-    return { score: s, pos: pos };
+    return { score: s, pos: pos, tags: tags, intent: intent };
   }
 
   // Ensure a flag is at a position (idempotent, slight nudge if tile blocked)
-  function _ensureFlagAt(name, pos) {
+  function _ensureFlagAt(name, pos, intent, tags) {
     var f = Game.flags[name];
+    var colors = _colorsForIntent(intent || DEFAULT_INTENT);
     if (f) {
+      // If intent changed we repaint the flag so Task.Squad picks up the new marching orders
+      if ((f.color !== colors.color) || (f.secondaryColor !== colors.secondary)) {
+        try { f.setColor(colors.color, colors.secondary); } catch (errSet) {} // Screeps docs: Flag.setColor(primary, secondary)
+      }
+      if (intent) {
+        f.memory = f.memory || {};
+        f.memory.intent = intent;
+      }
+      if (tags) {
+        f.memory = f.memory || {};
+        f.memory.lastTags = tags;
+      }
       if (f.pos.roomName === pos.roomName && f.pos.x === pos.x && f.pos.y === pos.y) return;
       try { f.remove(); } catch (e) {}
     }
     var rc = pos.roomName && Game.rooms[pos.roomName]
-      ? Game.rooms[pos.roomName].createFlag(pos, name)
+      ? Game.rooms[pos.roomName].createFlag(pos, name, colors.color, colors.secondary) // Screeps docs: Room.createFlag(pos, name, color, secondary)
       : ERR_INVALID_TARGET;
 
     if (rc !== OK && Game.rooms[pos.roomName]) {
@@ -157,9 +252,26 @@ var SquadFlagManager = (function () {
             if (Math.abs(dx) !== i && Math.abs(dy) !== i) continue;
             x = pos.x + dx; y = pos.y + dy;
             if (x < 1 || x > 48 || y < 1 || y > 48) continue;
-            if (Game.rooms[pos.roomName].createFlag(x, y, name) === OK) return;
+            if (Game.rooms[pos.roomName].createFlag(x, y, name, colors.color, colors.secondary) === OK) {
+              var placed = Game.flags[name];
+              if (placed) {
+                placed.memory = placed.memory || {};
+                if (intent) placed.memory.intent = intent;
+                if (tags) placed.memory.lastTags = tags;
+              }
+              return;
+            }
           }
         }
+      }
+    }
+
+    if (rc === OK) {
+      var nf = Game.flags[name];
+      if (nf) {
+        nf.memory = nf.memory || {};
+        if (intent) nf.memory.intent = intent;
+        if (tags) nf.memory.lastTags = tags;
       }
     }
   }
@@ -184,10 +296,26 @@ var SquadFlagManager = (function () {
       if ((tick + _roomHashMod(rn, 4)) % (CFG.scanModulo || 1)) continue; // stagger
 
       var info = _scoreRoom(room);
-      var rec = mem.rooms[rn] || (mem.rooms[rn] = { lastSeen: 0, lastThreatAt: 0, lastPos: null, lastScore: 0 });
+      var rec = mem.rooms[rn];
+      if (!rec) {
+        rec = {
+          lastSeen: 0,
+          lastThreatAt: 0,
+          lastPos: null,
+          lastScore: 0,
+          lastIntent: DEFAULT_INTENT,
+          lastIntentAt: 0,
+          lastTags: null,
+        };
+        mem.rooms[rn] = rec;
+      }
 
       rec.lastSeen = tick;
       rec.lastScore = info.score | 0;
+      // Cache the suggested intent so other modules (and future ticks without vision) can stay aligned
+      rec.lastIntent = info.intent || DEFAULT_INTENT;
+      rec.lastIntentAt = tick;
+      rec.lastTags = info.tags || null;
       if (info.score >= CFG.minThreatScore) {
         rec.lastThreatAt = tick;
         rec.lastPos = { x: info.pos.x, y: info.pos.y, roomName: info.pos.roomName };
@@ -229,7 +357,9 @@ var SquadFlagManager = (function () {
         var pos = (rrec && rrec.lastPos)
           ? new RoomPosition(rrec.lastPos.x, rrec.lastPos.y, rrec.lastPos.roomName)
           : new RoomPosition(25, 25, boundRoom);
-        _ensureFlagAt(fname, pos);
+        var intent = rrec && rrec.lastIntent ? rrec.lastIntent : DEFAULT_INTENT;
+        var tags = rrec && rrec.lastTags ? rrec.lastTags : null;
+        _ensureFlagAt(fname, pos, intent, tags);
       }
     }
 
@@ -278,7 +408,9 @@ var SquadFlagManager = (function () {
       var placePos = (rec3 && rec3.lastPos)
         ? new RoomPosition(rec3.lastPos.x, rec3.lastPos.y, rec3.lastPos.roomName)
         : new RoomPosition(25,25,pick.rn);
-      _ensureFlagAt(fname, placePos);
+      var intentNew = rec3 && rec3.lastIntent ? rec3.lastIntent : DEFAULT_INTENT;
+      var tagsNew = rec3 && rec3.lastTags ? rec3.lastTags : null;
+      _ensureFlagAt(fname, placePos, intentNew, tagsNew);
     }
 
     // 4) Cleanup: remove flags beyond managed list or unconfigured names
