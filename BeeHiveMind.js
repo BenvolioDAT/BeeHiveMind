@@ -291,28 +291,28 @@ var BeeHiveMind = {
         // --- Squad spawning (run before normal quotas) ---
         // Only the first spawn attempts squad maintenance to avoid double-spawning.
         if (typeof spawnLogic.Spawn_Squad === 'function') {
-          if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
-          if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
-          if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
-          if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
+         // if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
+          //if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
+          //if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
+          //if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
         }
       var room = spawner.room;
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
       var workerTaskLimits = {
-        baseharvest:   2,
+        baseharvest:   1,
         builder:       NeedBuilder(room),
-        upgrader:      1,
+        upgrader:      0,
         repair:        0,
         courier:       1,
-        queen:         2,
+        queen:         1,
         luna:          DetermineLunaQuota(room),
-        scout:         2,
+        scout:         0,
         CombatArcher:  0,
         CombatMelee:   0,
         CombatMedic:   0,
         Dismantler:    0,
         Trucker:       0,
-        Claimer:       2,
+        Claimer:       0,
       };
 
       // find first underfilled task and try to spawn it
