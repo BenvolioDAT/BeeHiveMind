@@ -26,7 +26,7 @@ var TaskCombatArcher = {
     // (0) Optional: wait for medic / rally
     if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
       var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
-      if (rf) this._moveSmart(creep, (rf.pos || rf), 0);
+      if (rf) BeeToolbox.combatStepToward(creep, (rf.pos || rf), 0, TaskSquad);
       return;
     }
 
@@ -34,8 +34,8 @@ var TaskCombatArcher = {
     var target = TaskSquad.sharedTarget(creep);
     if (!target) {
       var anc = TaskSquad.getAnchor(creep) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
-      if (anc) this._moveSmart(creep, anc, 0);
-      this._shootOpportunistic(creep); // still shoot if anything in range
+      if (anc) BeeToolbox.combatStepToward(creep, anc, 0, TaskSquad);
+      BeeToolbox.combatShootOpportunistic(creep); // still shoot if anything in range
       return;
     }
 
@@ -56,17 +56,22 @@ var TaskCombatArcher = {
     var dangerAdj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h){
       return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0;
     }}).length > 0;
-    var inTowerBad = this._inTowerDanger(creep.pos);
+    var inTowerBad = BeeToolbox.isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius);
 
     if (lowHp || dangerAdj || inTowerBad) {
-      this._flee(creep, this._threats(creep.room).concat([target]), 3);
-      this._shootOpportunistic(creep); // still try to shoot after stepping
+      BeeToolbox.combatFlee(
+        creep,
+        BeeToolbox.combatThreats(creep.room).concat([target]),
+        3,
+        { maxOps: CONFIG.maxOps, taskSquad: TaskSquad, roomCallback: BeeToolbox.roomCallback }
+      );
+      BeeToolbox.combatShootOpportunistic(creep); // still try to shoot after stepping
       A.movedAt = Game.time;
       return;
     }
 
     // (4) Combat first: fire before footwork
-    this._shootPrimary(creep, target);
+    BeeToolbox.combatShootPrimary(creep, target, { desiredRange: CONFIG.desiredRange, massAttackThreshold: 3 });
 
     // (5) Decide if we should move at all (anti-dance)
     var range = creep.pos.getRangeTo(target);
@@ -77,108 +82,30 @@ var TaskCombatArcher = {
     }
 
     // If target is NOT moving and we are within a comfy band, HOLD.
-    if (!tMoved && this._inHoldBand(range)) {
+    if (!tMoved && BeeToolbox.combatInHoldBand(range, CONFIG.desiredRange, CONFIG.holdBand)) {
       return; // statuesque elegance achieved 🗿
     }
 
     // If we have a good shot and no extra need to adjust, also prefer holding in the band
     var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
-    if (hostilesIn3 && hostilesIn3.length && this._inHoldBand(range)) {
+    if (hostilesIn3 && hostilesIn3.length && BeeToolbox.combatInHoldBand(range, CONFIG.desiredRange, CONFIG.holdBand)) {
       return;
     }
 
     // (6) Movement with hysteresis: only advance if too far; only kite if truly close
     var moved = false;
     if (range <= CONFIG.kiteIfAtOrBelow) {
-      this._flee(creep, [target], 3); moved = true;
+      if (BeeToolbox.combatFlee(creep, [target], 3, { maxOps: CONFIG.maxOps, taskSquad: TaskSquad, roomCallback: BeeToolbox.roomCallback })) {
+        moved = true;
+      }
     } else if (range > (CONFIG.desiredRange + CONFIG.approachSlack)) {
-      this._moveSmart(creep, target.pos, CONFIG.desiredRange); moved = true;
+      BeeToolbox.combatStepToward(creep, target.pos, CONFIG.desiredRange, TaskSquad); moved = true;
     } else {
       // in band but target moved: do nothing (don’t orbit/strafe)
     }
 
     if (moved) A.movedAt = Game.time;
   },
-
-  // ---- Shooting policies ----
-  _shootPrimary: function (creep, target) {
-    // Mass if many, else single; else opportunistic at any hostile in 3
-    var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
-    if (in3.length >= 3) { creep.rangedMassAttack(); return; }
-    var range = creep.pos.getRangeTo(target);
-    if (range <= 3) { creep.rangedAttack(target); return; }
-    this._shootOpportunistic(creep);
-  },
-
-  _shootOpportunistic: function (creep) {
-    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
-    if (closer && creep.pos.inRangeTo(closer, 3)) creep.rangedAttack(closer);
-  },
-
-  // ---- Helpers ----
-  _inHoldBand: function (range) {
-    // Hold if within [desiredRange, desiredRange + holdBand]
-    if (range < CONFIG.desiredRange) return false;
-    if (range > (CONFIG.desiredRange + CONFIG.holdBand)) return false;
-    return true;
-  },
-
-  _threats: function (room) {
-    if (!room) return [];
-    var creeps = room.find(FIND_HOSTILE_CREEPS, { filter: function (h){
-      return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0;
-    }});
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType===STRUCTURE_TOWER; } });
-    return creeps.concat(towers);
-  },
-
-  _inTowerDanger: function (pos) {
-    var room = Game.rooms[pos.roomName]; if (!room) return false;
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType===STRUCTURE_TOWER; } });
-    for (var i=0;i<towers.length;i++) if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
-    return false;
-  },
-
-  _flee: function (creep, fromThings, safeRange) {
-    var goals = (fromThings || []).map(function (t){ return { pos: t.pos, range: safeRange }; });
-    var res = PathFinder.search(creep.pos, goals, {
-      flee: true,
-      maxOps: CONFIG.maxOps,
-      roomCallback: function (roomName) {
-        if (BeeToolbox && BeeToolbox.roomCallback) return BeeToolbox.roomCallback(roomName);
-        var room = Game.rooms[roomName]; if (!room) return false;
-        var costs = new PathFinder.CostMatrix();
-        room.find(FIND_STRUCTURES).forEach(function (s){
-          if (s.structureType===STRUCTURE_ROAD) costs.set(s.pos.x,s.pos.y,1);
-          else if (s.structureType!==STRUCTURE_CONTAINER && (s.structureType!==STRUCTURE_RAMPART || !s.my)) costs.set(s.pos.x,s.pos.y,0xFF);
-        });
-        return costs;
-      }
-    });
-
-    if (res && res.path && res.path.length) {
-      var step = res.path[0];
-      if (step) {
-        var np = new RoomPosition(step.x, step.y, creep.pos.roomName);
-        if (!TaskSquad.tryFriendlySwap || !TaskSquad.tryFriendlySwap(creep, np)) {
-          creep.move(creep.pos.getDirectionTo(step));
-        }
-      }
-    } else {
-      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
-      if (bad) {
-        var dir = creep.pos.getDirectionTo(bad);
-        var zero = (dir - 1 + 8) % 8;
-        var back = ((zero + 4) % 8) + 1; // 1..8
-        creep.move(back);
-      }
-    }
-  },
-
-  _moveSmart: function (creep, targetPos, range) {
-    if (!targetPos) return;
-    TaskSquad.stepToward(creep, (targetPos.pos || targetPos), range);
-  }
 };
 
 module.exports = TaskCombatArcher;
