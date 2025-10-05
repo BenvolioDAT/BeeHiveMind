@@ -17,6 +17,124 @@
 const Logger = require('core.logger');
 const LOG_LEVEL = Logger.LOG_LEVEL;
 const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
+const EconomyManager = require('EconomyManager');
+
+const SQUAD_NAME_ORDER = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
+const HEAVY_THREAT_SCORE = 18;
+const MIN_THREAT_SCORE = 5;
+const STALE_THREAT_WINDOW = 150; // ticks after last threat sighting before we consider room calm
+
+function _squadIndex(id) {
+  if (!id) return -1;
+  const key = id.replace(/^Squad/i, '').replace(/^_/, '');
+  return SQUAD_NAME_ORDER.indexOf(key);
+}
+
+function _normalizeSquadId(id) {
+  if (!id) return null;
+  const idx = _squadIndex(id);
+  return idx === -1 ? null : SQUAD_NAME_ORDER[idx];
+}
+
+function _gatherThreats() {
+  const mem = Memory.squadFlags || {};
+  const bindings = mem.bindings || {};
+  const rooms = mem.rooms || {};
+  const threats = [];
+
+  for (const flagName in bindings) {
+    if (!bindings.hasOwnProperty(flagName)) continue;
+    const squadId = _normalizeSquadId(flagName);
+    if (!squadId) continue;
+    const roomName = bindings[flagName];
+    const info = rooms[roomName] || {};
+    const score = info.lastScore || 0;
+    const lastThreatAt = info.lastThreatAt || 0;
+    const recent = Game.time - lastThreatAt <= STALE_THREAT_WINDOW;
+    if (score >= MIN_THREAT_SCORE || recent) {
+      threats.push({
+        squadId,
+        flagName,
+        roomName,
+        score,
+        lastThreatAt,
+      });
+    }
+  }
+
+  threats.sort(function (a, b) {
+    if (b.score !== a.score) return b.score - a.score;
+    return (b.lastThreatAt || 0) - (a.lastThreatAt || 0);
+  });
+
+  return threats;
+}
+
+function _desiredSquadCount(threats) {
+  if (!threats || !threats.length) return 0;
+  const top = threats[0];
+  if (threats.length === 1) {
+    return top.score >= HEAVY_THREAT_SCORE ? 2 : 1;
+  }
+  // Multiple simultaneous threats → at least two if we have them
+  return Math.min(2, threats.length);
+}
+
+function _allowedSquadCount(room, threats) {
+  const desired = _desiredSquadCount(threats);
+  if (!EconomyManager || typeof EconomyManager.getLedger !== 'function') {
+    return desired;
+  }
+
+  const ledger = EconomyManager.getLedger(room);
+  if (!ledger) return desired;
+
+  const stored = ledger.currentStored || 0;
+  const avgNet = ledger.averageNet || 0;
+  const avgIncome = ledger.averageIncome || 0;
+  const avgSpend = ledger.averageSpend || 0;
+  const historyLength = ledger.history ? ledger.history.length : 0;
+
+  let allowed = desired;
+  if (historyLength >= 5) {
+    if (stored < 1500 || avgNet < 0) {
+      allowed = Math.min(allowed, 1);
+    }
+    if (stored < 600 && avgIncome <= avgSpend) {
+      allowed = Math.min(allowed, 1);
+    }
+    if (stored < 400 && avgNet <= 0) {
+      allowed = Math.max(allowed, threats.length ? 1 : 0);
+    }
+  }
+
+  return allowed;
+}
+
+function _currentSquadPlan(room) {
+  if (!global.__squadSpawnPlan || global.__squadSpawnPlan.tick !== Game.time) {
+    global.__squadSpawnPlan = { tick: Game.time, data: {} };
+  }
+
+  const cache = global.__squadSpawnPlan.data;
+  const roomName = room && room.name;
+  if (!roomName) return { allowed: 0, threats: [], bySquad: {}, desired: 0 };
+
+  if (cache[roomName]) return cache[roomName];
+
+  const threats = _gatherThreats();
+  const desired = _desiredSquadCount(threats);
+  const allowed = _allowedSquadCount(room, threats);
+  const bySquad = {};
+
+  for (let i = 0; i < threats.length; i++) {
+    bySquad[threats[i].squadId] = threats[i];
+  }
+
+  const plan = { allowed, threats, bySquad, desired, highestThreat: threats.length ? threats[0].score : 0 };
+  cache[roomName] = plan;
+  return plan;
+}
 
 // ---------- Shorthand Body Builders ----------
 // B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
@@ -344,6 +462,12 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
     return false;
   }
 
+  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+    if (!EconomyManager.shouldSpawn(spawn.room, roleName, bodyCost)) {
+      return false;
+    }
+  }
+
   const name = Generate_Creep_Name(roleName);
   if (!name) return false;
 
@@ -354,6 +478,9 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
     spawnLog.debug('Result', roleName + '/' + name + ':', result);
   }
   if (result === OK) {
+    if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
+      EconomyManager.recordSpawnCost(spawn.room, bodyCost);
+    }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('🟢 Spawned', roleName + ':', name);
     }
@@ -363,9 +490,25 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
 }
 
 // Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
-function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
+function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory, options) {
+  options = options || {};
   const body = getBodyForTask(neededTask, availableEnergy);
   const name = Generate_Creep_Name(neededTask || 'Worker');
+  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
+
+  if (!body || !body.length) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('No body available for task', neededTask, 'with energy', availableEnergy);
+    }
+    return false;
+  }
+
+  if (!options.force && EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+    if (!EconomyManager.shouldSpawn(spawn.room, neededTask, bodyCost)) {
+      return false;
+    }
+  }
+
   const memory = {
     role: 'Worker_Bee',
     task: neededTask,
@@ -375,6 +518,9 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   if (extraMemory) Object.assign(memory, extraMemory);
   const res = spawn.spawnCreep(body, name, { memory });
   if (res === OK) {
+    if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
+      EconomyManager.recordSpawnCost(spawn.room, bodyCost);
+    }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('🟢 Spawned Creep:', name, 'for task', neededTask);
     }
@@ -386,13 +532,16 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
 
 // --- REPLACE your existing Spawn_Squad with this hardened version ---
 function Spawn_Squad(spawn, squadId = 'Alpha') {
-  if (!spawn || spawn.spawning) return false;
+  if (!spawn || spawn.spawning) return { skipped: true };
 
-  // Per-squad memory book-keeping to avoid rapid duplicate spawns
+  const normalizedId = _normalizeSquadId(squadId) || 'Alpha';
+  const idx = _squadIndex(normalizedId);
+  if (idx === -1) return { skipped: true };
+
   if (!Memory.squads) Memory.squads = {};
-  if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
-  const S = Memory.squads[squadId];
-  const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
+  if (!Memory.squads[normalizedId]) Memory.squads[normalizedId] = {};
+  const S = Memory.squads[normalizedId];
+  const COOLDOWN_TICKS = 3;
 
   function desiredLayout(score) {
     const threat = score | 0;
@@ -401,7 +550,7 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
     let archer = 0;
 
     if (threat >= 12) melee = 2;
-    if (threat >= 18) medic = 2;
+    if (threat >= HEAVY_THREAT_SCORE) medic = 2;
     if (threat >= 10 && threat < 22) archer = 1;
     else if (threat >= 22) archer = 2;
 
@@ -413,81 +562,90 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
     return order;
   }
 
-  const flagName = 'Squad' + squadId;
-  const altFlagName = 'Squad_' + squadId;
-  const flag = Game.flags[flagName] || Game.flags[altFlagName] || Game.flags[squadId] || null;
-  const squadFlagsMem = Memory.squadFlags || {};
-  const bindings = squadFlagsMem.bindings || {};
-
-  let targetRoom = bindings[flagName] || bindings[altFlagName] || bindings[squadId] || null;
-  if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
-  if (!targetRoom) return false;
-
-  if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
-    const dist = Game.map.getRoomLinearDistance(spawn.room.name, targetRoom, true);
-    if (typeof dist === 'number' && dist > 3) return false; // too far to be considered "nearby"
+  const plan = _currentSquadPlan(spawn.room);
+  if (idx >= plan.allowed) {
+    return { skipped: true, limit: plan.allowed };
   }
 
-  const roomInfo = (squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom]) || null;
-  const threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
-  const layout = desiredLayout(threatScore);
-  if (!layout.length) return false;
+  const threatEntry = plan.bySquad[normalizedId];
+  if (!threatEntry) {
+    // No active threat assigned to this squad; mark desired counts as empty
+    S.desiredCounts = {};
+    S.targetRoom = null;
+    S.lastKnownScore = 0;
+    return { done: true };
+  }
 
-  S.targetRoom = targetRoom;
-  S.lastKnownScore = threatScore;
-  S.flagName = flag ? flag.name : null;
+  if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
+    const dist = Game.map.getRoomLinearDistance(spawn.room.name, threatEntry.roomName, true);
+    if (typeof dist === 'number' && dist > 3) {
+      return { skipped: true, reason: 'distance' };
+    }
+  }
+
+  const layout = desiredLayout(threatEntry.score);
+  if (!layout.length) {
+    return { done: true };
+  }
+
+  S.targetRoom = threatEntry.roomName;
+  S.lastKnownScore = threatEntry.score;
+  S.flagName = threatEntry.flagName || null;
   S.desiredCounts = {};
   for (let li = 0; li < layout.length; li++) {
     S.desiredCounts[layout[li].role] = layout[li].need | 0;
   }
   S.lastEvaluated = Game.time;
 
-  // Count squad members by role (includes spawning eggs)
   function haveCount(taskName) {
-    // count live creeps
-    var live = _.sum(Game.creeps, function(c){
-      return c.my && c.memory && c.memory.squadId === squadId && c.memory.task === taskName ? 1 : 0;
+    const live = _.sum(Game.creeps, function (c) {
+      return c.my && c.memory && c.memory.squadId === normalizedId && c.memory.task === taskName ? 1 : 0;
     });
-    // count "eggs" currently spawning (Memory is set immediately when you spawn)
-    var hatching = _.sum(Memory.creeps, function(mem, name){
+    const hatching = _.sum(Memory.creeps, function (mem, name) {
       if (!mem) return 0;
-      if (mem.squadId !== squadId) return 0;
+      if (mem.squadId !== normalizedId) return 0;
       if (mem.task !== taskName) return 0;
-      // Only count if not yet in Game.creeps (i.e., still spawning)
       return Game.creeps[name] ? 0 : 1;
     });
     return live + hatching;
   }
 
-  // Simple cooldown guard
   if (S.lastSpawnAt && (Game.time - S.lastSpawnAt) < COOLDOWN_TICKS) {
-    return false;
+    return { pending: true, needsMore: true };
   }
 
   const avail = Calculate_Spawn_Resource(spawn);
 
-  // Find the first underfilled slot (in order) and spawn exactly one
   for (let i = 0; i < layout.length; i++) {
-    const plan = layout[i];
-    if ((plan.need | 0) <= 0) continue;
-    const have = haveCount(plan.role);
+    const rolePlan = layout[i];
+    if ((rolePlan.need | 0) <= 0) continue;
+    const have = haveCount(rolePlan.role);
 
-    if (have < plan.need) {
-      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: targetRoom };
-      const ok = Spawn_Worker_Bee(spawn, plan.role, avail, extraMemory);
+    if (have < rolePlan.need) {
+      const previewBody = getBodyForTask(rolePlan.role, avail);
+      const previewCost = _.sum(previewBody, part => BODYPART_COST[part]) || 0;
+      if (!previewBody.length || avail < previewCost) {
+        return { pending: true, needsMore: true, reason: 'energy' };
+      }
+
+      const extraMemory = {
+        squadId: normalizedId,
+        role: rolePlan.role,
+        targetRoom: threatEntry.roomName,
+        homeRoom: spawn.room.name,
+      };
+      const force = plan.highestThreat >= HEAVY_THREAT_SCORE;
+      const ok = Spawn_Worker_Bee(spawn, rolePlan.role, avail, extraMemory, { force });
       if (ok) {
         S.lastSpawnAt = Game.time;
-        S.lastSpawnRole = plan.role;
-        return true;
-      } else {
-        // If we failed due to energy, bail; don’t try other roles this tick
-        return false;
+        S.lastSpawnRole = rolePlan.role;
+        return { spawned: true, needsMore: have + 1 < rolePlan.need };
       }
+      return { pending: true, needsMore: true };
     }
   }
 
-  // Nothing missing → ensure cooldown resets slowly (optional)
-  return false;
+  return { done: true };
 }
 
 
@@ -500,7 +658,6 @@ module.exports = {
   configurations: Object.entries(CONFIGS).map(([task, body]) => ({ task, body })), // preserve your original shape
   Generate_Body_From_Config,
   Spawn_Creep_Role,
-    // + new helper
   Spawn_Squad,
   // role generators (compat)
   Generate_Courier_Body,

@@ -20,6 +20,7 @@ var RoomPlanner     = require('Planner.Room');
 var RoadPlanner     = require('Planner.Road');
 var TradeEnergy     = require('Trade.Energy');
 var TaskLuna        = require('Task.Luna');
+var EconomyManager  = require('EconomyManager');
 
 // Map role name -> run function (extend as you add roles)
 var creepRoles = {
@@ -149,6 +150,10 @@ var BeeHiveMind = {
 // lean room loop: planners only (no market spam)
   manageRoom: function (room, C) {
     if (!room) return;
+
+    if (EconomyManager && typeof EconomyManager.updateRoom === 'function') {
+      EconomyManager.updateRoom(room);
+    }
 
     if (RoomPlanner && RoomPlanner.ensureSites) RoomPlanner.ensureSites(room);
     if (RoadPlanner && RoadPlanner.ensureRemoteRoads) RoadPlanner.ensureRemoteRoads(room);
@@ -291,10 +296,17 @@ var BeeHiveMind = {
         // --- Squad spawning (run before normal quotas) ---
         // Only the first spawn attempts squad maintenance to avoid double-spawning.
         if (typeof spawnLogic.Spawn_Squad === 'function') {
-          if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
-          if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
-          if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
-          if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
+          var alphaRes = spawnLogic.Spawn_Squad(spawner, 'Alpha');
+          if (alphaRes && (alphaRes.spawned || alphaRes.pending || alphaRes.needsMore)) continue;
+
+          var bravoRes = spawnLogic.Spawn_Squad(spawner, 'Bravo');
+          if (bravoRes && (bravoRes.spawned || bravoRes.pending || bravoRes.needsMore)) continue;
+
+          var charlieRes = spawnLogic.Spawn_Squad(spawner, 'Charlie');
+          if (charlieRes && (charlieRes.spawned || charlieRes.pending || charlieRes.needsMore)) continue;
+
+          var deltaRes = spawnLogic.Spawn_Squad(spawner, 'Delta');
+          if (deltaRes && (deltaRes.spawned || deltaRes.pending || deltaRes.needsMore)) continue;
         }
       var room = spawner.room;
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)

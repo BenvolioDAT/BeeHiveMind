@@ -23,6 +23,11 @@ var TaskCombatArcher = {
   run: function (creep) {
     if (creep.spawning) return;
 
+    if (TaskSquad.shouldRecycle && TaskSquad.shouldRecycle(creep)) {
+      TaskSquad.recycleToHome(creep);
+      return;
+    }
+
     // (0) Optional: wait for medic / rally
     if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
       var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
