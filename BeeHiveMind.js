@@ -1,3 +1,8 @@
+// CHANGES:
+// - Added builder task prioritization, spawn retry handling, and fallback behavior.
+// - Updated builder need calculations to count owned sites in home and remotes with logging support.
+// - Added helper utilities for spawn body costs and builder spawn diagnostics.
+
 "use strict";
 
 var CoreLogger = require('core.logger');
@@ -138,11 +143,33 @@ function prepareTickCaches() {
   cache.totalSites = totalSites;
 
   var remotesByHome = Object.create(null);
-  if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-    for (var idx = 0; idx < ownedRooms.length; idx++) {
-      var ownedRoom = ownedRooms[idx];
-      remotesByHome[ownedRoom.name] = RoadPlanner.getActiveRemoteRooms(ownedRoom) || [];
+  for (var idx = 0; idx < ownedRooms.length; idx++) {
+    var ownedRoom = ownedRooms[idx];
+    var remoteNames = [];
+    if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
+      var remoteResult = RoadPlanner.getActiveRemoteRooms(ownedRoom);
+      if (Array.isArray(remoteResult)) {
+        for (var ridx = 0; ridx < remoteResult.length; ridx++) {
+          var remoteName = remoteResult[ridx];
+          if (typeof remoteName === 'string') {
+            remoteNames.push(remoteName);
+          } else if (remoteName && typeof remoteName.roomName === 'string') {
+            remoteNames.push(remoteName.roomName);
+          }
+        }
+      } else if (remoteResult && typeof remoteResult === 'object') {
+        for (var key in remoteResult) {
+          if (!BeeToolbox.hasOwn(remoteResult, key)) continue;
+          var remoteValue = remoteResult[key];
+          if (typeof remoteValue === 'string') {
+            remoteNames.push(remoteValue);
+          } else if (remoteValue && typeof remoteValue.roomName === 'string') {
+            remoteNames.push(remoteValue.roomName);
+          }
+        }
+      }
     }
+    remotesByHome[ownedRoom.name] = remoteNames;
   }
   cache.remotesByHome = remotesByHome;
 
@@ -163,10 +190,10 @@ function defaultTaskForRole(role) {
 }
 
 /**
- * Determine whether a room needs an additional builder.
+ * Determine how many construction sites require builder attention.
  * @param {Room} room Owned room under evaluation.
  * @param {object} cache Per-tick cache data.
- * @returns {number} Desired builder count (0 or 1).
+ * @returns {number} Count of construction sites in home and remotes.
  * @sideeffects None.
  * @cpu O(remotes) to inspect cached lists.
  * @memory Temporary counters only.
@@ -180,7 +207,94 @@ function needBuilder(room, cache) {
     var remoteRoomName = remotes[i];
     remoteSites += cache.roomSiteCounts[remoteRoomName] || 0;
   }
-  return (localSites + remoteSites) > 0 ? 1 : 0;
+  return localSites + remoteSites;
+}
+
+/**
+ * Compute the total energy cost of a body definition.
+ * @param {string[]} body Array of body part constants.
+ * @returns {number} Aggregate energy cost for the body.
+ * @sideeffects None.
+ * @cpu O(parts) per evaluation.
+ * @memory None.
+ */
+function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
+  var cost = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    cost += BODYPART_COST[part] || 0;
+  }
+  return cost;
+}
+
+/**
+ * Fetch cached builder body configurations from spawn logic.
+ * @returns {Array} Array of builder body arrays.
+ * @sideeffects Caches the configuration on the global cache for reuse.
+ * @cpu Low; iterates exported configuration list once per reset.
+ * @memory Stores references to configuration arrays.
+ */
+function getBuilderBodyConfigs() {
+  if (GLOBAL_CACHE.builderBodyConfigs) {
+    return GLOBAL_CACHE.builderBodyConfigs;
+  }
+  var result = [];
+  if (spawnLogic && spawnLogic.configurations && typeof spawnLogic.configurations.length === 'number') {
+    for (var i = 0; i < spawnLogic.configurations.length; i++) {
+      var entry = spawnLogic.configurations[i];
+      if (!entry || entry.task !== 'builder') continue;
+      var bodies = entry.body;
+      if (Array.isArray(bodies)) {
+        for (var j = 0; j < bodies.length; j++) {
+          result.push(bodies[j]);
+        }
+      }
+      break;
+    }
+  }
+  GLOBAL_CACHE.builderBodyConfigs = result;
+  return result;
+}
+
+/**
+ * Determine the failure reason when a builder cannot be spawned.
+ * @param {number} available Current room energy available.
+ * @param {number} capacity Room energy capacity available.
+ * @returns {string} Diagnostic reason identifier.
+ * @sideeffects None.
+ * @cpu O(configs) for builder body inspection.
+ * @memory None.
+ */
+function determineBuilderFailureReason(available, capacity) {
+  var configs = getBuilderBodyConfigs();
+  if (!configs.length) {
+    return 'body';
+  }
+  var minCost = null;
+  var bestCapacityCost = 0;
+  var bestAvailableCost = 0;
+  for (var i = 0; i < configs.length; i++) {
+    var body = configs[i];
+    var cost = calculateBodyCost(body);
+    if (!cost) continue;
+    if (minCost === null || cost < minCost) {
+      minCost = cost;
+    }
+    if (cost <= capacity && cost > bestCapacityCost) {
+      bestCapacityCost = cost;
+    }
+    if (cost <= available && cost > bestAvailableCost) {
+      bestAvailableCost = cost;
+    }
+  }
+  if (!bestCapacityCost) {
+    return 'body';
+  }
+  if (!bestAvailableCost) {
+    return 'energy';
+  }
+  return 'fail';
 }
 
 /**
@@ -382,6 +496,23 @@ var BeeHiveMind = {
     var roleCounts = cloneCounts(cache.roleCounts);
     var lunaCountsByHome = cloneCounts(cache.lunaCountsByHome);
     var spawns = cache.spawns || [];
+    var builderFailLog = GLOBAL_CACHE.builderFailLog || (GLOBAL_CACHE.builderFailLog = Object.create(null));
+    var defaultTaskOrder = [
+      'queen',
+      'baseharvest',
+      'courier',
+      'upgrader',
+      'repair',
+      'luna',
+      'scout',
+      'CombatArcher',
+      'CombatMelee',
+      'CombatMedic',
+      'Dismantler',
+      'Trucker',
+      'Claimer',
+      'builder'
+    ];
 
     for (var i = 0; i < spawns.length; i++) {
       var spawner = spawns[i];
@@ -393,12 +524,37 @@ var BeeHiveMind = {
 
       var room = spawner.room;
       if (!room) continue;
+
+      var builderSites = needBuilder(room, cache);
+      var builderLimit = builderSites > 0 ? 1 : 0;
+
+      var taskOrder = defaultTaskOrder.slice();
+      if (builderLimit > 0) {
+        var builderIndex = -1;
+        var queenIndex = -1;
+        for (var orderIdx = 0; orderIdx < taskOrder.length; orderIdx++) {
+          if (taskOrder[orderIdx] === 'builder') {
+            builderIndex = orderIdx;
+          }
+          if (taskOrder[orderIdx] === 'queen') {
+            queenIndex = orderIdx;
+          }
+        }
+        if (builderIndex !== -1) {
+          taskOrder.splice(builderIndex, 1);
+          if (queenIndex === -1) {
+            queenIndex = 0;
+          }
+          taskOrder.splice(queenIndex + 1, 0, 'builder');
+        }
+      }
+
       var workerTaskLimits = {
         baseharvest: 2,
         courier: 1,
         queen: 1,
         upgrader: 1,
-        builder: needBuilder(room, cache),
+        builder: builderLimit,
         repair: 0,
         luna: determineLunaQuota(room, cache),
         scout: 1,
@@ -410,9 +566,17 @@ var BeeHiveMind = {
         Claimer: 0
       };
 
-      for (var task in workerTaskLimits) {
+      var spawnResource = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
+        ? spawnLogic.Calculate_Spawn_Resource(spawner)
+        : (room.energyAvailable || 0);
+      var spawnCapacity = room.energyCapacityAvailable || spawnResource;
+
+      for (var orderPos = 0; orderPos < taskOrder.length; orderPos++) {
+        var task = taskOrder[orderPos];
         if (!BeeToolbox.hasOwn(workerTaskLimits, task)) continue;
         var limit = workerTaskLimits[task] | 0;
+        if (!limit) continue;
+
         var current = (task === 'luna')
           ? (lunaCountsByHome[room.name] || 0)
           : (roleCounts[task] || 0);
@@ -420,19 +584,46 @@ var BeeHiveMind = {
           continue;
         }
 
-        if (!spawnLogic || typeof spawnLogic.Calculate_Spawn_Resource !== 'function' || typeof spawnLogic.Spawn_Worker_Bee !== 'function') {
+        if (!spawnLogic || typeof spawnLogic.Spawn_Worker_Bee !== 'function') {
           break;
         }
 
-        var spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
-        var didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+        var didSpawn = false;
+        if (task === 'builder') {
+          var builderBodyForCapacity = (typeof spawnLogic.Generate_Builder_Body === 'function')
+            ? spawnLogic.Generate_Builder_Body(spawnCapacity)
+            : [];
+          var builderBodyForAvailable = (typeof spawnLogic.Generate_Builder_Body === 'function')
+            ? spawnLogic.Generate_Builder_Body(spawnResource)
+            : [];
+          var capacityCost = calculateBodyCost(builderBodyForCapacity);
+          var availableCost = calculateBodyCost(builderBodyForAvailable);
+          if (capacityCost > 0 && spawnCapacity > spawnResource && capacityCost > spawnResource) {
+            didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnCapacity);
+          }
+          if (!didSpawn && availableCost > 0) {
+            didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+          }
+          if (!didSpawn && builderLimit > 0) {
+            var reason = determineBuilderFailureReason(spawnResource, spawnCapacity);
+            var lastLogTick = builderFailLog[room.name] || 0;
+            if ((Game.time - lastLogTick) >= 50) {
+              builderFailLog[room.name] = Game.time;
+              var message = '[' + (spawner.name || 'spawn') + '] builder wanted: sites=' + builderSites + ' ; not spawning: reason=' + reason + ' (energy ' + spawnResource + '/' + spawnCapacity + ')';
+              hiveLog.info(message);
+            }
+          }
+        } else {
+          didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+        }
+
         if (didSpawn) {
           roleCounts[task] = (roleCounts[task] || 0) + 1;
           if (task === 'luna') {
             lunaCountsByHome[room.name] = (lunaCountsByHome[room.name] || 0) + 1;
           }
+          break;
         }
-        break;
       }
     }
   },
