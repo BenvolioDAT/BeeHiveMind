@@ -326,13 +326,13 @@ var BeeHiveMind = {
         courier:       1,
         queen:         2,
         luna:          DetermineLunaQuota(room),
-        scout:         2,
+        scout:         1,
         CombatArcher:  0,
         CombatMelee:   0,
         CombatMedic:   0,
         Dismantler:    0,
         Trucker:       0,
-        Claimer:       2,
+        Claimer:       0,
       };
 
       // find first underfilled task and try to spawn it
