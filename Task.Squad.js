@@ -112,6 +112,59 @@ var TaskSquad = (function () {
     return Memory.squads[id];
   }
 
+  function _resolveHomeRoom(creep, squadMem) {
+    if (creep && creep.memory && creep.memory.homeRoom) return creep.memory.homeRoom;
+    if (squadMem && squadMem.homeRoom) return squadMem.homeRoom;
+    if (creep && creep.room && creep.room.controller && creep.room.controller.my) return creep.room.name;
+    var first = _.first(_.keys(Game.spawns));
+    return first && Game.spawns[first] ? Game.spawns[first].room.name : null;
+  }
+
+  function _pickRecycleSpawn(creep, squadMem) {
+    var homeRoom = _resolveHomeRoom(creep, squadMem);
+    var chosen = null;
+    if (homeRoom) {
+      for (var name in Game.spawns) {
+        if (!Game.spawns.hasOwnProperty(name)) continue;
+        var sp = Game.spawns[name];
+        if (sp && sp.my && sp.room && sp.room.name === homeRoom) { chosen = sp; break; }
+      }
+    }
+    if (!chosen && creep && creep.pos && creep.pos.findClosestByPath) {
+      chosen = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
+    }
+    if (!chosen && creep && creep.pos) {
+      chosen = creep.pos.findClosestByRange(FIND_MY_SPAWNS);
+    }
+    if (!chosen) {
+      for (var sName in Game.spawns) { if (Game.spawns.hasOwnProperty(sName)) { chosen = Game.spawns[sName]; if (chosen) break; } }
+    }
+    return chosen || null;
+  }
+
+  function shouldRecycle(creep) {
+    var sid = getSquadId(creep);
+    var S = _ensureSquadBucket(sid);
+    return !!(S && S.recall);
+  }
+
+  function recycle(creep) {
+    if (!creep) return false;
+    var sid = getSquadId(creep);
+    var S = _ensureSquadBucket(sid);
+    var spawn = _pickRecycleSpawn(creep, S);
+    if (!spawn) return false;
+    if (!creep.pos.isNearTo(spawn)) {
+      stepToward(creep, spawn.pos, 1);
+      return true;
+    }
+    if (spawn.spawning) {
+      return true; // wait until spawn is free
+    }
+    spawn.recycleCreep(creep);
+    return true;
+  }
+
   function _rallyFlagFor(id) {
     return Game.flags[RALLY_FLAG_PREFIX + id] ||
            Game.flags[RALLY_FLAG_PREFIX + '_' + id] ||
@@ -351,6 +404,8 @@ var TaskSquad = (function () {
   API.sharedTarget = sharedTarget;
   API.getAnchor    = getAnchor;
   API.stepToward   = stepToward;
+  API.shouldRecycle = shouldRecycle;
+  API.recycle = recycle;
 
   return API;
 })();

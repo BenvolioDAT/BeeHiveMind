@@ -412,6 +412,163 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
 }
 
 
+const SQUAD_ORDER = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
+const MIN_THREAT_FOR_SQUAD = 5;
+const RECENT_THREAT_WINDOW = 50;
+
+function normalizeSquadId(raw) {
+  if (!raw) return null;
+  if (raw.indexOf('Squad') === 0) {
+    return raw.replace(/^Squad_?/, '');
+  }
+  return raw;
+}
+
+function resolveSquadBinding(id) {
+  const squadFlagsMem = Memory.squadFlags || {};
+  const bindings = squadFlagsMem.bindings || {};
+  const names = ['Squad' + id, 'Squad_' + id, id];
+  let chosenName = null;
+  let targetRoom = null;
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i];
+    if (bindings[n]) {
+      chosenName = n;
+      targetRoom = bindings[n];
+      break;
+    }
+  }
+  let flag = null;
+  if (chosenName) flag = Game.flags[chosenName] || null;
+  if (!flag) {
+    for (let j = 0; j < names.length; j++) {
+      const f = Game.flags[names[j]];
+      if (f) { flag = f; if (!chosenName) chosenName = f.name; if (!targetRoom && f.pos) targetRoom = f.pos.roomName; break; }
+    }
+  }
+  if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
+  const roomsMem = squadFlagsMem.rooms || {};
+  const roomInfo = targetRoom ? roomsMem[targetRoom] || null : null;
+  const threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
+  return { flagName: chosenName, flag: flag || null, targetRoom, roomInfo, threatScore };
+}
+
+function computeSquadContext() {
+  if (!global.__SQUAD_SPAWN_CTX__ || global.__SQUAD_SPAWN_CTX__.tick !== Game.time) {
+    const infoById = {};
+    const roomsNeeding = [];
+    const roleCountBySquad = {};
+    const activeById = {};
+
+    function noteRole(sid, role) {
+      if (!sid || !role) return;
+      if (!roleCountBySquad[sid]) roleCountBySquad[sid] = {};
+      roleCountBySquad[sid][role] = (roleCountBySquad[sid][role] || 0) + 1;
+      activeById[sid] = (activeById[sid] || 0) + 1;
+    }
+
+    for (let i = 0; i < SQUAD_ORDER.length; i++) {
+      const sid = SQUAD_ORDER[i];
+      infoById[sid] = resolveSquadBinding(sid);
+      const binding = infoById[sid];
+      const threatScore = binding ? (binding.threatScore | 0) : 0;
+      const recent = binding && binding.roomInfo && typeof binding.roomInfo.lastThreatAt === 'number'
+        ? (Game.time - binding.roomInfo.lastThreatAt) <= RECENT_THREAT_WINDOW
+        : false;
+      if (binding && binding.targetRoom && (threatScore >= MIN_THREAT_FOR_SQUAD || recent)) {
+        roomsNeeding.push({ id: sid, threat: Math.max(threatScore, recent ? MIN_THREAT_FOR_SQUAD : threatScore) });
+      }
+    }
+
+    const names = Object.keys(Game.creeps);
+    for (let idx = 0; idx < names.length; idx++) {
+      const c = Game.creeps[names[idx]];
+      if (!c || !c.my || !c.memory) continue;
+      const sid = normalizeSquadId(c.memory.squadId || c.memory.SquadId);
+      if (!sid) continue;
+      const role = c.memory.task || c.memory.role;
+      noteRole(sid, role);
+    }
+
+    for (const cname in Memory.creeps) {
+      if (!Memory.creeps.hasOwnProperty(cname)) continue;
+      if (Game.creeps[cname]) continue;
+      const mem = Memory.creeps[cname];
+      if (!mem) continue;
+      const sid = normalizeSquadId(mem.squadId || mem.SquadId);
+      if (!sid) continue;
+      const role = mem.task || mem.role;
+      noteRole(sid, role);
+    }
+
+    roomsNeeding.sort(function (a, b) { return b.threat - a.threat; });
+    const prioritized = roomsNeeding.map(function (e) { return e.id; });
+
+    const incompleteById = {};
+    if (Memory.squads) {
+      for (let i = 0; i < SQUAD_ORDER.length; i++) {
+        const sid = SQUAD_ORDER[i];
+        const squadMem = Memory.squads[sid];
+        if (!squadMem || !squadMem.desiredCounts) continue;
+        const desired = squadMem.desiredCounts;
+        const counts = roleCountBySquad[sid] || {};
+        let missing = false;
+        for (const role in desired) {
+          if (!desired.hasOwnProperty(role)) continue;
+          const have = counts[role] || 0;
+          if (have < (desired[role] | 0)) { missing = true; break; }
+        }
+        if (missing) incompleteById[sid] = true;
+      }
+    }
+
+    global.__SQUAD_SPAWN_CTX__ = {
+      tick: Game.time,
+      data: {
+        infoById,
+        roomsNeeding,
+        prioritized,
+        roleCountBySquad,
+        activeById,
+        incompleteById,
+      }
+    };
+  }
+  return global.__SQUAD_SPAWN_CTX__.data;
+}
+
+function determineSquadCap(room, ctx) {
+  const needed = ctx.roomsNeeding.length;
+  if (needed <= 0) return 0;
+
+  let stored = 0;
+  let avgNet = 0;
+  if (EconomyManager && typeof EconomyManager.getLedger === 'function') {
+    const ledger = EconomyManager.getLedger(room);
+    if (ledger) {
+      stored = ledger.currentStored || 0;
+      avgNet = ledger.averageNet || 0;
+    }
+  }
+
+  if (!stored) {
+    stored = room.energyAvailable || 0;
+    if (room.storage && room.storage.store) stored += room.storage.store[RESOURCE_ENERGY] || 0;
+    if (room.terminal && room.terminal.store) stored += room.terminal.store[RESOURCE_ENERGY] || 0;
+  }
+
+  let cap = Math.min(needed, SQUAD_ORDER.length);
+
+  if (stored < 2000 || avgNet < -200) {
+    cap = Math.min(cap, 1);
+  } else if (stored < 6000 || avgNet < 0) {
+    cap = Math.min(cap, 2);
+  }
+
+  if (cap <= 0 && needed > 0) cap = 1;
+  return cap;
+}
+
 // --- REPLACE your existing Spawn_Squad with this hardened version ---
 function Spawn_Squad(spawn, squadId = 'Alpha') {
   if (!spawn || spawn.spawning) return false;
@@ -421,6 +578,54 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
   const S = Memory.squads[squadId];
   const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
+
+  const ctx = computeSquadContext();
+  const binding = ctx.infoById[squadId] || resolveSquadBinding(squadId);
+  if (!binding || !binding.targetRoom) {
+    S.targetRoom = null;
+    S.recall = true;
+    S.desiredCounts = {};
+    return false;
+  }
+
+  if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
+    const dist = Game.map.getRoomLinearDistance(spawn.room.name, binding.targetRoom, true);
+    if (typeof dist === 'number' && dist > 3) {
+      S.recall = true;
+      return false; // too far to be considered "nearby"
+    }
+  }
+
+  const squadCap = determineSquadCap(spawn.room, ctx);
+  const prioritizedIds = ctx.prioritized || [];
+  const allowedIds = prioritizedIds.slice(0, squadCap);
+  const threatScore = binding.threatScore | 0;
+  const isRecentThreat = binding && binding.roomInfo && typeof binding.roomInfo.lastThreatAt === 'number'
+    ? (Game.time - binding.roomInfo.lastThreatAt) <= RECENT_THREAT_WINDOW
+    : false;
+  const shouldEngage = (threatScore >= MIN_THREAT_FOR_SQUAD || isRecentThreat) && allowedIds.indexOf(squadId) !== -1;
+
+  if (!shouldEngage) {
+    S.targetRoom = binding.targetRoom;
+    S.lastKnownScore = threatScore;
+    S.flagName = binding.flag ? binding.flag.name : (binding.flagName || null);
+    S.desiredCounts = {};
+    S.recall = true;
+    S.lastEvaluated = Game.time;
+    return false;
+  }
+
+  // Block later squads until earlier priorities are fully staffed
+  const orderIndex = SQUAD_ORDER.indexOf(squadId);
+  if (orderIndex > -1) {
+    for (let idx = 0; idx < orderIndex; idx++) {
+      const priorId = SQUAD_ORDER[idx];
+      if (allowedIds.indexOf(priorId) === -1) continue;
+      if (ctx.incompleteById[priorId]) {
+        return true; // signal blockage so other squads wait their turn
+      }
+    }
+  }
 
   function desiredLayout(score) {
     const threat = score | 0;
@@ -441,33 +646,21 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
     return order;
   }
 
-  const flagName = 'Squad' + squadId;
-  const altFlagName = 'Squad_' + squadId;
-  const flag = Game.flags[flagName] || Game.flags[altFlagName] || Game.flags[squadId] || null;
-  const squadFlagsMem = Memory.squadFlags || {};
-  const bindings = squadFlagsMem.bindings || {};
-
-  let targetRoom = bindings[flagName] || bindings[altFlagName] || bindings[squadId] || null;
-  if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
-  if (!targetRoom) return false;
-
-  if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
-    const dist = Game.map.getRoomLinearDistance(spawn.room.name, targetRoom, true);
-    if (typeof dist === 'number' && dist > 3) return false; // too far to be considered "nearby"
+  const layout = desiredLayout(threatScore);
+  if (!layout.length) {
+    S.recall = true;
+    return false;
   }
 
-  const roomInfo = (squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom]) || null;
-  const threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
-  const layout = desiredLayout(threatScore);
-  if (!layout.length) return false;
-
-  S.targetRoom = targetRoom;
+  S.recall = false;
+  S.targetRoom = binding.targetRoom;
   S.lastKnownScore = threatScore;
-  S.flagName = flag ? flag.name : null;
+  S.flagName = binding.flag ? binding.flag.name : (binding.flagName || null);
   S.desiredCounts = {};
   for (let li = 0; li < layout.length; li++) {
     S.desiredCounts[layout[li].role] = layout[li].need | 0;
   }
+  S.homeRoom = spawn.room.name;
   S.lastEvaluated = Game.time;
 
   // Count squad members by role (includes spawning eggs)
@@ -501,15 +694,15 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
     const have = haveCount(plan.role);
 
     if (have < plan.need) {
-      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: targetRoom };
+      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: binding.targetRoom, homeRoom: spawn.room.name };
       const ok = Spawn_Worker_Bee(spawn, plan.role, avail, extraMemory);
       if (ok) {
         S.lastSpawnAt = Game.time;
         S.lastSpawnRole = plan.role;
         return true;
       } else {
-        // If we failed due to energy, bail; don’t try other roles this tick
-        return false;
+        // Block other squads this tick so we finish this team first
+        return true;
       }
     }
   }
