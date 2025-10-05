@@ -112,6 +112,14 @@ var TaskSquad = (function () {
     return Memory.squads[id];
   }
 
+  function _isSquadActive(S) {
+    if (!S) return true;
+    if (Object.prototype.hasOwnProperty.call(S, 'active')) {
+      return !!S.active;
+    }
+    return true;
+  }
+
   function _rallyFlagFor(id) {
     return Game.flags[RALLY_FLAG_PREFIX + id] ||
            Game.flags[RALLY_FLAG_PREFIX + '_' + id] ||
@@ -155,6 +163,11 @@ var TaskSquad = (function () {
     var id = getSquadId(creep);
     var S  = _ensureSquadBucket(id);
 
+    if (!_isSquadActive(S)) {
+      S.targetId = null;
+      return null;
+    }
+
     if (S.targetId && Game.time - (S.targetAt || 0) <= TARGET_STICKY_TICKS) {
       var keep = Game.getObjectById(S.targetId);
       if (_isGood(keep) && creep.pos.getRangeTo(keep) <= MAX_TARGET_RANGE) return keep;
@@ -186,6 +199,68 @@ var TaskSquad = (function () {
       S.anchorAt = Game.time; return leader.pos;
     }
     return null;
+  }
+
+  function _homeRoomName(creep) {
+    if (!creep) return null;
+    if (creep.memory) {
+      if (creep.memory.homeRoom) return creep.memory.homeRoom;
+      if (creep.memory.home) return creep.memory.home;
+      if (creep.memory._home) return creep.memory._home;
+    }
+    var sid = creep.memory && creep.memory.squadId;
+    if (sid) {
+      var S = _ensureSquadBucket(sid);
+      if (S && S.homeRoom) return S.homeRoom;
+    }
+    if (creep.memory && creep.memory.spawnRoom) return creep.memory.spawnRoom;
+    if (creep.room && creep.room.controller && creep.room.controller.my) return creep.room.name;
+    return null;
+  }
+
+  function _nearestHomeSpawn(creep) {
+    var home = _homeRoomName(creep);
+    var best = null;
+    if (home && Game.rooms[home]) {
+      var spawns = Game.rooms[home].find(FIND_MY_SPAWNS);
+      if (spawns && spawns.length) best = spawns[0];
+    }
+    if (!best) {
+      for (var sn in Game.spawns) {
+        if (!Game.spawns.hasOwnProperty(sn)) continue;
+        var sp = Game.spawns[sn];
+        if (!sp || !sp.my) continue;
+        if (!best || creep.pos.getRangeTo(sp) < creep.pos.getRangeTo(best)) best = sp;
+      }
+    }
+    return best;
+  }
+
+  function shouldStandDown(creep) {
+    if (!creep || (creep.memory && creep.memory.forceStay)) return false;
+    var sid = creep.memory && creep.memory.squadId;
+    if (!sid) return false;
+    var S = _ensureSquadBucket(sid);
+    return !_isSquadActive(S);
+  }
+
+  function recycle(creep) {
+    if (!creep) return false;
+    var spawn = _nearestHomeSpawn(creep);
+    if (!spawn) {
+      var home = _homeRoomName(creep);
+      if (home && creep.room && creep.room.name !== home) {
+        stepToward(creep, new RoomPosition(25, 25, home), 3);
+      }
+      return false;
+    }
+    if (creep.pos.getRangeTo(spawn) > 1) {
+      stepToward(creep, spawn.pos, 1);
+      creep.say('↩️');
+      return true;
+    }
+    spawn.recycleCreep(creep);
+    return true;
   }
 
   // -----------------------------
@@ -351,6 +426,8 @@ var TaskSquad = (function () {
   API.sharedTarget = sharedTarget;
   API.getAnchor    = getAnchor;
   API.stepToward   = stepToward;
+  API.shouldStandDown = shouldStandDown;
+  API.recycle     = recycle;
 
   return API;
 })();
