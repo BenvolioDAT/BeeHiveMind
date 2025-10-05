@@ -296,22 +296,10 @@ var BeeHiveMind = {
         // --- Squad spawning (run before normal quotas) ---
         // Only the first spawn attempts squad maintenance to avoid double-spawning.
         if (typeof spawnLogic.Spawn_Squad === 'function') {
-          var squadIds = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
-          var skipToNextSpawn = false;
-          var blockLowerSquads = false;
-          for (var qi = 0; qi < squadIds.length; qi++) {
-            if (blockLowerSquads) break;
-            var squadResult = spawnLogic.Spawn_Squad(spawner, squadIds[qi]);
-            if (!squadResult) continue;
-            if (squadResult.spawned || squadResult === true || squadResult === 'spawned') {
-              skipToNextSpawn = true;
-              break;
-            }
-            if (squadResult.defer) {
-              blockLowerSquads = true;
-            }
-          }
-          if (skipToNextSpawn) continue;
+          if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
+          if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
+          if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
+          if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
         }
       var room = spawner.room;
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)

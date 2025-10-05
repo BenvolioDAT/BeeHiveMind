@@ -29,11 +29,6 @@ var TaskCombatMedic = {
   run: function (creep) {
     if (creep.spawning) return;
 
-    if (TaskSquad && typeof TaskSquad.shouldStandDown === 'function' && TaskSquad.shouldStandDown(creep)) {
-      TaskSquad.recycle(creep);
-      return;
-    }
-
     var now = Game.time;
     var bodyHeal = creep.getActiveBodyparts(HEAL);
     var canHeal = bodyHeal > 0;

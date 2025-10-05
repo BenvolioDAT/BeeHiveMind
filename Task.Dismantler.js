@@ -2,16 +2,10 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('Task.Squad');
 
 var TaskDismantler = {
   run: function (creep) {
     if (creep.spawning) return;
-
-    if (TaskSquad && typeof TaskSquad.shouldStandDown === 'function' && TaskSquad.shouldStandDown(creep)) {
-      TaskSquad.recycle(creep);
-      return;
-    }
 
     // Optional “wait behind decoy” start delay
     if (creep.memory.delay && Game.time < creep.memory.delay) return;

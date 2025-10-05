@@ -21,11 +21,6 @@ var CombatMelee = {
   run: function (creep) {
     if (creep.spawning) return;
 
-    if (TaskSquad && typeof TaskSquad.shouldStandDown === 'function' && TaskSquad.shouldStandDown(creep)) {
-      TaskSquad.recycle(creep);
-      return;
-    }
-
     // (0) optional: wait for medic if you want tighter stack
     if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
       var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
