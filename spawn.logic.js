@@ -456,6 +456,7 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory, optio
   const bypassEconomy = !!options.bypassEconomy;
 
   if (!bypassEconomy && EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
     if (!EconomyManager.shouldSpawn(spawn.room, neededTask, bodyCost)) {
       return false;
     }
