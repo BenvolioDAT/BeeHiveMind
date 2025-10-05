@@ -294,23 +294,6 @@ var BeeHiveMind = {
       return Math.min(800, scaled);
     }
 
-    function shouldDelayForFullStrength(task, count, room, energyAvailable) {
-      if (!room) return false;
-      if (task !== 'baseharvest' && task !== 'courier' && task !== 'queen') return false;
-      if ((count | 0) <= 0) return false;
-
-      var capacity = room.energyCapacityAvailable | 0;
-      if (capacity <= 0 || energyAvailable >= capacity) return false;
-
-      var preferredBody = spawnLogic.getBodyForTask(task, capacity);
-      if (!preferredBody || !preferredBody.length) return false;
-
-      var preferredCost = spawnLogic.calculateBodyCost(preferredBody);
-      if (!preferredCost || preferredCost > capacity) return false;
-
-      return energyAvailable < preferredCost;
-    }
-
     // snapshot of counts (we mutate this as we schedule spawns to avoid double-filling)
     var roleCounts = {};
     for (var k in C.roleCounts) if (C.roleCounts.hasOwnProperty(k)) roleCounts[k] = C.roleCounts[k];
