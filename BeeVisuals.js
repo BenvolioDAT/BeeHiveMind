@@ -6,6 +6,7 @@
 var TaskBuilder = require('Task.Builder'); // guarded below
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
+var BeeHiveMind = require('BeeHiveMind');
 
 // Config: draw every tick, but keep caps to avoid runaway CPU
 var CFG = {
@@ -143,12 +144,8 @@ var BeeVisuals = {
     }
     var totalCount = workerBees.length | 0;
 
-    var maxTasks = {
-      baseharvest: 2, builder: 1, upgrader: 1, repair: 0,
-      courier: 1, luna: 8, scout: 1, queen: 2,
-      CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
-      Dismantler: 0, Claimer: 2
-    };
+    var maxTasks = BeeHiveMind.getWorkerTaskLimits(room);
+    if (!maxTasks) return; // limits are populated during spawn management; skip if unavailable
 
     var tasks = {};
     var k;
