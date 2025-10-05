@@ -156,20 +156,12 @@ function _qCache(room) {
   });
 
   // Source containers exist?
-  var sourceContainers = room.find(FIND_STRUCTURES, {
+  var hasSourceContainers = room.find(FIND_STRUCTURES, {
     filter: function (s) {
       return s.structureType === STRUCTURE_CONTAINER &&
              s.pos.findInRange(FIND_SOURCES, 1).length > 0;
     }
-  });
-  var hasSourceContainers = sourceContainers.length > 0;
-  var sourceContainersWithEnergy = [];
-  for (var i = 0; i < sourceContainers.length; i++) {
-    var sc = sourceContainers[i];
-    if (sc && sc.store && (sc.store.getUsedCapacity(RESOURCE_ENERGY) | 0) > 0) {
-      sourceContainersWithEnergy.push(sc);
-    }
-  }
+  }).length > 0;
 
   R = {
     spawn: sp,
@@ -180,8 +172,7 @@ function _qCache(room) {
     storageNeed: storageNeed,
     storageHasEnergy: storageHasEnergy,
     sideContainers: sideContainers,
-    hasSourceContainers: hasSourceContainers,
-    sourceContainersWithEnergy: sourceContainersWithEnergy
+    hasSourceContainers: hasSourceContainers
   };
   G.byRoom[room.name] = R;
   return R;
@@ -194,15 +185,6 @@ var TaskQueen = {
   run: function (creep) {
     var room = creep.room;
     var cache = _qCache(room);
-    var lastWithdrawId = creep.memory.qLastWithdrawId;
-    var lastWithdrawAt = creep.memory.qLastWithdrawAt | 0;
-
-    function canReturnTo(target) {
-      if (!target) return false;
-      if (!target.id) return true;
-      if (target.id !== lastWithdrawId) return true;
-      return (Game.time - lastWithdrawAt) >= 10;
-    }
 
     // BOOTSTRAP (before first source-containers exist)
     if (!cache.hasSourceContainers) {
@@ -251,9 +233,7 @@ var TaskQueen = {
     }
 
     // NORMAL PHASE
-    var storageEnergy = (room.storage && room.storage.store && (room.storage.store[RESOURCE_ENERGY] | 0)) || 0;
     var carrying = (creep.store.getUsedCapacity(RESOURCE_ENERGY) | 0) > 0;
-    var assistCourier = !!room.storage && !cache.storageHasEnergy && storageEnergy === 0;
 
     if (carrying) {
       var carryAmt = creep.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
@@ -285,9 +265,9 @@ var TaskQueen = {
         pickNeedy(cache.extSpawnNeed) ||
         pickNeedy(cache.towersNeed)   ||
         (cache.linkNearSpawn && _effectiveFree(cache.linkNearSpawn, RESOURCE_ENERGY) > 0 ? cache.linkNearSpawn : null) ||
-        ((cache.terminalNeed && canReturnTo(cache.terminalNeed) &&
+        ((cache.terminalNeed && cache.terminalNeed.id !== creep.memory.qLastWithdrawId &&
           _effectiveFree(cache.terminalNeed, RESOURCE_ENERGY) > 0) ? cache.terminalNeed : null) ||
-        ((cache.storageNeed  && canReturnTo(cache.storageNeed) &&
+        ((cache.storageNeed  && cache.storageNeed.id  !== creep.memory.qLastWithdrawId &&
           _effectiveFree(cache.storageNeed,  RESOURCE_ENERGY) > 0) ? cache.storageNeed  : null);
 
       if (target) {
@@ -315,27 +295,6 @@ var TaskQueen = {
       filter: function (r) { return r.resourceType === RESOURCE_ENERGY; }
     });
     if (drop2) { if (creep.pickup(drop2) === ERR_NOT_IN_RANGE) go(creep, drop2); return; }
-
-    if (assistCourier) {
-      var tomb = creep.pos.findClosestByRange(FIND_TOMBSTONES, {
-        filter: function (t) {
-          return t.store && (t.store.getUsedCapacity(RESOURCE_ENERGY) | 0) > 0;
-        }
-      });
-      if (tomb) { withdrawFrom(creep, tomb); return; }
-
-      var ruin = creep.pos.findClosestByRange(FIND_RUINS, {
-        filter: function (r) {
-          return r.store && (r.store.getUsedCapacity(RESOURCE_ENERGY) | 0) > 0;
-        }
-      });
-      if (ruin) { withdrawFrom(creep, ruin); return; }
-
-      if (cache.sourceContainersWithEnergy && cache.sourceContainersWithEnergy.length) {
-        var srcCont = _nearest(creep.pos, cache.sourceContainersWithEnergy);
-        if (srcCont) { withdrawFrom(creep, srcCont); return; }
-      }
-    }
 
     harvestFromClosest(creep);
   }
