@@ -25,6 +25,16 @@ try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 // NOTE: REMOTE_RADIUS is measured in "room hops" from the home room.
 var REMOTE_RADIUS = 4;
 
+// Hard ceiling on how many distinct remote rooms each home will actively work.
+// Set to 0 to disable and allow unlimited remotes (not recommended without
+// manual oversight).
+var MAX_REMOTE_ROOMS_PER_HOME = 4;
+
+// Total number of active Luna creeps per home (covers both sources in each
+// remote). This should generally be >= MAX_REMOTE_ROOMS_PER_HOME so that rooms
+// with two sources can be fully staffed.
+var MAX_ACTIVE_LUNA_PER_HOME = MAX_REMOTE_ROOMS_PER_HOME * 2;
+
 var MAX_PF_OPS    = 3000;
 var PLAIN_COST    = 2;
 var SWAMP_COST    = 10;
@@ -460,6 +470,28 @@ function getHomeName(creep){
   }
   creep.memory.home = creep.pos.roomName; return creep.memory.home;
 }
+
+function peekHomeName(creep){
+  if (!creep || !creep.memory) return null;
+  if (creep.memory.home) return creep.memory.home;
+  if (creep.memory._home) return creep.memory._home;
+  return null;
+}
+
+function countAssignedForagersForHome(homeName){
+  if (!homeName) return 0;
+  var count = 0;
+  for (var name in Game.creeps){
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (c.memory.task !== 'luna') continue;
+    var ch = peekHomeName(c);
+    if (ch !== homeName) continue;
+    if (c.memory.sourceId) count++;
+  }
+  return count;
+}
+
 function getAnchorPos(homeName){
   var r = Game.rooms[homeName];
   if (r){
@@ -807,9 +839,15 @@ var TaskLuna = {
     });
 
     // Sort by linear distance from home (cheap tiebreaker)
-    return filtered.sort(function(a,b){
+    filtered.sort(function(a,b){
       return Game.map.getRoomLinearDistance(homeName, a) - Game.map.getRoomLinearDistance(homeName, b);
     });
+
+    if (MAX_REMOTE_ROOMS_PER_HOME > 0 && filtered.length > MAX_REMOTE_ROOMS_PER_HOME){
+      filtered = filtered.slice(0, MAX_REMOTE_ROOMS_PER_HOME);
+    }
+
+    return filtered;
   },
 
   findRoomWithLeastForagers: function(rooms, homeName){
@@ -840,9 +878,18 @@ var TaskLuna = {
   },
 
   initializeAndAssign: function(creep){
+    var homeName = getHomeName(creep);
+    if (MAX_ACTIVE_LUNA_PER_HOME > 0){
+      var assigned = countAssignedForagersForHome(homeName);
+      if (!creep.memory.sourceId && assigned >= MAX_ACTIVE_LUNA_PER_HOME){
+        if (Game.time%25===0) console.log('⏳ Forager '+creep.name+' waiting: '+homeName+' reached Luna cap ('+MAX_ACTIVE_LUNA_PER_HOME+').');
+        return;
+      }
+    }
+
     var targetRooms = this.getNearbyRoomsWithSources(creep);
     if (!creep.memory.targetRoom || !creep.memory.sourceId){
-      var least = this.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
+      var least = this.findRoomWithLeastForagers(targetRooms, homeName);
       if (!least){ if (Game.time%25===0) console.log('🚫 Forager '+creep.name+' found no suitable room with unclaimed sources.'); return; }
       creep.memory.targetRoom = least;
 
@@ -961,5 +1008,7 @@ var TaskLuna = {
 };
 
 TaskLuna.MAX_LUNA_PER_SOURCE = MAX_LUNA_PER_SOURCE;
+TaskLuna.MAX_REMOTE_ROOMS_PER_HOME = MAX_REMOTE_ROOMS_PER_HOME;
+TaskLuna.MAX_ACTIVE_LUNA_PER_HOME = MAX_ACTIVE_LUNA_PER_HOME;
 
 module.exports = TaskLuna;

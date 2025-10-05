@@ -214,17 +214,29 @@ var BeeHiveMind = {
       var remotes = C.remotesByHome[room.name] || [];
       if (!remotes.length) return 0;
 
+      var remotesSorted = remotes.slice();
+      if (remotesSorted.length > 1) {
+        remotesSorted.sort(function (a, b) {
+          return Game.map.getRoomLinearDistance(room.name, a) - Game.map.getRoomLinearDistance(room.name, b);
+        });
+      }
+
+      var maxRoomsPerHome = (TaskLuna && TaskLuna.MAX_REMOTE_ROOMS_PER_HOME) || 0;
+      if (maxRoomsPerHome > 0 && remotesSorted.length > maxRoomsPerHome) {
+        remotesSorted = remotesSorted.slice(0, maxRoomsPerHome);
+      }
+
       var remoteSet = {};
-      for (var r = 0; r < remotes.length; r++) {
-        remoteSet[remotes[r]] = true;
+      for (var r = 0; r < remotesSorted.length; r++) {
+        remoteSet[remotesSorted[r]] = true;
       }
 
       var roomsMem = Memory.rooms || {};
       var totalSources = 0;
       var perSource = (TaskLuna && TaskLuna.MAX_LUNA_PER_SOURCE) || 1;
 
-      for (var j = 0; j < remotes.length; j++) {
-        var remoteName = remotes[j];
+      for (var j = 0; j < remotesSorted.length; j++) {
+        var remoteName = remotesSorted[j];
         var mem = roomsMem[remoteName] || {};
 
         if (mem.hostile) continue;
@@ -256,8 +268,8 @@ var BeeHiveMind = {
         totalSources += sourceCount;
       }
 
-      if (totalSources <= 0 && remotes.length > 0) {
-        totalSources = remotes.length;
+      if (totalSources <= 0 && remotesSorted.length > 0) {
+        totalSources = remotesSorted.length;
       }
 
       var assignments = Memory.remoteAssignments || {};
@@ -275,6 +287,9 @@ var BeeHiveMind = {
 
       var desired = totalSources * perSource;
       if (active > desired) desired = active;
+
+      var maxActive = (TaskLuna && TaskLuna.MAX_ACTIVE_LUNA_PER_HOME) || 0;
+      if (maxActive > 0 && desired > maxActive) desired = maxActive;
 
       return desired;
     }
