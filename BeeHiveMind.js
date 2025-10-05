@@ -206,7 +206,7 @@ var BeeHiveMind = {
         var rn = list[i];
         remote += (C.roomSiteCounts[rn] | 0);
       }
-      return (local + remote) > 0 ? 2 : 0;
+      return (local + remote) > 0 ? 1 : 0;
     }
 
     function DetermineLunaQuota(room) {
