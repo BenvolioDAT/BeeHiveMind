@@ -299,12 +299,12 @@ var BeeHiveMind = {
       var room = spawner.room;
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
       var workerTaskLimits = {
-        baseharvest:   1,
-        builder:       NeedBuilder(room),
-        upgrader:      0,
-        repair:        0,
+        baseharvest:   2,
         courier:       1,
         queen:         1,
+        upgrader:      1,
+        builder:       NeedBuilder(room),        
+        repair:        0,
         luna:          DetermineLunaQuota(room),
         scout:         0,
         CombatArcher:  0,
