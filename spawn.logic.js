@@ -97,8 +97,11 @@ const CONFIGS = {
     B(2, 2, 4)     // 400 energy, 8 parts, 100 carry
   ],
   upgrader: [
-    //B(4,1,5), 
+    // Larger bodies listed first so higher RCLs still prefer beefier creeps
     B(2,1,3),
+    B(1,1,3),
+    B(1,1,2),
+    B(1,1,1),
   ],
   repair: [
     B(5,2,7), 
