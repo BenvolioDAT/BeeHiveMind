@@ -326,9 +326,6 @@ var BeeHiveMind = {
         }
         if (count < limit) {
           var spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
-          if (shouldDelayForFullStrength(task, count, room, spawnResource)) {
-            break;
-          }
           var didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
           if (didSpawn) {
             roleCounts[task] = count + 1; // reflect immediately so other spawns see the bump
