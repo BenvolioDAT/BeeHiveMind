@@ -17,6 +17,7 @@
 const Logger = require('core.logger');
 const LOG_LEVEL = Logger.LOG_LEVEL;
 const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
+const EconomyManager = require('EconomyManager');
 
 // ---------- Shorthand Body Builders ----------
 // B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
@@ -344,6 +345,12 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
     return false;
   }
 
+  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+    if (!EconomyManager.shouldSpawn(spawn.room, roleName, bodyCost)) {
+      return false;
+    }
+  }
+
   const name = Generate_Creep_Name(roleName);
   if (!name) return false;
 
@@ -354,6 +361,9 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
     spawnLog.debug('Result', roleName + '/' + name + ':', result);
   }
   if (result === OK) {
+    if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
+      EconomyManager.recordSpawnCost(spawn.room, bodyCost);
+    }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('🟢 Spawned', roleName + ':', name);
     }
@@ -366,6 +376,21 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
 function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   const body = getBodyForTask(neededTask, availableEnergy);
   const name = Generate_Creep_Name(neededTask || 'Worker');
+  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
+
+  if (!body || !body.length) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('No body available for task', neededTask, 'with energy', availableEnergy);
+    }
+    return false;
+  }
+
+  if (EconomyManager && typeof EconomyManager.shouldSpawn === 'function') {
+    if (!EconomyManager.shouldSpawn(spawn.room, neededTask, bodyCost)) {
+      return false;
+    }
+  }
+
   const memory = {
     role: 'Worker_Bee',
     task: neededTask,
@@ -375,6 +400,9 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   if (extraMemory) Object.assign(memory, extraMemory);
   const res = spawn.spawnCreep(body, name, { memory });
   if (res === OK) {
+    if (EconomyManager && typeof EconomyManager.recordSpawnCost === 'function') {
+      EconomyManager.recordSpawnCost(spawn.room, bodyCost);
+    }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('🟢 Spawned Creep:', name, 'for task', neededTask);
     }
