@@ -140,10 +140,10 @@ const CONFIGS = {
     //B(5,2,7), 
     //B(4,2,6),
     B(3,6,5), 
-    B(3,5,4), 
-    B(3,4,3), 
-    B(3,3,3), 
-    B(3,2,2,), 
+    B(3,5,4),
+    B(3,4,3),
+    B(3,3,3),
+    B(3,2,2),
     B(2,2,2), 
     B(1,1,1),
   ],
@@ -246,6 +246,16 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 
 // ---------- Body Selection ----------
 // Returns the largest body from CONFIGS[taskKey] that fits energyAvailable.
+function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    total += BODYPART_COST[part] || 0;
+  }
+  return total;
+}
+
 function Generate_Body_From_Config(taskKey, energyAvailable) {
   const list = CONFIGS[taskKey];
   if (!list) {
@@ -255,7 +265,7 @@ function Generate_Body_From_Config(taskKey, energyAvailable) {
     return [];
   }
   for (const body of list) {
-    const cost = _.sum(body, part => BODYPART_COST[part]); // Screeps global
+    const cost = calculateBodyCost(body);
     if (cost <= energyAvailable) {
       if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
         spawnLog.debug('Picked', taskKey, 'body:', '[' + body + ']', 'cost', cost, '(avail', energyAvailable + ')');
@@ -264,9 +274,28 @@ function Generate_Body_From_Config(taskKey, energyAvailable) {
     }
   }
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-    spawnLog.debug('Insufficient energy for', taskKey, '(need at least', _.sum(_.last(list), p => BODYPART_COST[p]), ')');
+    spawnLog.debug('Insufficient energy for', taskKey, '(need at least', calculateBodyCost(list[list.length - 1] || []), ')');
   }
   return [];
+}
+
+function getMaxConfigCost(task, energyBudget) {
+  const key = normalizeTask(task);
+  const list = CONFIGS[key];
+  if (!list || !list.length) return 0;
+  const budget = energyBudget || Infinity;
+  let best = 0;
+  for (let i = 0; i < list.length; i++) {
+    const body = list[i];
+    const cost = calculateBodyCost(body);
+    if (cost <= budget && cost > best) {
+      best = cost;
+    }
+  }
+  if (best === 0) {
+    best = calculateBodyCost(list[list.length - 1]);
+  }
+  return best;
 }
 
 // Helper to normalize a requested task into a CONFIGS key.
@@ -331,7 +360,7 @@ function Generate_Creep_Name(role, max = 70) {
 // Spawns a role using a provided body-gen function; merges memory.role automatically.
 function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory = {}) {
   const body = generateBodyFn(availableEnergy);
-  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
+  const bodyCost = calculateBodyCost(body) || 0;
 
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('Attempt', roleName, 'body=[' + body + ']', 'cost=' + bodyCost, 'avail=' + availableEnergy);
@@ -508,6 +537,8 @@ module.exports = {
   Calculate_Spawn_Resource,
   configurations: Object.entries(CONFIGS).map(([task, body]) => ({ task, body })), // preserve your original shape
   Generate_Body_From_Config,
+  calculateBodyCost,
+  getMaxConfigCost,
   Spawn_Creep_Role,
     // + new helper
   Spawn_Squad,
