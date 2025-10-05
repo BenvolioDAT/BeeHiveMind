@@ -1,6 +1,7 @@
 // Task.CombatMelee.js — disciplined vanguard micro (ES5-only)
 'use strict';
 
+var BeeToolbox = require('BeeToolbox');
 var TaskSquad = require('Task.Squad');
 var ThreatAnalyzer = require('Combat.ThreatAnalyzer.es5');
 
@@ -26,20 +27,11 @@ function _collectSquad(creep) {
 
 function _healSelf(creep) {
   if (!creep) return;
-  if (creep.getActiveBodyparts(HEAL) <= 0) return;
-  if (creep.hits < creep.hitsMax) {
-    creep.heal(creep);
-    return;
-  }
-  var sid = TaskSquad.getSquadId(creep);
-  var allies = creep.pos.findInRange(FIND_MY_CREEPS, 1, {
-    filter: function (ally) {
-      if (!ally || !ally.my || !ally.memory) return false;
-      if (TaskSquad.getSquadId(ally) !== sid) return false;
-      return ally.hits < ally.hitsMax;
-    }
+  BeeToolbox.healBestTarget(creep, {
+    squadId: TaskSquad.getSquadId(creep),
+    range: 1,
+    selfCritical: 0.9
   });
-  if (allies.length) creep.heal(allies[0]);
 }
 
 function _adjacentHostile(creep) {
@@ -80,9 +72,22 @@ var TaskCombatMelee = {
     var squad = _collectSquad(creep);
     var towerDps = ThreatAnalyzer.projectedTowerPressure(creep.pos.roomName, squad);
     var hps = ThreatAnalyzer.totalSquadHps(squad);
+    var supportHps = Math.max(0, hps - (creep.getActiveBodyparts(HEAL) * 12));
     var marginOk = hps * CFG.towerMarginPct >= towerDps;
 
-    if (intent === 'RETREAT' || (creep.hits / Math.max(1, creep.hitsMax)) < CFG.fleeHp || !marginOk) {
+    creep.memory = creep.memory || {};
+    creep.memory.supportHps = supportHps;
+    creep.memory.towerMarginPct = CFG.towerMarginPct;
+
+    var flee = BeeToolbox.shouldFlee(creep, {
+      fleeHp: CFG.fleeHp,
+      supportHps: supportHps,
+      towerMargin: CFG.towerMarginPct
+    });
+    if (!marginOk) flee = true;
+    if (intent === 'RETREAT') flee = true;
+
+    if (flee) {
       if (anchor) TaskSquad.stepToward(creep, anchor, CFG.anchorRange);
       return;
     }

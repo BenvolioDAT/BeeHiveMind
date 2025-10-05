@@ -1,8 +1,8 @@
 // Task.CombatMedic.js — calm triage discipline (ES5-only)
 'use strict';
 
+var BeeToolbox = require('BeeToolbox');
 var TaskSquad = require('Task.Squad');
-var ThreatAnalyzer = require('Combat.ThreatAnalyzer.es5');
 
 var CFG = {
   followRange: 1,
@@ -46,40 +46,6 @@ function _chooseBuddy(creep) {
   return best;
 }
 
-function _healTarget(creep, target) {
-  if (!creep || !target) return false;
-  if (target.hits >= target.hitsMax) return false;
-  if (creep.pos.isNearTo(target)) {
-    return creep.heal(target) === OK;
-  }
-  if (creep.pos.inRangeTo(target, 3)) {
-    return creep.rangedHeal(target) === OK;
-  }
-  return false;
-}
-
-function _nearestHurt(creep, range, squadId) {
-  var list = creep.pos.findInRange(FIND_MY_CREEPS, range || CFG.triageRange, {
-    filter: function (ally) {
-      if (!ally || !ally.my || !ally.memory) return false;
-      if (squadId && TaskSquad.getSquadId(ally) !== squadId) return false;
-      return ally.hits < ally.hitsMax;
-    }
-  });
-  if (!list.length) return null;
-  var best = list[0];
-  var bestPct = _hpPct(best);
-  for (var i = 1; i < list.length; i++) {
-    var cand = list[i];
-    var pct = _hpPct(cand);
-    if (pct < bestPct) {
-      best = cand;
-      bestPct = pct;
-    }
-  }
-  return best;
-}
-
 var TaskCombatMedic = {
   run: function (creep) {
     if (!creep || creep.spawning) return;
@@ -103,34 +69,29 @@ var TaskCombatMedic = {
     }
 
     var anchor = TaskSquad.getAnchor(creep);
-    var towerDps = ThreatAnalyzer.estimateTowerDps(creep.pos.roomName, creep.pos);
-    var towerHps = creep.getActiveBodyparts(HEAL) * 12;
     var hpPct = _hpPct(creep);
 
-    // Heal priority: self critical → buddy → nearest ally → self top-off
-    if (hpPct < CFG.selfCritical) {
-      if (_healTarget(creep, creep)) return;
-    }
-
-    if (buddy && buddy.hits < buddy.hitsMax && _healTarget(creep, buddy)) {
-      // heal executed
-    } else {
-      var other = _nearestHurt(creep, CFG.triageRange, squadId);
-      if (other && other.id !== creep.id && (!buddy || other.id !== buddy.id)) {
-        if (_healTarget(creep, other)) {
-          // done
-        }
-      }
-    }
+    BeeToolbox.healBestTarget(creep, {
+      squadId: squadId,
+      range: CFG.triageRange,
+      selfCritical: CFG.selfCritical,
+      preferId: buddy ? buddy.id : null
+    });
 
     if (hpPct < CFG.selfCritical && creep.hits < creep.hitsMax) {
       creep.heal(creep);
     }
 
-    var shouldRetreat = false;
+    creep.memory = creep.memory || {};
+    creep.memory.supportHps = creep.getActiveBodyparts(HEAL) * 12;
+    creep.memory.towerMarginPct = CFG.towerMarginPct;
+
+    var shouldRetreat = BeeToolbox.shouldFlee(creep, {
+      fleeHp: CFG.fleeHp,
+      towerMargin: CFG.towerMarginPct,
+      supportHps: 0
+    });
     if (intent === 'RETREAT') shouldRetreat = true;
-    if (towerDps > towerHps * CFG.towerMarginPct) shouldRetreat = true;
-    if (hpPct < CFG.fleeHp) shouldRetreat = true;
 
     if (shouldRetreat && anchor) {
       TaskSquad.stepToward(creep, anchor, 0);

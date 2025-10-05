@@ -3,14 +3,12 @@
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
-var ThreatAnalyzer = require('Combat.ThreatAnalyzer.es5');
 
 var CFG = {
   desiredRange: 3,             // maintain 3 range sweet spot
   holdSlack: 1,                // acceptable extra distance before advancing
   kiteTrigger: 2,              // if target ≤ this range we backpedal
   fleeHpPct: 0.40,
-  maxTowerSafe: 300,           // tower DPS threshold for standing ground
   waitForMedic: true,
   fallbackRange: 2,
   kiteRange: 4,
@@ -22,67 +20,119 @@ function _archerMem(creep) {
   return creep.memory.archer;
 }
 
-function _towerDps(pos) {
-  if (!pos) return 0;
-  return ThreatAnalyzer.estimateTowerDps(pos.roomName, pos);
+var DIRS = [
+  null,
+  { x: 0, y: -1 },
+  { x: 1, y: -1 },
+  { x: 1, y: 0 },
+  { x: 1, y: 1 },
+  { x: 0, y: 1 },
+  { x: -1, y: 1 },
+  { x: -1, y: 0 },
+  { x: -1, y: -1 }
+];
+
+function _supportHps(creep) {
+  if (!creep) return 0;
+  var squadId = TaskSquad.getSquadId(creep);
+  var allies = creep.pos.findInRange(FIND_MY_CREEPS, 2, {
+    filter: function (ally) {
+      if (!ally || !ally.my || ally.id === creep.id) return false;
+      if (ally.getActiveBodyparts(HEAL) <= 0) return false;
+      return TaskSquad.getSquadId(ally) === squadId;
+    }
+  });
+  var total = 0;
+  for (var i = 0; i < allies.length; i++) {
+    total += allies[i].getActiveBodyparts(HEAL) * 12;
+  }
+  return total;
 }
 
-function _shouldHold(creep, target, range, info) {
-  if (!target || range == null) return false;
-  if (range < CFG.desiredRange) return false;
-  if (range > CFG.desiredRange + CFG.holdSlack) return false;
-  if (info && info.targetMoved) return false;
-  if (info && info.intent === 'KITE') return false;
-  if (info && info.towerDps > CFG.maxTowerSafe) return false;
-  return true;
-}
-
-function _shouldRetreat(info) {
-  if (!info) return false;
-  if (info.intent === 'RETREAT') return true;
-  if (info.hpPct < CFG.fleeHpPct) return true;
-  if (info.towerDps > info.hps) return true;
+function _stepAway(creep, threatPos, anchorPos) {
+  if (!creep) return false;
+  if (anchorPos) {
+    TaskSquad.stepToward(creep, anchorPos, CFG.kiteRange);
+    return true;
+  }
+  if (!threatPos) return false;
+  var pos = threatPos.pos ? threatPos.pos : threatPos;
+  if (!pos) return false;
+  if (creep.travelTo) {
+    creep.travelTo(pos, { flee: true, range: CFG.desiredRange + 1, maxRooms: 1, ignoreCreeps: false });
+    return true;
+  }
+  var terrain = creep.room ? creep.room.getTerrain() : null;
+  var bestDir = 0;
+  var bestRange = -1;
+  for (var d = 1; d <= 8; d++) {
+    var off = DIRS[d];
+    if (!off) continue;
+    var nx = creep.pos.x + off.x;
+    var ny = creep.pos.y + off.y;
+    if (nx <= 0 || nx >= 49 || ny <= 0 || ny >= 49) continue;
+    if (terrain && terrain.get(nx, ny) === TERRAIN_MASK_WALL) continue;
+    var range = Math.max(Math.abs(nx - pos.x), Math.abs(ny - pos.y));
+    if (range > bestRange) {
+      bestRange = range;
+      bestDir = d;
+    }
+  }
+  if (bestDir > 0) {
+    creep.move(bestDir);
+    return true;
+  }
   return false;
 }
 
-function _healWhileMoving(creep, info) {
-  if (!creep || creep.getActiveBodyparts(HEAL) <= 0) return;
-  if (info && info.lowSelf) {
-    creep.heal(creep);
-    return;
-  }
-  var squadId = TaskSquad.getSquadId(creep);
-  var allies = creep.pos.findInRange(FIND_MY_CREEPS, 3, {
-    filter: function (c) {
-      if (!c || !c.my || !c.memory) return false;
-      return c.memory.squadId === squadId && c.hits < c.hitsMax;
-    }
-  });
-  if (allies.length) {
-    var buddy = creep.pos.findClosestByRange(allies);
-    if (buddy) {
-      if (creep.pos.isNearTo(buddy)) creep.heal(buddy);
-      else creep.rangedHeal(buddy);
-    }
-  }
+function _resolveTarget(creep, shared) {
+  if (shared) return shared;
+  return BeeToolbox.pickFocusTarget(creep, null);
 }
 
-function _fire(creep, target) {
-  if (!target) {
-    var opportunistic = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
-    if (opportunistic && creep.pos.inRangeTo(opportunistic, 3)) creep.rangedAttack(opportunistic);
-    return;
+function _massAttackBetter(creep, focus, hostiles) {
+  if (!creep) return false;
+  hostiles = hostiles || [];
+  if (!hostiles.length) return false;
+  var total = 0;
+  for (var i = 0; i < hostiles.length; i++) {
+    var h = hostiles[i];
+    if (!h || h.hits <= 0) continue;
+    var dist = creep.pos.getRangeTo(h);
+    if (dist <= 1) total += 10;
+    else if (dist === 2) total += 4;
+    else if (dist === 3) total += 1;
   }
-  var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
-  if (in3.length >= 3) {
+  var single = 0;
+  if (focus && focus.hits != null && creep.pos.inRangeTo(focus, 3)) single = 10;
+  if (total >= single + 8) return true;
+  if (hostiles.length >= 3 && total >= 12) return true;
+  return false;
+}
+
+function _performRanged(creep, focus) {
+  if (!creep) return;
+  var hostiles = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, {
+    filter: function (h) { return h && h.hits > 0; }
+  });
+  if (_massAttackBetter(creep, focus, hostiles)) {
     creep.rangedMassAttack();
     return;
   }
-  if (creep.pos.inRangeTo(target, 3)) {
-    creep.rangedAttack(target);
+  if (focus && focus.pos && focus.hits != null && creep.pos.inRangeTo(focus, 3)) {
+    creep.rangedAttack(focus);
     return;
   }
-  _fire(creep, null);
+  if (hostiles.length) {
+    var picked = BeeToolbox.pickFocusTarget(creep, hostiles);
+    if (picked && picked.hits != null && creep.pos.inRangeTo(picked, 3)) {
+      creep.rangedAttack(picked);
+      return;
+    }
+  }
+  if (hostiles.length) {
+    creep.rangedAttack(hostiles[0]);
+  }
 }
 
 var TaskCombatArcher = {
@@ -101,60 +151,65 @@ var TaskCombatArcher = {
     }
 
     var intent = TaskSquad.getIntent(creep);
-    var target = TaskSquad.sharedTarget(creep);
     var anchorPos = TaskSquad.getAnchor(creep);
+    var shared = TaskSquad.sharedTarget(creep);
+    var target = _resolveTarget(creep, shared);
+    var targetPos = target && target.pos ? target.pos : null;
+    if (!targetPos && target && target.x != null && target.y != null) {
+      targetPos = target;
+    }
+    if (!targetPos && A.tR === creep.pos.roomName) {
+      targetPos = new RoomPosition(A.tX || creep.pos.x, A.tY || creep.pos.y, A.tR || creep.pos.roomName);
+    }
 
-    if (!target) {
-      if (intent === 'RETREAT' && anchorPos) {
-        TaskSquad.stepToward(creep, anchorPos, 0);
+    var supportHps = _supportHps(creep);
+    creep.memory = creep.memory || {};
+    creep.memory.supportHps = supportHps;
+    creep.memory.towerMarginPct = 1.1;
+    var flee = false;
+    if (intent === 'RETREAT') flee = true;
+    else if (BeeToolbox && BeeToolbox.shouldFlee) {
+      flee = BeeToolbox.shouldFlee(creep, {
+        fleeHp: CFG.fleeHpPct,
+        supportHps: supportHps,
+        towerMargin: 1.1
+      });
+    }
+
+    BeeToolbox.healBestTarget(creep, {
+      squadId: TaskSquad.getSquadId(creep),
+      range: 3,
+      selfCritical: CFG.fleeHpPct
+    });
+
+    if (!targetPos) {
+      if (flee && anchorPos) {
+        TaskSquad.stepToward(creep, anchorPos, CFG.kiteRange);
       } else if (anchorPos) {
         TaskSquad.stepToward(creep, anchorPos, CFG.fallbackRange);
       }
-      _fire(creep, null);
+      _performRanged(creep, null);
       return;
     }
 
-    var targetPos = target.pos || target;
-    var range = creep.pos.getRangeTo(targetPos);
-
-    var towerDps = _towerDps(creep.pos);
-    var hpPct = creep.hits / Math.max(1, creep.hitsMax);
-    var hps = creep.getActiveBodyparts(HEAL) * 12;
-    var info = {
-      intent: intent,
-      towerDps: towerDps,
-      hpPct: hpPct,
-      hps: hps,
-      targetMoved: !(A.tX === targetPos.x && A.tY === targetPos.y && A.tR === targetPos.roomName),
-      lowSelf: hpPct < 0.45,
-    };
     A.tX = targetPos.x; A.tY = targetPos.y; A.tR = targetPos.roomName; A.lastSeen = Game.time;
 
-    _fire(creep, target);
-    _healWhileMoving(creep, info);
-
-    if (_shouldRetreat(info)) {
-      if (anchorPos) TaskSquad.stepToward(creep, anchorPos, CFG.kiteRange);
-      else TaskSquad.stepToward(creep, targetPos, CFG.kiteRange);
-      A.movedAt = Game.time;
+    if (flee) {
+      _stepAway(creep, targetPos, anchorPos);
+      _performRanged(creep, target && target.hits != null ? target : null);
       return;
     }
 
-    if (_shouldHold(creep, targetPos, range, info)) {
-      return;
-    }
-
-    if (range <= CFG.kiteTrigger) {
-      TaskSquad.stepToward(creep, targetPos, CFG.kiteRange);
-      A.movedAt = Game.time;
-      return;
-    }
-
-    if (range > CFG.desiredRange + CFG.holdSlack) {
+    var range = creep.pos.getRangeTo(targetPos);
+    if (range < CFG.desiredRange) {
+      _stepAway(creep, targetPos, anchorPos);
+    } else if (range > CFG.desiredRange + CFG.holdSlack) {
       TaskSquad.stepToward(creep, targetPos, CFG.desiredRange);
-      A.movedAt = Game.time;
-      return;
+    } else if (intent === 'KITE' && range <= CFG.kiteTrigger) {
+      _stepAway(creep, targetPos, anchorPos);
     }
+
+    _performRanged(creep, target && target.hits != null ? target : null);
   }
 };
 

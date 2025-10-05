@@ -5,8 +5,15 @@
 
 var Traveler = require('Traveler');
 var Logger = require('core.logger');
+var ThreatAnalyzer; try { ThreatAnalyzer = require('Combat.ThreatAnalyzer.es5'); } catch (err) { ThreatAnalyzer = null; }
+var SquadIntents; try { SquadIntents = require('Squad.Intents.es5'); } catch (err2) { SquadIntents = null; }
+var BodyConfigsCombat; try { BodyConfigsCombat = require('bodyConfigs.combat.es5'); } catch (err3) { BodyConfigsCombat = null; }
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
+
+if (!global.__beeMemo) global.__beeMemo = {};
+if (!global.__beeThrottle) global.__beeThrottle = {};
+if (!global.__beeReservations) global.__beeReservations = {};
 
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
@@ -608,7 +615,276 @@ var BeeToolbox = {
         return creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
       }
     }
-  }
+  },
+
+  // ---------------------------------------------------------------------------
+  // ⚔️ COMBAT & CONTROL HELPERS
+  // ---------------------------------------------------------------------------
+
+  calcTowerDps: function (room, pos) {
+    if (!pos) return 0;
+    var targetPos = pos.pos ? pos.pos : pos;
+    if (!targetPos) return 0;
+    var roomName = targetPos.roomName;
+    if (!roomName && room && room.name) roomName = room.name;
+    if (!roomName && room && room.pos) roomName = room.pos.roomName;
+    if (!roomName && targetPos.room) roomName = targetPos.room;
+    if (!roomName && room && room.roomName) roomName = room.roomName;
+    if (!roomName) return 0;
+    if (ThreatAnalyzer && ThreatAnalyzer.estimateTowerDps) {
+      return ThreatAnalyzer.estimateTowerDps(roomName, targetPos);
+    }
+    return 0;
+  },
+
+  isTowerFireSafe: function (room, creep) {
+    if (!creep) return true;
+    var pos = creep.pos ? creep.pos : creep;
+    if (!pos) return true;
+    var towerDps = this.calcTowerDps(room || (creep.room || null), pos);
+    if (towerDps <= 0) return true;
+    var heal = 0;
+    if (creep.getActiveBodyparts) heal += creep.getActiveBodyparts(HEAL) * 12;
+    var support = 0;
+    if (creep.memory && creep.memory.supportHps) support = creep.memory.supportHps | 0;
+    var margin = 1.05;
+    if (creep.memory && creep.memory.towerMarginPct) margin = creep.memory.towerMarginPct;
+    return ((heal + support) * margin) >= towerDps;
+  },
+
+  pickFocusTarget: function (creep, hostiles) {
+    if (!creep) return null;
+    var list = hostiles;
+    if (!list || !list.length) {
+      if (ThreatAnalyzer && creep.pos && creep.pos.roomName) {
+        var intel = ThreatAnalyzer.getIntel(creep.pos.roomName);
+        if (intel && intel.hostiles && intel.hostiles.length) {
+          list = intel.hostiles;
+        }
+      }
+      if (!list || !list.length) {
+        if (creep.room) list = creep.room.find(FIND_HOSTILE_CREEPS);
+        else list = [];
+      }
+    }
+
+    var best = null;
+    var bestScore = -999999;
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i];
+      if (!entry) continue;
+      var target = entry;
+      if (entry.hostile && entry.hostile.id) {
+        target = Game.getObjectById(entry.hostile.id);
+      } else if (entry.id && entry.hits == null) {
+        target = Game.getObjectById(entry.id);
+      }
+      if (!target && entry.pos && entry.pos.x != null) {
+        target = entry;
+      }
+      if (!target || !target.pos) continue;
+      if (target.hits != null && target.hits <= 0) continue;
+
+      var range = creep.pos.getRangeTo(target.pos || target);
+      var score = 0;
+      if (target.getActiveBodyparts) {
+        score += target.getActiveBodyparts(HEAL) * 450;
+        score += target.getActiveBodyparts(RANGED_ATTACK) * 260;
+        score += target.getActiveBodyparts(ATTACK) * 200;
+        score += target.getActiveBodyparts(WORK) * 60;
+      }
+      if (target.hits != null && target.hitsMax) {
+        var pct = target.hits / Math.max(1, target.hitsMax);
+        score += (1 - pct) * 600;
+      }
+      score -= range * 30;
+      if (creep.memory && creep.memory.focusId && target.id === creep.memory.focusId) score += 150;
+      if (target.owner && target.owner.username === 'Invader') score += 80;
+      if (score > bestScore) {
+        bestScore = score;
+        best = target;
+      }
+    }
+    if (best && creep.memory) creep.memory.focusId = best.id || null;
+    return best;
+  },
+
+  shouldFlee: function (creep, cfg) {
+    if (!creep) return false;
+    cfg = cfg || {};
+    var hpPct = creep.hits / Math.max(1, creep.hitsMax);
+    if (cfg.hpPct != null && hpPct <= cfg.hpPct) return true;
+    if (cfg.fleeHp != null && hpPct <= cfg.fleeHp) return true;
+    if (cfg.criticalHp != null && hpPct <= cfg.criticalHp) return true;
+
+    var towerDps = this.calcTowerDps(creep.room || null, creep.pos);
+    var selfHeal = creep.getActiveBodyparts ? creep.getActiveBodyparts(HEAL) * 12 : 0;
+    var support = cfg.supportHps ? cfg.supportHps : 0;
+    var margin = cfg.towerMargin != null ? cfg.towerMargin : (cfg.towerMarginPct != null ? cfg.towerMarginPct : 1.05);
+    if (towerDps > 0 && ((selfHeal + support) * margin) < towerDps) {
+      return true;
+    }
+
+    if (cfg.extra && typeof cfg.extra === 'function') {
+      try {
+        if (cfg.extra(creep, { hpPct: hpPct, towerDps: towerDps, selfHeal: selfHeal, supportHps: support })) {
+          return true;
+        }
+      } catch (err) {}
+    }
+    return false;
+  },
+
+  healBestTarget: function (medic, options) {
+    if (!medic) return null;
+    if (medic.getActiveBodyparts && medic.getActiveBodyparts(HEAL) <= 0) return null;
+    options = options || {};
+    var squadId = options.squadId || (medic.memory ? (medic.memory.squadId || medic.memory.SquadId) : null);
+    var range = options.range != null ? options.range : 3;
+    var selfCritical = options.selfCritical != null ? options.selfCritical : 0.4;
+    var preferId = options.preferId || null;
+    var allies = medic.pos.findInRange(FIND_MY_CREEPS, range, {
+      filter: function (ally) {
+        if (!ally || !ally.my || ally.hits >= ally.hitsMax) return false;
+        if (!squadId) return true;
+        var sid = ally.memory ? (ally.memory.squadId || ally.memory.SquadId) : null;
+        return sid === squadId;
+      }
+    });
+
+    var best = null;
+    var bestScore = -999999;
+    var i;
+    var selfPct = medic.hits / Math.max(1, medic.hitsMax);
+    if (selfPct < selfCritical && medic.hits < medic.hitsMax) {
+      best = medic;
+      bestScore = 999999;
+    }
+
+    for (i = 0; i < allies.length; i++) {
+      var ally = allies[i];
+      var missing = ally.hitsMax - ally.hits;
+      if (missing <= 0) continue;
+      var pct = ally.hits / Math.max(1, ally.hitsMax);
+      var score = missing + (1 - pct) * 1000;
+      if (preferId && ally.id === preferId) score += 1500;
+      if (ally.id === medic.id) score += 5000;
+      if (score > bestScore) {
+        bestScore = score;
+        best = ally;
+      }
+    }
+
+    if (!best && medic.hits < medic.hitsMax) {
+      best = medic;
+    }
+
+    if (!best) return null;
+
+    if (best.id === medic.id) {
+      medic.heal(medic);
+      return medic;
+    }
+    if (medic.pos.isNearTo(best)) {
+      medic.heal(best);
+      return best;
+    }
+    if (medic.pos.inRangeTo(best, 3)) {
+      medic.rangedHeal(best);
+      return best;
+    }
+    return null;
+  },
+
+  friendlySwap: function (creep, destPos) {
+    if (!creep || !destPos || !creep.pos) return false;
+    var pos = destPos.pos ? destPos.pos : destPos;
+    if (!pos || pos.roomName !== creep.pos.roomName) return false;
+    var creeps = pos.lookFor ? pos.lookFor(LOOK_CREEPS) : [];
+    if (!creeps || !creeps.length) return false;
+    var ally = creeps[0];
+    if (!ally || !ally.my) return false;
+    if (ally.id === creep.id) return true;
+    if (ally.fatigue > 0) return false;
+    var dirToMover = ally.pos.getDirectionTo(creep.pos);
+    if (!dirToMover) return false;
+    var moveAlly = ally.move(dirToMover);
+    if (moveAlly === OK) {
+      if (ally.memory) ally.memory._movedAt = Game.time;
+      var dirToDest = creep.pos.getDirectionTo(pos);
+      if (dirToDest) creep.move(dirToDest);
+      return true;
+    }
+    return false;
+  },
+
+  decodeSquadFlag: function (flag) {
+    if (!flag) return null;
+    if (SquadIntents && SquadIntents.resolve) {
+      return SquadIntents.resolve(flag);
+    }
+    return { intent: 'RALLY', rule: null };
+  },
+
+  ensureUniqueReservation: function (key, ttl) {
+    if (!key) return true;
+    ttl = ttl == null ? 1 : ttl;
+    var now = Game.time | 0;
+    var bucket = global.__beeReservations;
+    var entry = bucket[key];
+    if (entry && entry > now) return false;
+    bucket[key] = now + Math.max(1, ttl);
+    return true;
+  },
+
+  buildBodyByBudget: function (role, energy, tiers) {
+    if (!energy || energy <= 0) return null;
+    var list = tiers;
+    if (!list && BodyConfigsCombat) list = BodyConfigsCombat[role];
+    if (!list || !list.length) return null;
+    var chosen = null;
+    for (var j = 0; j < list.length; j++) {
+      var tier = list[j];
+      if (tier && tier.minEnergy != null && tier.minEnergy <= energy) {
+        chosen = tier;
+        break;
+      }
+    }
+    if (!chosen) chosen = list[list.length - 1];
+    if (!chosen) return null;
+    var body = [];
+    if (chosen.body && chosen.body.length) {
+      for (var k = 0; k < chosen.body.length; k++) body.push(chosen.body[k]);
+    }
+    return { tier: chosen.tier || 'Unknown', body: body, note: chosen.note || '', minEnergy: chosen.minEnergy || 0 };
+  },
+
+  throttle: function (key, modulo) {
+    if (!key) return false;
+    modulo = modulo || 1;
+    if (modulo < 1) modulo = 1;
+    var bucket = global.__beeThrottle;
+    var offset = bucket[key];
+    if (offset == null) {
+      offset = Math.floor(Math.random() * modulo);
+      bucket[key] = offset;
+    }
+    return ((Game.time + offset) % modulo) === 0;
+  },
+
+  memo: function (key, ttl, fn) {
+    if (!key) {
+      return fn ? fn() : null;
+    }
+    ttl = ttl == null ? 1 : ttl;
+    var now = Game.time | 0;
+    var bucket = global.__beeMemo;
+    var entry = bucket[key];
+    if (entry && entry.expires > now) return entry.value;
+    var value = fn ? fn() : null;
+    bucket[key] = { expires: now + Math.max(1, ttl), value: value };
+    return value;
+  },
 
 }; // end BeeToolbox
 

@@ -644,7 +644,12 @@ function Spawn_Squad(spawn, squadId) {
     return false;
   }
 
-  var desired = CombatSquadPlanner.desiredCounts(threatScore);
+  var tags = binding && binding.roomInfo && binding.roomInfo.lastTags ? binding.roomInfo.lastTags : null;
+  var threatType = (tags && tags.hasFortress) ? 'fortress' : 'npc';
+  var desired = CombatSquadPlanner.desiredCounts(threatScore, {
+    energyCapacity: spawn.room.energyCapacityAvailable || 0,
+    threatType: threatType
+  });
   S.desiredCounts = desired;
   S.recall = false;
   S.targetRoom = binding.targetRoom;

@@ -132,7 +132,14 @@ function _currentIntent(id) {
     return mem.intent;
   }
   var flag = _findSquadFlag(id, mem);
-  var resolved = flag ? SquadIntents.resolve(flag) : null;
+  var resolved = null;
+  if (flag) {
+    if (BeeToolbox && BeeToolbox.decodeSquadFlag) {
+      resolved = BeeToolbox.decodeSquadFlag(flag);
+    } else {
+      resolved = SquadIntents.resolve(flag);
+    }
+  }
   if (resolved && resolved.intent) {
     mem.intent = resolved.intent;
     mem.intentAt = Game.time;
@@ -310,27 +317,6 @@ function recycle(creep) {
   return false;
 }
 
-function tryFriendlySwap(mover, targetPos) {
-  if (!mover || !targetPos) return false;
-  var pos = targetPos.pos || targetPos;
-  if (!pos || pos.roomName !== mover.pos.roomName) return false;
-  var creeps = pos.lookFor(LOOK_CREEPS);
-  if (!creeps || !creeps.length) return false;
-  var ally = creeps[0];
-  if (!ally || !ally.my) return false;
-  if (ally.fatigue > 0) return false;
-  var dirToMover = ally.pos.getDirectionTo(mover.pos);
-  if (!_reserveTile(ally, mover.pos, _rolePriority(ally))) return false;
-  var moveAlly = ally.move(dirToMover);
-  if (moveAlly === OK) {
-    ally.memory = ally.memory || {};
-    ally.memory._movedAt = Game.time;
-    mover.move(mover.pos.getDirectionTo(pos));
-    return true;
-  }
-  return false;
-}
-
 function stepToward(creep, pos, range) {
   if (!creep || !pos) return ERR_INVALID_TARGET;
   var goal = pos.pos || pos;
@@ -356,8 +342,8 @@ function stepToward(creep, pos, range) {
     var pri = _rolePriority(creep);
     var nextPos = retData.nextPos;
     var occupant = nextPos.lookFor(LOOK_CREEPS);
-    if (occupant && occupant.length) {
-      tryFriendlySwap(creep, nextPos);
+    if (occupant && occupant.length && BeeToolbox && BeeToolbox.friendlySwap) {
+      BeeToolbox.friendlySwap(creep, nextPos);
     }
     if (!_reserveTile(creep, nextPos, pri)) {
       return ERR_BUSY;
@@ -374,7 +360,6 @@ var TaskSquad = {
   stepToward: stepToward,
   shouldRecycle: shouldRecycle,
   recycle: recycle,
-  tryFriendlySwap: tryFriendlySwap,
 };
 
 module.exports = TaskSquad;

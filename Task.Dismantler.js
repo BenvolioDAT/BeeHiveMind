@@ -1,6 +1,7 @@
 // Task.Dismantler.js — rampart breacher (ES5-only)
 'use strict';
 
+var BeeToolbox = require('BeeToolbox');
 var TaskSquad = require('Task.Squad');
 var ThreatAnalyzer = require('Combat.ThreatAnalyzer.es5');
 
@@ -58,11 +59,21 @@ var TaskDismantler = {
     var squad = _collectSquad(creep);
     var towerDps = ThreatAnalyzer.projectedTowerPressure(creep.pos.roomName, squad);
     var hps = ThreatAnalyzer.totalSquadHps(squad);
+    var supportHps = Math.max(0, hps - (creep.getActiveBodyparts(HEAL) * 12));
     var marginOk = hps * CFG.towerMarginPct >= towerDps;
     var intent = TaskSquad.getIntent(creep);
     var anchor = TaskSquad.getAnchor(creep);
 
-    if (!marginOk && intent !== 'BREACH') {
+    var flee = BeeToolbox.shouldFlee(creep, {
+      supportHps: supportHps,
+      towerMargin: CFG.towerMarginPct
+    });
+
+    creep.memory = creep.memory || {};
+    creep.memory.supportHps = supportHps;
+    creep.memory.towerMarginPct = CFG.towerMarginPct;
+
+    if ((!marginOk && intent !== 'BREACH') || flee) {
       if (anchor) TaskSquad.stepToward(creep, anchor, CFG.safeRange);
       return;
     }
@@ -73,6 +84,14 @@ var TaskDismantler = {
     if (!target) {
       if (anchor) TaskSquad.stepToward(creep, anchor, 1);
       return;
+    }
+
+    if (target.pos) {
+      var projected = BeeToolbox.calcTowerDps(creep.room, target.pos);
+      if (projected > hps * CFG.towerMarginPct && intent !== 'BREACH') {
+        if (anchor) TaskSquad.stepToward(creep, anchor, CFG.safeRange);
+        return;
+      }
     }
 
     if (target.structureType === STRUCTURE_INVADER_CORE) {
