@@ -588,6 +588,7 @@ var BeeHiveMind = {
       'queen',
       'baseharvest',
       'courier',
+      'builder',
       'upgrader',
       'repair',
       'luna',
@@ -598,7 +599,7 @@ var BeeHiveMind = {
       'Dismantler',
       'Trucker',
       'Claimer',
-      'builder'
+      
     ];
 
     for (var i = 0; i < spawns.length; i++) {
@@ -652,7 +653,7 @@ var BeeHiveMind = {
         baseharvest: 2,
         courier: 1,
         queen: 2,
-        upgrader: 4,
+        upgrader: 1,
         builder: builderLimit,
         repair: 0,
         luna: determineLunaQuota(room, cache),
