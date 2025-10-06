@@ -94,10 +94,10 @@ function ensureHome(creep) {
   var keys = Object.keys(Game.spawns);
   if (keys.length) {
     var best = Game.spawns[keys[0]];
-    var bestD = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
+    var bestD = BeeToolbox.safeLinearDistance(creep.pos.roomName, best.pos.roomName);
     for (var i = 1; i < keys.length; i++) {
       var sp = Game.spawns[keys[i]];
-      var d  = Game.map.getRoomLinearDistance(creep.pos.roomName, sp.pos.roomName);
+      var d  = BeeToolbox.safeLinearDistance(creep.pos.roomName, sp.pos.roomName);
       if (d < bestD) { best = sp; bestD = d; }
     }
     creep.memory.home = best.pos.roomName;
@@ -538,7 +538,7 @@ var TaskBuilder = {
         var nearestRoom = null, bestDist = 1e9;
         for (var r2 = 0; r2 < C.rooms.length; r2++) {
           var rn = C.rooms[r2];
-          var dist = Game.map.getRoomLinearDistance(here, rn);
+          var dist = BeeToolbox.safeLinearDistance(here, rn);
           if (dist < bestDist) { bestDist = dist; nearestRoom = rn; }
         }
 

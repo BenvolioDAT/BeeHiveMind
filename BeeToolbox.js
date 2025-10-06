@@ -33,6 +33,33 @@ var BeeToolbox = {
   },
 
   /**
+   * Determine if a string is a valid Screeps room name (e.g. W12N34).
+   * @param {string} name Candidate room name.
+   * @returns {boolean} True when the name matches the required pattern.
+   */
+  isValidRoomName: function (name) {
+    if (typeof name !== 'string') return false;
+    return /^[WE]\d+[NS]\d+$/.test(name);
+  },
+
+  /**
+   * Safely compute linear distance between rooms, guarding against invalid inputs.
+   * @param {string} a Origin room name.
+   * @param {string} b Destination room name.
+   * @param {boolean} allowInexact Optional Screeps flag to allow highway approximations.
+   * @returns {number} Distance or a high sentinel when names are invalid.
+   */
+  safeLinearDistance: function (a, b, allowInexact) {
+    if (!BeeToolbox.isValidRoomName(a) || !BeeToolbox.isValidRoomName(b)) {
+      return 9999;
+    }
+    if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') {
+      return 9999;
+    }
+    return Game.map.getRoomLinearDistance(a, b, allowInexact);
+  },
+
+  /**
    * Check whether a value behaves like an object (non-null, type object).
    * @param {*} value Candidate value.
    * @returns {boolean} True when the value is an object.
