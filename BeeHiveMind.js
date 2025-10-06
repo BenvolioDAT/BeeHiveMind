@@ -335,11 +335,11 @@ function getBuilderBodyConfigs() {
 function determineBuilderFailureReason(available, capacity) {
   var configs = getBuilderBodyConfigs();
   if (!configs.length) {
-    return 'body';
+    return 'BODY_INVALID';
   }
   var minCost = null;
-  var bestCapacityCost = 0;
-  var bestAvailableCost = 0;
+  var capacityFits = false;
+  var availableFits = false;
   for (var i = 0; i < configs.length; i++) {
     var body = configs[i];
     var cost = calculateBodyCost(body);
@@ -347,20 +347,41 @@ function determineBuilderFailureReason(available, capacity) {
     if (minCost === null || cost < minCost) {
       minCost = cost;
     }
-    if (cost <= capacity && cost > bestCapacityCost) {
-      bestCapacityCost = cost;
+    if (cost <= capacity) {
+      capacityFits = true;
     }
-    if (cost <= available && cost > bestAvailableCost) {
-      bestAvailableCost = cost;
+    if (cost <= available) {
+      availableFits = true;
     }
   }
-  if (!bestCapacityCost) {
-    return 'body';
+  if (minCost === null) {
+    return 'BODY_INVALID';
   }
-  if (!bestAvailableCost) {
-    return 'energy';
+  if (!capacityFits) {
+    return 'ENERGY_OVER_CAPACITY';
   }
-  return 'fail';
+  if (!availableFits) {
+    return 'ENERGY_LOW_AVAILABLE';
+  }
+  return 'OTHER_FAIL';
+}
+
+function logBuilderSpawnBlock(spawner, room, builderSites, reason, available, capacity, builderFailLog) {
+  if (!room || builderSites <= 0) {
+    return;
+  }
+  var roomName = room.name || null;
+  if (!roomName) {
+    return;
+  }
+  var lastLogTick = builderFailLog[roomName] || 0;
+  if ((Game.time - lastLogTick) < 50) {
+    return;
+  }
+  builderFailLog[roomName] = Game.time;
+  var spawnName = (spawner && spawner.name) ? spawner.name : 'spawn';
+  var message = '[' + spawnName + '] builder wanted: sites=' + builderSites + ' reason=' + reason + ' (avail/cap ' + available + '/' + capacity + ')';
+  hiveLog.info(message);
 }
 
 /**
@@ -582,7 +603,7 @@ var BeeHiveMind = {
 
     for (var i = 0; i < spawns.length; i++) {
       var spawner = spawns[i];
-      if (!spawner || spawner.spawning) continue;
+      if (!spawner) continue;
 
       if (typeof spawnLogic.Spawn_Squad === 'function') {
         // Squad spawning left disabled by default; enable when configured externally.
@@ -593,6 +614,18 @@ var BeeHiveMind = {
 
       var builderSites = needBuilder(room, cache);
       var builderLimit = builderSites > 0 ? 1 : 0;
+
+      var spawnResource = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
+        ? spawnLogic.Calculate_Spawn_Resource(spawner)
+        : (room.energyAvailable || 0);
+      var spawnCapacity = room.energyCapacityAvailable || spawnResource;
+
+      if (spawner.spawning) {
+        if (builderLimit > 0) {
+          logBuilderSpawnBlock(spawner, room, builderSites, 'SPAWN_BUSY', spawnResource, spawnCapacity, builderFailLog);
+        }
+        continue;
+      }
 
       var taskOrder = defaultTaskOrder.slice();
       if (builderLimit > 0) {
@@ -632,25 +665,31 @@ var BeeHiveMind = {
         Claimer: 0
       };
 
-      var spawnResource = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
-        ? spawnLogic.Calculate_Spawn_Resource(spawner)
-        : (room.energyAvailable || 0);
-      var spawnCapacity = room.energyCapacityAvailable || spawnResource;
-
       for (var orderPos = 0; orderPos < taskOrder.length; orderPos++) {
         var task = taskOrder[orderPos];
         if (!BeeToolbox.hasOwn(workerTaskLimits, task)) continue;
         var limit = workerTaskLimits[task] | 0;
-        if (!limit) continue;
+        if (!limit) {
+          if (task === 'builder' && builderLimit > 0) {
+            logBuilderSpawnBlock(spawner, room, builderSites, 'LIMIT_ZERO', spawnResource, spawnCapacity, builderFailLog);
+          }
+          continue;
+        }
 
         var current = (task === 'luna')
           ? (lunaCountsByHome[room.name] || 0)
           : (roleCounts[task] || 0);
         if (current >= limit) {
+          if (task === 'builder' && builderLimit > 0) {
+            logBuilderSpawnBlock(spawner, room, builderSites, 'ROLE_LIMIT_REACHED', spawnResource, spawnCapacity, builderFailLog);
+          }
           continue;
         }
 
         if (!spawnLogic || typeof spawnLogic.Spawn_Worker_Bee !== 'function') {
+          if (task === 'builder' && builderLimit > 0) {
+            logBuilderSpawnBlock(spawner, room, builderSites, 'OTHER_FAIL', spawnResource, spawnCapacity, builderFailLog);
+          }
           continue;
         }
 
@@ -659,12 +698,7 @@ var BeeHiveMind = {
           didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
           if (didSpawn !== true && builderLimit > 0) {
             var reason = determineBuilderFailureReason(spawnResource, spawnCapacity);
-            var lastLogTick = builderFailLog[room.name] || 0;
-            if ((Game.time - lastLogTick) >= 50) {
-              builderFailLog[room.name] = Game.time;
-              var message = '[' + (spawner.name || 'spawn') + '] builder wanted: sites=' + builderSites + '; not spawning: reason=' + reason + ' (energy ' + spawnResource + '/' + spawnCapacity + ')';
-              hiveLog.info(message);
-            }
+            logBuilderSpawnBlock(spawner, room, builderSites, reason, spawnResource, spawnCapacity, builderFailLog);
           }
         } else {
           didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);

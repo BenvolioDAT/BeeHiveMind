@@ -122,7 +122,9 @@ var CONFIGS = {
     // Budget scout/seed — starter road + container drop
     B(2, 4, 6),    // 600 energy, 12 parts, 200 carry
     // Emergency mini — drops a container + token road
-    B(2, 2, 4)     // 400 energy, 8 parts, 100 carry
+    B(2, 2, 4),    // 500 energy, 8 parts, 100 carry
+    // Starter body for RCL2+ rooms to guarantee at least one builder
+    B(1, 2, 2)     // 300 energy, 5 parts, 100 carry
   ],
   upgrader: [
     // Larger bodies listed first so higher RCLs still prefer beefier creeps
