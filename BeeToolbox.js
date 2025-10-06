@@ -43,6 +43,38 @@ var BeeToolbox = {
   },
 
   /**
+   * Compute an exponential moving average.
+   * @param {number} previous Previous EMA value (may be undefined).
+   * @param {number} value Latest observation.
+   * @param {number} alpha Smoothing factor between 0 and 1.
+   * @returns {number} Updated EMA value.
+   * @cpu O(1).
+   * @memory None.
+   */
+  ema: function (previous, value, alpha) {
+    var v = typeof value === 'number' ? value : 0;
+    var a = typeof alpha === 'number' ? alpha : 0.5;
+    if (a <= 0) a = 0.0001;
+    if (a > 1) a = 1;
+    var prev = typeof previous === 'number' ? previous : v;
+    return (a * v) + ((1 - a) * prev);
+  },
+
+  /**
+   * Clamp a numeric value within inclusive bounds.
+   * @param {number} value Value to clamp.
+   * @param {number} lo Minimum allowed value.
+   * @param {number} hi Maximum allowed value.
+   * @returns {number} Clamped result.
+   */
+  bound: function (value, lo, hi) {
+    var num = typeof value === 'number' ? value : 0;
+    if (typeof lo === 'number' && num < lo) num = lo;
+    if (typeof hi === 'number' && num > hi) num = hi;
+    return num;
+  },
+
+  /**
    * Safely compute linear distance between rooms, guarding against invalid inputs.
    * @param {string} a Origin room name.
    * @param {string} b Destination room name.

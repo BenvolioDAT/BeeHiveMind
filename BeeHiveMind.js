@@ -14,6 +14,9 @@ var RoadPlanner = require('Planner.Road');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
 var BeeToolbox = require('BeeToolbox');
+var Blackboard = require('AI.Blackboard');
+var EconomyAI = require('AI.Economy');
+var ExpansionAI = require('AI.Expansion');
 
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
@@ -34,6 +37,137 @@ var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE =
   : 1;
 
 var GLOBAL_CACHE = global.__BHM_CACHE || (global.__BHM_CACHE = { tick: -1 });
+
+function ensureAiCache() {
+  if (!GLOBAL_CACHE.aiState) {
+    GLOBAL_CACHE.aiState = { tick: -1, rooms: Object.create(null) };
+  }
+  var ai = GLOBAL_CACHE.aiState;
+  if (ai.tick !== (Game.time | 0)) {
+    ai.tick = Game.time | 0;
+    ai.rooms = Object.create(null);
+  }
+  return ai;
+}
+
+function structureTypeForPlan(type) {
+  if (type === 'container') return STRUCTURE_CONTAINER;
+  if (type === 'link') return STRUCTURE_LINK;
+  if (type === 'road') return STRUCTURE_ROAD;
+  return null;
+}
+
+function applyConstructionPlans(room, cache, plans) {
+  if (!room || !plans || !plans.length) return;
+  if (!cache) cache = prepareTickCaches();
+  var totalSites = cache.totalSites || 0;
+  var limit = 90;
+  for (var i = 0; i < plans.length; i++) {
+    if (totalSites >= limit) break;
+    var plan = plans[i];
+    if (!plan || !plan.pos) continue;
+    var structureType = structureTypeForPlan(plan.type);
+    if (!structureType) continue;
+    var pos = plan.pos;
+    if (typeof pos.x !== 'number' || typeof pos.y !== 'number' || typeof pos.roomName !== 'string') continue;
+    var targetRoom = Game.rooms[pos.roomName];
+    if (!targetRoom) continue;
+    var terrain = targetRoom.getTerrain();
+    if (terrain.get(pos.x, pos.y) === TERRAIN_MASK_WALL) continue;
+    var existing = targetRoom.lookForAt(LOOK_STRUCTURES, pos.x, pos.y);
+    var skip = false;
+    for (var s = 0; s < existing.length; s++) {
+      if (existing[s].structureType === structureType) { skip = true; break; }
+    }
+    if (skip) continue;
+    var sites = targetRoom.lookForAt(LOOK_CONSTRUCTION_SITES, pos.x, pos.y);
+    for (var cs = 0; cs < sites.length; cs++) {
+      if (sites[cs].structureType === structureType) { skip = true; break; }
+    }
+    if (skip) continue;
+    var rc = targetRoom.createConstructionSite(pos.x, pos.y, structureType);
+    if (rc === OK) {
+      totalSites += 1;
+    }
+  }
+  cache.totalSites = totalSites;
+}
+
+function storeLinkPlan(room, linkPlan) {
+  if (!linkPlan) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+  var src = Array.isArray(linkPlan.sourceIds) ? linkPlan.sourceIds : [];
+  var sink = Array.isArray(linkPlan.sinkIds) ? linkPlan.sinkIds : [];
+  var existing = Memory.rooms[room.name].aiLinkPlan;
+  var same = false;
+  if (existing && Array.isArray(existing.sourceIds) && Array.isArray(existing.sinkIds)) {
+    if (existing.sourceIds.length === src.length && existing.sinkIds.length === sink.length) {
+      same = true;
+      for (var i = 0; i < src.length; i++) {
+        if (existing.sourceIds[i] !== src[i]) { same = false; break; }
+      }
+      if (same) {
+        for (var j = 0; j < sink.length; j++) {
+          if (existing.sinkIds[j] !== sink[j]) { same = false; break; }
+        }
+      }
+    }
+  }
+  if (same) {
+    existing.updated = Game.time | 0;
+    return;
+  }
+  Memory.rooms[room.name].aiLinkPlan = {
+    sourceIds: src.slice(),
+    sinkIds: sink.slice(),
+    updated: Game.time | 0
+  };
+}
+
+function normalizeExpansionRole(role) {
+  if (!role) return null;
+  var str = String(role);
+  var lower = str.toLowerCase();
+  if (lower === 'remoteharvest' || lower === 'remoteharvester' || lower === 'luna') return 'luna';
+  if (lower === 'trucker') return 'Trucker';
+  if (lower === 'claimer') return 'Claimer';
+  if (lower === 'scout') return 'scout';
+  if (lower === 'courier') return 'courier';
+  if (lower === 'builder') return 'builder';
+  if (lower === 'baseharvest') return 'baseharvest';
+  if (lower === 'upgrader') return 'upgrader';
+  return str;
+}
+
+function reorderTasks(taskOrder, spawnWeights) {
+  if (!spawnWeights) return taskOrder;
+  var list = [];
+  for (var i = 0; i < taskOrder.length; i++) {
+    var task = taskOrder[i];
+    var weight = spawnWeights[task];
+    if (typeof weight !== 'number') {
+      weight = spawnWeights[normalizeExpansionRole(task)];
+    }
+    var priority = 1;
+    if (typeof weight === 'number') {
+      var bounded = BeeToolbox.bound(weight, 0.1, 5);
+      priority = 1 / bounded;
+    }
+    list.push({ task: task, priority: priority, index: i });
+  }
+  list.sort(function (a, b) {
+    if (a.priority === b.priority) {
+      return a.index - b.index;
+    }
+    return a.priority - b.priority;
+  });
+  var result = [];
+  for (var j = 0; j < list.length; j++) {
+    result.push(list[j].task);
+  }
+  return result;
+}
 
 /**
  * Shallow clone a task count dictionary into a fresh object.
@@ -494,6 +628,8 @@ var BeeHiveMind = {
     this.initializeMemory();
     var cache = prepareTickCaches();
 
+    this.runAI(cache);
+
     var ownedRooms = cache.roomsOwned || [];
     for (var i = 0; i < ownedRooms.length; i++) {
       this.manageRoom(ownedRooms[i], cache);
@@ -508,6 +644,73 @@ var BeeHiveMind = {
   },
 
   /**
+   * Execute AI planning stages and cache decisions for this tick.
+   * @param {object} cache Shared per-tick cache data.
+   * @returns {void}
+   */
+  runAI: function (cache) {
+    var aiCache = ensureAiCache();
+    var rooms = (cache && cache.roomsOwned) ? cache.roomsOwned : [];
+    for (var i = 0; i < rooms.length; i++) {
+      var room = rooms[i];
+      if (!room) continue;
+
+      var kpis = null;
+      if (Blackboard && typeof Blackboard.tick === 'function') {
+        kpis = Blackboard.tick(room);
+      }
+      if (!kpis && Blackboard && typeof Blackboard.get === 'function') {
+        kpis = Blackboard.get(room.name);
+      }
+
+      var economy = { spawnWeights: {}, buildPlans: [], linkPlan: null };
+      if (EconomyAI && typeof EconomyAI.decideEconomy === 'function') {
+        economy = EconomyAI.decideEconomy(room, kpis);
+      }
+
+      var expansionTargets = [];
+      if (ExpansionAI && typeof ExpansionAI.rankExpansionTargets === 'function') {
+        expansionTargets = ExpansionAI.rankExpansionTargets(room, kpis) || [];
+      }
+
+      var bestTarget = expansionTargets.length ? expansionTargets[0] : null;
+      var stable = false;
+      if (kpis) {
+        var storagePct = kpis.storageFillPct || 0;
+        var defense = kpis.defenseReadiness || {};
+        var hostiles = !!defense.activeHostiles;
+        stable = (storagePct >= 0.25) && !hostiles;
+      }
+
+      var plan = null;
+      if (bestTarget && bestTarget.score > 0 && stable && ExpansionAI && typeof ExpansionAI.planFOB === 'function') {
+        plan = ExpansionAI.planFOB(room, bestTarget);
+      }
+
+      aiCache.rooms[room.name] = {
+        kpis: kpis,
+        economy: economy,
+        expansionTargets: expansionTargets,
+        expansionPlan: plan,
+        bestTarget: bestTarget,
+        stable: stable
+      };
+
+      if (Memory.ai && Memory.ai.rooms && Memory.ai.rooms[room.name]) {
+        if (plan) {
+          Memory.ai.rooms[room.name].expansion = {
+            target: bestTarget ? bestTarget.roomName : null,
+            score: bestTarget ? bestTarget.score : 0,
+            updated: Game.time | 0
+          };
+        } else if (Memory.ai.rooms[room.name].expansion) {
+          delete Memory.ai.rooms[room.name].expansion;
+        }
+      }
+    }
+  },
+
+  /**
    * Execute per-room planning hooks for owned rooms.
    * @param {Room} room Room to manage.
    * @param {object} cache Per-tick cache data.
@@ -518,6 +721,14 @@ var BeeHiveMind = {
    */
   manageRoom: function (room, cache) {
     if (!room) return;
+    var aiCache = ensureAiCache();
+    var aiRoom = aiCache.rooms[room.name] || null;
+    if (aiRoom && aiRoom.economy) {
+      applyConstructionPlans(room, cache, aiRoom.economy.buildPlans);
+      if (aiRoom.economy.linkPlan) {
+        storeLinkPlan(room, aiRoom.economy.linkPlan);
+      }
+    }
     if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
       RoomPlanner.ensureSites(room, cache);
     }
@@ -583,6 +794,7 @@ var BeeHiveMind = {
     var roleCounts = cloneCounts(cache.roleCounts);
     var lunaCountsByHome = cloneCounts(cache.lunaCountsByHome);
     var spawns = cache.spawns || [];
+    var aiCache = ensureAiCache();
     var builderFailLog = GLOBAL_CACHE.builderFailLog || (GLOBAL_CACHE.builderFailLog = Object.create(null));
     var defaultTaskOrder = [
       'queen',
@@ -611,6 +823,9 @@ var BeeHiveMind = {
 
       var room = spawner.room;
       if (!room) continue;
+      var aiRoomData = aiCache.rooms[room.name] || {};
+      var spawnWeights = (aiRoomData.economy && aiRoomData.economy.spawnWeights) ? aiRoomData.economy.spawnWeights : null;
+      var expansionPlan = aiRoomData.expansionPlan || null;
 
       var builderSites = needBuilder(room, cache);
       var builderLimit = builderSites > 0 ? 1 : 0;
@@ -647,6 +862,7 @@ var BeeHiveMind = {
           taskOrder.splice(queenIndex + 1, 0, 'builder');
         }
       }
+      taskOrder = reorderTasks(taskOrder, spawnWeights);
 
       var workerTaskLimits = {
         baseharvest: 2,
@@ -664,6 +880,51 @@ var BeeHiveMind = {
         Trucker: 0,
         Claimer: 0
       };
+
+      if (spawnWeights) {
+        for (var weightKey in spawnWeights) {
+          if (!BeeToolbox.hasOwn(spawnWeights, weightKey)) continue;
+          var weightVal = spawnWeights[weightKey];
+          if (typeof weightVal !== 'number') continue;
+          var normalizedKey = normalizeExpansionRole(weightKey);
+          if (!normalizedKey) continue;
+          if (!BeeToolbox.hasOwn(workerTaskLimits, normalizedKey)) continue;
+          var baseLimit = workerTaskLimits[normalizedKey] || 0;
+          if (baseLimit <= 0 && weightVal <= 0) {
+            workerTaskLimits[normalizedKey] = 0;
+            continue;
+          }
+          if (baseLimit <= 0 && weightVal > 1) {
+            workerTaskLimits[normalizedKey] = Math.round(weightVal);
+            continue;
+          }
+          var boundedWeight = BeeToolbox.bound(weightVal, 0, 3);
+          var adjustedLimit = Math.round(baseLimit * boundedWeight);
+          if (baseLimit > 0 && adjustedLimit < 1 && boundedWeight > 0) adjustedLimit = 1;
+          workerTaskLimits[normalizedKey] = adjustedLimit;
+        }
+      }
+
+      if (expansionPlan && expansionPlan.spawnQueue && expansionPlan.spawnQueue.length) {
+        for (var sq = 0; sq < expansionPlan.spawnQueue.length; sq++) {
+          var order = expansionPlan.spawnQueue[sq];
+          if (!order) continue;
+          var taskName = normalizeExpansionRole(order.role);
+          var desiredCount = order.count | 0;
+          if (!taskName || desiredCount <= 0) continue;
+          if (!BeeToolbox.hasOwn(workerTaskLimits, taskName)) {
+            workerTaskLimits[taskName] = desiredCount;
+          } else {
+            if (workerTaskLimits[taskName] < desiredCount) {
+              workerTaskLimits[taskName] = desiredCount;
+            }
+          }
+        }
+      }
+
+      if (builderLimit > 0 && workerTaskLimits.builder < builderLimit) {
+        workerTaskLimits.builder = builderLimit;
+      }
 
       for (var orderPos = 0; orderPos < taskOrder.length; orderPos++) {
         var task = taskOrder[orderPos];
