@@ -652,7 +652,7 @@ var BeeHiveMind = {
         baseharvest: 2,
         courier: 1,
         queen: 2,
-        upgrader: 1,
+        upgrader: 4,
         builder: builderLimit,
         repair: 0,
         luna: determineLunaQuota(room, cache),
