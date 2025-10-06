@@ -1,32 +1,32 @@
 "use strict";
 
-const CoreConfig = require('core.config');
-const Logger = require('core.logger');
+var CoreConfig = require('core.config');
+var Logger = require('core.logger');
 
-const BeeMaintenance = require('BeeMaintenance');
-const BeeVisuals = require('BeeVisuals');
-const BeeHiveMind = require('BeeHiveMind');
-const towerLogic = require('tower.logic');
-const roleLinkManager = require('role.LinkManager');
-const BeeToolbox = require('BeeToolbox');
+var BeeMaintenance = require('BeeMaintenance');
+var BeeVisuals = require('BeeVisuals');
+var BeeHiveMind = require('BeeHiveMind');
+var towerLogic = require('tower.logic');
+var roleLinkManager = require('role.LinkManager');
+var BeeToolbox = require('BeeToolbox');
 require('Traveler');
-const SquadFlagManager = require('SquadFlagManager');
+var SquadFlagManager = require('SquadFlagManager');
 
-const LOG_LEVEL = CoreConfig.LOG_LEVEL;
+var LOG_LEVEL = CoreConfig.LOG_LEVEL;
 
 // Maintain backwards compatibility: expose log level helpers on global.
 global.LOG_LEVEL = LOG_LEVEL;
 Object.defineProperty(global, 'currentLogLevel', {
     configurable: true,
-    get() {
+    get: function () {
         return Logger.getLogLevel();
     },
-    set(value) {
+    set: function (value) {
         Logger.setLogLevel(value);
     }
 });
 
-const mainLog = Logger.createLogger('Main', LOG_LEVEL.BASIC);
+var mainLog = Logger.createLogger('Main', LOG_LEVEL.BASIC);
 
 function ensureFirstSpawnMemory() {
     if (Memory.GameTickCounter === undefined) Memory.GameTickCounter = 0;
@@ -34,7 +34,12 @@ function ensureFirstSpawnMemory() {
     if (Memory.GameTickCounter < 10) return;
 
     Memory.GameTickCounter = 0;
-    const spawns = Object.values(Game.spawns);
+    var spawns = [];
+    for (var name in Game.spawns) {
+        if (Object.prototype.hasOwnProperty.call(Game.spawns, name)) {
+            spawns.push(Game.spawns[name]);
+        }
+    }
     if (!spawns.length) {
         if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
             mainLog.debug('No owned spawns detected.');
@@ -42,7 +47,7 @@ function ensureFirstSpawnMemory() {
         return;
     }
 
-    const primaryRoom = spawns[0].room.name;
+    var primaryRoom = spawns[0].room.name;
     if (Memory.firstSpawnRoom !== primaryRoom) {
         Memory.firstSpawnRoom = primaryRoom;
         if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
@@ -59,9 +64,9 @@ function maintainRepairTargets() {
     Memory.GameTickRepairCounter = 0;
     if (!Memory.rooms) Memory.rooms = {};
 
-    for (const roomName in Game.rooms) {
+    for (var roomName in Game.rooms) {
         if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
-        const room = Game.rooms[roomName];
+        var room = Game.rooms[roomName];
         if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
         Memory.rooms[roomName].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
     }
@@ -69,21 +74,21 @@ function maintainRepairTargets() {
 
 function refreshSourceIntel() {
     if (Game.time % 3 !== 0) return;
-    for (const roomName in Game.rooms) {
+    for (var roomName in Game.rooms) {
         if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
-        const room = Game.rooms[roomName];
+        var room = Game.rooms[roomName];
         BeeToolbox.logSourceContainersInRoom(room);
     }
 }
 
 function maybeGeneratePixel() {
-    const pixelCfg = CoreConfig.settings.pixels;
+    var pixelCfg = CoreConfig.settings.pixels;
     if (!pixelCfg.enabled) return;
     if (Game.cpu.bucket < pixelCfg.bucketThreshold) return;
     if (pixelCfg.tickModulo > 1 && (Game.time % pixelCfg.tickModulo) !== 0) return;
 
-    const result = Game.cpu.generatePixel();
-    if (result === OK) {
+    var result = Game.cpu.generatePixel();
+    if (result === OK && Logger.shouldLog(LOG_LEVEL.BASIC)) {
         mainLog.info('Pixel generated successfully.');
     }
 }

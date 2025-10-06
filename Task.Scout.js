@@ -248,10 +248,10 @@ function ensureScoutMem(creep) {
     for (var k in Game.spawns) if (Game.spawns.hasOwnProperty(k)) spawns.push(Game.spawns[k]);
     if (spawns.length) {
       var best = spawns[0];
-      var bestD = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
+      var bestD = BeeToolbox.safeLinearDistance(creep.pos.roomName, best.pos.roomName);
       for (var i = 1; i < spawns.length; i++) {
         var s = spawns[i];
-        var d = Game.map.getRoomLinearDistance(creep.pos.roomName, s.pos.roomName);
+        var d = BeeToolbox.safeLinearDistance(creep.pos.roomName, s.pos.roomName);
         if (d < bestD) { best = s; bestD = d; }
       }
       m.home = best.pos.roomName;
@@ -360,7 +360,7 @@ function rebuildQueueAllRings(mem, creep) {
     var layer = getRingCached(home, r);
     for (var i = 0; i < layer.length; i++) {
       var rn = layer[i];
-      if (Game.map.getRoomLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn)) {
+      if (BeeToolbox.safeLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn)) {
         all.push(rn);
       }
     }
@@ -414,7 +414,7 @@ function rebuildQueueAllRings(mem, creep) {
     for (var i2 = 0; i2 < fb.length; i2++) {
       var rn2 = fb[i2];
       if (okRoomName(rn2) &&
-          Game.map.getRoomLinearDistance(home, rn2) <= EXPLORE_RADIUS &&
+          BeeToolbox.safeLinearDistance(home, rn2) <= EXPLORE_RADIUS &&
           !isBlockedRecently(rn2)) filt.push(rn2);
     }
     queue = filt;
@@ -429,7 +429,7 @@ function inwardNeighborTowardHome(current, home) {
   var best = null, bestD = 9999;
   for (var i = 0; i < neigh.length; i++) {
     var rn = neigh[i];
-    var d = Game.map.getRoomLinearDistance(home, rn);
+    var d = BeeToolbox.safeLinearDistance(home, rn);
     if (d < bestD) { bestD = d; best = rn; }
   }
   return best;
@@ -469,7 +469,7 @@ var TaskScout = {
     if (!creep.memory.lastRoom) creep.memory.lastRoom = creep.room.name;
 
     // leash: if we're outside radius, step one room inward first
-    var curDist = Game.map.getRoomLinearDistance(M.home, creep.room.name);
+    var curDist = BeeToolbox.safeLinearDistance(M.home, creep.room.name);
     if (curDist > EXPLORE_RADIUS) {
       var back = inwardNeighborTowardHome(creep.room.name, M.home);
       if (back) {
@@ -542,7 +542,7 @@ var TaskScout = {
     while (M.queue.length) {
       var next = M.queue.shift();
       if (!okRoomName(next) || isBlockedRecently(next)) continue;
-      if (Game.map.getRoomLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
+      if (BeeToolbox.safeLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
       if (next === (M.prevRoom || null) && M.queue.length) continue;
 
       var claimOK = tryClaimRoomThisTick(creep, next);

@@ -1,7 +1,8 @@
 // CHANGES:
-// - Added builder task prioritization, spawn retry handling, and fallback behavior.
-// - Updated builder need calculations to count owned sites in home and remotes with logging support.
-// - Added helper utilities for spawn body costs and builder spawn diagnostics.
+// - Adjusted spawn loop to stop breaking on failed attempts and improved builder prioritization per tick.
+// - Added builder spawn fallback coordination with diagnostics and cached body helpers.
+// - Maintained construction tracking utilities for logging and quota calculations.
+// - Refined builder demand calculations to only consider owned construction in home and remote rooms.
 
 "use strict";
 
@@ -147,33 +148,88 @@ function prepareTickCaches() {
     var ownedRoom = ownedRooms[idx];
     var remoteNames = [];
     if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-      var remoteResult = RoadPlanner.getActiveRemoteRooms(ownedRoom);
-      if (Array.isArray(remoteResult)) {
-        for (var ridx = 0; ridx < remoteResult.length; ridx++) {
-          var remoteName = remoteResult[ridx];
-          if (typeof remoteName === 'string') {
-            remoteNames.push(remoteName);
-          } else if (remoteName && typeof remoteName.roomName === 'string') {
-            remoteNames.push(remoteName.roomName);
-          }
-        }
-      } else if (remoteResult && typeof remoteResult === 'object') {
-        for (var key in remoteResult) {
-          if (!BeeToolbox.hasOwn(remoteResult, key)) continue;
-          var remoteValue = remoteResult[key];
-          if (typeof remoteValue === 'string') {
-            remoteNames.push(remoteValue);
-          } else if (remoteValue && typeof remoteValue.roomName === 'string') {
-            remoteNames.push(remoteValue.roomName);
-          }
-        }
-      }
+      remoteNames = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
     }
     remotesByHome[ownedRoom.name] = remoteNames;
   }
   cache.remotesByHome = remotesByHome;
 
   return cache;
+}
+
+/**
+ * Normalize remote room descriptors into an array of room name strings.
+ * @param {*} input Source data describing remote rooms.
+ * @returns {string[]} Array of remote room names without duplicates.
+ * @sideeffects None.
+ * @cpu O(n) over provided descriptors.
+ * @memory Allocates arrays for normalized output.
+ */
+function normalizeRemoteRooms(input) {
+  var result = [];
+  var seen = Object.create(null);
+
+  function addName(value) {
+    if (!value) return;
+    var name = null;
+    if (typeof value === 'string') {
+      name = value;
+    } else if (typeof value.roomName === 'string') {
+      name = value.roomName;
+    } else if (typeof value.name === 'string') {
+      name = value.name;
+    }
+    if (!name) return;
+    if (seen[name]) return;
+    seen[name] = true;
+    result.push(name);
+  }
+
+  if (!input) {
+    return result;
+  }
+
+  if (typeof input === 'string') {
+    addName(input);
+    return result;
+  }
+
+  if (Array.isArray(input)) {
+    for (var i = 0; i < input.length; i++) {
+      addName(input[i]);
+    }
+    return result;
+  }
+
+  if (typeof input === 'object') {
+    if (typeof input.roomName === 'string' || typeof input.name === 'string') {
+      addName(input);
+      return result;
+    }
+    for (var key in input) {
+      if (!BeeToolbox.hasOwn(input, key)) continue;
+      addName(input[key]);
+      if (looksLikeRoomName(key)) {
+        addName(key);
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Basic heuristic to detect Screeps room name strings.
+ * @param {string} name Candidate value.
+ * @returns {boolean} True when the string resembles a room name.
+ */
+function looksLikeRoomName(name) {
+  if (typeof name !== 'string') return false;
+  if (name.length < 4) return false;
+  var first = name.charAt(0);
+  if (first !== 'W' && first !== 'E') return false;
+  if (name.indexOf('N') === -1 && name.indexOf('S') === -1) return false;
+  return true;
 }
 
 /**
@@ -200,14 +256,24 @@ function defaultTaskForRole(role) {
  */
 function needBuilder(room, cache) {
   if (!room) return 0;
-  var localSites = cache.roomSiteCounts[room.name] || 0;
-  var remotes = cache.remotesByHome[room.name] || [];
-  var remoteSites = 0;
-  for (var i = 0; i < remotes.length; i++) {
-    var remoteRoomName = remotes[i];
-    remoteSites += cache.roomSiteCounts[remoteRoomName] || 0;
+  cache = cache || prepareTickCaches();
+
+  var roomSiteCounts = cache.roomSiteCounts || Object.create(null);
+  var totalSites = roomSiteCounts[room.name] || 0;
+
+  var remoteNames;
+  if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
+    remoteNames = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(room));
+  } else {
+    remoteNames = cache.remotesByHome[room.name] || [];
   }
-  return localSites + remoteSites;
+
+  for (var i = 0; i < remoteNames.length; i++) {
+    var remoteRoomName = remoteNames[i];
+    totalSites += roomSiteCounts[remoteRoomName] || 0;
+  }
+
+  return totalSites;
 }
 
 /**
@@ -585,31 +651,18 @@ var BeeHiveMind = {
         }
 
         if (!spawnLogic || typeof spawnLogic.Spawn_Worker_Bee !== 'function') {
-          break;
+          continue;
         }
 
         var didSpawn = false;
         if (task === 'builder') {
-          var builderBodyForCapacity = (typeof spawnLogic.Generate_Builder_Body === 'function')
-            ? spawnLogic.Generate_Builder_Body(spawnCapacity)
-            : [];
-          var builderBodyForAvailable = (typeof spawnLogic.Generate_Builder_Body === 'function')
-            ? spawnLogic.Generate_Builder_Body(spawnResource)
-            : [];
-          var capacityCost = calculateBodyCost(builderBodyForCapacity);
-          var availableCost = calculateBodyCost(builderBodyForAvailable);
-          if (capacityCost > 0 && spawnCapacity > spawnResource && capacityCost > spawnResource) {
-            didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnCapacity);
-          }
-          if (!didSpawn && availableCost > 0) {
-            didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
-          }
-          if (!didSpawn && builderLimit > 0) {
+          didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+          if (didSpawn !== true && builderLimit > 0) {
             var reason = determineBuilderFailureReason(spawnResource, spawnCapacity);
             var lastLogTick = builderFailLog[room.name] || 0;
             if ((Game.time - lastLogTick) >= 50) {
               builderFailLog[room.name] = Game.time;
-              var message = '[' + (spawner.name || 'spawn') + '] builder wanted: sites=' + builderSites + ' ; not spawning: reason=' + reason + ' (energy ' + spawnResource + '/' + spawnCapacity + ')';
+              var message = '[' + (spawner.name || 'spawn') + '] builder wanted: sites=' + builderSites + '; not spawning: reason=' + reason + ' (energy ' + spawnResource + '/' + spawnCapacity + ')';
               hiveLog.info(message);
             }
           }
@@ -617,7 +670,7 @@ var BeeHiveMind = {
           didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
         }
 
-        if (didSpawn) {
+        if (didSpawn === true) {
           roleCounts[task] = (roleCounts[task] || 0) + 1;
           if (task === 'luna') {
             lunaCountsByHome[room.name] = (lunaCountsByHome[room.name] || 0) + 1;

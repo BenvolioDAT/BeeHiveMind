@@ -1,13 +1,16 @@
-const TaskManager = require('TaskManager');
-const roleWorker_Bee = {
-  run: function(creep) {
-    if (creep.spawning) 
+'use strict';
+
+var TaskManager = require('TaskManager');
+var roleWorker_Bee = {
+  run: function (creep) {
+    if (!creep || creep.spawning) {
       return;
-    // If the bee has no task, assign default (idle, or 'harvest' for max usefulness)
+    }
+
     if (!creep.memory.task) {
       creep.memory.task = TaskManager.getHighestPriorityTask(creep);
     }
-    // Run whatever task is assigned
+
     TaskManager.run(creep);
   }
 };

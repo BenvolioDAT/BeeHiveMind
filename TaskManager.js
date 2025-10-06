@@ -1,43 +1,43 @@
 'use strict';
 
-const Logger = require('core.logger');
-const LOG_LEVEL = Logger.LOG_LEVEL;
-const taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
+var Logger = require('core.logger');
+var LOG_LEVEL = Logger.LOG_LEVEL;
+var taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
 
-const TaskIdle = require('./Task.Idle');
-const TaskBaseHarvest = require('./Task.BaseHarvest');
-const TaskLuna = require('./Task.Luna');
-const TaskBuilder = require('./Task.Builder');
-const TaskCourier = require('./Task.Courier');
-const TaskQueen = require('./Task.Queen');
-const TaskScout = require('./Task.Scout');
-const TaskRepair = require('./Task.Repair');
-const TaskUpgrader = require('./Task.Upgrader');
-const TaskCombatArcher = require('./Task.CombatArcher');
-const TaskCombatMedic = require('./Task.CombatMedic');
-const TaskCombatMelee = require('./Task.CombatMelee');
-const TaskDismantler = require('./Task.Dismantler');
-const TaskTrucker = require('Task.Trucker');
-const TaskClaimer = require('Task.Claimer');
+var TaskIdle = require('./Task.Idle');
+var TaskBaseHarvest = require('./Task.BaseHarvest');
+var TaskLuna = require('./Task.Luna');
+var TaskBuilder = require('./Task.Builder');
+var TaskCourier = require('./Task.Courier');
+var TaskQueen = require('./Task.Queen');
+var TaskScout = require('./Task.Scout');
+var TaskRepair = require('./Task.Repair');
+var TaskUpgrader = require('./Task.Upgrader');
+var TaskCombatArcher = require('./Task.CombatArcher');
+var TaskCombatMedic = require('./Task.CombatMedic');
+var TaskCombatMelee = require('./Task.CombatMelee');
+var TaskDismantler = require('./Task.Dismantler');
+var TaskTrucker = require('Task.Trucker');
+var TaskClaimer = require('Task.Claimer');
 
-const DEFAULT_NEEDS = Object.freeze({
+var DEFAULT_NEEDS = Object.freeze({
   baseharvest: 2,
   builder: 2,
   repair: 1,
   courier: 2,
   upgrader: 2,
-  scout: 1,
+  scout: 1
 });
 
-const DEFAULT_PRIORITY = Object.freeze([
+var DEFAULT_PRIORITY = Object.freeze([
   'baseharvest',
   'repair',
   'builder',
   'courier',
-  'upgrader',
+  'upgrader'
 ]);
 
-const TASK_REGISTRY = Object.create(null);
+var TASK_REGISTRY = Object.create(null);
 
 function registerTask(name, module) {
   if (!name || !module || typeof module.run !== 'function') {
@@ -65,24 +65,33 @@ registerTask('idle', TaskIdle);
 registerTask('Trucker', TaskTrucker);
 registerTask('Claimer', TaskClaimer);
 
-const cache = (global.__taskManagerCache = global.__taskManagerCache || {
+var cache = (global.__taskManagerCache = global.__taskManagerCache || {
   tick: -1,
   counts: null,
   needs: null,
-  needsTick: -1,
+  needsTick: -1
 });
 
 function getTaskCounts() {
   if (cache.tick === Game.time && cache.counts) return cache.counts;
   cache.tick = Game.time;
-  cache.counts = _.countBy(Game.creeps, function (c) {
-    return c && c.memory ? c.memory.task || 'idle' : 'idle';
-  });
+  var counts = Object.create(null);
+  for (var creepName in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) continue;
+    var creep = Game.creeps[creepName];
+    if (!creep || !creep.memory) {
+      counts.idle = (counts.idle || 0) + 1;
+      continue;
+    }
+    var task = creep.memory.task || 'idle';
+    counts[task] = (counts[task] || 0) + 1;
+  }
+  cache.counts = counts;
   return cache.counts;
 }
 
 function mergeNeeds(defaults, overrides) {
-  var result = {};
+  var result = Object.create(null);
   var key;
   for (key in defaults) {
     if (Object.prototype.hasOwnProperty.call(defaults, key)) {
@@ -103,7 +112,7 @@ function colonyNeeds() {
   var overrides = (Memory.colonyNeeds && Memory.colonyNeeds.overrides) || {};
   var needsConfig = mergeNeeds(DEFAULT_NEEDS, overrides);
   var counts = getTaskCounts();
-  var shortage = {};
+  var shortage = Object.create(null);
 
   for (var key in needsConfig) {
     if (!Object.prototype.hasOwnProperty.call(needsConfig, key)) continue;
@@ -137,7 +146,7 @@ function getPriorityList() {
 }
 
 module.exports = {
-  run(creep) {
+  run: function (creep) {
     if (!creep) return;
     var taskName = creep.memory && creep.memory.task;
     var taskModule = getTaskModule(taskName);
@@ -152,12 +161,12 @@ module.exports = {
     }
   },
 
-  isTaskNeeded(taskName) {
+  isTaskNeeded: function (taskName) {
     var needs = colonyNeeds();
     return (needs[taskName] || 0) > 0;
   },
 
-  getHighestPriorityTask(creep) {
+  getHighestPriorityTask: function (creep) {
     var needs = colonyNeeds();
     var priorityList = getPriorityList();
     for (var i = 0; i < priorityList.length; i++) {
@@ -167,11 +176,11 @@ module.exports = {
     return 'idle';
   },
 
-  clearTaskMemory(creep) {
+  clearTaskMemory: function (creep) {
     if (!creep || !creep.memory) return;
     delete creep.memory.assignedSource;
     delete creep.memory.targetRoom;
     delete creep.memory.assignedContainer;
     delete creep.memory.sourceId;
-  },
+  }
 };
