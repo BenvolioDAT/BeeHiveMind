@@ -451,9 +451,9 @@ function getHomeName(creep){
   if (creep.memory.home) return creep.memory.home;
   var spawns = Object.keys(Game.spawns).map(function(k){return Game.spawns[k];});
   if (spawns.length){
-    var best = spawns[0], bestD = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
+    var best = spawns[0], bestD = BeeToolbox.safeLinearDistance(creep.pos.roomName, best.pos.roomName);
     for (var i=1;i<spawns.length;i++){
-      var s=spawns[i], d=Game.map.getRoomLinearDistance(creep.pos.roomName, s.pos.roomName);
+      var s=spawns[i], d=BeeToolbox.safeLinearDistance(creep.pos.roomName, s.pos.roomName);
       if (d<bestD){ best=s; bestD=d; }
     }
     creep.memory.home = best.pos.roomName; return creep.memory.home;
@@ -566,7 +566,7 @@ function pickRemoteSource(creep){
     for (var j=0;j<sources.length;j++){
       var s=sources[j];
       var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
-      var lin = Game.map.getRoomLinearDistance(homeName, rn);
+      var lin = BeeToolbox.safeLinearDistance(homeName, rn);
 
       if (shouldAvoid(creep, s.id)){ avoided.push({id:s.id,roomName:rn,cost:cost,lin:lin,left:avoidRemaining(creep,s.id)}); continue; }
       // Skip if another owner is active
@@ -590,7 +590,7 @@ function pickRemoteSource(creep){
         if (ownerNow2 && ownerNow2 !== creep.name) continue;
         if (maCount(memAssign, sid) >= MAX_LUNA_PER_SOURCE) continue;
 
-        var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
+        var lin2 = BeeToolbox.safeLinearDistance(homeName, rn);
         var synth = (lin2*200)+800;
         var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
         candidates.push({ id:sid, roomName:rn, cost:synth, lin:lin2, sticky:sticky2 });
@@ -808,7 +808,7 @@ var TaskLuna = {
 
     // Sort by linear distance from home (cheap tiebreaker)
     return filtered.sort(function(a,b){
-      return Game.map.getRoomLinearDistance(homeName, a) - Game.map.getRoomLinearDistance(homeName, b);
+      return BeeToolbox.safeLinearDistance(homeName, a) - BeeToolbox.safeLinearDistance(homeName, b);
     });
   },
 

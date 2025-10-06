@@ -23,6 +23,13 @@ var CFG = {
 };
 
 // ---------- helpers ----------
+/**
+ * Resolve the primary owned room for drawing HUD elements.
+ * @returns {Room|null} First owned room detected or null when none.
+ * @sideeffects None.
+ * @cpu Low because it scans spawns at most once.
+ * @memory None beyond local variables.
+ */
 function _getMainRoom() {
   var rn = Memory.firstSpawnRoom;
   if (rn && Game.rooms[rn]) return Game.rooms[rn];
@@ -33,6 +40,15 @@ function _getMainRoom() {
   }
   return null;
 }
+/**
+ * Determine whether visuals for a room should render on this tick.
+ * @param {number} mod Tick modulo throttling value.
+ * @param {string} roomName Room identifier.
+ * @returns {boolean} True when drawing should occur.
+ * @sideeffects None.
+ * @cpu O(len(roomName)).
+ * @memory None.
+ */
 function _shouldDraw(mod, roomName) {
   if (mod <= 1) return true;
   var h = 0;
@@ -42,7 +58,13 @@ function _shouldDraw(mod, roomName) {
 
 // ---------- module ----------
 var BeeVisuals = {
-  // Always called each tick
+  /**
+   * Render the main per-tick in-room HUD visuals.
+   * @returns {void}
+   * @sideeffects Draws visuals and mutates Memory.lastCpuUsage, Memory.GameTickRepairCounter.
+   * @cpu Moderate due to iteration over creeps and optional overlays.
+   * @memory Uses transient arrays only.
+   */
   drawVisuals: function () {
     var room = _getMainRoom();
     if (!room) return;
@@ -108,7 +130,13 @@ var BeeVisuals = {
     }
   },
 
-  // Energy bar
+  /**
+   * Draw an energy availability bar in the main room.
+   * @returns {void}
+   * @sideeffects Renders visuals only.
+   * @cpu Low.
+   * @memory None.
+   */
   drawEnergyBar: function () {
     var room = _getMainRoom();
     if (!room) return;
@@ -127,7 +155,13 @@ var BeeVisuals = {
     });
   },
 
-  // Task table
+  /**
+   * Display a table of worker bee task assignments.
+   * @returns {void}
+   * @sideeffects Draws visuals.
+   * @cpu Moderate when enumerating creeps.
+   * @memory Temporary counters only.
+   */
   drawWorkerBeeTaskTable: function () {
     var room = _getMainRoom();
     if (!room) return;
@@ -186,6 +220,13 @@ var BeeVisuals = {
 };
 
 // --- Planned road overlay (in-room, DEBUG only) ---
+/**
+ * Render debug markers for planned roads stored by the planner.
+ * @returns {void}
+ * @sideeffects Draws visuals for debugging.
+ * @cpu Moderate due to iterating planned segments.
+ * @memory Temporary arrays only.
+ */
 BeeVisuals.drawPlannedRoadsDebug = function () {
   if (!Logger.shouldLog(LOG_LEVEL.DEBUG)) return;
   var room = _getMainRoom(); if (!room) return;
@@ -208,7 +249,17 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
   var COLOR_BUILT   = '#99ff99';
   var COLOR_CURSOR  = '#66ccff';
 
-  function _hasRoadOrSiteFast(roomObj, x, y) {
+/**
+ * Quickly check if a tile already hosts a road or road construction site.
+ * @param {Room} roomObj Room context.
+ * @param {number} x Tile X coordinate.
+ * @param {number} y Tile Y coordinate.
+ * @returns {boolean} True when a road exists or is planned on the tile.
+ * @sideeffects None.
+ * @cpu Low per call.
+ * @memory None.
+ */
+function _hasRoadOrSiteFast(roomObj, x, y) {
     var arr = roomObj.lookForAt(LOOK_STRUCTURES, x, y);
     for (var i = 0; i < arr.length; i++) if (arr[i].structureType === STRUCTURE_ROAD) return true;
     var siteArr = roomObj.lookForAt(LOOK_CONSTRUCTION_SITES, x, y);
@@ -266,6 +317,13 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
 };
 
 // --- NEW: World/overview map overlays (flags + planned sites) ---
+/**
+ * Draw high-level world map overlays including flags and planned roads.
+ * @returns {void}
+ * @sideeffects Draws visuals on the world map.
+ * @cpu Moderate when data volume high.
+ * @memory Temporary arrays only.
+ */
 BeeVisuals.drawWorldOverview = function () {
   // Throttle — treat 0/false as "disabled"
   var mod = CFG.worldDrawModulo | 0;

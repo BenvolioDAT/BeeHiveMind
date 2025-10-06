@@ -34,41 +34,6 @@ var TaskCombatMedic = {
     var canHeal = bodyHeal > 0;
     var healedThisTick = false; // cast at most once/tick
 
-    // ---------- helpers ----------
-    function lowestInRange(origin, range) {
-      var allies = origin.findInRange(FIND_MY_CREEPS, range, { filter: function (a){ return a.hits < a.hitsMax; } });
-      if (!allies.length) return null;
-      return _.min(allies, function (a){ return a.hits / Math.max(1, a.hitsMax); });
-    }
-
-    function moveSmart(targetPos, range) {
-      if (!targetPos) return ERR_NO_PATH;
-      return TaskSquad.stepToward(creep, (targetPos.pos || targetPos), range);
-    }
-
-    function tryHeal(target) {
-      if (!canHeal || healedThisTick || !target) return;
-      if (target.hits >= target.hitsMax) return;
-      if (creep.pos.isNearTo(target)) {
-        if (creep.heal(target) === OK) healedThisTick = true;
-      } else if (creep.pos.inRangeTo(target, 3)) {
-        if (creep.rangedHeal(target) === OK) healedThisTick = true;
-      }
-    }
-
-    function countMedicsFollowing(targetId) {
-      var sid = creep.memory.squadId || 'Alpha';
-      var n = 0;
-      for (var name in Game.creeps) {
-        var c = Game.creeps[name];
-        if (!c || !c.my || !c.memory) continue;
-        if ((c.memory.squadId || 'Alpha') !== sid) continue;
-        if ((c.memory.task || c.memory.role) !== 'CombatMedic') continue;
-        if (c.memory.followTarget === targetId) n++;
-      }
-      return n;
-    }
-
     // ---------- 1) choose / refresh buddy ----------
     var buddy = Game.getObjectById(creep.memory.followTarget);
     var needNewBuddy = (!buddy || !buddy.my || buddy.hits <= 0);
@@ -91,9 +56,8 @@ var TaskCombatMedic = {
       if (candidates.length) {
         var anyInjured = _.some(candidates, function(a){ return a.hits < a.hitsMax; });
         if (anyInjured) {
-          var selfRef = this;
           buddy = _.min(candidates, function (a){
-            return (a.hits - selfRef._estimateTowerDamage(creep.room, a.pos)) / Math.max(1, a.hitsMax);
+            return (a.hits - BeeToolbox.estimateTowerDamage(creep.room, a.pos)) / Math.max(1, a.hitsMax);
           });
         } else {
           // Prefer melee as anchor if nobody is hurt
@@ -105,12 +69,12 @@ var TaskCombatMedic = {
 
         // per-target medic cap
         if (buddy && CONFIG.maxMedicsPerTarget > 0) {
-          var count = countMedicsFollowing(buddy.id);
+          var count = BeeToolbox.countRoleFollowingTarget(squadId, buddy.id, 'CombatMedic');
           if (count >= CONFIG.maxMedicsPerTarget) {
             var alt = null, bestLoad = 999, i;
             for (i=0;i<candidates.length;i++){
               var cand = candidates[i];
-              var load = countMedicsFollowing(cand.id);
+              var load = BeeToolbox.countRoleFollowingTarget(squadId, cand.id, 'CombatMedic');
               if (load < bestLoad) { bestLoad = load; alt = cand; }
             }
             if (alt) buddy = alt;
@@ -124,15 +88,18 @@ var TaskCombatMedic = {
     // ---------- 2) no buddy? hover at anchor/rally and still heal ----------
     if (!buddy) {
       var anc = TaskSquad.getAnchor(creep) || Game.flags.MedicRally || Game.flags.Rally;
-      if (anc) moveSmart(anc.pos || anc, 1);
-      if (!healedThisTick) tryHeal(lowestInRange(creep.pos, CONFIG.triageRange));
+      if (anc) BeeToolbox.combatStepToward(creep, anc.pos || anc, 1, TaskSquad);
+      if (!healedThisTick) {
+        var triage = BeeToolbox.findLowestInjuredAlly(creep.pos, CONFIG.triageRange);
+        if (BeeToolbox.tryHealTarget(creep, triage)) healedThisTick = true;
+      }
       return;
     }
 
     // ---------- 3) flee logic (keep heals going) ----------
     var underHp = (creep.hits / creep.hitsMax) < CONFIG.fleePct;
     var hostilesNear = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0; } });
-    var needToFlee = underHp || (hostilesNear.length && this._inTowerDanger(creep.pos));
+    var needToFlee = underHp || (hostilesNear.length && BeeToolbox.isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius));
     if (needToFlee) {
       var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
       if (bad) {
@@ -141,12 +108,17 @@ var TaskCombatMedic = {
           creep.move(creep.pos.getDirectionTo(flee.path[0]));
         }
       } else {
-        moveSmart(buddy.pos, 3);
+        BeeToolbox.combatStepToward(creep, buddy.pos, 3, TaskSquad);
       }
       // heal while fleeing: buddy > anyone in 3 > self
       if (!healedThisTick) {
-        if (buddy.hits < buddy.hitsMax && creep.pos.inRangeTo(buddy, 3)) tryHeal(buddy);
-        if (!healedThisTick) tryHeal(lowestInRange(creep.pos, 3));
+        if (buddy.hits < buddy.hitsMax && creep.pos.inRangeTo(buddy, 3) && BeeToolbox.tryHealTarget(creep, buddy)) {
+          healedThisTick = true;
+        }
+        if (!healedThisTick) {
+          var nearby = BeeToolbox.findLowestInjuredAlly(creep.pos, 3);
+          if (BeeToolbox.tryHealTarget(creep, nearby)) healedThisTick = true;
+        }
         if (!healedThisTick && canHeal && creep.hits < creep.hitsMax) {
           if (creep.heal(creep) === OK) healedThisTick = true;
         }
@@ -161,11 +133,16 @@ var TaskCombatMedic = {
     }).length > 0;
 
     if (!creep.pos.inRangeTo(buddy, wantRange)) {
-      moveSmart(buddy.pos, wantRange);
+      BeeToolbox.combatStepToward(creep, buddy.pos, wantRange, TaskSquad);
       // heal while approaching
       if (!healedThisTick) {
-        if (buddy.hits < buddy.hitsMax) tryHeal(buddy);
-        if (!healedThisTick) tryHeal(lowestInRange(creep.pos, 3));
+        if (buddy.hits < buddy.hitsMax && BeeToolbox.tryHealTarget(creep, buddy)) {
+          healedThisTick = true;
+        }
+        if (!healedThisTick) {
+          var triage3 = BeeToolbox.findLowestInjuredAlly(creep.pos, 3);
+          if (BeeToolbox.tryHealTarget(creep, triage3)) healedThisTick = true;
+        }
       }
     } else if (meleeThreat) {
       // small nudge away from closest melee if we're too close
@@ -186,9 +163,9 @@ var TaskCombatMedic = {
     );
 
     if (triageSet && triageSet.length) {
-      var room2 = creep.room, self2 = this;
+      var room2 = creep.room;
       var scored = _.map(triageSet, function (a) {
-        var exp = a.hits - self2._estimateTowerDamage(room2, a.pos);
+        var exp = a.hits - BeeToolbox.estimateTowerDamage(room2, a.pos);
         return { a: a, key: exp / Math.max(1, a.hitsMax) };
       });
       var worst = _.min(scored, 'key');
@@ -197,15 +174,22 @@ var TaskCombatMedic = {
       if (patient) {
         // Do not step onto melee tiles if rangedHeal will do
         var desiredRange = creep.pos.inRangeTo(patient, 1) ? 1 : (creep.pos.inRangeTo(patient, 3) ? 3 : 1);
-        moveSmart(patient.pos, desiredRange === 1 ? 1 : 2);
-        tryHeal(patient); // rangedHeal during approach, heal if adjacent
+        BeeToolbox.combatStepToward(creep, patient.pos, desiredRange === 1 ? 1 : 2, TaskSquad);
+        if (!healedThisTick && BeeToolbox.tryHealTarget(creep, patient)) {
+          healedThisTick = true;
+        }
       }
     } else {
       // ---------- 6) fallback: stick to buddy, heal buddy/nearby ----------
-      if (!creep.pos.inRangeTo(buddy, wantRange)) moveSmart(buddy.pos, wantRange);
+      if (!creep.pos.inRangeTo(buddy, wantRange)) BeeToolbox.combatStepToward(creep, buddy.pos, wantRange, TaskSquad);
       if (!healedThisTick) {
-        if (buddy.hits < buddy.hitsMax) tryHeal(buddy);
-        if (!healedThisTick) tryHeal(lowestInRange(creep.pos, 3));
+        if (buddy.hits < buddy.hitsMax && BeeToolbox.tryHealTarget(creep, buddy)) {
+          healedThisTick = true;
+        }
+        if (!healedThisTick) {
+          var triageNear = BeeToolbox.findLowestInjuredAlly(creep.pos, 3);
+          if (BeeToolbox.tryHealTarget(creep, triageNear)) healedThisTick = true;
+        }
       }
     }
 
@@ -213,33 +197,6 @@ var TaskCombatMedic = {
     if (!healedThisTick && canHeal && creep.hits < creep.hitsMax) {
       if (creep.heal(creep) === OK) healedThisTick = true;
     }
-  },
-
-  // Quick tower damage estimate (simple & cheap)
-  _estimateTowerDamage: function (room, pos) {
-    if (!room || !pos) return 0;
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType === STRUCTURE_TOWER; } });
-    var total = 0;
-    for (var i=0;i<towers.length;i++) {
-      var d = towers[i].pos.getRangeTo(pos);
-      if (d <= TOWER_OPTIMAL_RANGE) total += TOWER_POWER_ATTACK;
-      else {
-        var capped = Math.min(d, TOWER_FALLOFF_RANGE);
-        var frac = (capped - TOWER_OPTIMAL_RANGE) / Math.max(1, (TOWER_FALLOFF_RANGE - TOWER_OPTIMAL_RANGE));
-        var fall = TOWER_POWER_ATTACK * (1 - (TOWER_FALLOFF * frac));
-        total += Math.max(0, Math.floor(fall));
-      }
-    }
-    return total;
-  },
-
-  _inTowerDanger: function (pos) {
-    var room = Game.rooms[pos.roomName]; if (!room) return false;
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType===STRUCTURE_TOWER; } });
-    for (var i=0;i<towers.length;i++) {
-      if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
-    }
-    return false;
   }
 };
 

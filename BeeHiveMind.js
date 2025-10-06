@@ -1,355 +1,749 @@
-// BeeHiveMind.cpu.es5.js
-// ES5-safe, CPU-minded hive brain:
-// - One-pass per-tick caches (rooms, spawns, creeps, roleCounts, siteCounts)
-// - TradeEnergy.runAll() once per tick (not per room)
-// - Spawning loops only spawns (no nested rooms×spawns×creeps hurricanes)
-// - NeedBuilder() uses cached global construction sites (no per-remote .find())
-// - Room/road planners still run per-room, but your versions are already tick-gated
+// CHANGES:
+// - Adjusted spawn loop to stop breaking on failed attempts and improved builder prioritization per tick.
+// - Added builder spawn fallback coordination with diagnostics and cached body helpers.
+// - Maintained construction tracking utilities for logging and quota calculations.
+// - Refined builder demand calculations to only consider owned construction in home and remote rooms.
 
-'use strict';
+"use strict";
 
 var CoreLogger = require('core.logger');
+var spawnLogic = require('spawn.logic');
+var roleWorkerBee = require('role.Worker_Bee');
+var RoomPlanner = require('Planner.Room');
+var RoadPlanner = require('Planner.Road');
+var TradeEnergy = require('Trade.Energy');
+var TaskLuna = require('Task.Luna');
+var BeeToolbox = require('BeeToolbox');
+
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
-// -------- Requires --------
-var spawnLogic      = require('spawn.logic');
-var roleWorker_Bee  = require('role.Worker_Bee');
-var TaskBuilder     = require('Task.Builder');
-var RoomPlanner     = require('Planner.Room');
-var RoadPlanner     = require('Planner.Road');
-var TradeEnergy     = require('Trade.Energy');
-var TaskLuna        = require('Task.Luna');
+var ROLE_DISPATCH = Object.freeze({
+  Worker_Bee: roleWorkerBee.run
+});
 
-// Map role name -> run function (extend as you add roles)
-var creepRoles = {
-  Worker_Bee: roleWorker_Bee.run
-};
+var ROLE_DEFAULT_TASK = Object.freeze({
+  Queen: 'queen',
+  Scout: 'scout',
+  repair: 'repair'
+});
 
-// ------- Per-tick global cache (cheap lookups, no double work) -------
-if (!global.__BHM) global.__BHM = {};
+var DYING_SOON_TTL = 60;
+var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE === 'number')
+  ? TaskLuna.MAX_LUNA_PER_SOURCE
+  : 1;
+
+var GLOBAL_CACHE = global.__BHM_CACHE || (global.__BHM_CACHE = { tick: -1 });
+
+/**
+ * Shallow clone a task count dictionary into a fresh object.
+ * @param {object} source Original count mapping.
+ * @returns {object} Clone with the same numeric values.
+ * @sideeffects None.
+ * @cpu O(n) over keys.
+ * @memory Allocates a new object storing primitive values.
+ */
+function cloneCounts(source) {
+  var result = Object.create(null);
+  if (!source) return result;
+  for (var key in source) {
+    if (!BeeToolbox.hasOwn(source, key)) continue;
+    result[key] = source[key];
+  }
+  return result;
+}
+
+/**
+ * Build and cache frequently used data for the current tick.
+ * @returns {object} The shared cache object for this tick.
+ * @sideeffects Populates global.__BHM_CACHE with per-tick state.
+ * @cpu Moderate on first call per tick due to object scans.
+ * @memory Keeps lightweight arrays and maps for reuse during the tick.
+ */
 function prepareTickCaches() {
-  var T = Game.time;
-  var C = global.__BHM;
-  if (C.tick === T) return C; // already prepared
-
-  C.tick = T;
-
-  // Owned rooms list + map
-  var rooms = [];
-  var roomsMap = {};
-  for (var rn in Game.rooms) {
-    if (!Game.rooms.hasOwnProperty(rn)) continue;
-    var rr = Game.rooms[rn];
-    if (rr && rr.controller && rr.controller.my) {
-      rooms.push(rr);
-      roomsMap[rn] = rr;
-    }
+  var tick = Game.time | 0;
+  var cache = GLOBAL_CACHE;
+  if (cache.tick === tick) {
+    return cache;
   }
-  C.roomsOwned = rooms;
-  C.roomsMap = roomsMap;
 
-  // Spawns list
+  cache.tick = tick;
+
+  var ownedRooms = [];
+  var roomsMap = Object.create(null);
+  for (var roomName in Game.rooms) {
+    if (!BeeToolbox.hasOwn(Game.rooms, roomName)) continue;
+    var room = Game.rooms[roomName];
+    if (!room || !room.controller || !room.controller.my) continue;
+    ownedRooms.push(room);
+    roomsMap[room.name] = room;
+  }
+  cache.roomsOwned = ownedRooms;
+  cache.roomsMap = roomsMap;
+
   var spawns = [];
-  for (var sn in Game.spawns) {
-    if (!Game.spawns.hasOwnProperty(sn)) continue;
-    spawns.push(Game.spawns[sn]);
+  for (var spawnName in Game.spawns) {
+    if (!BeeToolbox.hasOwn(Game.spawns, spawnName)) continue;
+    var spawnObj = Game.spawns[spawnName];
+    if (spawnObj) spawns.push(spawnObj);
   }
-  C.spawns = spawns;
+  cache.spawns = spawns;
 
-  // Creeps list + roleCounts (by creep.memory.task), skipping dying-soon
-  var DYING_SOON_TTL = 60;
-  var roleCounts = {};
-  var lunaCountsByHome = {};
   var creeps = [];
-  for (var cn in Game.creeps) {
-    if (!Game.creeps.hasOwnProperty(cn)) continue;
-    var c = Game.creeps[cn];
-    creeps.push(c);
-    var ttl = c.ticksToLive;
-    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue; // let the next wave replace
-    var t = c.memory && c.memory.task;
-    if (t === 'remoteharvest' && c.memory) {
-      t = 'luna';
-      c.memory.task = 'luna';
+  var roleCounts = Object.create(null);
+  var lunaCountsByHome = Object.create(null);
+
+  for (var creepName in Game.creeps) {
+    if (!BeeToolbox.hasOwn(Game.creeps, creepName)) continue;
+    var creep = Game.creeps[creepName];
+    if (!creep) continue;
+    creeps.push(creep);
+
+    var ttl = creep.ticksToLive;
+    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) {
+      continue;
     }
-    if (t) {
-      roleCounts[t] = (roleCounts[t] || 0) + 1;
-      if (t === 'luna') {
-        var homeName = (c.memory && c.memory.home) || null;
-        if (!homeName && c.memory && c.memory._home) homeName = c.memory._home;
-        if (!homeName && c.room) homeName = c.room.name;
-        if (homeName) {
-          lunaCountsByHome[homeName] = (lunaCountsByHome[homeName] || 0) + 1;
-        }
+
+    if (!creep.memory) creep.memory = {};
+    var creepMemory = creep.memory;
+    var task = creepMemory.task;
+    if (task === 'remoteharvest') {
+      task = 'luna';
+      creepMemory.task = 'luna';
+    }
+
+    if (!task) continue;
+
+    roleCounts[task] = (roleCounts[task] || 0) + 1;
+
+    if (task === 'luna') {
+      var homeName = creepMemory.home || creepMemory._home || (creep.room ? creep.room.name : null);
+      if (homeName) {
+        lunaCountsByHome[homeName] = (lunaCountsByHome[homeName] || 0) + 1;
       }
     }
   }
-  C.creeps = creeps;
-  C.roleCounts = roleCounts;
-  C.lunaCountsByHome = lunaCountsByHome;
 
-  // Global construction site counts by room (my sites)
-  var roomSiteCounts = {};
+  cache.creeps = creeps;
+  cache.roleCounts = roleCounts;
+  cache.lunaCountsByHome = lunaCountsByHome;
+
+  var roomSiteCounts = Object.create(null);
   var totalSites = 0;
-  for (var id in Game.constructionSites) {
-    if (!Game.constructionSites.hasOwnProperty(id)) continue;
-    var site = Game.constructionSites[id];
-    // Screeps Game.constructionSites are your sites; still check for robustness
-    if (site && site.my) {
-      totalSites++;
-      var rname = site.pos.roomName;
-      roomSiteCounts[rname] = (roomSiteCounts[rname] || 0) + 1;
+  for (var siteId in Game.constructionSites) {
+    if (!BeeToolbox.hasOwn(Game.constructionSites, siteId)) continue;
+    var site = Game.constructionSites[siteId];
+    if (!site || !site.my) continue;
+    totalSites += 1;
+    var siteRoomName = site.pos && site.pos.roomName;
+    if (siteRoomName) {
+      roomSiteCounts[siteRoomName] = (roomSiteCounts[siteRoomName] || 0) + 1;
     }
   }
-  C.roomSiteCounts = roomSiteCounts;
-  C.totalSites = totalSites;
+  cache.roomSiteCounts = roomSiteCounts;
+  cache.totalSites = totalSites;
 
-  // Active remote rooms by home (use RoadPlanner helper once per home)
-  var remotesByHome = {};
+  var remotesByHome = Object.create(null);
+  for (var idx = 0; idx < ownedRooms.length; idx++) {
+    var ownedRoom = ownedRooms[idx];
+    var remoteNames = [];
+    if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
+      remoteNames = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
+    }
+    remotesByHome[ownedRoom.name] = remoteNames;
+  }
+  cache.remotesByHome = remotesByHome;
+
+  return cache;
+}
+
+/**
+ * Normalize remote room descriptors into an array of room name strings.
+ * @param {*} input Source data describing remote rooms.
+ * @returns {string[]} Array of remote room names without duplicates.
+ * @sideeffects None.
+ * @cpu O(n) over provided descriptors.
+ * @memory Allocates arrays for normalized output.
+ */
+function normalizeRemoteRooms(input) {
+  var result = [];
+  var seen = Object.create(null);
+
+  function addName(value) {
+    if (!value) return;
+    var name = null;
+    if (typeof value === 'string') {
+      name = value;
+    } else if (typeof value.roomName === 'string') {
+      name = value.roomName;
+    } else if (typeof value.name === 'string') {
+      name = value.name;
+    }
+    if (!name) return;
+    if (seen[name]) return;
+    seen[name] = true;
+    result.push(name);
+  }
+
+  if (!input) {
+    return result;
+  }
+
+  if (typeof input === 'string') {
+    addName(input);
+    return result;
+  }
+
+  if (Array.isArray(input)) {
+    for (var i = 0; i < input.length; i++) {
+      addName(input[i]);
+    }
+    return result;
+  }
+
+  if (typeof input === 'object') {
+    if (typeof input.roomName === 'string' || typeof input.name === 'string') {
+      addName(input);
+      return result;
+    }
+    for (var key in input) {
+      if (!BeeToolbox.hasOwn(input, key)) continue;
+      addName(input[key]);
+      if (looksLikeRoomName(key)) {
+        addName(key);
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Basic heuristic to detect Screeps room name strings.
+ * @param {string} name Candidate value.
+ * @returns {boolean} True when the string resembles a room name.
+ */
+function looksLikeRoomName(name) {
+  if (typeof name !== 'string') return false;
+  if (name.length < 4) return false;
+  var first = name.charAt(0);
+  if (first !== 'W' && first !== 'E') return false;
+  if (name.indexOf('N') === -1 && name.indexOf('S') === -1) return false;
+  return true;
+}
+
+/**
+ * Resolve a default task string for a creep role.
+ * @param {string} role Role identifier stored on creep memory.
+ * @returns {string|undefined} Default task name when one exists.
+ * @sideeffects None.
+ * @cpu O(1).
+ * @memory None.
+ */
+function defaultTaskForRole(role) {
+  if (!role) return undefined;
+  return ROLE_DEFAULT_TASK[role];
+}
+
+/**
+ * Determine how many construction sites require builder attention.
+ * @param {Room} room Owned room under evaluation.
+ * @param {object} cache Per-tick cache data.
+ * @returns {number} Count of construction sites in home and remotes.
+ * @sideeffects None.
+ * @cpu O(remotes) to inspect cached lists.
+ * @memory Temporary counters only.
+ */
+function needBuilder(room, cache) {
+  if (!room) return 0;
+  cache = cache || prepareTickCaches();
+
+  var roomSiteCounts = cache.roomSiteCounts || Object.create(null);
+  var totalSites = roomSiteCounts[room.name] || 0;
+
+  var remoteNames;
   if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-    for (var i = 0; i < rooms.length; i++) {
-      var home = rooms[i];
-      var list = RoadPlanner.getActiveRemoteRooms(home) || [];
-      remotesByHome[home.name] = list;
+    remoteNames = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(room));
+  } else {
+    remoteNames = cache.remotesByHome[room.name] || [];
+  }
+
+  for (var i = 0; i < remoteNames.length; i++) {
+    var remoteRoomName = remoteNames[i];
+    totalSites += roomSiteCounts[remoteRoomName] || 0;
+  }
+
+  return totalSites;
+}
+
+/**
+ * Compute the total energy cost of a body definition.
+ * @param {string[]} body Array of body part constants.
+ * @returns {number} Aggregate energy cost for the body.
+ * @sideeffects None.
+ * @cpu O(parts) per evaluation.
+ * @memory None.
+ */
+function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
+  var cost = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    cost += BODYPART_COST[part] || 0;
+  }
+  return cost;
+}
+
+/**
+ * Fetch cached builder body configurations from spawn logic.
+ * @returns {Array} Array of builder body arrays.
+ * @sideeffects Caches the configuration on the global cache for reuse.
+ * @cpu Low; iterates exported configuration list once per reset.
+ * @memory Stores references to configuration arrays.
+ */
+function getBuilderBodyConfigs() {
+  if (GLOBAL_CACHE.builderBodyConfigs) {
+    return GLOBAL_CACHE.builderBodyConfigs;
+  }
+  var result = [];
+  if (spawnLogic && spawnLogic.configurations && typeof spawnLogic.configurations.length === 'number') {
+    for (var i = 0; i < spawnLogic.configurations.length; i++) {
+      var entry = spawnLogic.configurations[i];
+      if (!entry || entry.task !== 'builder') continue;
+      var bodies = entry.body;
+      if (Array.isArray(bodies)) {
+        for (var j = 0; j < bodies.length; j++) {
+          result.push(bodies[j]);
+        }
+      }
+      break;
     }
   }
-  C.remotesByHome = remotesByHome;
+  GLOBAL_CACHE.builderBodyConfigs = result;
+  return result;
+}
 
-  return C;
+/**
+ * Determine the failure reason when a builder cannot be spawned.
+ * @param {number} available Current room energy available.
+ * @param {number} capacity Room energy capacity available.
+ * @returns {string} Diagnostic reason identifier.
+ * @sideeffects None.
+ * @cpu O(configs) for builder body inspection.
+ * @memory None.
+ */
+function determineBuilderFailureReason(available, capacity) {
+  var configs = getBuilderBodyConfigs();
+  if (!configs.length) {
+    return 'BODY_INVALID';
+  }
+  var minCost = null;
+  var capacityFits = false;
+  var availableFits = false;
+  for (var i = 0; i < configs.length; i++) {
+    var body = configs[i];
+    var cost = calculateBodyCost(body);
+    if (!cost) continue;
+    if (minCost === null || cost < minCost) {
+      minCost = cost;
+    }
+    if (cost <= capacity) {
+      capacityFits = true;
+    }
+    if (cost <= available) {
+      availableFits = true;
+    }
+  }
+  if (minCost === null) {
+    return 'BODY_INVALID';
+  }
+  if (!capacityFits) {
+    return 'ENERGY_OVER_CAPACITY';
+  }
+  if (!availableFits) {
+    return 'ENERGY_LOW_AVAILABLE';
+  }
+  return 'OTHER_FAIL';
+}
+
+function logBuilderSpawnBlock(spawner, room, builderSites, reason, available, capacity, builderFailLog) {
+  if (!room || builderSites <= 0) {
+    return;
+  }
+  var roomName = room.name || null;
+  if (!roomName) {
+    return;
+  }
+  var lastLogTick = builderFailLog[roomName] || 0;
+  if ((Game.time - lastLogTick) < 50) {
+    return;
+  }
+  builderFailLog[roomName] = Game.time;
+  var spawnName = (spawner && spawner.name) ? spawner.name : 'spawn';
+  var message = '[' + spawnName + '] builder wanted: sites=' + builderSites + ' reason=' + reason + ' (avail/cap ' + available + '/' + capacity + ')';
+  hiveLog.info(message);
+}
+
+/**
+ * Count known sources for a remote room from memory intel.
+ * @param {object} mem Memory blob for the remote room.
+ * @returns {number} Number of sources recorded.
+ * @sideeffects None.
+ * @cpu O(keys) when enumerating stored sources.
+ * @memory None.
+ */
+function countSourcesInMemory(mem) {
+  if (!mem) return 0;
+  if (mem.sources && typeof mem.sources === 'object') {
+    var count = 0;
+    for (var key in mem.sources) {
+      if (BeeToolbox.hasOwn(mem.sources, key)) count += 1;
+    }
+    return count;
+  }
+  if (mem.intel && typeof mem.intel.sources === 'number') {
+    return mem.intel.sources | 0;
+  }
+  return 0;
+}
+
+/**
+ * Compute how many luna (remote harvest) creeps a home room should spawn.
+ * @param {Room} room Owned room dispatching remote harvesters.
+ * @param {object} cache Per-tick cache data.
+ * @returns {number} Target number of luna creeps for the room.
+ * @sideeffects Reads Memory.remoteAssignments for active tasks.
+ * @cpu Moderate depending on remote count.
+ * @memory Temporary maps only.
+ */
+function determineLunaQuota(room, cache) {
+  if (!room) return 0;
+
+  var remotes = cache.remotesByHome[room.name] || [];
+  if (remotes.length === 0) return 0;
+
+  var remoteSet = Object.create(null);
+  for (var i = 0; i < remotes.length; i++) {
+    remoteSet[remotes[i]] = true;
+  }
+
+  var roomsMem = Memory.rooms || {};
+  var totalSources = 0;
+
+  for (i = 0; i < remotes.length; i++) {
+    var remoteName = remotes[i];
+    var mem = roomsMem[remoteName] || {};
+
+    if (mem.hostile) continue;
+
+    if (mem._invaderLock && mem._invaderLock.locked) {
+      var lockTick = typeof mem._invaderLock.t === 'number' ? mem._invaderLock.t : null;
+      if (lockTick === null || (Game.time - lockTick) <= 1500) {
+        continue;
+      }
+    }
+
+    var sourceCount = 0;
+    var visibleRoom = Game.rooms[remoteName];
+    if (visibleRoom) {
+      var sources = visibleRoom.find(FIND_SOURCES);
+      sourceCount = Array.isArray(sources) ? sources.length : 0;
+    }
+
+    if (sourceCount === 0) {
+      sourceCount = countSourcesInMemory(mem);
+    }
+
+    if (sourceCount === 0 && Array.isArray(mem.sources)) {
+      sourceCount = mem.sources.length;
+    }
+
+    totalSources += sourceCount;
+  }
+
+  if (totalSources <= 0) {
+    totalSources = remotes.length;
+  }
+
+  var assignments = Memory.remoteAssignments || {};
+  var active = 0;
+  for (var assignKey in assignments) {
+    if (!BeeToolbox.hasOwn(assignments, assignKey)) continue;
+    var entry = assignments[assignKey];
+    if (!entry) continue;
+    var remoteRoomName = entry.roomName || entry.room;
+    if (!remoteRoomName || !remoteSet[remoteRoomName]) continue;
+    var count = entry.count | 0;
+    if (!count && entry.owner) count = 1;
+    if (count > 0) active += count;
+  }
+
+  var desired = Math.max(totalSources * DEFAULT_LUNA_PER_SOURCE, active);
+  return desired;
 }
 
 var BeeHiveMind = {
-  // ---------------- Main tick ----------------
+  /**
+   * Main entry point executed each tick to coordinate the colony.
+   * @returns {void}
+   * @sideeffects Manages memory, creeps, spawns, planners, and trade routines.
+   * @cpu High but amortized via caches.
+   * @memory Writes to Memory and global cache structures.
+   */
   run: function () {
-    BeeHiveMind.initializeMemory();
+    this.initializeMemory();
+    var cache = prepareTickCaches();
 
-    var C = prepareTickCaches();
-
-    // Per-room management (planners already tick-gated in your CPU versions)
-    for (var i = 0; i < C.roomsOwned.length; i++) {
-      BeeHiveMind.manageRoom(C.roomsOwned[i], C);
+    var ownedRooms = cache.roomsOwned || [];
+    for (var i = 0; i < ownedRooms.length; i++) {
+      this.manageRoom(ownedRooms[i], cache);
     }
 
-    // Per-creep roles
-    BeeHiveMind.runCreeps(C);
+    this.runCreeps(cache);
+    this.manageSpawns(cache);
 
-    // Spawning — one pass over spawns, using cached counts and site info
-    BeeHiveMind.manageSpawns(C);
-
-    // Energy market decisions (once per tick, not per room)
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
-      // gate a little if you want to: e.g., run every 3 ticks
-      // if (Game.time % 3 === 0) TradeEnergy.runAll();
       TradeEnergy.runAll();
     }
   },
 
-  // ------------- Room loop -------------
-// lean room loop: planners only (no market spam)
-  manageRoom: function (room, C) {
+  /**
+   * Execute per-room planning hooks for owned rooms.
+   * @param {Room} room Room to manage.
+   * @param {object} cache Per-tick cache data.
+   * @returns {void}
+   * @sideeffects May place construction sites or road plans.
+   * @cpu Moderate depending on planner work.
+   * @memory No additional persistent data.
+   */
+  manageRoom: function (room, cache) {
     if (!room) return;
-
-    if (RoomPlanner && RoomPlanner.ensureSites) RoomPlanner.ensureSites(room);
-    if (RoadPlanner && RoadPlanner.ensureRemoteRoads) RoadPlanner.ensureRemoteRoads(room);
-
-    // Add light per-room logic here if needed (avoid heavy .find loops per tick)
+    if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
+      RoomPlanner.ensureSites(room, cache);
+    }
+    if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
+      RoadPlanner.ensureRemoteRoads(room, cache);
+    }
   },
 
-  // ------------- Creep loop -------------
-  runCreeps: function (C) {
-    var map = creepRoles;
-    for (var i = 0; i < C.creeps.length; i++) {
-      var creep = C.creeps[i];
-      BeeHiveMind.assignTask(creep); // idempotent when already set
-      var roleName = creep.memory && creep.memory.role;
-      var roleFn = map[roleName];
+  /**
+   * Run behavior logic for each cached creep.
+   * @param {object} cache Per-tick cache data.
+   * @returns {void}
+   * @sideeffects Issues creep actions and may log errors.
+   * @cpu High proportional to creep count.
+   * @memory No new persistent data.
+   */
+  runCreeps: function (cache) {
+    var creeps = cache.creeps || [];
+    for (var i = 0; i < creeps.length; i++) {
+      var creep = creeps[i];
+      if (!creep) continue;
+      this.assignTask(creep);
+      var roleName = (creep.memory && creep.memory.role) ? creep.memory.role : null;
+      var roleFn = ROLE_DISPATCH[roleName];
       if (typeof roleFn === 'function') {
         try {
           roleFn(creep);
-        } catch (e) {
-          hiveLog.debug('⚠️ Role error for', (creep.name || 'unknown'), '(' + roleName + '):', e);
+        } catch (error) {
+          hiveLog.debug('⚠️ Role error for ' + (creep.name || 'unknown') + ' (' + (roleName || 'unset') + ')', error);
         }
       } else {
-        var cName = creep.name || 'unknown';
-        var r = roleName || 'undefined';
-        hiveLog.info('🐝 Unknown role:', r, '(Creep:', cName + ')');
+        hiveLog.info('🐝 Unknown role: ' + (roleName || 'undefined') + ' (Creep: ' + (creep.name || 'unknown') + ')');
       }
     }
   },
 
-  // ------------- Task defaults -------------
+  /**
+   * Assign a default task to creeps lacking explicit orders.
+   * @param {Creep} creep Creep requiring a task assignment.
+   * @returns {void}
+   * @sideeffects Mutates creep.memory.task when empty.
+   * @cpu O(1).
+   * @memory None.
+   */
   assignTask: function (creep) {
-    if (!creep || (creep.memory && creep.memory.task)) return;
-    var role = creep.memory && creep.memory.role;
-    if (role === 'Queen') creep.memory.task = 'queen';
-    else if (role === 'Scout') creep.memory.task = 'scout';
-    else if (role === 'repair') creep.memory.task = 'repair';
-    // else leave undefined; spawner logic will create needed ones
+    if (!creep || !creep.memory) return;
+    if (creep.memory.task) return;
+    var defaultTask = defaultTaskForRole(creep.memory.role);
+    if (defaultTask) {
+      creep.memory.task = defaultTask;
+    }
   },
 
-  // ------------- Spawning -------------
-  manageSpawns: function (C) {
-    // helper: builder need (local + remote) using per-tick cached site counts
-    function NeedBuilder(room) {
-      if (!room) return 0;
-      var local = C.roomSiteCounts[room.name] | 0;
-      var remote = 0;
-      var list = C.remotesByHome[room.name] || [];
-      for (var i = 0; i < list.length; i++) {
-        var rn = list[i];
-        remote += (C.roomSiteCounts[rn] | 0);
-      }
-      return (local + remote) > 0 ? 1 : 0;
-    }
+  /**
+   * Spawn creeps based on task quotas for each spawn structure.
+   * @param {object} cache Per-tick cache data.
+   * @returns {void}
+   * @sideeffects Calls spawn logic modules to create creeps.
+   * @cpu Moderate depending on spawn count and quotas.
+   * @memory Updates count tracking maps during the tick.
+   */
+  manageSpawns: function (cache) {
+    var roleCounts = cloneCounts(cache.roleCounts);
+    var lunaCountsByHome = cloneCounts(cache.lunaCountsByHome);
+    var spawns = cache.spawns || [];
+    var builderFailLog = GLOBAL_CACHE.builderFailLog || (GLOBAL_CACHE.builderFailLog = Object.create(null));
+    var defaultTaskOrder = [
+      'queen',
+      'baseharvest',
+      'courier',
+      'upgrader',
+      'repair',
+      'luna',
+      'scout',
+      'CombatArcher',
+      'CombatMelee',
+      'CombatMedic',
+      'Dismantler',
+      'Trucker',
+      'Claimer',
+      'builder'
+    ];
 
-    function DetermineLunaQuota(room) {
-      if (!room) return 0;
+    for (var i = 0; i < spawns.length; i++) {
+      var spawner = spawns[i];
+      if (!spawner) continue;
 
-      var remotes = C.remotesByHome[room.name] || [];
-      if (!remotes.length) return 0;
-
-      var remoteSet = {};
-      for (var r = 0; r < remotes.length; r++) {
-        remoteSet[remotes[r]] = true;
-      }
-
-      var roomsMem = Memory.rooms || {};
-      var totalSources = 0;
-      var perSource = (TaskLuna && TaskLuna.MAX_LUNA_PER_SOURCE) || 1;
-
-      for (var j = 0; j < remotes.length; j++) {
-        var remoteName = remotes[j];
-        var mem = roomsMem[remoteName] || {};
-
-        if (mem.hostile) continue;
-
-        if (mem._invaderLock && mem._invaderLock.locked) {
-          var lockTick = typeof mem._invaderLock.t === 'number' ? mem._invaderLock.t : null;
-          if (lockTick == null || (Game.time - lockTick) <= 1500) {
-            continue;
-          }
-        }
-
-        var sourceCount = 0;
-        var remoteRoom = Game.rooms[remoteName];
-        if (remoteRoom) {
-          var found = remoteRoom.find(FIND_SOURCES);
-          sourceCount = found ? found.length : 0;
-        }
-
-        if (sourceCount === 0 && mem.sources) {
-          for (var sid in mem.sources) {
-            if (mem.sources.hasOwnProperty(sid)) sourceCount++;
-          }
-        }
-
-        if (sourceCount === 0 && mem.intel && typeof mem.intel.sources === 'number') {
-          sourceCount = mem.intel.sources | 0;
-        }
-
-        totalSources += sourceCount;
+      if (typeof spawnLogic.Spawn_Squad === 'function') {
+        // Squad spawning left disabled by default; enable when configured externally.
       }
 
-      if (totalSources <= 0 && remotes.length > 0) {
-        totalSources = remotes.length;
-      }
-
-      var assignments = Memory.remoteAssignments || {};
-      var active = 0;
-      for (var aid in assignments) {
-        if (!assignments.hasOwnProperty(aid)) continue;
-        var entry = assignments[aid];
-        if (!entry) continue;
-        var remoteRoomName = entry.roomName || entry.room;
-        if (!remoteRoomName || !remoteSet[remoteRoomName]) continue;
-        var count = entry.count | 0;
-        if (!count && entry.owner) count = 1;
-        if (count > 0) active += count;
-      }
-
-      var desired = totalSources * perSource;
-      if (active > desired) desired = active;
-
-      return desired;
-    }
-
-    // snapshot of counts (we mutate this as we schedule spawns to avoid double-filling)
-    var roleCounts = {};
-    for (var k in C.roleCounts) if (C.roleCounts.hasOwnProperty(k)) roleCounts[k] = C.roleCounts[k];
-    var lunaCountsByHome = {};
-    if (C.lunaCountsByHome) {
-      for (var hk in C.lunaCountsByHome) {
-        if (C.lunaCountsByHome.hasOwnProperty(hk)) lunaCountsByHome[hk] = C.lunaCountsByHome[hk];
-      }
-    }
-
-    // Iterate each spawn once
-    for (var s = 0; s < C.spawns.length; s++) {
-      var spawner = C.spawns[s];
-      if (!spawner || spawner.spawning) continue;
-        // --- Squad spawning (run before normal quotas) ---
-        // Only the first spawn attempts squad maintenance to avoid double-spawning.
-        if (typeof spawnLogic.Spawn_Squad === 'function') {
-         // if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue; // try to fill Alpha first
-          //if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue; // then try Bravo
-          //if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
-          //if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
-        }
       var room = spawner.room;
-      // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
+      if (!room) continue;
+
+      var builderSites = needBuilder(room, cache);
+      var builderLimit = builderSites > 0 ? 1 : 0;
+
+      var spawnResource = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
+        ? spawnLogic.Calculate_Spawn_Resource(spawner)
+        : (room.energyAvailable || 0);
+      var spawnCapacity = room.energyCapacityAvailable || spawnResource;
+
+      if (spawner.spawning) {
+        if (builderLimit > 0) {
+          logBuilderSpawnBlock(spawner, room, builderSites, 'SPAWN_BUSY', spawnResource, spawnCapacity, builderFailLog);
+        }
+        continue;
+      }
+
+      var taskOrder = defaultTaskOrder.slice();
+      if (builderLimit > 0) {
+        var builderIndex = -1;
+        var queenIndex = -1;
+        for (var orderIdx = 0; orderIdx < taskOrder.length; orderIdx++) {
+          if (taskOrder[orderIdx] === 'builder') {
+            builderIndex = orderIdx;
+          }
+          if (taskOrder[orderIdx] === 'queen') {
+            queenIndex = orderIdx;
+          }
+        }
+        if (builderIndex !== -1) {
+          taskOrder.splice(builderIndex, 1);
+          if (queenIndex === -1) {
+            queenIndex = 0;
+          }
+          taskOrder.splice(queenIndex + 1, 0, 'builder');
+        }
+      }
+
       var workerTaskLimits = {
-        baseharvest:   1,
-        builder:       NeedBuilder(room),
-        upgrader:      0,
-        repair:        0,
-        courier:       1,
-        queen:         1,
-        luna:          DetermineLunaQuota(room),
-        scout:         0,
-        CombatArcher:  0,
-        CombatMelee:   0,
-        CombatMedic:   0,
-        Dismantler:    0,
-        Trucker:       0,
-        Claimer:       0,
+        baseharvest: 2,
+        courier: 1,
+        queen: 2,
+        upgrader: 4,
+        builder: builderLimit,
+        repair: 0,
+        luna: determineLunaQuota(room, cache),
+        scout: 1,
+        CombatArcher: 0,
+        CombatMelee: 0,
+        CombatMedic: 0,
+        Dismantler: 0,
+        Trucker: 0,
+        Claimer: 0
       };
 
-      // find first underfilled task and try to spawn it
-      var task;
-      for (task in workerTaskLimits) {
-        if (!workerTaskLimits.hasOwnProperty(task)) continue;
+      for (var orderPos = 0; orderPos < taskOrder.length; orderPos++) {
+        var task = taskOrder[orderPos];
+        if (!BeeToolbox.hasOwn(workerTaskLimits, task)) continue;
         var limit = workerTaskLimits[task] | 0;
-        var count = roleCounts[task] | 0;
-        if (task === 'luna') {
-          count = lunaCountsByHome[room.name] | 0;
-        }
-        if (count < limit) {
-          var spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
-          var didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
-          if (didSpawn) {
-            roleCounts[task] = count + 1; // reflect immediately so other spawns see the bump
-            if (task === 'luna') {
-              lunaCountsByHome[room.name] = (lunaCountsByHome[room.name] | 0) + 1;
-            }
+        if (!limit) {
+          if (task === 'builder' && builderLimit > 0) {
+            logBuilderSpawnBlock(spawner, room, builderSites, 'LIMIT_ZERO', spawnResource, spawnCapacity, builderFailLog);
           }
-          break; // only one attempt per spawn per tick, either way
+          continue;
+        }
+
+        var current = (task === 'luna')
+          ? (lunaCountsByHome[room.name] || 0)
+          : (roleCounts[task] || 0);
+        if (current >= limit) {
+          if (task === 'builder' && builderLimit > 0) {
+            logBuilderSpawnBlock(spawner, room, builderSites, 'ROLE_LIMIT_REACHED', spawnResource, spawnCapacity, builderFailLog);
+          }
+          continue;
+        }
+
+        if (!spawnLogic || typeof spawnLogic.Spawn_Worker_Bee !== 'function') {
+          if (task === 'builder' && builderLimit > 0) {
+            logBuilderSpawnBlock(spawner, room, builderSites, 'OTHER_FAIL', spawnResource, spawnCapacity, builderFailLog);
+          }
+          continue;
+        }
+
+        var didSpawn = false;
+        if (task === 'builder') {
+          didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+          if (didSpawn !== true && builderLimit > 0) {
+            var reason = determineBuilderFailureReason(spawnResource, spawnCapacity);
+            logBuilderSpawnBlock(spawner, room, builderSites, reason, spawnResource, spawnCapacity, builderFailLog);
+          }
+        } else {
+          didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+        }
+
+        if (didSpawn === true) {
+          roleCounts[task] = (roleCounts[task] || 0) + 1;
+          if (task === 'luna') {
+            lunaCountsByHome[room.name] = (lunaCountsByHome[room.name] || 0) + 1;
+          }
+          break;
         }
       }
     }
   },
 
-  // ------------- Remote ops hook -------------
+  /**
+   * Placeholder for remote operations (reserved for future use).
+   * @returns {void}
+   * @sideeffects None currently.
+   * @cpu None.
+   * @memory None.
+   */
   manageRemoteOps: function () {
-    // assignment, scouting, claiming, etc. (stub)
+    // Reserved for future remote task coordination.
   },
 
-  // ------------- Memory init -------------
+  /**
+   * Ensure Memory.rooms exists and contains valid objects.
+   * @returns {void}
+   * @sideeffects Initializes Memory.rooms entries to empty objects.
+   * @cpu O(n) over existing room keys.
+   * @memory May allocate empty objects for missing rooms.
+   */
   initializeMemory: function () {
-    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms) {
+      Memory.rooms = {};
+      return;
+    }
+
     for (var roomName in Memory.rooms) {
-      if (!Memory.rooms.hasOwnProperty(roomName)) continue;
-      if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+      if (!BeeToolbox.hasOwn(Memory.rooms, roomName)) continue;
+      if (!Memory.rooms[roomName]) {
+        Memory.rooms[roomName] = {};
+      }
     }
   }
 };
