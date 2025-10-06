@@ -455,7 +455,7 @@ function _pickReservableSite(creep, list, cap, weights, opts) {
 var TaskBuilder = {
   structureLimits: { 'tower': 6, 'extension': 60, 'container': 1, 'rampart': 2, 'road': 20 },
 
-  siteWeights: { 'tower': 5, 'container': 4, 'extension': 3, 'rampart': 2, 'road': 1 },
+  siteWeights: { 'tower': 7, 'extension': 6, 'container': 5, 'rampart': 2, 'road': 1 },
 
   structurePlacements: [ /* paste your existing placements here */ ],
 
