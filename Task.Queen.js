@@ -51,6 +51,35 @@ function transferTo(creep, target, res) {
   if (rc === ERR_NOT_IN_RANGE) go(creep, target);
   return rc;
 }
+
+function smartWithdraw(creep, target) {
+  if (!target) return false;
+  if (target.resourceType === RESOURCE_ENERGY && target.amount != null) {
+    var pick = creep.pickup(target);
+    if (pick === ERR_NOT_IN_RANGE) {
+      go(creep, target);
+      return true;
+    }
+    return pick === OK;
+  }
+  if (target.store && target.store[RESOURCE_ENERGY] != null) {
+    var rc = creep.withdraw(target, RESOURCE_ENERGY);
+    if (rc === ERR_NOT_IN_RANGE) {
+      go(creep, target);
+      return true;
+    }
+    return rc === OK;
+  }
+  if (typeof target.energy === 'number' && target.energy > 0) {
+    var rc2 = creep.withdraw(target, RESOURCE_ENERGY);
+    if (rc2 === ERR_NOT_IN_RANGE) {
+      go(creep, target);
+      return true;
+    }
+    return rc2 === OK;
+  }
+  return false;
+}
 function _nearest(pos, arr) {
   var best = null, bestD = 1e9;
   for (var i = 0; i < arr.length; i++) {
@@ -185,6 +214,7 @@ var TaskQueen = {
   run: function (creep) {
     var room = creep.room;
     var cache = _qCache(room);
+    var caps = BeeToolbox.getRoomCapabilities(room);
 
     // BOOTSTRAP (before first source-containers exist)
     if (!cache.hasSourceContainers) {
@@ -197,12 +227,18 @@ var TaskQueen = {
       });
       if (site) {
         if ((creep.store[RESOURCE_ENERGY] | 0) === 0) {
-          // Withdraw from spawn if room is topped up, else harvest
-          var sp = _nearest(creep.pos, room.find(FIND_MY_SPAWNS));
-          if (sp && sp.store && (sp.store[RESOURCE_ENERGY] | 0) >= 50 &&
-              room.energyAvailable === room.energyCapacityAvailable) {
-            withdrawFrom(creep, sp);
-          } else {
+          var bootOpts = {
+            minAmount: 40,
+            allowStorage: true,
+            allowContainers: true,
+            allowSourceContainers: true,
+            allowDropped: true,
+            allowRemains: true,
+            allowSpawn: true,
+            preferPos: creep.pos
+          };
+          var bootTarget = BeeToolbox.pickEnergyWithdrawTarget(creep, bootOpts);
+          if (!smartWithdraw(creep, bootTarget)) {
             harvestFromClosest(creep);
           }
         } else {
@@ -283,18 +319,29 @@ var TaskQueen = {
       return;
     }
 
-    // Refill: STORAGE -> side CONTAINERS -> DROPS -> harvest
-    if (cache.storageHasEnergy) { withdrawFrom(creep, cache.storageHasEnergy); return; }
-
-    if (cache.sideContainers.length) {
-      var side = _nearest(creep.pos, cache.sideContainers);
-      if (side) { withdrawFrom(creep, side); return; }
+    var refillOpts = {
+      minAmount: 60,
+      allowStorage: true,
+      allowContainers: true,
+      allowLinks: true,
+      allowRemains: true,
+      allowDropped: true,
+      preferPos: creep.pos
+    };
+    if (caps && caps.hasTerminal) {
+      refillOpts.allowTerminal = true;
+    }
+    if (!caps || !caps.hasStorage) {
+      refillOpts.allowSpawn = true;
+      refillOpts.allowSourceContainers = true;
+    } else {
+      refillOpts.allowSourceContainers = false;
     }
 
-    var drop2 = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
-      filter: function (r) { return r.resourceType === RESOURCE_ENERGY; }
-    });
-    if (drop2) { if (creep.pickup(drop2) === ERR_NOT_IN_RANGE) go(creep, drop2); return; }
+    var refillTarget = BeeToolbox.pickEnergyWithdrawTarget(creep, refillOpts);
+    if (smartWithdraw(creep, refillTarget)) {
+      return;
+    }
 
     harvestFromClosest(creep);
   }

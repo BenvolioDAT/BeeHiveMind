@@ -14,7 +14,8 @@ if (!RUNTIME_STATE) {
     planner: {},
     audit: {},
     spawnNotes: {},
-    capabilities: {}
+    capabilities: {},
+    energySources: {}
   };
   global.__beeToolboxRuntime = RUNTIME_STATE;
 }
@@ -33,6 +34,98 @@ function normalizeRoomArg(roomOrName) {
 // Kept small enough to react to construction/destruction, but large enough
 // to avoid expensive FIND_STRUCTURES work every few ticks.
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
+
+function createEmptyEnergyDataset(roomName) {
+  return {
+    roomName: roomName || null,
+    storage: null,
+    terminal: null,
+    sourceContainers: [],
+    otherContainers: [],
+    links: [],
+    spawnBuffers: [],
+    dropped: [],
+    remains: []
+  };
+}
+
+function getEnergySourceDataset(roomName) {
+  if (!roomName) return createEmptyEnergyDataset(null);
+
+  var cache = RUNTIME_STATE.energySources[roomName];
+  if (cache && cache.tick === Game.time) {
+    return cache.data;
+  }
+
+  var room = (Game.rooms && Game.rooms[roomName]) ? Game.rooms[roomName] : null;
+  var data = createEmptyEnergyDataset(roomName);
+
+  if (room) {
+    if (room.storage && room.storage.store && (room.storage.store[RESOURCE_ENERGY] | 0) > 0) {
+      data.storage = room.storage;
+    }
+    if (room.terminal && room.terminal.store && (room.terminal.store[RESOURCE_ENERGY] | 0) > 0) {
+      data.terminal = room.terminal;
+    }
+
+    var structures = room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        if (!s) return false;
+        if (s.structureType === STRUCTURE_CONTAINER ||
+            s.structureType === STRUCTURE_LINK ||
+            s.structureType === STRUCTURE_SPAWN ||
+            s.structureType === STRUCTURE_EXTENSION) {
+          if (s.store && (s.store[RESOURCE_ENERGY] | 0) > 0) return true;
+          if (typeof s.energy === 'number' && s.energy > 0) return true;
+        }
+        return false;
+      }
+    });
+
+    var i;
+    for (i = 0; i < structures.length; i++) {
+      var s = structures[i];
+      if (!s) continue;
+      if (s.structureType === STRUCTURE_CONTAINER) {
+        if (s.pos && s.pos.findInRange && s.pos.findInRange(FIND_SOURCES, 1).length > 0) {
+          data.sourceContainers.push(s);
+        } else {
+          data.otherContainers.push(s);
+        }
+      } else if (s.structureType === STRUCTURE_LINK) {
+        data.links.push(s);
+      } else if (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) {
+        data.spawnBuffers.push(s);
+      }
+    }
+
+    var drops = room.find(FIND_DROPPED_RESOURCES, {
+      filter: function (r) {
+        return r && r.resourceType === RESOURCE_ENERGY && (r.amount | 0) > 0;
+      }
+    });
+    data.dropped = drops;
+
+    var tombs = room.find(FIND_TOMBSTONES, {
+      filter: function (t) {
+        if (!t || !t.store) return false;
+        return (t.store[RESOURCE_ENERGY] | 0) > 0;
+      }
+    });
+    var ruins = room.find(FIND_RUINS, {
+      filter: function (r) {
+        if (!r || !r.store) return false;
+        return (r.store[RESOURCE_ENERGY] | 0) > 0;
+      }
+    });
+    if (!tombs) tombs = [];
+    if (!ruins) ruins = [];
+    data.remains = tombs.concat(ruins);
+  }
+
+  RUNTIME_STATE.energySources[roomName] = { tick: Game.time, data: data };
+  return data;
+}
 
 var BeeToolbox = {
 
@@ -313,6 +406,7 @@ var BeeToolbox = {
     RUNTIME_STATE.audit = {};
     RUNTIME_STATE.spawnNotes = {};
     RUNTIME_STATE.capabilities = {};
+    RUNTIME_STATE.energySources = {};
   },
 
   /**
@@ -488,6 +582,169 @@ var BeeToolbox = {
     status.total = (status.existing | 0) + (status.sites | 0);
     status.remaining = Math.max(0, (status.desired | 0) - status.total);
     return status;
+  },
+
+  /**
+   * Aggregate planner, audit, and capability signals for a room.
+   * @param {(Room|string)} roomOrName Room reference or room name.
+   * @returns {object} Bundle including tier, planner, and audit data.
+   */
+  getRoomTaskSignals: function (roomOrName) {
+    var roomName = normalizeRoomArg(roomOrName);
+    if (!roomName) {
+      return {
+        roomName: null,
+        room: null,
+        rcl: 0,
+        tier: 'early',
+        capabilities: BeeToolbox.getRoomCapabilities(null),
+        planner: null,
+        audit: null
+      };
+    }
+
+    var room = (Game.rooms && Game.rooms[roomName]) ? Game.rooms[roomName] : null;
+    var caps = BeeToolbox.getRoomCapabilities(roomName);
+    var planner = BeeToolbox.getPlannerState(roomName);
+    var audit = BeeToolbox.getAuditState(roomName);
+
+    return {
+      roomName: roomName,
+      room: room,
+      rcl: caps.rcl || 0,
+      tier: caps.tier || 'early',
+      capabilities: caps,
+      planner: planner,
+      audit: audit
+    };
+  },
+
+  /**
+   * Select the best available energy withdrawal target for a creep or room.
+   * @param {(Creep|Room|string)} roomOrCreep Creep, room, or room name context.
+   * @param {object} options Optional tuning flags (minAmount, allowSpawn, etc.).
+   * @returns {RoomObject|null} Preferred target or null when none available.
+   */
+  pickEnergyWithdrawTarget: function (roomOrCreep, options) {
+    var opts = options || {};
+    var creep = null;
+    var room = null;
+    var roomName = null;
+
+    if (roomOrCreep && roomOrCreep.pos && roomOrCreep.room) {
+      creep = roomOrCreep;
+      room = creep.room;
+      roomName = room ? room.name : null;
+    } else if (roomOrCreep && roomOrCreep.controller && roomOrCreep.name) {
+      room = roomOrCreep;
+      roomName = room.name;
+    } else {
+      roomName = normalizeRoomArg(roomOrCreep);
+      room = (Game.rooms && roomName) ? Game.rooms[roomName] : null;
+    }
+
+    if (!roomName) return null;
+
+    var caps = BeeToolbox.getRoomCapabilities(roomName);
+    var dataset = getEnergySourceDataset(roomName);
+    var preferPos = opts.preferPos || (creep && creep.pos ? creep.pos : null);
+    var minAmount = (opts.minAmount != null) ? opts.minAmount : 50;
+
+    var allowStorage = (opts.allowStorage !== false);
+    var allowTerminal = (opts.allowTerminal === true);
+    var allowContainers = (opts.allowContainers !== false);
+    var allowSourceContainers;
+    if (opts.allowSourceContainers != null) {
+      allowSourceContainers = !!opts.allowSourceContainers;
+    } else {
+      allowSourceContainers = !caps.hasStorage;
+    }
+    var allowLinks = (opts.allowLinks !== false);
+    var allowDropped = (opts.allowDropped !== false);
+    var allowRemains = (opts.allowRemains !== false);
+    var allowSpawn;
+    if (opts.allowSpawn != null) {
+      allowSpawn = !!opts.allowSpawn;
+    } else {
+      allowSpawn = !caps.hasStorage && caps.tier === 'early';
+    }
+    var ignoreSpawnBuffer = opts.ignoreSpawnEnergyBuffer === true;
+
+    var best = null;
+    var bestScore = null;
+
+    function consider(candidate, priority) {
+      if (!candidate) return;
+      var pos = candidate.pos || null;
+      if (!pos) return;
+      var amount = 0;
+      if (candidate.store && candidate.store[RESOURCE_ENERGY] != null) {
+        amount = candidate.store[RESOURCE_ENERGY] | 0;
+      } else if (typeof candidate.energy === 'number') {
+        amount = candidate.energy | 0;
+      } else if (candidate.amount != null && candidate.resourceType === RESOURCE_ENERGY) {
+        amount = candidate.amount | 0;
+      }
+      if (amount < minAmount) return;
+      var range = preferPos ? preferPos.getRangeTo(pos) : 0;
+      var score = (priority * 100000) + (range * 100) - amount;
+      if (bestScore === null || score < bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+
+    if (allowStorage && dataset.storage) {
+      consider(dataset.storage, 1);
+    }
+    if (allowTerminal && dataset.terminal) {
+      consider(dataset.terminal, 2);
+    }
+
+    var i;
+    if (allowContainers && dataset.otherContainers && dataset.otherContainers.length) {
+      for (i = 0; i < dataset.otherContainers.length; i++) {
+        consider(dataset.otherContainers[i], 3);
+      }
+    }
+
+    if (allowLinks && dataset.links && dataset.links.length) {
+      for (i = 0; i < dataset.links.length; i++) {
+        consider(dataset.links[i], 4);
+      }
+    }
+
+    if (allowSourceContainers && dataset.sourceContainers && dataset.sourceContainers.length) {
+      for (i = 0; i < dataset.sourceContainers.length; i++) {
+        consider(dataset.sourceContainers[i], 5);
+      }
+    }
+
+    if (allowRemains && dataset.remains && dataset.remains.length) {
+      for (i = 0; i < dataset.remains.length; i++) {
+        consider(dataset.remains[i], 6);
+      }
+    }
+
+    if (allowDropped && dataset.dropped && dataset.dropped.length) {
+      for (i = 0; i < dataset.dropped.length; i++) {
+        consider(dataset.dropped[i], 7);
+      }
+    }
+
+    if (allowSpawn && dataset.spawnBuffers && dataset.spawnBuffers.length) {
+      var spawnReady = true;
+      if (!ignoreSpawnBuffer && room && typeof room.energyAvailable === 'number' && typeof room.energyCapacityAvailable === 'number') {
+        spawnReady = room.energyAvailable === room.energyCapacityAvailable;
+      }
+      if (spawnReady) {
+        for (i = 0; i < dataset.spawnBuffers.length; i++) {
+          consider(dataset.spawnBuffers[i], 8);
+        }
+      }
+    }
+
+    return best;
   },
 
   /**

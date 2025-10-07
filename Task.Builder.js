@@ -130,17 +130,29 @@ function _nearest(pos, arr) {
 
 function findWithdrawTargetInRoom(room) {
   if (!room) return null;
-  if (room.storage && (room.storage.store[RESOURCE_ENERGY] | 0) > 0) return room.storage;
-  if (room.terminal && (room.terminal.store[RESOURCE_ENERGY] | 0) > 0) return room.terminal;
 
-  var cand = room.find(FIND_STRUCTURES, {
-    filter: function(s) {
-      if (!s.store) return false;
-      if (s.structureType !== STRUCTURE_CONTAINER && s.structureType !== STRUCTURE_LINK) return false;
-      return (s.store[RESOURCE_ENERGY] | 0) > 0;
-    }
-  });
-  return cand.length ? _nearest(new RoomPosition(25, 25, room.name), cand) : null;
+  var caps = BeeToolbox.getRoomCapabilities(room);
+  var opts = {
+    minAmount: 80,
+    allowStorage: true,
+    allowContainers: true,
+    allowRemains: true,
+    allowLinks: true,
+    allowDropped: false,
+    preferPos: getHomeAnchorPos(room.name)
+  };
+
+  if (caps && caps.hasTerminal) {
+    opts.allowTerminal = true;
+  }
+  if (!caps || !caps.hasStorage) {
+    opts.allowSpawn = true;
+    opts.allowSourceContainers = true;
+  } else {
+    opts.allowSourceContainers = false;
+  }
+
+  return BeeToolbox.pickEnergyWithdrawTarget(room, opts);
 }
 
 // -------- Anti-stuck & movement --------
