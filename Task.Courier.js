@@ -135,11 +135,47 @@ function _closestByRange(pos, arr) {
 
 function _selectDropoffTarget(creep) {
   var room = creep.room;
-  // Prefer storage, then terminal
-  if (room.storage && ((room.storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0)) return room.storage;
-  if (room.terminal && ((room.terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0)) return room.terminal;
+  var caps = BeeToolbox.getRoomCapabilities(room);
+  var tier = caps ? caps.tier : 'early';
+  // Early rooms or colonies without storage focus on feeding spawn/extension buffers first.
+  var preferSpawnFirst = (tier === 'early') || !(caps && caps.hasStorage);
 
-  // Then nearest non-source container with free capacity (no pathing)
+  var spawnTargets = room.find(FIND_MY_STRUCTURES, {
+    filter: function (s) {
+      if (!s.store) return false;
+      if (s.structureType !== STRUCTURE_SPAWN && s.structureType !== STRUCTURE_EXTENSION) return false;
+      return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
+    }
+  });
+
+  if (preferSpawnFirst && spawnTargets.length) {
+    return _closestByRange(creep.pos, spawnTargets);
+  }
+
+  var storage = null;
+  if (caps && caps.storageId) {
+    storage = Game.getObjectById(caps.storageId);
+  }
+  if (!storage && room.storage) storage = room.storage;
+  if (storage && storage.store && (storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
+    // Developing rooms keep storage topped off until a healthy reserve accumulates.
+    var storageHungry = !caps || caps.storageEnergy < 40000;
+    if (!preferSpawnFirst || !spawnTargets.length || storageHungry) {
+      return storage;
+    }
+  }
+
+  if (caps && caps.hasTerminal) {
+    var terminal = caps.terminalId ? Game.getObjectById(caps.terminalId) : room.terminal;
+    if (terminal && terminal.store && (terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
+      // Late-game economies dump excess energy into the terminal once storage is saturated.
+      var storageNearlyFull = storage && storage.store && (storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) < 500;
+      if (tier === 'late' || storageNearlyFull) {
+        return terminal;
+      }
+    }
+  }
+
   var rc = _roomCache(room);
   var others = _idsToObjects(rc.otherIds);
   var candidates = [];

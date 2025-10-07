@@ -31,6 +31,119 @@ var BeeMaintenance = (function () {
     LOG: Logger.shouldLog(LOG_LEVEL.DEBUG)
   };
 
+  function priorityForType(priorityMap, type) {
+    if (!priorityMap) return 99;
+    if (priorityMap[type] != null) return priorityMap[type];
+    if (priorityMap.default != null) return priorityMap.default;
+    return 99;
+  }
+
+  // Derive repair thresholds and priorities from the room's current capabilities and RCL tier.
+  function computeRepairSettings(room) {
+    var caps = BeeToolbox.getRoomCapabilities(room);
+    var tier = caps.tier || 'early';
+
+    var thresholds = {
+      road: 1500,
+      container: 120000,
+      rampart: 5000,
+      wall: 10000
+    };
+
+    if (tier === 'developing') {
+      thresholds.road = 2500;
+      thresholds.container = 180000;
+      thresholds.rampart = 20000;
+      thresholds.wall = 60000;
+    } else if (tier === 'expansion') {
+      thresholds.road = 3500;
+      thresholds.container = 220000;
+      thresholds.rampart = 60000;
+      thresholds.wall = 200000;
+    } else if (tier === 'late') {
+      thresholds.road = 4500;
+      thresholds.container = 240000;
+      thresholds.rampart = 200000;
+      thresholds.wall = 600000;
+    }
+
+    thresholds.rampart = Math.min(thresholds.rampart, CFG.REPAIR_MAX_RAMPART);
+    thresholds.wall = Math.min(thresholds.wall, CFG.REPAIR_MAX_WALL);
+
+    if (!caps.hasStorage) {
+      thresholds.container = Math.max(thresholds.container, 200000);
+    }
+
+    var roadStatus = BeeToolbox.getStructureStatus(room, STRUCTURE_ROAD);
+    if ((roadStatus.remaining | 0) > 0) {
+      thresholds.road = Math.max(thresholds.road, 2500);
+    }
+
+    var priorityOrder = {
+      default: 8
+    };
+
+    priorityOrder[STRUCTURE_SPAWN] = 1;
+    priorityOrder[STRUCTURE_TOWER] = 1;
+    priorityOrder[STRUCTURE_EXTENSION] = 2;
+    priorityOrder[STRUCTURE_STORAGE] = 2;
+    priorityOrder[STRUCTURE_LINK] = 3;
+    priorityOrder[STRUCTURE_TERMINAL] = 3;
+    priorityOrder[STRUCTURE_CONTAINER] = caps.hasStorage ? 3 : 1;
+    priorityOrder[STRUCTURE_ROAD] = (tier === 'early') ? 5 : 6;
+    priorityOrder[STRUCTURE_RAMPART] = (tier === 'late') ? 4 : 6;
+    priorityOrder[STRUCTURE_WALL] = (tier === 'late') ? 7 : 8;
+    priorityOrder[STRUCTURE_LAB] = 4;
+
+    if (caps.storageEnergy < 20000 && caps.hasStorage) {
+      priorityOrder[STRUCTURE_STORAGE] = 1;
+    }
+
+    if ((roadStatus.remaining | 0) > 0) {
+      priorityOrder[STRUCTURE_ROAD] = 4;
+    }
+
+    var containerStatus = BeeToolbox.getStructureStatus(room, STRUCTURE_CONTAINER);
+    if ((containerStatus.remaining | 0) > 0) {
+      priorityOrder[STRUCTURE_CONTAINER] = 2;
+    }
+
+    return {
+      thresholds: thresholds,
+      priority: priorityOrder,
+      tier: tier
+    };
+  }
+
+  function shouldRepairStructure(structure, thresholds) {
+    if (!structure) return false;
+    var hits = structure.hits | 0;
+    var hitsMax = structure.hitsMax | 0;
+    var type = structure.structureType;
+
+    if (type === STRUCTURE_ROAD) {
+      var roadCap = thresholds.road || (hitsMax * 0.60);
+      roadCap = Math.min(hitsMax, roadCap);
+      return hits < roadCap;
+    }
+    if (type === STRUCTURE_RAMPART) {
+      var rampCap = thresholds.rampart || CFG.REPAIR_MAX_RAMPART;
+      rampCap = Math.min(hitsMax || rampCap, rampCap);
+      return hits < rampCap;
+    }
+    if (type === STRUCTURE_WALL) {
+      var wallCap = thresholds.wall || CFG.REPAIR_MAX_WALL;
+      wallCap = Math.min(hitsMax || wallCap, wallCap);
+      return hits < wallCap;
+    }
+    if (type === STRUCTURE_CONTAINER) {
+      var contCap = thresholds.container || hitsMax;
+      contCap = Math.min(hitsMax || contCap, contCap);
+      return hits < contCap;
+    }
+    return hits < hitsMax;
+  }
+
   // -----------------------------
   // Small helpers
   // -----------------------------
@@ -342,22 +455,10 @@ var BeeMaintenance = (function () {
       m = Memory.rooms[room.name]._maint;
     }
 
-    if (!m.priorityOrder) {
-      m.priorityOrder = {};
-      m.priorityOrder[STRUCTURE_CONTAINER] = 1;
-      m.priorityOrder[STRUCTURE_RAMPART]   = 3;
-      m.priorityOrder[STRUCTURE_WALL]      = 4;
-      m.priorityOrder[STRUCTURE_STORAGE]   = 5;
-      m.priorityOrder[STRUCTURE_SPAWN]     = 6;
-      m.priorityOrder[STRUCTURE_EXTENSION] = 7;
-      m.priorityOrder[STRUCTURE_TOWER]     = 8;
-      m.priorityOrder[STRUCTURE_LINK]      = 9;
-      m.priorityOrder[STRUCTURE_TERMINAL]  = 10;
-      m.priorityOrder[STRUCTURE_LAB]       = 11;
-      m.priorityOrder[STRUCTURE_OBSERVER]  = 12;
-      m.priorityOrder[STRUCTURE_ROAD]      = 13; // low prio; throttled below
-    }
-    var priorityOrder = m.priorityOrder;
+    var settings = computeRepairSettings(room);
+    var priorityOrder = settings.priority;
+    var thresholds = settings.thresholds;
+    m.priorityOrder = priorityOrder;
 
     var T = _now();
     var nextScan = m.nextRepairScanTick | 0;
@@ -365,20 +466,25 @@ var BeeMaintenance = (function () {
     // If not time to rescan, return cached (and drop fully repaired)
     if (T < nextScan && m.cachedRepairTargets && m.cachedRepairTargets.length) {
       var kept = [];
-      var maxR = CFG.REPAIR_MAX_RAMPART;
-      var maxW = CFG.REPAIR_MAX_WALL;
       for (var i0 = 0; i0 < m.cachedRepairTargets.length; i0++) {
         var t = m.cachedRepairTargets[i0];
         var obj = Game.getObjectById(t.id);
         if (!obj) continue;
-        if (obj.structureType === STRUCTURE_RAMPART) {
-          if (obj.hits < Math.min(obj.hitsMax, maxR)) kept.push(t);
-        } else if (obj.structureType === STRUCTURE_WALL) {
-          if (obj.hits < Math.min(obj.hitsMax, maxW)) kept.push(t);
-        } else {
-          if (obj.hits < obj.hitsMax) kept.push(t);
-        }
+        if (!shouldRepairStructure(obj, thresholds)) continue;
+        kept.push({
+          id: obj.id,
+          hits: obj.hits,
+          hitsMax: obj.hitsMax,
+          type: obj.structureType,
+          priority: priorityForType(priorityOrder, obj.structureType),
+          ratio: (obj.hitsMax > 0) ? (obj.hits / obj.hitsMax) : 1
+        });
       }
+      kept.sort(function (a, b) {
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        if (a.ratio !== b.ratio) return a.ratio - b.ratio;
+        return a.hits - b.hits;
+      });
       m.cachedRepairTargets = kept;
       return kept;
     }
@@ -386,30 +492,26 @@ var BeeMaintenance = (function () {
     // Full rescan (throttled)
     var list = room.find(FIND_STRUCTURES, {
       filter: function (s) {
-        // Roads: repair only when under 60% to avoid constant churn
-        if (s.structureType === STRUCTURE_ROAD) {
-          return s.hits < (s.hitsMax * 0.60);
-        }
-        if (s.structureType === STRUCTURE_RAMPART) {
-          return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_RAMPART);
-        }
-        if (s.structureType === STRUCTURE_WALL) {
-          return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_WALL);
-        }
-        return s.hits < s.hitsMax;
+        return shouldRepairStructure(s, thresholds);
       }
     });
 
     var targets = [];
     for (var i = 0; i < list.length; i++) {
       var s = list[i];
-      targets.push({ id: s.id, hits: s.hits, hitsMax: s.hitsMax, type: s.structureType });
+      targets.push({
+        id: s.id,
+        hits: s.hits,
+        hitsMax: s.hitsMax,
+        type: s.structureType,
+        priority: priorityForType(priorityOrder, s.structureType),
+        ratio: (s.hitsMax > 0) ? (s.hits / s.hitsMax) : 1
+      });
     }
 
     targets.sort(function (a, b) {
-      var pa = priorityOrder[a.type] != null ? priorityOrder[a.type] : 99;
-      var pb = priorityOrder[b.type] != null ? priorityOrder[b.type] : 99;
-      if (pa !== pb) return pa - pb;
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      if (a.ratio !== b.ratio) return a.ratio - b.ratio;
       return a.hits - b.hits;
     });
 

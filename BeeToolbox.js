@@ -13,12 +13,21 @@ if (!RUNTIME_STATE) {
   RUNTIME_STATE = {
     planner: {},
     audit: {},
-    spawnNotes: {}
+    spawnNotes: {},
+    capabilities: {}
   };
   global.__beeToolboxRuntime = RUNTIME_STATE;
 }
 
 var DEBUG_INTERVAL = 75; // refresh Memory.debug.rclReport roughly every 75 ticks
+
+function normalizeRoomArg(roomOrName) {
+  if (!roomOrName) return null;
+  if (typeof roomOrName === 'string') return roomOrName;
+  if (roomOrName.name) return roomOrName.name;
+  if (roomOrName.room && roomOrName.room.name) return roomOrName.room.name;
+  return null;
+}
 
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
@@ -303,6 +312,7 @@ var BeeToolbox = {
     RUNTIME_STATE.planner = {};
     RUNTIME_STATE.audit = {};
     RUNTIME_STATE.spawnNotes = {};
+    RUNTIME_STATE.capabilities = {};
   },
 
   /**
@@ -389,6 +399,184 @@ var BeeToolbox = {
       }
     }
     return highest;
+  },
+
+  /**
+   * Retrieve combined planner and audit information for a structure type.
+   * @param {(Room|string)} roomOrName Room reference or room name.
+   * @param {string} structureType Screeps structure constant.
+   * @returns {object} Summary with desired/existing/sites/missing counts.
+   */
+  getPlannerStructureSummary: function (roomOrName, structureType) {
+    var roomName = normalizeRoomArg(roomOrName);
+    var summary = {
+      roomName: roomName,
+      type: structureType,
+      desired: 0,
+      existing: 0,
+      sites: 0,
+      planned: 0,
+      blocked: 0,
+      allowed: 0,
+      missing: 0
+    };
+
+    if (!roomName || !structureType) {
+      return summary;
+    }
+
+    var plan = BeeToolbox.getPlannerState(roomName);
+    if (plan && plan.structures && plan.structures[structureType]) {
+      var entry = plan.structures[structureType];
+      summary.desired = (entry.desired | 0);
+      summary.existing = (entry.existing | 0);
+      summary.sites = (entry.sites | 0);
+      summary.planned = (entry.planned | 0);
+      summary.blocked = (entry.blocked | 0);
+      summary.allowed = (entry.desired | 0);
+      summary.missing = Math.max(0, (entry.desired | 0) - (entry.existing | 0) - (entry.sites | 0));
+    }
+
+    var audit = BeeToolbox.getAuditState(roomName);
+    if (audit && audit.structures && audit.structures[structureType]) {
+      var auditEntry = audit.structures[structureType];
+      if ((auditEntry.existing | 0) > summary.existing) {
+        summary.existing = auditEntry.existing | 0;
+      }
+      if ((auditEntry.sites | 0) > summary.sites) {
+        summary.sites = auditEntry.sites | 0;
+      }
+      if ((auditEntry.allowed | 0) > summary.allowed) {
+        summary.allowed = auditEntry.allowed | 0;
+      }
+      if ((auditEntry.missing | 0) > summary.missing) {
+        summary.missing = auditEntry.missing | 0;
+      }
+    }
+
+    var room = (Game.rooms && roomName) ? Game.rooms[roomName] : null;
+    if (room) {
+      var existing = BeeToolbox.countExisting(room, structureType);
+      var sites = BeeToolbox.countSites(room, structureType);
+      if (existing > summary.existing) summary.existing = existing;
+      if (sites > summary.sites) summary.sites = sites;
+    }
+
+    if (!summary.allowed) {
+      var rcl = plan && plan.rcl ? plan.rcl : BeeToolbox.getRoomRcl(room);
+      summary.allowed = BeeToolbox.getMaxAllowed(structureType, rcl);
+    }
+    if (!summary.desired && summary.allowed) {
+      summary.desired = summary.allowed;
+    }
+    if (!summary.missing) {
+      var deficit = (summary.desired | 0) - (summary.existing | 0) - (summary.sites | 0);
+      if (deficit > 0) summary.missing = deficit;
+    }
+
+    return summary;
+  },
+
+  /**
+   * High-level structure status summary including totals and remaining slots.
+   * @param {(Room|string)} roomOrName Room reference or name.
+   * @param {string} structureType Screeps structure constant.
+   * @returns {object} Status with existing, sites, total, and remaining counts.
+   */
+  getStructureStatus: function (roomOrName, structureType) {
+    var status = BeeToolbox.getPlannerStructureSummary(roomOrName, structureType);
+    status.total = (status.existing | 0) + (status.sites | 0);
+    status.remaining = Math.max(0, (status.desired | 0) - status.total);
+    return status;
+  },
+
+  /**
+   * Describe the current capabilities of a room (storage, links, containers, etc.).
+   * @param {(Room|string)} roomOrName Room reference or room name.
+   * @returns {object} Capability descriptor for the current tick.
+   */
+  getRoomCapabilities: function (roomOrName) {
+    var roomName = normalizeRoomArg(roomOrName);
+    if (!roomName) {
+      return {
+        roomName: null,
+        rcl: 0,
+        tier: 'early'
+      };
+    }
+
+    var cache = RUNTIME_STATE.capabilities[roomName];
+    if (cache && cache.tick === Game.time) {
+      return cache.data;
+    }
+
+    var room = (Game.rooms && Game.rooms[roomName]) ? Game.rooms[roomName] : null;
+    var rcl = BeeToolbox.getRoomRcl(room);
+    var tier = BeeToolbox.getRclTierName(rcl);
+
+    var info = {
+      roomName: roomName,
+      rcl: rcl,
+      tier: tier,
+      hasController: !!(room && room.controller && room.controller.my),
+      hasStorage: false,
+      storageId: null,
+      storageEnergy: 0,
+      storagePlanned: false,
+      storageRemaining: 0,
+      hasTerminal: false,
+      terminalId: null,
+      controllerLinkId: null,
+      controllerContainerId: null,
+      sourceContainerCount: 0,
+      energyCapacity: room ? BeeToolbox.energyCapacity(room) : 0,
+      energyAvailable: room ? BeeToolbox.energyAvailable(room) : 0
+    };
+
+    var storageStatus = BeeToolbox.getStructureStatus(roomName, STRUCTURE_STORAGE);
+    info.storagePlanned = (storageStatus.desired | 0) > 0;
+    info.storageRemaining = storageStatus.remaining | 0;
+
+    if (room) {
+      if (room.storage) {
+        info.hasStorage = true;
+        info.storageId = room.storage.id;
+        info.storageEnergy = (room.storage.store && room.storage.store[RESOURCE_ENERGY]) || 0;
+      }
+      if (room.terminal) {
+        info.hasTerminal = true;
+        info.terminalId = room.terminal.id;
+      }
+
+      var containers = room.find(FIND_STRUCTURES, {
+        filter: function (s) {
+          return s.structureType === STRUCTURE_CONTAINER && s.pos.findInRange(FIND_SOURCES, 1).length > 0;
+        }
+      });
+      info.sourceContainerCount = containers ? containers.length : 0;
+
+      if (room.controller) {
+        var nearLink = room.controller.pos.findInRange(FIND_MY_STRUCTURES, 2, {
+          filter: function (s) { return s.structureType === STRUCTURE_LINK; }
+        });
+        if (nearLink && nearLink.length) {
+          info.controllerLinkId = nearLink[0].id;
+        }
+        var nearContainer = room.controller.pos.findInRange(FIND_STRUCTURES, 2, {
+          filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
+        });
+        if (nearContainer && nearContainer.length) {
+          info.controllerContainerId = nearContainer[0].id;
+        }
+      }
+    }
+
+    RUNTIME_STATE.capabilities[roomName] = {
+      tick: Game.time,
+      data: info
+    };
+
+    return info;
   },
 
   /**

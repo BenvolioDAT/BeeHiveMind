@@ -9,6 +9,8 @@ var TaskUpgrader = {
     var store = creep.store;
     var room = creep.room;
     var controller = room ? room.controller : null;
+    var capabilities = BeeToolbox.getRoomCapabilities(room);
+    var tier = capabilities ? capabilities.tier : 'early';
 
     if (creep.memory.upgrading && store[RESOURCE_ENERGY] === 0) {
       creep.memory.upgrading = false;
@@ -31,74 +33,81 @@ var TaskUpgrader = {
       // Check and update the controller sign
       checkAndUpdateControllerSign(creep, controller);
     } else {
-      // First, check for a link near the controller
-      var linkNearController = creep.pos.findClosestByRange(FIND_STRUCTURES, {
-        filter: function (structure) {
-          return (
-            structure.structureType === STRUCTURE_LINK &&
-            controller && structure.pos.inRangeTo(controller, 3) && // within range of the controller
-            structure.store[RESOURCE_ENERGY] > 0 // link has energy
-          );
-        }
-      });
-      if (linkNearController) {
-        if (creep.withdraw(linkNearController, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-          BeeToolbox.BeeTravel(creep, linkNearController);
-          //creep.moveTo(linkNearController, { reusePath: 10 });
-        }
-        return; // Early return to avoid checking other sources if the link is valid
+      var linkNearController = null;
+      if (capabilities && capabilities.controllerLinkId) {
+        linkNearController = Game.getObjectById(capabilities.controllerLinkId);
       }
-      BeeToolbox.collectEnergy(creep);
-      // Check if there is energy in storage
-      var storageWithEnergy = room ? room.storage : null;
-      if (storageWithEnergy && storageWithEnergy.store[RESOURCE_ENERGY] > 0) {
-        if (creep.withdraw(storageWithEnergy, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-          BeeToolbox.BeeTravel(creep, storageWithEnergy);
-          //creep.moveTo(storageWithEnergy, { reusePath: 10 });
-        }
-      } else {
-        // If no energy in storage, look for energy in containers
-        var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+      if (!linkNearController && controller) {
+        linkNearController = creep.pos.findClosestByRange(FIND_STRUCTURES, {
           filter: function (structure) {
             return (
-              structure.structureType === STRUCTURE_CONTAINER &&
-              structure.store[RESOURCE_ENERGY] > 0
+              structure.structureType === STRUCTURE_LINK &&
+              structure.store[RESOURCE_ENERGY] > 0 &&
+              structure.pos.inRangeTo(controller, 3)
             );
           }
         });
-        if (containerWithEnergy) {
-          if (creep.withdraw(containerWithEnergy, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            BeeToolbox.BeeTravel(creep, containerWithEnergy);
-            //creep.moveTo(containerWithEnergy, { reusePath: 10 });
+      }
+      // RCL5+ rooms expect a controller-side link to keep the upgrader topped up.
+      if (linkNearController && linkNearController.store[RESOURCE_ENERGY] > 0) {
+        if (creep.withdraw(linkNearController, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+          BeeToolbox.BeeTravel(creep, linkNearController);
+        }
+        return;
+      }
+
+      var controllerContainer = null;
+      if (capabilities && capabilities.controllerContainerId) {
+        controllerContainer = Game.getObjectById(capabilities.controllerContainerId);
+      }
+      if (controllerContainer && controllerContainer.store[RESOURCE_ENERGY] > 0) {
+        if (creep.withdraw(controllerContainer, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+          BeeToolbox.BeeTravel(creep, controllerContainer);
+        }
+        return;
+      }
+
+      var storageWithEnergy = null;
+      if (capabilities && capabilities.hasStorage && capabilities.storageId) {
+        storageWithEnergy = Game.getObjectById(capabilities.storageId);
+      }
+      // Storage withdraw thresholds scale with controller tier to avoid draining bootstrap reserves.
+      var storageThreshold = (tier === 'early') ? 300 : (tier === 'developing' ? 800 : 1200);
+      if (storageWithEnergy && storageWithEnergy.store && storageWithEnergy.store[RESOURCE_ENERGY] > storageThreshold) {
+        if (creep.withdraw(storageWithEnergy, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+          BeeToolbox.BeeTravel(creep, storageWithEnergy);
+        }
+        return;
+      }
+
+      if (capabilities && capabilities.hasTerminal && capabilities.tier === 'late') {
+        var terminal = Game.getObjectById(capabilities.terminalId);
+        if (terminal && terminal.store && terminal.store[RESOURCE_ENERGY] > 0) {
+          if (creep.withdraw(terminal, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            BeeToolbox.BeeTravel(creep, terminal);
           }
-        } else {
-          // If no energy in containers, look for dropped energy
-          var targetDroppedEnergyId = creep.memory.targetDroppedEnergyId;
-          var droppedResource;
-          if (targetDroppedEnergyId) {
-            droppedResource = Game.getObjectById(targetDroppedEnergyId);
-          }
-          // If the target dropped resource is not valid, find a new one
-          if (!droppedResource || droppedResource.amount === 0) {
-            var droppedResources = room ? room.find(FIND_DROPPED_RESOURCES, {
-              filter: function (resource) {
-                return resource.resourceType === RESOURCE_ENERGY;
-              }
-            }) : [];
-            if (droppedResources.length > 0) {
-              droppedResources.sort(function (a, b) {
-                return b.amount - a.amount;
-              });
-              droppedResource = droppedResources[0];
-              creep.memory.targetDroppedEnergyId = droppedResource.id;
-            }
-          }
-          if (droppedResource && creep.pickup(droppedResource) === ERR_NOT_IN_RANGE) {
-            BeeToolbox.BeeTravel(creep, droppedResource);
-            //creep.moveTo(droppedResource, { reusePath: 10 });
-          }
+          return;
         }
       }
+
+      // Early RCL rooms recycle energy directly from spawn/extension buffers until storage exists.
+      if (tier === 'early') {
+        var spawnOrExtension = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+          filter: function (structure) {
+            if (!structure.store) return false;
+            if (structure.structureType !== STRUCTURE_SPAWN && structure.structureType !== STRUCTURE_EXTENSION) return false;
+            return structure.store[RESOURCE_ENERGY] > 0;
+          }
+        });
+        if (spawnOrExtension) {
+          if (creep.withdraw(spawnOrExtension, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            BeeToolbox.BeeTravel(creep, spawnOrExtension);
+          }
+          return;
+        }
+      }
+
+      BeeToolbox.collectEnergy(creep);
     }
   }
 };
