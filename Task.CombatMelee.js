@@ -21,11 +21,39 @@ var CombatMelee = {
   run: function (creep) {
     if (creep.spawning) return;
 
-    // (0) optional: wait for medic if you want tighter stack
-    if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
-      var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
+    var squadId = (creep.memory && creep.memory.squadId) || 'Alpha';
+    if (BeeToolbox && BeeToolbox.noteSquadPresence) {
+      BeeToolbox.noteSquadPresence(creep);
+    }
+
+    var squadInfo = BeeToolbox && BeeToolbox.getSquadContext
+      ? BeeToolbox.getSquadContext(squadId)
+      : null;
+
+    // (0) optional: wait for medic if the squad is still forming
+    var mustWaitForMedic = CONFIG.waitForMedic;
+    if (!mustWaitForMedic && squadInfo && squadInfo.waitForMedic) {
+      mustWaitForMedic = true;
+    }
+    if (mustWaitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
+      var rf = (squadInfo && squadInfo.anchor) || Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
       if (rf) BeeToolbox.combatStepToward(creep, rf.pos || rf, 0, TaskSquad);
       return;
+    }
+
+    // (0.5) squad-level regroup when posture says hold (e.g. missing medic or bruised)
+    if (squadInfo && squadInfo.needsRegroup) {
+      var urgentThreats = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
+      if (!urgentThreats || !urgentThreats.length) {
+        var regroupPos = (squadInfo.anchor && squadInfo.anchor.pos) ? squadInfo.anchor.pos : squadInfo.anchor;
+        if (!regroupPos) regroupPos = TaskSquad.getAnchor(creep);
+        if (!regroupPos && Game.flags.Rally) regroupPos = Game.flags.Rally.pos;
+        if (regroupPos) {
+          BeeToolbox.combatStepToward(creep, regroupPos, 1, TaskSquad);
+          BeeToolbox.combatAuxHeal(creep);
+          return;
+        }
+      }
     }
 
     // quick self/buddy healing if we have HEAL
@@ -53,10 +81,21 @@ var CombatMelee = {
 
     // (3) squad shared target
     var target = TaskSquad.sharedTarget(creep);
+    if (target && BeeToolbox && BeeToolbox.setSquadFocus && (target.structureType || target.owner)) {
+      BeeToolbox.setSquadFocus(squadId, target, 15);
+    }
     if (!target) {
-      var anc = TaskSquad.getAnchor(creep);
+      var anc = (squadInfo && squadInfo.anchor) || TaskSquad.getAnchor(creep);
       if (anc) BeeToolbox.combatStepToward(creep, anc, 1, TaskSquad);
       return;
+    }
+
+    if (squadInfo && squadInfo.anchor && target.pos && target.pos.roomName === creep.pos.roomName) {
+      var anchorPos = (squadInfo.anchor.pos || squadInfo.anchor);
+      if (anchorPos && anchorPos.getRangeTo && anchorPos.getRangeTo(target.pos) > (squadInfo.chaseRange || 15)) {
+        BeeToolbox.combatStepToward(creep, anchorPos, 1, TaskSquad);
+        return;
+      }
     }
 
     // (4) approach & strike

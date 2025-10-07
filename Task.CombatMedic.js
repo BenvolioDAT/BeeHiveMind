@@ -29,6 +29,14 @@ var TaskCombatMedic = {
   run: function (creep) {
     if (creep.spawning) return;
 
+    var squadId = (creep.memory && creep.memory.squadId) || 'Alpha';
+    if (BeeToolbox && BeeToolbox.noteSquadPresence) {
+      BeeToolbox.noteSquadPresence(creep);
+    }
+    var squadInfo = BeeToolbox && BeeToolbox.getSquadContext
+      ? BeeToolbox.getSquadContext(squadId)
+      : null;
+
     var now = Game.time;
     var bodyHeal = creep.getActiveBodyparts(HEAL);
     var canHeal = bodyHeal > 0;
@@ -45,7 +53,6 @@ var TaskCombatMedic = {
       delete creep.memory.followTarget;
       delete creep.memory.assignedAt;
 
-      var squadId = creep.memory.squadId || 'Alpha';
       var candidates = _.filter(Game.creeps, function (a){
         if (!a || !a.my || !a.memory) return false;
         if (a.memory.squadId !== squadId) return false;
@@ -87,7 +94,7 @@ var TaskCombatMedic = {
 
     // ---------- 2) no buddy? hover at anchor/rally and still heal ----------
     if (!buddy) {
-      var anc = TaskSquad.getAnchor(creep) || Game.flags.MedicRally || Game.flags.Rally;
+      var anc = (squadInfo && squadInfo.anchor) || TaskSquad.getAnchor(creep) || Game.flags.MedicRally || Game.flags.Rally;
       if (anc) BeeToolbox.combatStepToward(creep, anc.pos || anc, 1, TaskSquad);
       if (!healedThisTick) {
         var triage = BeeToolbox.findLowestInjuredAlly(creep.pos, CONFIG.triageRange);
@@ -131,6 +138,10 @@ var TaskCombatMedic = {
     var meleeThreat = creep.pos.findInRange(FIND_HOSTILE_CREEPS, CONFIG.avoidMeleeRange, {
       filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
     }).length > 0;
+
+    if (squadInfo && squadInfo.needsRegroup) {
+      wantRange = Math.min(wantRange, 1);
+    }
 
     if (!creep.pos.inRangeTo(buddy, wantRange)) {
       BeeToolbox.combatStepToward(creep, buddy.pos, wantRange, TaskSquad);
@@ -189,6 +200,13 @@ var TaskCombatMedic = {
         if (!healedThisTick) {
           var triageNear = BeeToolbox.findLowestInjuredAlly(creep.pos, 3);
           if (BeeToolbox.tryHealTarget(creep, triageNear)) healedThisTick = true;
+        }
+        if (!healedThisTick && squadInfo && squadInfo.anchor) {
+          var anchor = (squadInfo.anchor.pos || squadInfo.anchor);
+          if (anchor && creep.pos.inRangeTo(anchor, 3)) {
+            var hold = BeeToolbox.findLowestInjuredAlly(anchor, 3);
+            if (BeeToolbox.tryHealTarget(creep, hold)) healedThisTick = true;
+          }
         }
       }
     }

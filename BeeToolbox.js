@@ -1265,6 +1265,223 @@ var BeeToolbox = {
     return false;
   },
 
+  /**
+   * Ensure a squad memory bucket exists and return it.
+   * @param {string} squadId Squad identifier.
+   * @returns {object} Memory bucket for the squad.
+   */
+  ensureSquadMemory: function (squadId) {
+    var sid = squadId || 'Alpha';
+    if (!Memory.squads) Memory.squads = {};
+    if (!Memory.squads[sid]) Memory.squads[sid] = {};
+    return Memory.squads[sid];
+  },
+
+  /**
+   * Set or refresh the shared focus target for a squad (structure/creep).
+   * @param {string} squadId Squad identifier.
+   * @param {RoomObject} target Target to focus or null to clear.
+   * @param {number} ttlTicks Optional lifespan for the focus in ticks.
+   */
+  setSquadFocus: function (squadId, target, ttlTicks) {
+    var sid = squadId || 'Alpha';
+    var bucket = BeeToolbox.ensureSquadMemory(sid);
+    if (!target) {
+      delete bucket.focusId;
+      delete bucket.focusUntil;
+      return;
+    }
+    if (!target.id) return;
+    var ttl = typeof ttlTicks === 'number' ? ttlTicks : 15;
+    bucket.focusId = target.id;
+    bucket.focusUntil = Game.time + Math.max(1, ttl);
+  },
+
+  /**
+   * Retrieve the active shared focus for a squad if still valid.
+   * @param {string} squadId Squad identifier.
+   * @returns {RoomObject|null} Focus target or null when none/expired.
+   */
+  getSquadFocus: function (squadId) {
+    var sid = squadId || 'Alpha';
+    if (!Memory.squads || !Memory.squads[sid]) return null;
+    var bucket = Memory.squads[sid];
+    if (!bucket.focusId) return null;
+    if (bucket.focusUntil && Game.time > bucket.focusUntil) {
+      delete bucket.focusId;
+      delete bucket.focusUntil;
+      return null;
+    }
+    var obj = Game.getObjectById(bucket.focusId);
+    if (!obj) {
+      delete bucket.focusId;
+      delete bucket.focusUntil;
+      return null;
+    }
+    return obj;
+  },
+
+  /**
+   * Record a lightweight heartbeat for a combat creep so squad telemetry stays fresh.
+   * @param {Creep} creep Squad member to record.
+   * @returns {void}
+   */
+  noteSquadPresence: function (creep) {
+    if (!creep || !creep.memory) return;
+    var sid = creep.memory.squadId || 'Alpha';
+    var bucket = BeeToolbox.ensureSquadMemory(sid);
+    bucket.lastActive = Game.time;
+    if (!bucket.telemetry) bucket.telemetry = {};
+    bucket.telemetry[creep.name] = {
+      role: creep.memory.task || creep.memory.role || '',
+      hits: creep.hits,
+      hitsMax: creep.hitsMax,
+      room: creep.pos ? creep.pos.roomName : null,
+      x: creep.pos ? creep.pos.x : null,
+      y: creep.pos ? creep.pos.y : null,
+      tick: Game.time
+    };
+
+    // Prune stale telemetry entries (keep squad bucket compact)
+    var cutoff = Game.time - 150;
+    for (var name in bucket.telemetry) {
+      if (!Object.prototype.hasOwnProperty.call(bucket.telemetry, name)) continue;
+      var info = bucket.telemetry[name];
+      if (!info || info.tick == null || info.tick < cutoff) {
+        delete bucket.telemetry[name];
+      }
+    }
+  },
+
+  /**
+   * Compute an aggregated context snapshot for the provided squad.
+   * @param {string} squadId Squad identifier.
+   * @returns {object} Snapshot describing roster, posture, anchor, and focus.
+   */
+  getSquadContext: function (squadId) {
+    var sid = squadId || 'Alpha';
+    var bucket = BeeToolbox.ensureSquadMemory(sid);
+
+    var context = {
+      id: sid,
+      targetRoom: bucket.targetRoom || null,
+      flagName: bucket.flagName || null,
+      desiredCounts: {},
+      counts: {},
+      total: 0,
+      wounded: 0,
+      healthRatio: 1,
+      missingRoles: [],
+      waitForMedic: false,
+      needsRegroup: false,
+      lastKnownScore: bucket.lastKnownScore || 0,
+      posture: bucket.posture || null,
+      focus: null,
+      anchor: null,
+      holdRange: 4,
+      chaseRange: 15
+    };
+
+    if (bucket.desiredCounts) {
+      for (var key in bucket.desiredCounts) {
+        if (!Object.prototype.hasOwnProperty.call(bucket.desiredCounts, key)) continue;
+        context.desiredCounts[key] = bucket.desiredCounts[key] | 0;
+      }
+    }
+
+    if (bucket.anchor && bucket.anchor.x != null && bucket.anchor.y != null && bucket.anchor.room) {
+      context.anchor = new RoomPosition(bucket.anchor.x, bucket.anchor.y, bucket.anchor.room);
+    }
+
+    var flag = null;
+    if (context.flagName && Game.flags[context.flagName]) {
+      flag = Game.flags[context.flagName];
+    } else {
+      var fallback = ['Squad' + sid, 'Squad_' + sid, sid];
+      for (var fi = 0; fi < fallback.length && !flag; fi++) {
+        var fname = fallback[fi];
+        if (Game.flags[fname]) flag = Game.flags[fname];
+      }
+    }
+    if (!context.anchor && flag && flag.pos) {
+      context.anchor = flag.pos;
+    }
+    context.flag = flag || null;
+
+    var total = 0;
+    var wounded = 0;
+    var sumHits = 0;
+    var sumMax = 0;
+    var leaderId = null;
+    for (var cname in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, cname)) continue;
+      var c = Game.creeps[cname];
+      if (!c || !c.my || !c.memory) continue;
+      var csid = c.memory.squadId || 'Alpha';
+      if (csid !== sid) continue;
+      var role = (c.memory.task || c.memory.role || '');
+      if (!context.counts[role]) context.counts[role] = 0;
+      context.counts[role]++;
+      total++;
+      sumHits += c.hits;
+      sumMax += Math.max(1, c.hitsMax);
+      if (c.hits < c.hitsMax) wounded++;
+      if (!leaderId && role === 'CombatMelee') {
+        leaderId = c.id;
+      }
+    }
+
+    context.total = total;
+    context.wounded = wounded;
+    if (sumMax > 0) {
+      context.healthRatio = sumHits / sumMax;
+    }
+
+    for (var roleName in context.desiredCounts) {
+      if (!Object.prototype.hasOwnProperty.call(context.desiredCounts, roleName)) continue;
+      var desired = context.desiredCounts[roleName] | 0;
+      var have = context.counts[roleName] || 0;
+      if (have < desired) {
+        context.missingRoles.push(roleName);
+        if (roleName === 'CombatMedic') context.waitForMedic = true;
+      }
+    }
+
+    if (!context.waitForMedic) {
+      if ((context.counts.CombatMedic || 0) === 0 && context.total > 0 && context.wounded > 0) {
+        context.waitForMedic = true;
+      }
+    }
+
+    if (!context.posture) {
+      if (context.lastKnownScore >= 20) context.posture = 'breach';
+      else if (context.lastKnownScore >= 8) context.posture = 'engage';
+      else context.posture = 'patrol';
+    }
+
+    if (context.posture === 'patrol') {
+      context.holdRange = 4;
+      context.chaseRange = 8;
+    } else if (context.posture === 'engage') {
+      context.holdRange = 6;
+      context.chaseRange = 15;
+    } else if (context.posture === 'breach') {
+      context.holdRange = 8;
+      context.chaseRange = 25;
+    }
+
+    if (context.healthRatio < 0.7) context.needsRegroup = true;
+    if (context.waitForMedic) context.needsRegroup = true;
+    if (context.missingRoles.length > 0) context.needsRegroup = true;
+
+    var focus = BeeToolbox.getSquadFocus(sid);
+    if (focus) context.focus = focus;
+
+    context.leaderId = leaderId;
+
+    return context;
+  },
+
   // ---------------------------------------------------------------------------
   // 🛡️ COMBAT HELPERS
   // ---------------------------------------------------------------------------

@@ -23,17 +23,48 @@ var TaskCombatArcher = {
   run: function (creep) {
     if (creep.spawning) return;
 
-    // (0) Optional: wait for medic / rally
-    if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
-      var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
+    var squadId = (creep.memory && creep.memory.squadId) || 'Alpha';
+    if (BeeToolbox && BeeToolbox.noteSquadPresence) {
+      BeeToolbox.noteSquadPresence(creep);
+    }
+
+    var squadInfo = BeeToolbox && BeeToolbox.getSquadContext
+      ? BeeToolbox.getSquadContext(squadId)
+      : null;
+
+    // (0) Optional: wait for medic / rally when squad still forming
+    var holdForMedic = CONFIG.waitForMedic;
+    if (!holdForMedic && squadInfo && squadInfo.waitForMedic) {
+      holdForMedic = true;
+    }
+    if (holdForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
+      var rf = (squadInfo && squadInfo.anchor) || Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
       if (rf) BeeToolbox.combatStepToward(creep, (rf.pos || rf), 0, TaskSquad);
+      BeeToolbox.combatShootOpportunistic(creep);
       return;
+    }
+
+    if (squadInfo && squadInfo.needsRegroup) {
+      var imminent = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 4);
+      if (!imminent || !imminent.length) {
+        var regroup = (squadInfo.anchor && squadInfo.anchor.pos) ? squadInfo.anchor.pos : squadInfo.anchor;
+        if (!regroup) regroup = TaskSquad.getAnchor(creep);
+        if (!regroup && Game.flags.Rally) regroup = Game.flags.Rally.pos;
+        if (regroup) {
+          BeeToolbox.combatStepToward(creep, regroup, 1, TaskSquad);
+          BeeToolbox.combatShootOpportunistic(creep);
+          return;
+        }
+      }
     }
 
     // (1) Acquire target or rally
     var target = TaskSquad.sharedTarget(creep);
+    if (target && BeeToolbox && BeeToolbox.setSquadFocus && (target.structureType || target.owner)) {
+      BeeToolbox.setSquadFocus(squadId, target, 15);
+    }
     if (!target) {
-      var anc = TaskSquad.getAnchor(creep) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
+      var anc = (squadInfo && squadInfo.anchor) || TaskSquad.getAnchor(creep) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
       if (anc) BeeToolbox.combatStepToward(creep, anc, 0, TaskSquad);
       BeeToolbox.combatShootOpportunistic(creep); // still shoot if anything in range
       return;
@@ -75,6 +106,14 @@ var TaskCombatArcher = {
 
     // (5) Decide if we should move at all (anti-dance)
     var range = creep.pos.getRangeTo(target);
+
+    if (squadInfo && squadInfo.anchor && target.pos && target.pos.roomName === creep.pos.roomName) {
+      var anchorPos = (squadInfo.anchor.pos || squadInfo.anchor);
+      if (anchorPos && anchorPos.getRangeTo && anchorPos.getRangeTo(target.pos) > (squadInfo.chaseRange || 15)) {
+        BeeToolbox.combatStepToward(creep, anchorPos, Math.max(1, CONFIG.desiredRange), TaskSquad);
+        return;
+      }
+    }
 
     // Cooldown: if we moved very recently, hold to prevent jitter
     if (typeof A.movedAt === 'number' && (Game.time - A.movedAt) < CONFIG.shuffleCooldown) {

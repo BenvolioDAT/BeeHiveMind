@@ -155,6 +155,19 @@ var TaskSquad = (function () {
     var id = getSquadId(creep);
     var S  = _ensureSquadBucket(id);
 
+    if (S.focusId) {
+      if (!S.focusUntil || Game.time <= S.focusUntil) {
+        var focus = Game.getObjectById(S.focusId);
+        if (_isGood(focus)) {
+          return focus;
+        }
+      }
+      if (!S.focusUntil || Game.time > S.focusUntil) {
+        delete S.focusId;
+        delete S.focusUntil;
+      }
+    }
+
     if (S.targetId && Game.time - (S.targetAt || 0) <= TARGET_STICKY_TICKS) {
       var keep = Game.getObjectById(S.targetId);
       if (_isGood(keep) && creep.pos.getRangeTo(keep) <= MAX_TARGET_RANGE) return keep;

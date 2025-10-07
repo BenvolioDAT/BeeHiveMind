@@ -2,15 +2,38 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
+var TaskSquad  = require('Task.Squad');
 
 var TaskDismantler = {
   run: function (creep) {
     if (creep.spawning) return;
 
+    var squadId = (creep.memory && creep.memory.squadId) || 'Alpha';
+    if (BeeToolbox && BeeToolbox.noteSquadPresence) {
+      BeeToolbox.noteSquadPresence(creep);
+    }
+    var squadInfo = BeeToolbox && BeeToolbox.getSquadContext
+      ? BeeToolbox.getSquadContext(squadId)
+      : null;
+
     // Optional “wait behind decoy” start delay
     if (creep.memory.delay && Game.time < creep.memory.delay) return;
 
     var target = Game.getObjectById(creep.memory.tid);
+    if (!target && BeeToolbox && BeeToolbox.getSquadFocus) {
+      target = BeeToolbox.getSquadFocus(squadId);
+      if (target) creep.memory.tid = target.id;
+    }
+
+    if (squadInfo && squadInfo.needsRegroup && (!target || squadInfo.waitForMedic)) {
+      var regroup = (squadInfo.anchor && squadInfo.anchor.pos) ? squadInfo.anchor.pos : squadInfo.anchor;
+      if (!regroup) regroup = TaskSquad.getAnchor(creep);
+      if (!regroup && Game.flags.Rally) regroup = Game.flags.Rally.pos;
+      if (regroup) {
+        BeeToolbox.combatStepToward(creep, regroup, 1, TaskSquad);
+        return;
+      }
+    }
 
     // Small helper: pathable closest-by-path from a list
     function closest(arr) { return (arr && arr.length) ? creep.pos.findClosestByPath(arr) : null; }
@@ -64,6 +87,9 @@ var TaskDismantler = {
           if (target.id === (st && st.id)) break;
         }
         creep.memory.tid = target.id;
+        if (BeeToolbox && BeeToolbox.setSquadFocus) {
+          BeeToolbox.setSquadFocus(squadId, target, 25);
+        }
       }
     }
 
@@ -71,6 +97,14 @@ var TaskDismantler = {
     if (target) {
       var inMelee = creep.pos.isNearTo(target);
       var range = creep.pos.getRangeTo(target);
+
+      if (squadInfo && squadInfo.anchor && target.pos && target.pos.roomName === creep.pos.roomName) {
+        var anchorPos = (squadInfo.anchor.pos || squadInfo.anchor);
+        if (anchorPos && anchorPos.getRangeTo && anchorPos.getRangeTo(target.pos) > (squadInfo.chaseRange || 15)) {
+          BeeToolbox.combatStepToward(creep, anchorPos, 1, TaskSquad);
+          return;
+        }
+      }
 
       // Special case: Invader Core must be attacked (not dismantled)
       if (target.structureType === STRUCTURE_INVADER_CORE) {
@@ -83,7 +117,7 @@ var TaskDismantler = {
           creep.attack(target);
         }
         if (!inMelee) {
-          creep.moveTo(target, { reusePath: 10, maxRooms: 1 });
+          BeeToolbox.combatStepToward(creep, target.pos, 1, TaskSquad);
         }
         // If we have no ATTACK parts at all, keep ID so escorts can kill it,
         // or you can spawn a proper smasher for cores.
@@ -100,12 +134,12 @@ var TaskDismantler = {
         // Retarget early when low hits to avoid idle ticks on empty swings
         if (target.hits && target.hits <= 1000) delete creep.memory.tid;
       } else {
-        creep.moveTo(target, { reusePath: 10, maxRooms: 1 });
+        BeeToolbox.combatStepToward(creep, target.pos, 1, TaskSquad);
       }
     } else {
       // No targets: rally
-      var rally = Game.flags.Rally || Game.flags.Attack;
-      if (rally) creep.moveTo(rally, { reusePath: 20 });
+      var rally = (squadInfo && squadInfo.anchor) || Game.flags.Rally || Game.flags.Attack;
+      if (rally) BeeToolbox.combatStepToward(creep, rally.pos || rally, 1, TaskSquad);
     }
   }
 };
