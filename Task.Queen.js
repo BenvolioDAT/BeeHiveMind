@@ -91,6 +91,262 @@ function _nearest(pos, arr) {
 }
 
 // ============================
+// Room-level intel helpers ensure the Queen can step into any shortage.
+// ============================
+function creepBelongsToRoom(creep, roomName) {
+  if (!creep || !roomName) return false;
+  if (creep.memory) {
+    if (creep.memory.homeRoom === roomName) return true;
+    if (creep.memory.home === roomName) return true;
+    if (creep.memory.origin === roomName) return true;
+    if (creep.memory.originRoom === roomName) return true;
+  }
+  return creep.room && creep.room.name === roomName;
+}
+
+function countTasksForRoom(roomName, taskNames) {
+  if (!roomName) return 0;
+  var list;
+  if (Array.isArray && Array.isArray(taskNames)) {
+    list = taskNames;
+  } else {
+    list = [taskNames];
+  }
+  var total = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (!creepBelongsToRoom(c, roomName)) continue;
+    var role = (c.memory.task || c.memory.role || '');
+    for (var i = 0; i < list.length; i++) {
+      if (role === list[i]) {
+        total++;
+        break;
+      }
+    }
+  }
+  return total;
+}
+
+function gatherQueenIntel(room, caps) {
+  var info = {
+    room: room,
+    roomName: room ? room.name : null,
+    tier: 'early',
+    rcl: 0,
+    caps: caps || null,
+    sites: [],
+    spawnEnergyPct: 0,
+    counts: {
+      builder: 0,
+      repair: 0,
+      upgrader: 0,
+      courier: 0,
+      baseharvest: 0
+    }
+  };
+
+  if (!room) return info;
+
+  var roomName = room.name;
+  var rcl = 0;
+  var tier = 'early';
+  if (caps) {
+    rcl = caps.rcl || 0;
+    tier = caps.tier || BeeToolbox.getRclTierName(rcl);
+  } else {
+    rcl = BeeToolbox.getRoomRcl(room);
+    tier = BeeToolbox.getRclTierName(rcl);
+  }
+
+  info.tier = tier;
+  info.rcl = rcl;
+  info.sites = room.find(FIND_MY_CONSTRUCTION_SITES);
+
+  var capacity = BeeToolbox.energyCapacity(room) || 0;
+  var available = BeeToolbox.energyAvailable(room) || 0;
+  info.spawnEnergyPct = capacity > 0 ? (available / capacity) : 0;
+
+  // Count staffed roles within the home room so the Queen can plug gaps.
+  info.counts.builder = countTasksForRoom(roomName, ['builder', 'luna']);
+  info.counts.repair = countTasksForRoom(roomName, 'repair');
+  info.counts.upgrader = countTasksForRoom(roomName, 'upgrader');
+  info.counts.courier = countTasksForRoom(roomName, 'courier');
+  info.counts.baseharvest = countTasksForRoom(roomName, 'baseharvest');
+
+  return info;
+}
+
+function pickPriorityConstructionSite(creep, intel) {
+  if (!creep || !intel || !intel.sites || !intel.sites.length) return null;
+
+  var tier = intel.tier || 'early';
+  var prefer = [];
+
+  // Tier-aware preference list keeps critical unlocks flowing by RCL band.
+  if (tier === 'early') {
+    // RCL1–2: rush containers/roads/extensions to stabilize the bootstrap.
+    prefer = [STRUCTURE_EXTENSION, STRUCTURE_CONTAINER, STRUCTURE_ROAD];
+  } else if (tier === 'developing') {
+    // RCL3–4: prioritize towers and storage while still filling extension rings.
+    prefer = [STRUCTURE_TOWER, STRUCTURE_EXTENSION, STRUCTURE_STORAGE, STRUCTURE_ROAD];
+  } else if (tier === 'expansion') {
+    // RCL5–6: links and storage dominate for logistics, then towers/extensions.
+    prefer = [STRUCTURE_STORAGE, STRUCTURE_LINK, STRUCTURE_TOWER, STRUCTURE_EXTENSION, STRUCTURE_ROAD];
+  } else {
+    // RCL7–8: labs/links spawn the late-game engine; keep towers fed too.
+    prefer = [STRUCTURE_LAB, STRUCTURE_LINK, STRUCTURE_SPAWN, STRUCTURE_TOWER, STRUCTURE_EXTENSION, STRUCTURE_ROAD];
+  }
+
+  var sites = intel.sites;
+  var i;
+  for (i = 0; i < prefer.length; i++) {
+    var type = prefer[i];
+    var best = null;
+    var bestD = 999;
+    var j;
+    for (j = 0; j < sites.length; j++) {
+      var site = sites[j];
+      if (!site || site.structureType !== type) continue;
+      var dist = creep.pos.getRangeTo(site);
+      if (dist < bestD) {
+        bestD = dist;
+        best = site;
+      }
+    }
+    if (best) return best;
+  }
+
+  return _nearest(creep.pos, sites);
+}
+
+function pickPriorityRepair(creep, intel, allowMaintenance) {
+  if (!creep || !intel || !intel.room) return null;
+  var tier = intel.tier || 'early';
+  var room = intel.room;
+
+  var structures = room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      if (!s || !s.hits || !s.hitsMax) return false;
+      if (s.structureType === STRUCTURE_WALL) return false;
+      if (s.structureType === STRUCTURE_RAMPART) return tier === 'late';
+      return true;
+    }
+  });
+
+  if (!structures || !structures.length) return null;
+
+  var best = null;
+  var bestRatio = 2;
+  var bestEmergency = false;
+
+  for (var i = 0; i < structures.length; i++) {
+    var s = structures[i];
+    if (!s || !s.hitsMax) continue;
+    var ratio = (s.hits || 0) / s.hitsMax;
+    var type = s.structureType;
+    var threshold = 0.8;
+    var emergency = 0.5;
+
+    if (type === STRUCTURE_CONTAINER) {
+      threshold = allowMaintenance ? 0.9 : 0.6;
+      emergency = 0.4;
+    } else if (type === STRUCTURE_ROAD) {
+      threshold = allowMaintenance ? 0.85 : 0.5;
+      emergency = 0.35;
+    } else if (type === STRUCTURE_TOWER || type === STRUCTURE_SPAWN || type === STRUCTURE_EXTENSION) {
+      threshold = allowMaintenance ? 0.95 : 0.75;
+      emergency = 0.6;
+    } else if (type === STRUCTURE_STORAGE || type === STRUCTURE_TERMINAL || type === STRUCTURE_LINK) {
+      threshold = allowMaintenance ? 0.92 : 0.7;
+      emergency = 0.5;
+    } else if (type === STRUCTURE_RAMPART) {
+      var desired = (tier === 'late') ? 300000 : 50000;
+      ratio = (s.hits || 0) / desired;
+      threshold = allowMaintenance ? 0.6 : 0.2;
+      emergency = 0.1;
+    } else {
+      threshold = allowMaintenance ? 0.9 : 0.65;
+      emergency = 0.5;
+    }
+
+    var isEmergency = ratio < emergency;
+    if (ratio >= threshold && !isEmergency) continue;
+    if (!allowMaintenance && !isEmergency) continue;
+
+    if (!best || ratio < bestRatio || (isEmergency && !bestEmergency)) {
+      best = s;
+      bestRatio = ratio;
+      bestEmergency = isEmergency;
+    }
+  }
+
+  if (!best) return null;
+
+  return {
+    target: best,
+    emergency: bestEmergency
+  };
+}
+
+function tryUpgrade(creep, intel) {
+  if (!creep || !intel || !intel.room) return false;
+  var controller = intel.room.controller;
+  if (!controller || !controller.my) return false;
+  var rc = creep.upgradeController(controller);
+  if (rc === ERR_NOT_IN_RANGE) {
+    go(creep, controller, 1);
+    return true;
+  }
+  return rc === OK;
+}
+
+function performOverlordFallback(creep, intel, carryAmt) {
+  if (!creep || !intel) return false;
+
+  var sites = intel.sites || [];
+  var builderCount = intel.counts ? (intel.counts.builder | 0) : 0;
+  var repairCount = intel.counts ? (intel.counts.repair | 0) : 0;
+  var upgraderCount = intel.counts ? (intel.counts.upgrader | 0) : 0;
+
+  // Builder fill-in: when builders are absent or the backlog is large, Queen builds.
+  var backlog = sites.length | 0;
+  var builderShort = (builderCount === 0) || (backlog > 3 && builderCount < 2);
+  if (carryAmt > 0 && backlog > 0 && builderShort) {
+    var buildTarget = pickPriorityConstructionSite(creep, intel);
+    if (buildTarget) {
+      if (creep.build(buildTarget) === ERR_NOT_IN_RANGE) {
+        go(creep, buildTarget, 3);
+      }
+      creep.say('Q:build');
+      return true;
+    }
+  }
+
+  // Repair fill-in: patch critical logistics when no repairers or emergency damage.
+  var repairData = pickPriorityRepair(creep, intel, repairCount === 0);
+  if (carryAmt > 0 && repairData && (repairCount === 0 || repairData.emergency)) {
+    var target = repairData.target;
+    if (creep.repair(target) === ERR_NOT_IN_RANGE) {
+      go(creep, target, 3);
+    }
+    creep.say('Q:fix');
+    return true;
+  }
+
+  // Upgrade safety net: keep progress rolling when upgraders are missing.
+  if (carryAmt > 0 && (upgraderCount === 0 || (intel.tier === 'early' && intel.spawnEnergyPct > 0.8))) {
+    if (tryUpgrade(creep, intel)) {
+      creep.say('Q:up');
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// ============================
 // Per-tick Queen fill reservations (ES5-safe)
 // structureId -> reserved energy amount (auto-reset each tick)
 // ============================
@@ -215,6 +471,7 @@ var TaskQueen = {
     var room = creep.room;
     var cache = _qCache(room);
     var caps = BeeToolbox.getRoomCapabilities(room);
+    var intel = gatherQueenIntel(room, caps);
 
     // BOOTSTRAP (before first source-containers exist)
     if (!cache.hasSourceContainers) {
@@ -313,6 +570,10 @@ var TaskQueen = {
         // reservation lost? we'll re-pick next tick
       }
 
+      if (performOverlordFallback(creep, intel, carryAmt)) {
+        return;
+      }
+
       // Soft idle near spawn/controller
       var anchor = cache.spawn || room.controller || creep.pos;
       go(creep, (anchor.pos || anchor), 2);
@@ -336,6 +597,18 @@ var TaskQueen = {
       refillOpts.allowSourceContainers = true;
     } else {
       refillOpts.allowSourceContainers = false;
+    }
+
+    if (intel.counts && (intel.counts.baseharvest | 0) === 0) {
+      // If harvesters are absent, let the Queen lean harder on direct sources.
+      refillOpts.allowSourceContainers = true;
+      refillOpts.allowDropped = true;
+      refillOpts.allowRemains = true;
+    }
+    if (intel.counts && (intel.counts.courier | 0) === 0) {
+      // When no couriers exist, relax the minimum to keep deliveries flowing.
+      refillOpts.minAmount = 30;
+      refillOpts.allowSpawn = true;
     }
 
     var refillTarget = BeeToolbox.pickEnergyWithdrawTarget(creep, refillOpts);
