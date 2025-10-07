@@ -633,6 +633,22 @@ var TaskBuilder = {
   // ——— Utilities kept for compatibility ———
   ensureSites: function(room) {
     if (!room || !room.controller || !room.controller.my) return;
+
+    // Defer to the RCL-aware BasePlanner when it already prepared a plan for
+    // this room; otherwise fall back to the legacy layout helper. This prevents
+    // two independent systems from racing to place the same sites while keeping
+    // backwards compatibility if the new planner is not yet active.
+    var plannerState = null;
+    if (BeeToolbox && typeof BeeToolbox.getPlannerState === 'function') {
+      plannerState = BeeToolbox.getPlannerState(room.name);
+    }
+    if (plannerState) {
+      if (!Memory.rooms) Memory.rooms = {};
+      if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+      Memory.rooms[room.name].nextPlanTick = Game.time + 50;
+      return;
+    }
+
     var spawns = room.find(FIND_MY_SPAWNS);
     if (!spawns.length) return;
     var center = spawns[0].pos;
