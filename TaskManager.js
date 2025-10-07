@@ -3,6 +3,7 @@
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
+var BeeToolbox = require('BeeToolbox');
 
 var TaskIdle = require('./Task.Idle');
 var TaskBaseHarvest = require('./Task.BaseHarvest');
@@ -31,10 +32,84 @@ var DEFAULT_NEEDS = Object.freeze({
 
 var DEFAULT_PRIORITY = Object.freeze([
   'baseharvest',
-  'repair',
-  'builder',
   'courier',
-  'upgrader'
+  'builder',
+  'upgrader',
+  'repair',
+  'luna',
+  'scout',
+  'CombatMelee',
+  'CombatArcher',
+  'CombatMedic',
+  'Trucker',
+  'Claimer'
+]);
+
+// Controller-level specific task mix keeps priorities aligned with colony growth.
+var RCL_NEED_PROFILES = Object.freeze([
+  {
+    min: 1,
+    max: 2,
+    tier: 'early',
+    needs: {
+      baseharvest: 3,
+      upgrader: 2,
+      courier: 1,
+      builder: 0,
+      repair: 0,
+      scout: 0
+    },
+    priority: ['baseharvest', 'upgrader', 'courier', 'builder']
+  },
+  {
+    min: 3,
+    max: 4,
+    tier: 'developing',
+    needs: {
+      baseharvest: 3,
+      upgrader: 2,
+      courier: 1,
+      builder: 1,
+      repair: 1,
+      scout: 1
+    },
+    priority: ['baseharvest', 'courier', 'builder', 'repair', 'upgrader', 'scout']
+  },
+  {
+    min: 5,
+    max: 6,
+    tier: 'expansion',
+    needs: {
+      baseharvest: 3,
+      upgrader: 2,
+      courier: 2,
+      builder: 2,
+      repair: 1,
+      scout: 1,
+      luna: 2,
+      Trucker: 1
+    },
+    priority: ['baseharvest', 'courier', 'builder', 'upgrader', 'repair', 'luna', 'Trucker', 'scout']
+  },
+  {
+    min: 7,
+    max: 8,
+    tier: 'late',
+    needs: {
+      baseharvest: 3,
+      upgrader: 3,
+      courier: 2,
+      builder: 2,
+      repair: 2,
+      scout: 1,
+      luna: 3,
+      Trucker: 1,
+      CombatMelee: 1,
+      CombatArcher: 1,
+      CombatMedic: 1
+    },
+    priority: ['baseharvest', 'courier', 'builder', 'upgrader', 'repair', 'luna', 'Trucker', 'CombatMelee', 'CombatArcher', 'CombatMedic', 'scout']
+  }
 ]);
 
 var TASK_REGISTRY = Object.create(null);
@@ -106,25 +181,118 @@ function mergeNeeds(defaults, overrides) {
   return result;
 }
 
-function colonyNeeds() {
-  if (cache.needsTick === Game.time && cache.needs) return cache.needs;
+function getNeedProfileForRcl(rcl) {
+  if (!rcl) {
+    return RCL_NEED_PROFILES.length ? RCL_NEED_PROFILES[0] : null;
+  }
+  for (var i = 0; i < RCL_NEED_PROFILES.length; i++) {
+    var profile = RCL_NEED_PROFILES[i];
+    if (rcl >= profile.min && rcl <= profile.max) {
+      return profile;
+    }
+  }
+  return RCL_NEED_PROFILES.length ? RCL_NEED_PROFILES[RCL_NEED_PROFILES.length - 1] : null;
+}
+
+function baseNeedsForRcl(rcl) {
+  var profile = getNeedProfileForRcl(rcl);
+  if (!profile) {
+    return mergeNeeds(DEFAULT_NEEDS, {});
+  }
+  var overrides = Object.create(null);
+  if (profile.needs) {
+    for (var key in profile.needs) {
+      if (Object.prototype.hasOwnProperty.call(profile.needs, key)) {
+        overrides[key] = profile.needs[key];
+      }
+    }
+  }
+  if (profile.tier === 'early' && rcl <= 1) {
+    overrides.courier = 0;
+  }
+  return mergeNeeds(DEFAULT_NEEDS, overrides);
+}
+
+function colonyNeeds(context) {
+  if (!context && cache.needsTick === Game.time && cache.needs) return cache.needs;
 
   var overrides = (Memory.colonyNeeds && Memory.colonyNeeds.overrides) || {};
-  var needsConfig = mergeNeeds(DEFAULT_NEEDS, overrides);
-  var counts = getTaskCounts();
-  var shortage = Object.create(null);
+  var plannerStates = BeeToolbox.getAllPlannerStates() || {};
+  var aggregateNeeds = Object.create(null);
+  var highestRcl = 0;
+  var manualSquad = false;
+  if (Memory && Memory.squadFlags) {
+    if (Memory.squadFlags.force === true) manualSquad = true;
+    if (Memory.squadFlags.global && Memory.squadFlags.global.force === true) manualSquad = true;
+  }
 
-  for (var key in needsConfig) {
-    if (!Object.prototype.hasOwnProperty.call(needsConfig, key)) continue;
-    var required = needsConfig[key] | 0;
-    var current = counts[key] | 0;
-    if (current < required) {
-      shortage[key] = required - current;
+  for (var roomName in plannerStates) {
+    if (!Object.prototype.hasOwnProperty.call(plannerStates, roomName)) continue;
+    var plan = plannerStates[roomName];
+    var room = Game.rooms && Game.rooms[roomName];
+    var rcl = plan && typeof plan.rcl === 'number' ? plan.rcl : BeeToolbox.getRoomRcl(room);
+    if (rcl > highestRcl) highestRcl = rcl;
+    var roomNeeds = baseNeedsForRcl(rcl);
+
+    var storageEntry = plan && plan.structures ? plan.structures[STRUCTURE_STORAGE] : null;
+    var hasStorage = storageEntry && (storageEntry.existing | 0) > 0;
+    var storageEnergy = 0;
+    if (room && room.storage) {
+      hasStorage = true;
+      storageEnergy = (room.storage.store && room.storage.store[RESOURCE_ENERGY]) || 0;
+    }
+    var cpuHealthy = (!Game || !Game.cpu || typeof Game.cpu.bucket !== 'number') ? true : (Game.cpu.bucket >= 4000);
+    if (!hasStorage) {
+      roomNeeds.queen = 0;
+    }
+    if (!hasStorage || storageEnergy < 20000 || !cpuHealthy) {
+      roomNeeds.luna = 0;
+      roomNeeds.Trucker = 0;
+    }
+
+    var hostiles = 0;
+    if (room) {
+      var hostileList = room.find ? room.find(FIND_HOSTILE_CREEPS) : [];
+      hostiles = hostileList ? hostileList.length : 0;
+    }
+    if (hostiles === 0 && !manualSquad) {
+      roomNeeds.CombatMelee = 0;
+      roomNeeds.CombatArcher = 0;
+      roomNeeds.CombatMedic = 0;
+    }
+
+    for (var key in roomNeeds) {
+      if (!Object.prototype.hasOwnProperty.call(roomNeeds, key)) continue;
+      aggregateNeeds[key] = (aggregateNeeds[key] || 0) + (roomNeeds[key] | 0);
     }
   }
 
-  cache.needsTick = Game.time;
-  cache.needs = shortage;
+  if (highestRcl === 0) {
+    highestRcl = BeeToolbox.getHighestOwnedRcl();
+    var fallbackNeeds = baseNeedsForRcl(highestRcl);
+    for (var fb in fallbackNeeds) {
+      if (!Object.prototype.hasOwnProperty.call(fallbackNeeds, fb)) continue;
+      aggregateNeeds[fb] = (aggregateNeeds[fb] || 0) + (fallbackNeeds[fb] | 0);
+    }
+  }
+
+  var needsConfig = mergeNeeds(aggregateNeeds, overrides);
+  var counts = getTaskCounts();
+  var shortage = Object.create(null);
+
+  for (var taskKey in needsConfig) {
+    if (!Object.prototype.hasOwnProperty.call(needsConfig, taskKey)) continue;
+    var required = needsConfig[taskKey] | 0;
+    var current = counts[taskKey] | 0;
+    if (current < required) {
+      shortage[taskKey] = required - current;
+    }
+  }
+
+  if (!context) {
+    cache.needsTick = Game.time;
+    cache.needs = shortage;
+  }
   return shortage;
 }
 
@@ -141,6 +309,10 @@ function getTaskModule(taskName) {
 function getPriorityList() {
   if (Memory.colonyNeeds && Memory.colonyNeeds.priorityOrder && Memory.colonyNeeds.priorityOrder.length) {
     return Memory.colonyNeeds.priorityOrder;
+  }
+  var profile = getNeedProfileForRcl(BeeToolbox.getHighestOwnedRcl());
+  if (profile && profile.priority && profile.priority.length) {
+    return profile.priority;
   }
   return DEFAULT_PRIORITY;
 }
@@ -161,13 +333,13 @@ module.exports = {
     }
   },
 
-  isTaskNeeded: function (taskName) {
-    var needs = colonyNeeds();
+  isTaskNeeded: function (taskName, context) {
+    var needs = colonyNeeds(context);
     return (needs[taskName] || 0) > 0;
   },
 
-  getHighestPriorityTask: function (creep) {
-    var needs = colonyNeeds();
+  getHighestPriorityTask: function (creep, context) {
+    var needs = colonyNeeds(context);
     var priorityList = getPriorityList();
     for (var i = 0; i < priorityList.length; i++) {
       var task = priorityList[i];

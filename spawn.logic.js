@@ -76,117 +76,110 @@ function C(c, m) {
   return arr;
 }
 
+function bodyCost(parts) {
+  if (!parts || !parts.length) return 0;
+  var cost = 0;
+  for (var i = 0; i < parts.length; i++) {
+    cost += BODYPART_COST[parts[i]] || 0;
+  }
+  return cost;
+}
+
+// Helper describing the minimum controller level required for a body.
+function createBodyConfig(body, minRcl, maxRcl) {
+  return {
+    body: body,
+    minRcl: (minRcl == null) ? 1 : minRcl,
+    maxRcl: (maxRcl == null) ? 8 : maxRcl
+  };
+}
+
+function normalizeBodyEntry(entry) {
+  if (!entry) return { body: [], minRcl: 1, maxRcl: 8 };
+  if (Array.isArray(entry)) return { body: entry, minRcl: 1, maxRcl: 8 };
+  var body = entry.body || [];
+  var min = (entry.minRcl == null) ? 1 : entry.minRcl;
+  var max = (entry.maxRcl == null) ? 8 : entry.maxRcl;
+  return { body: body, minRcl: min, maxRcl: max };
+}
+
 // ---------- Role Configs (largest first is preferred) ----------
+// Each config unlocks progressively as rooms reach the specified controller tier.
 var CONFIGS = {
   // Workers
   baseharvest: [
-    B(6,0,5),
-    B(5,1,5),
-    B(4,1,4),
-    B(3,1,3),
-    B(2,1,2),
-    B(1,1,1)
+    createBodyConfig(B(6,0,5), 7),   // High-RCL miners focus on throughput.
+    createBodyConfig(B(5,1,5), 6),
+    createBodyConfig(B(4,1,4), 5),
+    createBodyConfig(B(3,1,3), 4),
+    createBodyConfig(B(2,1,2), 2),   // Small harvesters keep RCL2 rooms alive.
+    createBodyConfig(B(1,1,1), 1)
   ],
   courier: [
-    CM(30,15),
-    CM(23,23),
-    CM(22,22),
-    CM(21,21),
-    CM(20,20),
-    CM(19,19),
-    CM(18,18),
-    CM(17,17),
-    CM(16,16),
-    CM(15,15),
-    CM(14,14),
-    CM(13,13),
-    CM(12,12),
-    CM(11,11),
-    CM(10,10),
-    CM(9,9),
-    CM(8,8),
-    CM(7,7),
-    CM(6,6),
-    CM(5,5),
-    CM(4,4),
-    CM(3,3),
-    CM(2,2),
-    CM(1,1)
+    createBodyConfig(CM(25,25), 7),   // Deep logistics once storage + links exist.
+    createBodyConfig(CM(18,18), 6),
+    createBodyConfig(CM(12,12), 5),
+    createBodyConfig(CM(9,9), 4),
+    createBodyConfig(CM(6,6), 3),
+    createBodyConfig(CM(4,4), 2),    // RCL2 gains dedicated haulers.
+    createBodyConfig(CM(2,2), 2),
+    createBodyConfig(CM(1,1), 1)
   ],
   builder: [
-    B(6,12,18),
-    // Long-haul “road layer” — balanced for 2–3 rooms out
-    B(4, 8, 12),   // 1200 energy, 24 parts, 400 carry
-    // Mid-range — solid for 1–2 rooms out
-    B(3, 6, 9),    // 900 energy, 18 parts, 300 carry
-    // Budget scout/seed — starter road + container drop
-    B(2, 4, 6),    // 600 energy, 12 parts, 200 carry
-    // Emergency mini — drops a container + token road
-    B(2, 2, 4),    // 500 energy, 8 parts, 100 carry
-    // Starter body for RCL2+ rooms to guarantee at least one builder
-    B(1, 2, 2)     // 300 energy, 5 parts, 100 carry
+    createBodyConfig(B(6,12,18), 7), // Late-game super builders for mega projects.
+    createBodyConfig(B(4, 8, 12), 6),
+    createBodyConfig(B(3, 6, 9), 5),
+    createBodyConfig(B(2, 4, 6), 4),
+    createBodyConfig(B(2, 2, 4), 3),
+    createBodyConfig(B(1, 2, 2), 2)
   ],
   upgrader: [
-    // Larger bodies listed first so higher RCLs still prefer beefier creeps
-    B(4,1,5),
-    B(3,1,4),
-    B(2,1,3),
-    B(1,1,1)
+    createBodyConfig(B(4,1,5), 6),   // Rich rooms upgrade quickly.
+    createBodyConfig(B(3,1,4), 4),
+    createBodyConfig(B(2,1,3), 3),
+    createBodyConfig(B(1,1,1), 1)
   ],
   repair: [
-    B(5,2,7),
-    B(4,1,5),
-    B(2,1,3)
+    createBodyConfig(B(5,2,7), 6),
+    createBodyConfig(B(4,1,5), 4),
+    createBodyConfig(B(2,1,3), 3)
   ],
   Queen: [ // keeping capitalization to match your original key
-    B(0,22,22),
-    B(0,21,21),
-    B(0,20,20),
-    B(0,19,19),
-    B(0,18,18),
-    B(0,17,17),
-    B(0,16,16),
-    B(0,15,15),
-    B(0,14,14),
-    B(0,13,13),
-    B(0,12,12),
-    B(0,11,11),
-    B(0,10,10),
-    B(0,9,9),
-    B(0,8,8),
-    B(0,7,7),
-    B(0,6,6),
-    B(0,5,5),
-    B(0,4,4),
-    B(0,3,3),
-    B(1,2,3),
-    B(1,1,2),
-    B(1,1,1)
+    createBodyConfig(B(0,22,22), 8), // Late tech: link/lab tenders.
+    createBodyConfig(B(0,18,18), 7),
+    createBodyConfig(B(0,14,14), 6),
+    createBodyConfig(B(0,10,10), 5),
+    createBodyConfig(B(0,7,7), 4),
+    createBodyConfig(B(0,5,5), 3),
+    createBodyConfig(B(0,3,3), 2),
+    createBodyConfig(B(1,2,3), 2),
+    createBodyConfig(B(1,1,2), 1),
+    createBodyConfig(B(1,1,1), 1)
   ],
   luna: [
-    B(3,6,5),
-    B(3,5,4),
-    B(3,4,3),
-    B(3,3,3),
-    B(3,2,2),
-    B(2,2,2),
-    B(1,1,1)
+    createBodyConfig(B(3,6,5), 7),    // Remote workhorses once roads+links exist.
+    createBodyConfig(B(3,5,4), 6),
+    createBodyConfig(B(3,4,3), 6),
+    createBodyConfig(B(3,3,3), 5),
+    createBodyConfig(B(3,2,2), 5),
+    createBodyConfig(B(2,2,2), 5),
+    createBodyConfig(B(1,1,1), 5)
   ],
   Scout: [
-    B(0,0,1)
+    createBodyConfig(B(0,0,1), 3)     // Scouts appear once expansion begins.
   ],
 
   // Combat
   CombatMelee: [
     //TAM(6,6,12),
-    TAM(4,4,8),
-    TAM(1,1,2)
+    createBodyConfig(TAM(4,4,8), 5),
+    createBodyConfig(TAM(1,1,2), 3)
   ],
   CombatArcher: [
     //R(6,8,14),
     //R(4,6,10),//1140
-    R(2,4,6),
-    R(1,2,3)
+    createBodyConfig(R(2,4,6), 5),
+    createBodyConfig(R(1,2,3), 4)
   ],
   CombatMedic: [
    // MH(12,12),
@@ -196,22 +189,22 @@ var CONFIGS = {
    // MH(5,5),
     //MH(4,4),
     //MH(3,3),
-    MH(2,2),
-    MH(1,1)
+    createBodyConfig(MH(2,2), 7),
+    createBodyConfig(MH(1,1), 6)
   ],
   Dismantler: [
     //WM(25,25),
     //WM(20,20),
     //WM(15,15),
-    WM(5,5)
+    createBodyConfig(WM(5,5), 6)
   ],
 
   // Special
   Claimer: [
-    C(4,4),
-    C(3,3),
-    C(2,2),
-    C(1,1)
+    createBodyConfig(C(4,4), 8),
+    createBodyConfig(C(3,3), 7),
+    createBodyConfig(C(2,2), 6),
+    createBodyConfig(C(1,1), 5)
   ]
 };
 
@@ -257,7 +250,32 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 
 // ---------- Body Selection ----------
 // Returns the largest body from CONFIGS[taskKey] that fits energyAvailable.
-function Generate_Body_From_Config(taskKey, energyAvailable) {
+function pickBodyForTask(list, taskKey, energyAvailable, rcl, filterByRcl) {
+  for (var i = 0; i < list.length; i++) {
+    var entry = normalizeBodyEntry(list[i]);
+    if (filterByRcl && rcl && (rcl < entry.minRcl || rcl > entry.maxRcl)) {
+      continue;
+    }
+
+    var body = entry.body;
+    if (!body || !body.length) continue;
+
+    var cost = _.sum(body, function (part) { return BODYPART_COST[part]; });
+    if (cost <= energyAvailable) {
+      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+        var rangeNote = '';
+        if (filterByRcl && rcl) {
+          rangeNote = ' (RCL ' + entry.minRcl + '-' + entry.maxRcl + ')';
+        }
+        spawnLog.debug('Picked', taskKey, 'body:', '[' + body + ']', 'cost', cost, '(avail', energyAvailable + ')' + rangeNote);
+      }
+      return body;
+    }
+  }
+  return [];
+}
+
+function Generate_Body_From_Config(taskKey, energyAvailable, opts) {
   var list = CONFIGS[taskKey];
   if (!list) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
@@ -265,54 +283,59 @@ function Generate_Body_From_Config(taskKey, energyAvailable) {
     }
     return [];
   }
-  for (var i = 0; i < list.length; i++) {
-    var body = list[i];
-    var cost = _.sum(body, function (part) { return BODYPART_COST[part]; }); // Screeps global
-    if (cost <= energyAvailable) {
-      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-        spawnLog.debug('Picked', taskKey, 'body:', '[' + body + ']', 'cost', cost, '(avail', energyAvailable + ')');
+
+  var rcl = opts && (opts.rcl || opts.roomRcl);
+  var room = opts && opts.room;
+  var roomName = room ? room.name : (opts && opts.roomName);
+  var capacity = opts && (opts.capacity || opts.energyCapacity);
+  var targetEnergy = energyAvailable;
+  if (capacity && capacity < targetEnergy) {
+    targetEnergy = capacity;
+  }
+
+  var preferred = pickBodyForTask(list, taskKey, targetEnergy, rcl, true);
+
+  if (!preferred.length && capacity && capacity < energyAvailable) {
+    preferred = pickBodyForTask(list, taskKey, capacity, rcl, true);
+  }
+
+  if (!preferred.length && rcl) {
+    preferred = pickBodyForTask(list, taskKey, targetEnergy, null, false);
+  }
+
+  if (!preferred.length && capacity && capacity < targetEnergy) {
+    preferred = pickBodyForTask(list, taskKey, capacity, null, false);
+  }
+
+  if (!preferred.length) {
+    var last = normalizeBodyEntry(list[list.length - 1]);
+    var minCost = bodyCost(last.body);
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('Insufficient energy for', taskKey, '(need at least', minCost, 'at RCL >=', last.minRcl + ')');
+    }
+    return [];
+  }
+
+  if (roomName) {
+    var tierEntry = null;
+    for (var i = 0; i < list.length; i++) {
+      var entry = normalizeBodyEntry(list[i]);
+      if (!entry.body || !entry.body.length) continue;
+      if (rcl && (rcl < entry.minRcl || rcl > entry.maxRcl)) continue;
+      tierEntry = entry;
+      break;
+    }
+    if (tierEntry) {
+      var tierCost = bodyCost(tierEntry.body);
+      var chosenCost = bodyCost(preferred);
+      // Document downshifts when the room lacks the energy capacity for the tier body.
+      if (capacity && capacity < tierCost && chosenCost < tierCost) {
+        BeeToolbox.noteSpawnDownshift(roomName, 'Downshifted ' + taskKey + ' to cost ' + chosenCost + ' (tier body ' + tierCost + ')');
       }
-      return body;
-    }
-  }
-  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-    var last = list[list.length - 1];
-    var minCost = _.sum(last, function (p) { return BODYPART_COST[p]; });
-    spawnLog.debug('Insufficient energy for', taskKey, '(need at least', minCost, ')');
-  }
-  return [];
-}
-
-function Select_Builder_Body(capacityEnergy, availableEnergy) {
-  var configs = CONFIGS.builder;
-  if (!configs || !configs.length) return [];
-
-  var filtered = [];
-  for (var i = 0; i < configs.length; i++) {
-    var body = configs[i];
-    if (!body || !body.length) continue;
-    var cost = _.sum(body, function (part) { return BODYPART_COST[part]; }) || 0;
-    if (!cost || cost > capacityEnergy) continue;
-
-    var insertAt = filtered.length;
-    for (var j = 0; j < filtered.length; j++) {
-      if (cost > filtered[j].cost) {
-        insertAt = j;
-        break;
-      }
-    }
-    filtered.splice(insertAt, 0, { index: i, cost: cost });
-  }
-
-  if (!filtered.length) return [];
-
-  for (var k = 0; k < filtered.length; k++) {
-    if (availableEnergy >= filtered[k].cost) {
-      return configs[filtered[k].index];
     }
   }
 
-  return [];
+  return preferred;
 }
 
 // Helper to normalize a requested task into a CONFIGS key.
@@ -324,39 +347,39 @@ function normalizeTask(task) {
 }
 
 // ---------- Role-specific wrappers (kept for API compatibility) ----------
-function Generate_Courier_Body(e) { return Generate_Body_From_Config('courier', e); }
-function Generate_BaseHarvest_Body(e) { return Generate_Body_From_Config('baseharvest', e); }
-function Generate_Builder_Body(e) { return Generate_Body_From_Config('builder', e); }
-function Generate_Repair_Body(e) { return Generate_Body_From_Config('repair', e); }
-function Generate_Queen_Body(e) { return Generate_Body_From_Config('Queen', e); }
-function Generate_Luna_Body(e) { return Generate_Body_From_Config('luna', e); }
-function Generate_Upgrader_Body(e) { return Generate_Body_From_Config('upgrader', e); }
-function Generate_Scout_Body(e) { return Generate_Body_From_Config('Scout', e); }
-function Generate_CombatMelee_Body(e) { return Generate_Body_From_Config('CombatMelee', e); }
-function Generate_CombatArcher_Body(e) { return Generate_Body_From_Config('CombatArcher', e); }
-function Generate_CombatMedic_Body(e) { return Generate_Body_From_Config('CombatMedic', e); }
-function Generate_Dismantler_Config_Body(e) { return Generate_Body_From_Config('Dismantler', e); }
-function Generate_Claimer_Body(e) { return Generate_Body_From_Config('Claimer', e); }
+function Generate_Courier_Body(e, opts) { return Generate_Body_From_Config('courier', e, opts); }
+function Generate_BaseHarvest_Body(e, opts) { return Generate_Body_From_Config('baseharvest', e, opts); }
+function Generate_Builder_Body(e, opts) { return Generate_Body_From_Config('builder', e, opts); }
+function Generate_Repair_Body(e, opts) { return Generate_Body_From_Config('repair', e, opts); }
+function Generate_Queen_Body(e, opts) { return Generate_Body_From_Config('Queen', e, opts); }
+function Generate_Luna_Body(e, opts) { return Generate_Body_From_Config('luna', e, opts); }
+function Generate_Upgrader_Body(e, opts) { return Generate_Body_From_Config('upgrader', e, opts); }
+function Generate_Scout_Body(e, opts) { return Generate_Body_From_Config('Scout', e, opts); }
+function Generate_CombatMelee_Body(e, opts) { return Generate_Body_From_Config('CombatMelee', e, opts); }
+function Generate_CombatArcher_Body(e, opts) { return Generate_Body_From_Config('CombatArcher', e, opts); }
+function Generate_CombatMedic_Body(e, opts) { return Generate_Body_From_Config('CombatMedic', e, opts); }
+function Generate_Dismantler_Config_Body(e, opts) { return Generate_Body_From_Config('Dismantler', e, opts); }
+function Generate_Claimer_Body(e, opts) { return Generate_Body_From_Config('Claimer', e, opts); }
 
 // ---------- Task → Body helper (kept for API compatibility) ----------
-function getBodyForTask(task, energyAvailable) {
+function getBodyForTask(task, energyAvailable, opts) {
   var key = normalizeTask(task);
   switch (key) {
-    case 'builder':        return Generate_Builder_Body(energyAvailable);
-    case 'repair':         return Generate_Repair_Body(energyAvailable);
-    case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable);
-    case 'upgrader':       return Generate_Upgrader_Body(energyAvailable);
-    case 'courier':        return Generate_Courier_Body(energyAvailable);
-    case 'luna':           return Generate_Luna_Body(energyAvailable);
-    case 'Scout':          return Generate_Scout_Body(energyAvailable);
-    case 'Queen':          return Generate_Queen_Body(energyAvailable);
-    case 'CombatArcher':   return Generate_CombatArcher_Body(energyAvailable);
-    case 'CombatMelee':    return Generate_CombatMelee_Body(energyAvailable);
-    case 'CombatMedic':    return Generate_CombatMedic_Body(energyAvailable);
-    case 'Dismantler':     return Generate_Dismantler_Config_Body(energyAvailable);
-    case 'Claimer':        return Generate_Claimer_Body(energyAvailable);
+    case 'builder':        return Generate_Builder_Body(energyAvailable, opts);
+    case 'repair':         return Generate_Repair_Body(energyAvailable, opts);
+    case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable, opts);
+    case 'upgrader':       return Generate_Upgrader_Body(energyAvailable, opts);
+    case 'courier':        return Generate_Courier_Body(energyAvailable, opts);
+    case 'luna':           return Generate_Luna_Body(energyAvailable, opts);
+    case 'Scout':          return Generate_Scout_Body(energyAvailable, opts);
+    case 'Queen':          return Generate_Queen_Body(energyAvailable, opts);
+    case 'CombatArcher':   return Generate_CombatArcher_Body(energyAvailable, opts);
+    case 'CombatMelee':    return Generate_CombatMelee_Body(energyAvailable, opts);
+    case 'CombatMedic':    return Generate_CombatMedic_Body(energyAvailable, opts);
+    case 'Dismantler':     return Generate_Dismantler_Config_Body(energyAvailable, opts);
+    case 'Claimer':        return Generate_Claimer_Body(energyAvailable, opts);
     // Aliases
-    case 'trucker':        return Generate_Courier_Body(energyAvailable);
+    case 'trucker':        return Generate_Courier_Body(energyAvailable, opts);
     default:
       if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
         spawnLog.debug('Unknown task:', task);
@@ -379,7 +402,11 @@ function Generate_Creep_Name(role, max) {
 // Spawns a role using a provided body-gen function; merges memory.role automatically.
 function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory) {
   var mem = memory || {};
-  var body = generateBodyFn(availableEnergy);
+  var roomRcl = BeeToolbox.getRoomRcl(spawn && spawn.room);
+  // Allow direct role spawns (like queens) to respect the same RCL-aware bodies.
+  var room = spawn ? spawn.room : null;
+  var capacity = BeeToolbox.energyCapacity(room);
+  var body = generateBodyFn(availableEnergy, { rcl: roomRcl, room: room, capacity: capacity });
   var bodyCost = _.sum(body, function (p) { return BODYPART_COST[p]; }) || 0;
 
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
@@ -418,25 +445,18 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
     energy = 0;
   }
 
-  var normalizedTask = normalizeTask(neededTask);
-  var normalizedLower = normalizedTask ? String(normalizedTask).toLowerCase() : '';
-  var body;
-  if (normalizedLower === 'builder') {
-    var capacity = 0;
-    if (spawn && spawn.room) {
-      capacity = spawn.room.energyCapacityAvailable || 0;
-    }
-    if (capacity < energy) {
-      capacity = energy;
-    }
-    body = Select_Builder_Body(capacity, energy);
-  } else {
-    body = getBodyForTask(neededTask, energy);
-  }
+  // Scale Worker_Bee bodies by the home room's controller tier.
+  var roomRcl = BeeToolbox.getRoomRcl(spawn ? spawn.room : null);
+  var capacity = BeeToolbox.energyCapacity(spawn ? spawn.room : null);
+  var bodyOptions = { rcl: roomRcl, room: spawn ? spawn.room : null, capacity: capacity };
+  var body = getBodyForTask(neededTask, energy, bodyOptions);
 
   if (!body || !body.length) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       spawnLog.debug('No body available for', neededTask, 'energy', energy);
+    }
+    if (spawn && spawn.room) {
+      BeeToolbox.noteSpawnDownshift(spawn.room.name, 'Blocked ' + neededTask + ' spawn: no viable body at ' + energy + ' energy.');
     }
     return false;
   }
@@ -573,7 +593,12 @@ function buildConfigurationsExport() {
   var list = [];
   for (var task in CONFIGS) {
     if (!Object.prototype.hasOwnProperty.call(CONFIGS, task)) continue;
-    list.push({ task: task, body: CONFIGS[task] });
+    var bodies = [];
+    var cfgList = CONFIGS[task];
+    for (var i = 0; i < cfgList.length; i++) {
+      bodies.push(normalizeBodyEntry(cfgList[i]).body);
+    }
+    list.push({ task: task, body: bodies });
   }
   return list;
 }

@@ -8,6 +8,18 @@ var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+var RUNTIME_STATE = global.__beeToolboxRuntime;
+if (!RUNTIME_STATE) {
+  RUNTIME_STATE = {
+    planner: {},
+    audit: {},
+    spawnNotes: {}
+  };
+  global.__beeToolboxRuntime = RUNTIME_STATE;
+}
+
+var DEBUG_INTERVAL = 75; // refresh Memory.debug.rclReport roughly every 75 ticks
+
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
 // to avoid expensive FIND_STRUCTURES work every few ticks.
@@ -69,6 +81,314 @@ var BeeToolbox = {
    */
   isObject: function (value) {
     return value !== null && typeof value === 'object';
+  },
+
+  /**
+   * Retrieve the controller level for an owned room (0 when uncontrolled).
+   * Used by multiple managers to scale behaviour with the room progression.
+   * @param {Room} room Screeps room reference.
+   * @returns {number} Numeric controller level or 0 when unavailable.
+   */
+  getRoomRcl: function (room) {
+    if (!room || !room.controller || !room.controller.my) return 0;
+    return room.controller.level | 0;
+  },
+
+  /**
+   * Retrieve the tier descriptor for a room based on controller level.
+   * @param {Room} room Room to inspect.
+   * @returns {{ level: number, tier: string }} Tuple describing the room tier.
+   */
+  getRclTier: function (room) {
+    var rcl = BeeToolbox.getRoomRcl(room);
+    return { level: rcl, tier: BeeToolbox.getRclTierName(rcl) };
+  },
+
+  /**
+   * Map a numeric controller level into a coarse progression tier string.
+   * The tiers are reused by spawning, task priorities, and planners.
+   * @param {number} rcl Controller level value.
+   * @returns {string} Tier identifier (early|developing|expansion|late).
+   */
+  getRclTierName: function (rcl) {
+    if (!rcl) return 'early';
+    if (rcl <= 2) return 'early';
+    if (rcl <= 4) return 'developing';
+    if (rcl <= 6) return 'expansion';
+    return 'late';
+  },
+
+  /**
+   * Determine the maximum number of a structure type allowed at the provided RCL.
+   * @param {string} structureType Screeps structure constant.
+   * @param {number} rcl Controller level (defaults to current highest owned when omitted).
+   * @returns {number} Maximum allowed count.
+   */
+  getMaxAllowed: function (structureType, rcl) {
+    if (!structureType) return 0;
+    var level = (rcl == null) ? BeeToolbox.getHighestOwnedRcl() : (rcl | 0);
+    if (level < 0) level = 0;
+    var table = (typeof CONTROLLER_STRUCTURES !== 'undefined') ? CONTROLLER_STRUCTURES[structureType] : null;
+    if (!table) return 0;
+    var allowed = table[level];
+    if (allowed == null) {
+      // Walk downward to find last defined entry (handles sparse tables gracefully)
+      for (var lvl = level; lvl >= 0; lvl--) {
+        if (table[lvl] != null) {
+          allowed = table[lvl];
+          break;
+        }
+      }
+    }
+    return (allowed == null) ? 0 : (allowed | 0);
+  },
+
+  /**
+   * Count structures of the provided type already present in the room.
+   * @param {Room} room Room to inspect.
+   * @param {string} structureType Screeps structure constant.
+   * @returns {number} Count of existing (fully built) structures owned by the player.
+   */
+  countExisting: function (room, structureType) {
+    if (!room || !structureType) return 0;
+    var list = room.find(FIND_MY_STRUCTURES, {
+      filter: function (s) { return s.structureType === structureType; }
+    });
+    return list ? list.length : 0;
+  },
+
+  /**
+   * Count construction sites of the provided type in the room.
+   * @param {Room} room Room to inspect.
+   * @param {string} structureType Screeps structure constant.
+   * @returns {number} Count of friendly construction sites of that type.
+   */
+  countSites: function (room, structureType) {
+    if (!room || !structureType) return 0;
+    var list = room.find(FIND_CONSTRUCTION_SITES, {
+      filter: function (s) {
+        return s.my && s.structureType === structureType;
+      }
+    });
+    return list ? list.length : 0;
+  },
+
+  /**
+   * Determine whether the room still needs more of the provided structure type.
+   * @param {Room} room Room reference.
+   * @param {string} structureType Screeps structure constant.
+   * @param {number} rcl Optional explicit controller level.
+   * @returns {boolean} True when existing + sites is below the maximum allowed.
+   */
+  needsMore: function (room, structureType, rcl) {
+    if (!room || !structureType) return false;
+    var existing = BeeToolbox.countExisting(room, structureType);
+    var sites = BeeToolbox.countSites(room, structureType);
+    var allowed = BeeToolbox.getMaxAllowed(structureType, (rcl == null) ? BeeToolbox.getRoomRcl(room) : rcl);
+    return (existing + sites) < allowed;
+  },
+
+  /**
+   * Check if a room can afford a body configuration at full energy capacity.
+   * @param {Room} room Target room.
+   * @param {string[]} bodyParts Array of body part constants.
+   * @returns {boolean} True when body cost is within energy capacity.
+   */
+  canAffordBody: function (room, bodyParts) {
+    if (!room || !bodyParts || !bodyParts.length) return false;
+    var capacity = BeeToolbox.energyCapacity(room);
+    var cost = 0;
+    for (var i = 0; i < bodyParts.length; i++) {
+      cost += BODYPART_COST[bodyParts[i]] || 0;
+    }
+    return cost <= capacity;
+  },
+
+  /**
+   * Retrieve the room's spawning energy capacity.
+   * @param {Room} room Target room or null.
+   * @returns {number} Available capacity (spawns + extensions).
+   */
+  energyCapacity: function (room) {
+    if (!room) return 0;
+    if (typeof room.energyCapacityAvailable === 'number') {
+      return room.energyCapacityAvailable | 0;
+    }
+    var sum = 0;
+    var structures = room.find(FIND_MY_STRUCTURES);
+    for (var i = 0; i < structures.length; i++) {
+      var s = structures[i];
+      if (!s.store) continue;
+      if (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) {
+        sum += s.store.getCapacity(RESOURCE_ENERGY) || 0;
+      }
+    }
+    return sum;
+  },
+
+  /**
+   * Retrieve the room's currently available spawning energy.
+   * @param {Room} room Target room or null.
+   * @returns {number} Energy currently stored in spawns + extensions.
+   */
+  energyAvailable: function (room) {
+    if (!room) return 0;
+    if (typeof room.energyAvailable === 'number') {
+      return room.energyAvailable | 0;
+    }
+    var sum = 0;
+    var structures = room.find(FIND_MY_STRUCTURES);
+    for (var i = 0; i < structures.length; i++) {
+      var s = structures[i];
+      if (!s.store) continue;
+      if (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) {
+        sum += s.store[RESOURCE_ENERGY] || 0;
+      }
+    }
+    return sum;
+  },
+
+  /**
+   * Store transient planner data for later consumers (TaskManager, reporters, etc.).
+   * @param {string} roomName Room identifier.
+   * @param {object} data Planner summary data.
+   */
+  storePlannerState: function (roomName, data) {
+    if (!roomName) return;
+    RUNTIME_STATE.planner[roomName] = data || null;
+  },
+
+  /**
+   * Retrieve the stored planner snapshot for a room.
+   * @param {string} roomName Room identifier.
+   * @returns {object|null} Planner data or null when absent.
+   */
+  getPlannerState: function (roomName) {
+    if (!roomName) return null;
+    return RUNTIME_STATE.planner[roomName] || null;
+  },
+
+  /**
+   * Retrieve the runtime planner mapping for all rooms.
+   * @returns {object} Internal planner mapping.
+   */
+  getAllPlannerStates: function () {
+    return RUNTIME_STATE.planner;
+  },
+
+  /**
+   * Store construction audit data (built vs sites etc.).
+   * @param {string} roomName Room identifier.
+   * @param {object} data Audit summary data.
+   */
+  storeAuditState: function (roomName, data) {
+    if (!roomName) return;
+    RUNTIME_STATE.audit[roomName] = data || null;
+  },
+
+  /**
+   * Retrieve construction audit information for a room.
+   * @param {string} roomName Room identifier.
+   * @returns {object|null} Audit summary or null.
+   */
+  getAuditState: function (roomName) {
+    if (!roomName) return null;
+    return RUNTIME_STATE.audit[roomName] || null;
+  },
+
+  /**
+   * Reset transient planner/audit caches. Intended for the top-level pipeline each tick.
+   */
+  resetPlannerRuntime: function () {
+    RUNTIME_STATE.planner = {};
+    RUNTIME_STATE.audit = {};
+    RUNTIME_STATE.spawnNotes = {};
+  },
+
+  /**
+   * Record a spawn downshift note to be surfaced in debug reports.
+   * @param {string} roomName Room identifier.
+   * @param {string} reason Human-readable explanation.
+   */
+  noteSpawnDownshift: function (roomName, reason) {
+    if (!roomName || !reason) return;
+    if (!RUNTIME_STATE.spawnNotes[roomName]) {
+      RUNTIME_STATE.spawnNotes[roomName] = [];
+    }
+    RUNTIME_STATE.spawnNotes[roomName].push({ tick: Game.time, reason: reason });
+  },
+
+  /**
+   * Retrieve and clear spawn downshift notes for a room.
+   * @param {string} roomName Room identifier.
+   * @returns {Array} Array of notes consumed this tick.
+   */
+  consumeSpawnNotes: function (roomName) {
+    if (!roomName) return [];
+    var notes = RUNTIME_STATE.spawnNotes[roomName] || [];
+    RUNTIME_STATE.spawnNotes[roomName] = [];
+    return notes;
+  },
+
+  /**
+   * Update Memory.debug.rclReport for a room at the configured cadence.
+   * @param {string} roomName Room identifier.
+   * @param {object} payload Summary including structures/nextSteps fields.
+   * @param {Array} spawnNotes Optional spawn downshift notes.
+   */
+  refreshRoomReport: function (roomName, payload, spawnNotes) {
+    if (!roomName) return;
+    if (!Memory.debug) Memory.debug = {};
+    if (!Memory.debug.rclReport) Memory.debug.rclReport = {};
+    if (!Memory.debug.rclReport[roomName]) {
+      Memory.debug.rclReport[roomName] = {
+        lastTick: 0,
+        structures: {},
+        spawnNotes: [],
+        nextSteps: [],
+        console: false
+      };
+    }
+    var entry = Memory.debug.rclReport[roomName];
+    var shouldUpdate = !entry.lastTick || (Game.time - entry.lastTick) >= DEBUG_INTERVAL;
+    if (!shouldUpdate && !payload) {
+      return;
+    }
+    entry.lastTick = Game.time;
+    if (payload && payload.structures) {
+      entry.structures = payload.structures;
+    }
+    if (payload && payload.nextSteps) {
+      entry.nextSteps = payload.nextSteps;
+    }
+    if (spawnNotes) {
+      entry.spawnNotes = spawnNotes;
+    }
+    if (entry.console) {
+      try {
+        console.log('[RCL] ' + roomName + ' planned=' + JSON.stringify(entry.structures) + ' next=' + JSON.stringify(entry.nextSteps));
+        if (entry.spawnNotes && entry.spawnNotes.length) {
+          console.log('[RCL] ' + roomName + ' spawnNotes=' + JSON.stringify(entry.spawnNotes));
+        }
+      } catch (e) {}
+    }
+  },
+
+  /**
+   * Determine the highest controller level across all owned rooms.
+   * @returns {number} Highest detected RCL, or 0 when no rooms are owned.
+   */
+  getHighestOwnedRcl: function () {
+    var highest = 0;
+    for (var roomName in Game.rooms) {
+      if (!BeeToolbox.hasOwn(Game.rooms, roomName)) continue;
+      var room = Game.rooms[roomName];
+      var rcl = BeeToolbox.getRoomRcl(room);
+      if (rcl > highest) {
+        highest = rcl;
+      }
+    }
+    return highest;
   },
 
   /**

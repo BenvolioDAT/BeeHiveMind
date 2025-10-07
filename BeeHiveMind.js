@@ -9,7 +9,7 @@
 var CoreLogger = require('core.logger');
 var spawnLogic = require('spawn.logic');
 var roleWorkerBee = require('role.Worker_Bee');
-var RoomPlanner = require('Planner.Room');
+var BasePlanner = require('BasePlanner');
 var RoadPlanner = require('Planner.Road');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
@@ -382,6 +382,7 @@ function logBuilderSpawnBlock(spawner, room, builderSites, reason, available, ca
   var spawnName = (spawner && spawner.name) ? spawner.name : 'spawn';
   var message = '[' + spawnName + '] builder wanted: sites=' + builderSites + ' reason=' + reason + ' (avail/cap ' + available + '/' + capacity + ')';
   hiveLog.info(message);
+  BeeToolbox.noteSpawnDownshift(roomName, message);
 }
 
 /**
@@ -416,8 +417,24 @@ function countSourcesInMemory(mem) {
  * @cpu Moderate depending on remote count.
  * @memory Temporary maps only.
  */
-function determineLunaQuota(room, cache) {
+function determineLunaQuota(room, cache, planSummary, auditSummary) {
   if (!room) return 0;
+
+  var storageInfo = planSummary && planSummary.structures ? planSummary.structures[STRUCTURE_STORAGE] : null;
+  var hasStorage = false;
+  if (storageInfo && (storageInfo.existing | 0) > 0) {
+    hasStorage = true;
+  }
+  var storageEnergy = 0;
+  if (room.storage) {
+    hasStorage = true;
+    storageEnergy = (room.storage.store && room.storage.store[RESOURCE_ENERGY]) || 0;
+  }
+  var cpuHealthy = (!Game || !Game.cpu || typeof Game.cpu.bucket !== 'number') ? true : (Game.cpu.bucket >= 4000);
+  var economyStable = hasStorage && storageEnergy >= 20000;
+  if (!economyStable || !cpuHealthy) {
+    return 0;
+  }
 
   var remotes = cache.remotesByHome[room.name] || [];
   if (remotes.length === 0) return 0;
@@ -482,6 +499,199 @@ function determineLunaQuota(room, cache) {
   return desired;
 }
 
+/**
+ * Merge two task order arrays while keeping the RCL-specific order first.
+ * @param {string[]} primary Preferred order derived from the room tier.
+ * @param {string[]} fallback Default order used as a safety net.
+ * @returns {string[]} Combined order without duplicates.
+ */
+function mergeTaskOrders(primary, fallback) {
+  var result = Array.isArray(primary) ? primary.slice() : [];
+  var i;
+  if (!Array.isArray(result)) result = [];
+  if (!Array.isArray(fallback)) return result;
+  for (i = 0; i < fallback.length; i++) {
+    if (result.indexOf(fallback[i]) === -1) {
+      result.push(fallback[i]);
+    }
+  }
+  return result;
+}
+
+/**
+ * Build an RCL-aware spawn plan describing task limits and order for a room.
+ * @param {Room} room The room to evaluate.
+ * @param {number} builderSites Count of construction sites tied to the room.
+ * @param {object} cache Tick cache object for colony intel.
+ * @param {number} hostileCount Number of hostile creeps currently visible.
+ * @returns {object} Plan with `taskOrder`, `limits`, `builderLimit`, and squad flags.
+ */
+function buildTaskPlanForRoom(room, builderSites, cache, hostileCount, roomPlan, roomAudit) {
+  var limits = {
+    baseharvest: 0,
+    courier: 0,
+    queen: 0,
+    upgrader: 0,
+    builder: 0,
+    repair: 0,
+    luna: 0,
+    scout: 0,
+    CombatArcher: 0,
+    CombatMelee: 0,
+    CombatMedic: 0,
+    Dismantler: 0,
+    Trucker: 0,
+    Claimer: 0
+  };
+
+  var rcl = BeeToolbox.getRoomRcl(room);
+  var tier = BeeToolbox.getRclTierName(rcl);
+  var storageInfo = roomPlan && roomPlan.structures ? roomPlan.structures[STRUCTURE_STORAGE] : null;
+  var hasStorage = false;
+  if (storageInfo && (storageInfo.existing | 0) > 0) {
+    hasStorage = true;
+  }
+  var storageEnergy = 0;
+  if (room && room.storage) {
+    hasStorage = true;
+    storageEnergy = (room.storage.store && room.storage.store[RESOURCE_ENERGY]) || 0;
+  }
+  var cpuHealthy = (!Game || !Game.cpu || typeof Game.cpu.bucket !== 'number') ? true : (Game.cpu.bucket >= 4000);
+  var missingStructures = 0;
+  if (roomPlan && roomPlan.structures) {
+    for (var structKey in roomPlan.structures) {
+      if (!BeeToolbox.hasOwn(roomPlan.structures, structKey)) continue;
+      var structEntry = roomPlan.structures[structKey];
+      var deficit = (structEntry.desired | 0) - (structEntry.existing | 0) - (structEntry.sites | 0);
+      if (deficit > 0) missingStructures += deficit;
+    }
+  }
+  var plan = {
+    rcl: rcl,
+    tier: tier,
+    taskOrder: [],
+    limits: limits,
+    builderLimit: 0,
+    maxBuilders: 0,
+    allowRemotes: false,
+    maxLuna: 0,
+    allowSquads: false,
+    squadHostileThreshold: 3,
+    squadId: 'Defense'
+  };
+
+  // Tier-specific adjustments keep behaviour aligned with controller progression.
+  if (tier === 'early') {
+    // RCL1-2: keep the colony alive with harvesters and a couple of upgraders.
+    plan.taskOrder = ['baseharvest', 'upgrader', 'courier', 'builder', 'queen'];
+    limits.baseharvest = Math.max(2, rcl + 1);
+    limits.upgrader = 2;
+    limits.courier = rcl >= 2 ? 1 : 0;
+    limits.queen = rcl >= 2 ? 1 : 0;
+    limits.repair = 0;
+    limits.scout = 0;
+    plan.maxBuilders = builderSites > 0 ? 1 : 0;
+  } else if (tier === 'developing') {
+    // RCL3-4: introduce haulers, builders, and a standing repair presence.
+    plan.taskOrder = ['queen', 'baseharvest', 'courier', 'builder', 'repair', 'upgrader', 'scout'];
+    limits.baseharvest = 3;
+    limits.courier = 1;
+    limits.queen = 1;
+    limits.upgrader = 2;
+    limits.repair = 1;
+    limits.scout = 1;
+    plan.maxBuilders = 2;
+  } else if (tier === 'expansion') {
+    // RCL5-6: balance economy while pushing remotes and road maintenance.
+    plan.taskOrder = ['queen', 'courier', 'baseharvest', 'builder', 'repair', 'upgrader', 'luna', 'Trucker', 'scout'];
+    limits.baseharvest = 3;
+    limits.courier = 2;
+    limits.queen = 2;
+    limits.upgrader = 2;
+    limits.repair = 1;
+    limits.scout = 1;
+    limits.Trucker = 1;
+    plan.maxBuilders = 2;
+    plan.allowRemotes = true;
+    plan.maxLuna = 4;
+  } else {
+    // RCL7-8: advanced operations with link networks, labs, and strong defenses.
+    plan.taskOrder = ['queen', 'courier', 'baseharvest', 'builder', 'repair', 'upgrader', 'luna', 'Trucker', 'Claimer', 'CombatMelee', 'CombatArcher', 'CombatMedic', 'scout'];
+    limits.baseharvest = 3;
+    limits.courier = 2;
+    limits.queen = 2;
+    limits.upgrader = 3;
+    limits.repair = 2;
+    limits.scout = 1;
+    limits.Trucker = 2;
+    plan.maxBuilders = 3;
+    plan.allowRemotes = true;
+    plan.maxLuna = 6;
+    plan.allowSquads = true;
+    plan.squadHostileThreshold = 2;
+  }
+
+  if (missingStructures > 0 && plan.maxBuilders < 1) {
+    plan.maxBuilders = 1;
+  }
+  if (missingStructures > plan.maxBuilders) {
+    plan.maxBuilders = Math.min(plan.maxBuilders + 1, 3);
+  }
+
+  var builderCap = plan.maxBuilders | 0;
+  if (builderSites > 0 && builderCap > 0) {
+    var desiredBuilders = Math.min(builderSites, builderCap);
+    if (desiredBuilders === 0) desiredBuilders = 1;
+    limits.builder = desiredBuilders;
+    plan.builderLimit = desiredBuilders;
+  }
+
+  if (plan.allowRemotes) {
+    // Remote operations only unlock once storage is online, stocked, and CPU headroom exists.
+    var storageReady = hasStorage && storageEnergy >= 20000;
+    if (!storageReady || !cpuHealthy) {
+      plan.allowRemotes = false;
+    }
+  }
+
+  if (plan.allowRemotes) {
+    var remoteQuota = determineLunaQuota(room, cache, roomPlan, roomAudit) | 0;
+    if (plan.maxLuna > 0 && remoteQuota > plan.maxLuna) {
+      remoteQuota = plan.maxLuna;
+    }
+    limits.luna = remoteQuota;
+    if (!limits.Trucker && remoteQuota > 0) {
+      limits.Trucker = 1;
+    }
+  }
+
+  if (!hasStorage && limits.queen > 0) {
+    limits.queen = 0;
+  }
+
+  var manualSquad = false;
+  if (Memory && Memory.squadFlags) {
+    if (Memory.squadFlags.force === true) manualSquad = true;
+    if (Memory.squadFlags.global && Memory.squadFlags.global.force === true) manualSquad = true;
+  }
+  if (plan.allowSquads) {
+    plan.allowSquads = manualSquad || hostileCount > 0;
+  } else if (manualSquad) {
+    plan.allowSquads = true;
+  }
+
+  // Hostile rooms request ad-hoc defenders matching the tier.
+  if (hostileCount > 0) {
+    limits.CombatMelee = Math.max(limits.CombatMelee, 1);
+    if (tier === 'late') {
+      limits.CombatArcher = Math.max(limits.CombatArcher, 1);
+      limits.CombatMedic = Math.max(limits.CombatMedic, 1);
+    }
+  }
+
+  return plan;
+}
+
 var BeeHiveMind = {
   /**
    * Main entry point executed each tick to coordinate the colony.
@@ -492,15 +702,15 @@ var BeeHiveMind = {
    */
   run: function () {
     this.initializeMemory();
-    var cache = prepareTickCaches();
+    BeeToolbox.resetPlannerRuntime();
 
-    var ownedRooms = cache.roomsOwned || [];
-    for (var i = 0; i < ownedRooms.length; i++) {
-      this.manageRoom(ownedRooms[i], cache);
-    }
-
-    this.runCreeps(cache);
-    this.manageSpawns(cache);
+    var context = this.collectIntel();
+    this.planRooms(context);
+    this.auditRooms(context);
+    this.manageSpawns(context);
+    this.assignCreepTasks(context);
+    this.runCreeps(context);
+    this.finalizeReports(context);
 
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
       TradeEnergy.runAll();
@@ -508,82 +718,67 @@ var BeeHiveMind = {
   },
 
   /**
-   * Execute per-room planning hooks for owned rooms.
-   * @param {Room} room Room to manage.
-   * @param {object} cache Per-tick cache data.
-   * @returns {void}
-   * @sideeffects May place construction sites or road plans.
-   * @cpu Moderate depending on planner work.
-   * @memory No additional persistent data.
+   * Gather per-tick intel shared across the pipeline stages.
+   * @returns {object} Context object containing caches and planner/audit maps.
    */
-  manageRoom: function (room, cache) {
-    if (!room) return;
-    if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
-      RoomPlanner.ensureSites(room, cache);
-    }
-    if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
-      RoadPlanner.ensureRemoteRoads(room, cache);
-    }
+  collectIntel: function () {
+    var cache = prepareTickCaches();
+    return {
+      cache: cache,
+      plans: Object.create(null),
+      audits: Object.create(null)
+    };
   },
 
   /**
-   * Run behavior logic for each cached creep.
-   * @param {object} cache Per-tick cache data.
-   * @returns {void}
-   * @sideeffects Issues creep actions and may log errors.
-   * @cpu High proportional to creep count.
-   * @memory No new persistent data.
+   * Execute deterministic base planning for each owned room.
+   * @param {object} context Pipeline context.
    */
-  runCreeps: function (cache) {
-    var creeps = cache.creeps || [];
-    for (var i = 0; i < creeps.length; i++) {
-      var creep = creeps[i];
-      if (!creep) continue;
-      this.assignTask(creep);
-      var roleName = (creep.memory && creep.memory.role) ? creep.memory.role : null;
-      var roleFn = ROLE_DISPATCH[roleName];
-      if (typeof roleFn === 'function') {
-        try {
-          roleFn(creep);
-        } catch (error) {
-          hiveLog.debug('⚠️ Role error for ' + (creep.name || 'unknown') + ' (' + (roleName || 'unset') + ')', error);
-        }
-      } else {
-        hiveLog.info('🐝 Unknown role: ' + (roleName || 'undefined') + ' (Creep: ' + (creep.name || 'unknown') + ')');
+  planRooms: function (context) {
+    if (!context || !context.cache) return;
+    var ownedRooms = context.cache.roomsOwned || [];
+    for (var i = 0; i < ownedRooms.length; i++) {
+      var room = ownedRooms[i];
+      if (!room) continue;
+      if (BasePlanner && typeof BasePlanner.planRoom === 'function') {
+        context.plans[room.name] = BasePlanner.planRoom(room);
+      }
+      if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
+        RoadPlanner.ensureRemoteRoads(room, context.cache);
       }
     }
   },
 
   /**
-   * Assign a default task to creeps lacking explicit orders.
-   * @param {Creep} creep Creep requiring a task assignment.
-   * @returns {void}
-   * @sideeffects Mutates creep.memory.task when empty.
-   * @cpu O(1).
-   * @memory None.
+   * Audit construction after planning to enforce caps and deduplicate sites.
+   * @param {object} context Pipeline context.
    */
-  assignTask: function (creep) {
-    if (!creep || !creep.memory) return;
-    if (creep.memory.task) return;
-    var defaultTask = defaultTaskForRole(creep.memory.role);
-    if (defaultTask) {
-      creep.memory.task = defaultTask;
+  auditRooms: function (context) {
+    if (!context || !context.cache) return;
+    var ownedRooms = context.cache.roomsOwned || [];
+    for (var i = 0; i < ownedRooms.length; i++) {
+      var room = ownedRooms[i];
+      if (!room) continue;
+      var plan = context.plans[room.name] || null;
+      if (BasePlanner && typeof BasePlanner.auditRoom === 'function') {
+        context.audits[room.name] = BasePlanner.auditRoom(room, plan);
+      }
     }
   },
 
   /**
    * Spawn creeps based on task quotas for each spawn structure.
-   * @param {object} cache Per-tick cache data.
+   * @param {object} context Pipeline context including caches, plans, and audits.
    * @returns {void}
-   * @sideeffects Calls spawn logic modules to create creeps.
-   * @cpu Moderate depending on spawn count and quotas.
-   * @memory Updates count tracking maps during the tick.
    */
-  manageSpawns: function (cache) {
+  manageSpawns: function (context) {
+    if (!context || !context.cache) return;
+    var cache = context.cache;
     var roleCounts = cloneCounts(cache.roleCounts);
     var lunaCountsByHome = cloneCounts(cache.lunaCountsByHome);
     var spawns = cache.spawns || [];
     var builderFailLog = GLOBAL_CACHE.builderFailLog || (GLOBAL_CACHE.builderFailLog = Object.create(null));
+    // Default order acts as a safety net; the RCL-specific plan will reorder/limit as needed.
     var defaultTaskOrder = [
       'queen',
       'baseharvest',
@@ -599,27 +794,32 @@ var BeeHiveMind = {
       'Dismantler',
       'Trucker',
       'Claimer',
-      
+
     ];
 
     for (var i = 0; i < spawns.length; i++) {
       var spawner = spawns[i];
       if (!spawner) continue;
 
-      if (typeof spawnLogic.Spawn_Squad === 'function') {
-        // Squad spawning left disabled by default; enable when configured externally.
-      }
-
       var room = spawner.room;
       if (!room) continue;
 
       var builderSites = needBuilder(room, cache);
-      var builderLimit = builderSites > 0 ? 1 : 0;
+      var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+      var hostileCount = hostiles.length | 0;
+      var roomPlan = context.plans[room.name] || null;
+      var roomAudit = context.audits[room.name] || null;
+      var plan = buildTaskPlanForRoom(room, builderSites, cache, hostileCount, roomPlan, roomAudit);
+      var builderLimit = plan.builderLimit | 0;
 
       var spawnResource = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
         ? spawnLogic.Calculate_Spawn_Resource(spawner)
         : (room.energyAvailable || 0);
       var spawnCapacity = room.energyCapacityAvailable || spawnResource;
+
+      if (plan.allowSquads && typeof spawnLogic.Spawn_Squad === 'function' && hostileCount >= plan.squadHostileThreshold) {
+        spawnLogic.Spawn_Squad(spawner, plan.squadId || 'Defense');
+      }
 
       if (spawner.spawning) {
         if (builderLimit > 0) {
@@ -628,36 +828,17 @@ var BeeHiveMind = {
         continue;
       }
 
-      var taskOrder = defaultTaskOrder.slice();
-      if (builderLimit > 0) {
-        var builderIndex = -1;
-        var queenIndex = -1;
-        for (var orderIdx = 0; orderIdx < taskOrder.length; orderIdx++) {
-          if (taskOrder[orderIdx] === 'builder') {
-            builderIndex = orderIdx;
-          }
-          if (taskOrder[orderIdx] === 'queen') {
-            queenIndex = orderIdx;
-          }
-        }
-        if (builderIndex !== -1) {
-          taskOrder.splice(builderIndex, 1);
-          if (queenIndex === -1) {
-            queenIndex = 0;
-          }
-          taskOrder.splice(queenIndex + 1, 0, 'builder');
-        }
-      }
+      var taskOrder = mergeTaskOrders(plan.taskOrder, defaultTaskOrder);
 
       var workerTaskLimits = {
-        baseharvest: 2,
-        courier: 1,
-        queen: 2,
-        upgrader: 1,
+        baseharvest: 0,
+        courier: 0,
+        queen: 0,
+        upgrader: 0,
         builder: builderLimit,
         repair: 0,
-        luna: determineLunaQuota(room, cache),
-        scout: 1,
+        luna: 0,
+        scout: 0,
         CombatArcher: 0,
         CombatMelee: 0,
         CombatMedic: 0,
@@ -665,6 +846,13 @@ var BeeHiveMind = {
         Trucker: 0,
         Claimer: 0
       };
+
+      for (var taskKey in plan.limits) {
+        if (!BeeToolbox.hasOwn(plan.limits, taskKey)) continue;
+        workerTaskLimits[taskKey] = plan.limits[taskKey] | 0;
+      }
+
+      builderLimit = workerTaskLimits.builder | 0;
 
       for (var orderPos = 0; orderPos < taskOrder.length; orderPos++) {
         var task = taskOrder[orderPos];
@@ -716,6 +904,115 @@ var BeeHiveMind = {
     }
   },
 
+  /**
+   * Assign tasks to creeps after spawn decisions using TaskManager context.
+   * @param {object} context Pipeline context.
+   */
+  assignCreepTasks: function (context) {
+    if (!context || !context.cache) return;
+    var creeps = context.cache.creeps || [];
+    for (var i = 0; i < creeps.length; i++) {
+      var creep = creeps[i];
+      if (!creep || !creep.memory) continue;
+      if (creep.memory.task) continue;
+      var defaultTask = defaultTaskForRole(creep.memory.role);
+      if (TaskManager && typeof TaskManager.getHighestPriorityTask === 'function') {
+        var suggested = TaskManager.getHighestPriorityTask(creep, context);
+        if (suggested && suggested !== 'idle') {
+          creep.memory.task = suggested;
+          continue;
+        }
+      }
+      if (defaultTask) {
+        creep.memory.task = defaultTask;
+      }
+    }
+  },
+
+  /**
+   * Run behavior logic for each cached creep.
+   * @param {object} context Pipeline context.
+   */
+  runCreeps: function (context) {
+    if (!context || !context.cache) return;
+    var creeps = context.cache.creeps || [];
+    for (var i = 0; i < creeps.length; i++) {
+      var creep = creeps[i];
+      if (!creep) continue;
+      var roleName = (creep.memory && creep.memory.role) ? creep.memory.role : null;
+      var roleFn = ROLE_DISPATCH[roleName];
+      if (typeof roleFn === 'function') {
+        try {
+          roleFn(creep);
+        } catch (error) {
+          hiveLog.debug('⚠️ Role error for ' + (creep.name || 'unknown') + ' (' + (roleName || 'unset') + ')', error);
+        }
+      } else {
+        hiveLog.info('🐝 Unknown role: ' + (roleName || 'undefined') + ' (Creep: ' + (creep.name || 'unknown') + ')');
+      }
+    }
+  },
+
+  /**
+   * Produce debug summaries and Memory reports after major pipeline stages.
+   * @param {object} context Pipeline context.
+   */
+  finalizeReports: function (context) {
+    if (!context || !context.cache) return;
+    var ownedRooms = context.cache.roomsOwned || [];
+    function friendlyStructureName(structType, count) {
+      if (!structType) return 'structures';
+      var name = String(structType).replace('structure_', '').toLowerCase();
+      if (count > 1 && name.charAt(name.length - 1) !== 's') {
+        name += 's';
+      }
+      return name;
+    }
+    for (var i = 0; i < ownedRooms.length; i++) {
+      var room = ownedRooms[i];
+      if (!room) continue;
+      var plan = context.plans[room.name] || null;
+      var audit = context.audits[room.name] || null;
+      var spawnNotes = BeeToolbox.consumeSpawnNotes(room.name);
+      var structuresSummary = {};
+      if (plan && plan.structures) {
+        for (var key in plan.structures) {
+          if (!plan.structures.hasOwnProperty(key)) continue;
+          var entry = plan.structures[key];
+          structuresSummary[key] = {
+            existing: entry.existing,
+            sites: entry.sites,
+            desired: entry.desired,
+            planned: entry.planned,
+            blocked: entry.blocked
+          };
+        }
+      }
+      var nextSteps = plan && plan.nextSteps ? plan.nextSteps.slice() : [];
+      if (audit && audit.structures) {
+        for (var aKey in audit.structures) {
+          if (!audit.structures.hasOwnProperty(aKey)) continue;
+          var auditEntry = audit.structures[aKey];
+          if (!structuresSummary[aKey]) {
+            structuresSummary[aKey] = {
+              existing: auditEntry.existing,
+              sites: auditEntry.sites,
+              desired: auditEntry.allowed,
+              planned: 0,
+              blocked: 0
+            };
+          }
+          if (auditEntry.missing > 0) {
+            var reminder = 'Build ' + auditEntry.missing + ' more ' + friendlyStructureName(aKey, auditEntry.missing) + ' to reach the planned layout.';
+            if (nextSteps.indexOf(reminder) === -1) {
+              nextSteps.push(reminder);
+            }
+          }
+        }
+      }
+      BeeToolbox.refreshRoomReport(room.name, { structures: structuresSummary, nextSteps: nextSteps }, spawnNotes);
+    }
+  },
   /**
    * Placeholder for remote operations (reserved for future use).
    * @returns {void}
