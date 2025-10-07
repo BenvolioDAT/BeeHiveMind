@@ -4,6 +4,8 @@
 'use strict';
 
 var TaskBuilder = require('Task.Builder'); // guarded below
+var TaskManager = require('TaskManager');
+var BeeToolbox = require('BeeToolbox');
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 
@@ -92,16 +94,44 @@ var BeeVisuals = {
         if (count >= CFG.maxCreepsRenderedDebug) break;
       }
 
-      // structure placement markers near first spawn (cheap)
-      var firstSpawn = null;
-      for (var sn in Game.spawns) { if (Game.spawns.hasOwnProperty(sn)) { firstSpawn = Game.spawns[sn]; break; } }
-      if (firstSpawn && TaskBuilder && TaskBuilder.structurePlacements) {
-        var baseX = firstSpawn.pos.x;
-        var baseY = firstSpawn.pos.y;
-        var placements = TaskBuilder.structurePlacements;
-        for (var p = 0; p < placements.length; p++) {
-          var pl = placements[p];
-          visual.circle(baseX + pl.x, baseY + pl.y, { radius: 0.4, opacity: 0.1, stroke: 'cyan' });
+      var plannerState = null;
+      if (BeeToolbox && typeof BeeToolbox.getPlannerState === 'function') {
+        plannerState = BeeToolbox.getPlannerState(room.name);
+      }
+      if (plannerState && plannerState.placements && plannerState.placements.length) {
+        var MAX_PLACEMENTS = 75;
+        var colors = {
+          structure_extension: '#66ccff',
+          structure_road: '#cccccc',
+          structure_tower: '#ff6666',
+          structure_storage: '#ffcc66',
+          structure_container: '#a1887f',
+          structure_link: '#b388ff',
+          structure_lab: '#ff99ff'
+        };
+        var drawn = 0;
+        for (var pi = 0; pi < plannerState.placements.length && drawn < MAX_PLACEMENTS; pi++) {
+          var placement = plannerState.placements[pi];
+          if (!placement) continue;
+          var typeKey = String(placement.type || '').toLowerCase();
+          var color = colors[typeKey] || '#66ccff';
+          visual.circle(placement.x, placement.y, { radius: 0.35, opacity: 0.35, stroke: color, fill: 'transparent' });
+          drawn++;
+        }
+        if (plannerState.anchor) {
+          visual.circle(plannerState.anchor.x, plannerState.anchor.y, { radius: 0.45, opacity: 0.3, stroke: '#ffffff' });
+        }
+      } else {
+        var firstSpawn = null;
+        for (var sn in Game.spawns) { if (Game.spawns.hasOwnProperty(sn)) { firstSpawn = Game.spawns[sn]; break; } }
+        if (firstSpawn && TaskBuilder && TaskBuilder.structurePlacements) {
+          var baseX = firstSpawn.pos.x;
+          var baseY = firstSpawn.pos.y;
+          var placements = TaskBuilder.structurePlacements;
+          for (var p = 0; p < placements.length; p++) {
+            var pl = placements[p];
+            visual.circle(baseX + pl.x, baseY + pl.y, { radius: 0.4, opacity: 0.1, stroke: 'cyan' });
+          }
         }
       }
     }
@@ -177,22 +207,56 @@ var BeeVisuals = {
     }
     var totalCount = workerBees.length | 0;
 
-    var maxTasks = {
-      baseharvest: 2, builder: 1, upgrader: 1, repair: 0,
-      courier: 1, luna: 8, scout: 1, queen: 2,
-      CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
-      Dismantler: 0, Claimer: 2
+    var displayOrder = [
+      'baseharvest', 'courier', 'builder', 'upgrader', 'repair',
+      'luna', 'queen', 'Trucker', 'scout',
+      'CombatMelee', 'CombatArcher', 'CombatMedic',
+      'Dismantler', 'Claimer'
+    ];
+
+    var fallbackMax = {
+      baseharvest: 2,
+      courier: 1,
+      builder: 1,
+      upgrader: 1,
+      repair: 0,
+      luna: 4,
+      queen: 1,
+      Trucker: 0,
+      scout: 1,
+      CombatMelee: 0,
+      CombatArcher: 0,
+      CombatMedic: 0,
+      Dismantler: 0,
+      Claimer: 1
     };
+
+    var dynamicDesired = {};
+    if (TaskManager && typeof TaskManager.getDesiredTaskCounts === 'function') {
+      dynamicDesired = TaskManager.getDesiredTaskCounts();
+    }
+
+    var maxTasks = Object.create(null);
+    for (var di = 0; di < displayOrder.length; di++) {
+      var key = displayOrder[di];
+      var desired = (dynamicDesired && dynamicDesired[key] != null) ? (dynamicDesired[key] | 0) : (fallbackMax[key] | 0);
+      maxTasks[key] = desired;
+    }
 
     var tasks = {};
     var k;
-    for (k in maxTasks) if (maxTasks.hasOwnProperty(k)) tasks[k] = 0;
+    for (k = 0; k < displayOrder.length; k++) {
+      tasks[displayOrder[k]] = 0;
+    }
     for (var i = 0; i < workerBees.length; i++) {
       var t = (workerBees[i].memory && workerBees[i].memory.task) ? workerBees[i].memory.task : 'idle';
       if (tasks.hasOwnProperty(t)) tasks[t] = (tasks[t] | 0) + 1;
     }
 
-    var maxTotal = 0; for (k in maxTasks) if (maxTasks.hasOwnProperty(k)) maxTotal += (maxTasks[k] | 0);
+    var maxTotal = 0;
+    for (k = 0; k < displayOrder.length; k++) {
+      maxTotal += (maxTasks[displayOrder[k]] | 0);
+    }
 
     var x0 = 0, y0 = 20;
     var nameW = 4, valueW = 1.2, cellH = 0.7;
@@ -204,14 +268,14 @@ var BeeVisuals = {
     visual.text(String(totalCount) + '/' + String(maxTotal), x0 + nameW + valueW - 0.3, y0 + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'right', opacity: 1 });
 
     var row = 1;
-    for (k in maxTasks) {
-      if (!maxTasks.hasOwnProperty(k)) continue;
+    for (var orderIdx = 0; orderIdx < displayOrder.length; orderIdx++) {
+      var taskName = displayOrder[orderIdx];
       var y = y0 + row * cellH;
-      var val = String(tasks[k] | 0) + '/' + String(maxTasks[k] | 0);
+      var val = String(tasks[taskName] | 0) + '/' + String(maxTasks[taskName] | 0);
 
       visual.rect(x0, y, nameW, cellH, { fill: fillColor, stroke: strokeColor, opacity: opacityLvl, radius: 0.05 });
       visual.rect(x0 + nameW, y, valueW, cellH, { fill: fillColor, stroke: strokeColor, opacity: opacityLvl, radius: 0.05 });
-      visual.text(k, x0 + 0.3, y + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'left', opacity: 1 });
+      visual.text(taskName, x0 + 0.3, y + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'left', opacity: 1 });
       visual.text(val, x0 + nameW + valueW - 0.3, y + cellH / 2 + 0.15, { font: font, color: '#ffffff', align: 'right', opacity: 1 });
 
       row++;

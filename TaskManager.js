@@ -144,7 +144,9 @@ var cache = (global.__taskManagerCache = global.__taskManagerCache || {
   tick: -1,
   counts: null,
   needs: null,
-  needsTick: -1
+  needsTick: -1,
+  state: null,
+  stateTick: -1
 });
 
 function getTaskCounts() {
@@ -181,6 +183,17 @@ function mergeNeeds(defaults, overrides) {
   return result;
 }
 
+function cloneMap(source) {
+  var clone = Object.create(null);
+  if (!source) return clone;
+  for (var key in source) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) {
+      clone[key] = source[key];
+    }
+  }
+  return clone;
+}
+
 function getNeedProfileForRcl(rcl) {
   if (!rcl) {
     return RCL_NEED_PROFILES.length ? RCL_NEED_PROFILES[0] : null;
@@ -213,9 +226,10 @@ function baseNeedsForRcl(rcl) {
   return mergeNeeds(DEFAULT_NEEDS, overrides);
 }
 
-function colonyNeeds(context) {
-  if (!context && cache.needsTick === Game.time && cache.needs) return cache.needs;
-
+function computeNeedState(context) {
+  if (!context && cache.stateTick === Game.time && cache.state) {
+    return cache.state;
+  }
   var overrides = (Memory.colonyNeeds && Memory.colonyNeeds.overrides) || {};
   var plannerStates = BeeToolbox.getAllPlannerStates() || {};
   var aggregateNeeds = Object.create(null);
@@ -289,11 +303,26 @@ function colonyNeeds(context) {
     }
   }
 
+  var result = {
+    desired: cloneMap(needsConfig),
+    shortage: cloneMap(shortage),
+    counts: cloneMap(counts),
+    highestRcl: highestRcl
+  };
+
   if (!context) {
+    cache.stateTick = Game.time;
+    cache.state = result;
     cache.needsTick = Game.time;
-    cache.needs = shortage;
+    cache.needs = result.shortage;
   }
-  return shortage;
+
+  return result;
+}
+
+function colonyNeeds(context) {
+  var state = computeNeedState(context);
+  return state ? state.shortage : Object.create(null);
 }
 
 function getTaskModule(taskName) {
@@ -354,5 +383,25 @@ module.exports = {
     delete creep.memory.targetRoom;
     delete creep.memory.assignedContainer;
     delete creep.memory.sourceId;
+  },
+
+  getTaskCountsSnapshot: function () {
+    return cloneMap(getTaskCounts());
+  },
+
+  getDesiredTaskCounts: function (context) {
+    var state = computeNeedState(context);
+    return state ? cloneMap(state.desired) : Object.create(null);
+  },
+
+  getNeedState: function (context) {
+    var state = computeNeedState(context);
+    if (!state) return { desired: Object.create(null), shortage: Object.create(null), counts: Object.create(null), highestRcl: 0 };
+    return {
+      desired: cloneMap(state.desired),
+      shortage: cloneMap(state.shortage),
+      counts: cloneMap(state.counts),
+      highestRcl: state.highestRcl
+    };
   }
 };
