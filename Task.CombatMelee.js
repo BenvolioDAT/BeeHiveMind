@@ -3,7 +3,7 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('Task.Squad');
+var TaskSquad  = require('./Task.Squad');
 
 var CONFIG = {
   focusSticky: 15,
