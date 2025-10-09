@@ -35,6 +35,7 @@ var INVADER_LOCK_MEMO_TTL = 1500;
 
 var AVOID_TTL = 30;
 var RETARGET_COOLDOWN = 5;
+var OTHER_OWNER_AVOID_TTL = 500;
 
 // Small bias to keep the current owner briefly (soft preference only)
 var ASSIGN_STICKY_TTL = 50;
@@ -175,6 +176,12 @@ function _ensureAvoid(creep){ if (!creep.memory._avoid) creep.memory._avoid = {}
 function shouldAvoid(creep, sid){ var a=_ensureAvoid(creep); var t=a[sid]; return (typeof t==='number' && Game.time<t); }
 function markAvoid(creep, sid, ttl){ var a=_ensureAvoid(creep); a[sid] = Game.time + (ttl!=null?ttl:AVOID_TTL); }
 function avoidRemaining(creep, sid){ var a=_ensureAvoid(creep); var t=a[sid]; if (typeof t!=='number') return 0; var left=t-Game.time; return left>0?left:0; }
+
+// ============================
+// Foreign ownership/hostile detection helpers
+// ============================
+var detectForeignPresence = BeeToolbox.detectForeignPresence || function(){ return { avoid: false }; };
+var markRoomForeignAvoid = BeeToolbox.markRoomForeignAvoid || function(){ };
 
 // ============================
 // Per-tick *claim* (same-tick contention guard)
@@ -497,6 +504,8 @@ function markValidRemoteSourcesForHome(homeName){
     var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
     var rm = _roomMem(rn);
     if (rm.hostile) continue;
+    var foreign = detectForeignPresence(rn, room, rm);
+    if (foreign.avoid){ if (!foreign.memo) markRoomForeignAvoid(rm, foreign.owner, foreign.reason, OTHER_OWNER_AVOID_TTL); continue; }
     if (isRoomLockedByInvaderCore(rn)) continue;
 
     if (rm._lastValidFlagScan && (Game.time - rm._lastValidFlagScan) < 300) continue;
@@ -561,6 +570,10 @@ function pickRemoteSource(creep){
     rn=neighborRooms[i];
     if (isRoomLockedByInvaderCore(rn)) continue;
     var room=Game.rooms[rn]; if (!room) continue;
+    var rm = _roomMem(rn);
+    if (rm.hostile) continue;
+    var foreign = detectForeignPresence(rn, room, rm);
+    if (foreign.avoid){ if (!foreign.memo) markRoomForeignAvoid(rm, foreign.owner, foreign.reason, OTHER_OWNER_AVOID_TTL); continue; }
 
     var sources = room.find(FIND_SOURCES);
     for (var j=0;j<sources.length;j++){
@@ -583,7 +596,11 @@ function pickRemoteSource(creep){
   if (!candidates.length){
     for (i=0;i<neighborRooms.length;i++){
       rn=neighborRooms[i]; if (isRoomLockedByInvaderCore(rn)) continue;
-      var rm = _roomMem(rn); if (!rm || !rm.sources) continue;
+      var rm = _roomMem(rn);
+      if (rm.hostile) continue;
+      var foreignNV = detectForeignPresence(rn, Game.rooms[rn], rm);
+      if (foreignNV.avoid){ if (!foreignNV.memo) markRoomForeignAvoid(rm, foreignNV.owner, foreignNV.reason, OTHER_OWNER_AVOID_TTL); continue; }
+      if (!rm.sources) continue;
       for (var sid in rm.sources){
         if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
         var ownerNow2 = maOwner(memAssign, sid);
@@ -643,6 +660,7 @@ function releaseAssignment(creep){
   creep.memory.targetRoom = null;
   creep.memory.assigned   = false;
   creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+  delete creep.memory._lastForeignLog;
 }
 
 // If duplicates exist, loser yields this tick (no repick same tick)
@@ -777,6 +795,18 @@ var TaskLuna = {
       releaseAssignment(creep);
       return;
     }
+    var foreignRun = detectForeignPresence(creep.memory.targetRoom, targetRoomObj, tmem);
+    if (foreignRun.avoid){
+      if (!foreignRun.memo) markRoomForeignAvoid(tmem, foreignRun.owner, foreignRun.reason, OTHER_OWNER_AVOID_TTL);
+      if (!creep.memory._lastForeignLog || (Game.time - creep.memory._lastForeignLog) >= 10){
+        var reasonNote = foreignRun.reason || 'foreign presence';
+        var ownerNote = foreignRun.owner ? (' by '+foreignRun.owner) : '';
+        console.log('⚠️ Forager '+creep.name+' avoiding room '+creep.memory.targetRoom+' due to '+reasonNote+ownerNote+'.');
+        creep.memory._lastForeignLog = Game.time;
+      }
+      releaseAssignment(creep);
+      return;
+    }
     if (!tmem || !tmem.sources) return;
 
     // NEW: while we’re actively working this room, ensure a controller flag exists
@@ -802,6 +832,8 @@ var TaskLuna = {
       if (!rm || !rm.sources) return false;
       if (!inRadius[roomName]) return false;                 // ★ enforce radius here
       if (rm.hostile) return false;
+      var foreign = detectForeignPresence(roomName, Game.rooms[roomName], rm);
+      if (foreign.avoid){ if (!foreign.memo) markRoomForeignAvoid(rm, foreign.owner, foreign.reason, OTHER_OWNER_AVOID_TTL); return false; }
       if (isRoomLockedByInvaderCore(roomName)) return false;
       return roomName !== Memory.firstSpawnRoom;
     });
@@ -826,7 +858,11 @@ var TaskLuna = {
       if (!inRadius[rn]) continue;                 // ★ radius fence
       if (isRoomLockedByInvaderCore(rn)) continue;
 
-      var rm=_roomMem(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
+      var rm=_roomMem(rn);
+      if (rm.hostile) continue;
+      var foreign = detectForeignPresence(rn, Game.rooms[rn], rm);
+      if (foreign.avoid){ if (!foreign.memo) markRoomForeignAvoid(rm, foreign.owner, foreign.reason, OTHER_OWNER_AVOID_TTL); continue; }
+      var sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
 
       var count=0;
       for (var name in Game.creeps){

@@ -236,6 +236,18 @@ function logRoomIntel(room) {
   intel.hostiles = room.find(FIND_HOSTILE_CREEPS).length;
 
   seedSourcesFromVision(room);
+
+  if (BeeToolbox && typeof BeeToolbox.detectForeignPresence === 'function') {
+    var rm = BeeToolbox.getRoomMemory ? BeeToolbox.getRoomMemory(room.name) : (function () {
+      Memory.rooms = Memory.rooms || {};
+      if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+      return Memory.rooms[room.name];
+    })();
+    var foreign = BeeToolbox.detectForeignPresence(room.name, room, rm);
+    if (foreign.avoid && !foreign.memo && typeof BeeToolbox.markRoomForeignAvoid === 'function') {
+      BeeToolbox.markRoomForeignAvoid(rm, foreign.owner, foreign.reason);
+    }
+  }
 }
 
 // ---------- Scout memory ----------
