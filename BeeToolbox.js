@@ -8,6 +8,22 @@ var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+var _cachedUsername = null;
+var DEFAULT_FOREIGN_AVOID_TTL = 500;
+
+var IMPORTANT_FOREIGN_STRUCTURES = {};
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_TOWER] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_SPAWN] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_EXTENSION] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_STORAGE] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_TERMINAL] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_NUKER] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_POWER_SPAWN] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_OBSERVER] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_FACTORY] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LAB] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LINK] = true;
+
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
 // to avoid expensive FIND_STRUCTURES work every few ticks.
@@ -128,6 +144,141 @@ var BeeToolbox = {
         toolboxLog.debug('Final sources in', room.name + ':', JSON.stringify(Memory.rooms[room.name].sources));
       } catch (e) {}
     }
+  },
+
+  /**
+   * Ensure a Memory.rooms entry exists for the requested room and return it.
+   * @param {string} roomName Screeps room name.
+   * @returns {?Object} Memory blob for the room (or null when name invalid).
+   */
+  getRoomMemory: function (roomName) {
+    if (!BeeToolbox.isValidRoomName(roomName)) return null;
+    Memory.rooms = Memory.rooms || {};
+    if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+    return Memory.rooms[roomName];
+  },
+
+  /**
+   * Cache and return the current player's username.
+   * @returns {string}
+   */
+  getMyUsername: function () {
+    if (_cachedUsername) return _cachedUsername;
+    var name = null;
+    var k;
+    for (k in Game.spawns) {
+      if (!Game.spawns.hasOwnProperty(k)) continue;
+      var sp = Game.spawns[k];
+      if (sp && sp.owner && sp.owner.username) { name = sp.owner.username; break; }
+    }
+    if (!name) {
+      for (k in Game.creeps) {
+        if (!Game.creeps.hasOwnProperty(k)) continue;
+        var c = Game.creeps[k];
+        if (c && c.owner && c.owner.username) { name = c.owner.username; break; }
+      }
+    }
+    _cachedUsername = name || 'me';
+    return _cachedUsername;
+  },
+
+  /**
+   * Remove expired avoid markers for foreign ownership from room memory.
+   * @param {?Object} roomMem Memory blob for the room.
+   */
+  cleanupRoomForeignAvoid: function (roomMem) {
+    if (!roomMem) return;
+    if (typeof roomMem._avoidOtherOwnerUntil === 'number' && roomMem._avoidOtherOwnerUntil <= Game.time) {
+      delete roomMem._avoidOtherOwnerUntil;
+      delete roomMem._avoidOtherOwnerBy;
+      delete roomMem._avoidOtherOwnerReason;
+    }
+  },
+
+  /**
+   * Mark a room as temporarily avoided due to another player's presence.
+   * @param {?Object} roomMem Memory blob for the room.
+   * @param {?string} owner Username responsible for the avoid condition.
+   * @param {?string} reason Short reason token.
+   * @param {?number} ttl Optional TTL override in ticks.
+   */
+  markRoomForeignAvoid: function (roomMem, owner, reason, ttl) {
+    if (!roomMem) return;
+    var expire = Game.time + (typeof ttl === 'number' ? ttl : DEFAULT_FOREIGN_AVOID_TTL);
+    roomMem._avoidOtherOwnerUntil = expire;
+    roomMem._avoidOtherOwnerBy = owner || null;
+    roomMem._avoidOtherOwnerReason = reason || null;
+  },
+
+  /**
+   * Determine if a room should be avoided due to foreign ownership or hostiles.
+   * @param {string} roomName Name of the room being evaluated.
+   * @param {?Room} roomObj Visible Room object (optional).
+   * @param {?Object} roomMem Memory blob for the room (optional).
+   * @returns {{avoid:boolean, owner:?string, reason:?string, memo?:boolean}}
+   */
+  detectForeignPresence: function (roomName, roomObj, roomMem) {
+    var mem = roomMem;
+    if (!mem) mem = BeeToolbox.getRoomMemory(roomName);
+    if (mem) BeeToolbox.cleanupRoomForeignAvoid(mem);
+
+    if (mem && typeof mem._avoidOtherOwnerUntil === 'number' && mem._avoidOtherOwnerUntil > Game.time) {
+      return {
+        avoid: true,
+        owner: mem._avoidOtherOwnerBy || null,
+        reason: mem._avoidOtherOwnerReason || 'recentForeign',
+        memo: true
+      };
+    }
+
+    var myName = BeeToolbox.getMyUsername();
+
+    if (roomObj) {
+      var ctrl = roomObj.controller;
+      if (ctrl) {
+        if (ctrl.my === false && ctrl.owner && ctrl.owner.username && ctrl.owner.username !== myName) {
+          return { avoid: true, owner: ctrl.owner.username, reason: 'controllerOwned' };
+        }
+        if (ctrl.reservation && ctrl.reservation.username && ctrl.reservation.username !== myName) {
+          return { avoid: true, owner: ctrl.reservation.username, reason: 'reserved' };
+        }
+      }
+
+      var hostiles = roomObj.find(FIND_HOSTILE_CREEPS, {
+        filter: function (h) {
+          if (!h || !h.owner) return false;
+          var uname = h.owner.username;
+          if (uname === 'Invader') return false;
+          return uname !== myName;
+        }
+      }) || [];
+      if (hostiles.length) {
+        return { avoid: true, owner: (hostiles[0].owner && hostiles[0].owner.username) || null, reason: 'hostileCreeps' };
+      }
+
+      var hostileStructs = roomObj.find(FIND_HOSTILE_STRUCTURES, {
+        filter: function (s) {
+          if (!s || !s.owner) return false;
+          if (s.owner.username === myName) return false;
+          return IMPORTANT_FOREIGN_STRUCTURES[s.structureType] === true;
+        }
+      }) || [];
+      if (hostileStructs.length) {
+        return { avoid: true, owner: (hostileStructs[0].owner && hostileStructs[0].owner.username) || null, reason: 'hostileStructures' };
+      }
+    }
+
+    if (mem && mem.intel) {
+      var intel = mem.intel;
+      if (intel.owner && intel.owner !== myName) {
+        return { avoid: true, owner: intel.owner, reason: 'intelOwner' };
+      }
+      if (intel.reservation && intel.reservation !== myName) {
+        return { avoid: true, owner: intel.reservation, reason: 'intelReservation' };
+      }
+    }
+
+    return { avoid: false };
   },
 
   /**
