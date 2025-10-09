@@ -14,12 +14,38 @@ var RoadPlanner = require('Planner.Road');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
 var BeeToolbox = require('BeeToolbox');
+var SquadFlagManager = require('SquadFlagManager');
+var TaskSquad = require('Task.Squad');
+var TaskCombatArcher = require('Task.CombatArcher');
+var TaskCombatMelee = require('Task.CombatMelee');
+var TaskCombatMedic = require('Task.CombatMedic');
 
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
+var SQUAD_ROLE_RUNNERS = {
+  CombatArcher: (TaskCombatArcher && typeof TaskCombatArcher.run === 'function') ? TaskCombatArcher.run : null,
+  CombatMelee: (TaskCombatMelee && typeof TaskCombatMelee.run === 'function') ? TaskCombatMelee.run : null,
+  CombatMedic: (TaskCombatMedic && typeof TaskCombatMedic.run === 'function') ? TaskCombatMedic.run : null
+};
+
+function runSquadRole(creep) {
+  if (!creep || !creep.memory) return;
+  var role = creep.memory.squadRole || creep.memory.task;
+  if (!role) return;
+  var handler = SQUAD_ROLE_RUNNERS[role];
+  if (typeof handler === 'function') {
+    handler(creep);
+    return;
+  }
+}
+
 var ROLE_DISPATCH = Object.freeze({
-  Worker_Bee: roleWorkerBee.run
+  Worker_Bee: roleWorkerBee.run,
+  squad: runSquadRole,
+  CombatArcher: SQUAD_ROLE_RUNNERS.CombatArcher,
+  CombatMelee: SQUAD_ROLE_RUNNERS.CombatMelee,
+  CombatMedic: SQUAD_ROLE_RUNNERS.CombatMedic
 });
 
 var ROLE_DEFAULT_TASK = Object.freeze({
@@ -366,6 +392,270 @@ function determineBuilderFailureReason(available, capacity) {
   return 'OTHER_FAIL';
 }
 
+function ensureSquadMemoryRecord(squadId) {
+  var id = squadId || 'Alpha';
+  if (!Memory.squads) Memory.squads = {};
+  if (!Memory.squads[id]) {
+    Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
+  }
+  var bucket = Memory.squads[id];
+  if (!bucket.desiredRoles) bucket.desiredRoles = {};
+  if (!bucket.roleOrder || !bucket.roleOrder.length) bucket.roleOrder = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
+  if (!bucket.minReady || bucket.minReady < 1) bucket.minReady = 1;
+  if (!bucket.members) bucket.members = bucket.members || {};
+  return bucket;
+}
+
+function chooseHomeRoom(targetRoom, roomsOwned, preferred) {
+  if (preferred && Game.rooms[preferred] && Game.rooms[preferred].controller && Game.rooms[preferred].controller.my) {
+    return preferred;
+  }
+  if (!roomsOwned || !roomsOwned.length || !BeeToolbox || !BeeToolbox.isValidRoomName(targetRoom)) {
+    return preferred || null;
+  }
+  var best = preferred || null;
+  var bestDist = Infinity;
+  for (var i = 0; i < roomsOwned.length; i++) {
+    var room = roomsOwned[i];
+    if (!room || !room.controller || !room.controller.my) continue;
+    var dist = BeeToolbox.safeLinearDistance(room.name, targetRoom, true);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = room.name;
+    }
+  }
+  return best || preferred || null;
+}
+
+function gatherSquadCensus(squadId) {
+  var counts = Object.create(null);
+  var total = 0;
+  var name;
+
+  for (name in Game.creeps) {
+    if (!BeeToolbox.hasOwn(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory || creep.memory.squadId !== squadId) continue;
+    var role = creep.memory.squadRole || creep.memory.task || creep.memory.role;
+    if (!role) continue;
+    counts[role] = (counts[role] || 0) + 1;
+    total += 1;
+  }
+
+  for (name in Memory.creeps) {
+    if (!BeeToolbox.hasOwn(Memory.creeps, name)) continue;
+    if (Game.creeps[name]) continue;
+    var mem = Memory.creeps[name];
+    if (!mem || mem.squadId !== squadId) continue;
+    var mrole = mem.squadRole || mem.task || mem.role;
+    if (!mrole) continue;
+    counts[mrole] = (counts[mrole] || 0) + 1;
+    total += 1;
+  }
+
+  return { counts: counts, total: total };
+}
+
+function deriveSquadDesiredRoles(intel, bucket) {
+  var score = (intel && typeof intel.threatScore === 'number') ? intel.threatScore : 0;
+  var details = (intel && intel.details) ? intel.details : {};
+  var melee = 1;
+  var medic = 1;
+  var archer = 0;
+
+  if (details.hasRanged || score >= 10) {
+    archer = 1;
+  }
+  if (details.hasHostileTower || score >= 18) {
+    melee = 2;
+    medic = Math.max(medic, 2);
+  }
+  if (details.hasHeal) {
+    medic = Math.max(medic, 2);
+  }
+  if (score >= 22 || (details.hasRanged && details.hasHostileTower)) {
+    archer = Math.max(archer, 2);
+  }
+
+  var desired = Object.create(null);
+  desired.CombatMelee = melee;
+  desired.CombatMedic = medic;
+  if (archer > 0) {
+    desired.CombatArcher = archer;
+  }
+
+  bucket.desiredRoles = desired;
+  var order = ['CombatMelee'];
+  if (archer > 0) {
+    order.push('CombatArcher');
+  }
+  order.push('CombatMedic');
+  bucket.roleOrder = order;
+
+  var total = melee + medic + (archer > 0 ? archer : 0);
+  bucket.minReady = total > 0 ? total : 1;
+
+  return desired;
+}
+
+function selectNextSquadRole(bucket, desired, counts) {
+  var order = (bucket && bucket.roleOrder && bucket.roleOrder.length)
+    ? bucket.roleOrder
+    : ['CombatMelee', 'CombatArcher', 'CombatMedic'];
+  for (var i = 0; i < order.length; i++) {
+    var role = order[i];
+    var need = desired[role] || 0;
+    if (need <= 0) continue;
+    var have = counts[role] || 0;
+    if (have < need) {
+      return role;
+    }
+  }
+  return null;
+}
+
+function buildSquadSpawnPlans(cache) {
+  var plansByHome = Object.create(null);
+  if (!SquadFlagManager || typeof SquadFlagManager.getActiveSquads !== 'function') {
+    return plansByHome;
+  }
+
+  var roomsOwned = (cache && cache.roomsOwned) || [];
+  var active = SquadFlagManager.getActiveSquads({ ownedRooms: roomsOwned }) || [];
+
+  for (var i = 0; i < active.length; i++) {
+    var intel = active[i];
+    if (!intel) continue;
+    var id = intel.squadId || 'Alpha';
+    var bucket = ensureSquadMemoryRecord(id);
+    if (intel.rallyPos) {
+      bucket.rally = { x: intel.rallyPos.x, y: intel.rallyPos.y, roomName: intel.rallyPos.roomName };
+    }
+    if (intel.targetRoom) {
+      bucket.targetRoom = intel.targetRoom;
+    }
+    bucket.home = chooseHomeRoom(intel.targetRoom, roomsOwned, bucket.home || intel.homeRoom);
+
+    var desired = deriveSquadDesiredRoles(intel, bucket);
+    var census = gatherSquadCensus(id);
+    var nextRole = selectNextSquadRole(bucket, desired, census.counts);
+
+    var totalNeeded = 0;
+    var key;
+    for (key in desired) {
+      if (!BeeToolbox.hasOwn(desired, key)) continue;
+      totalNeeded += desired[key] || 0;
+    }
+    if (totalNeeded > 0) {
+      bucket.minReady = totalNeeded;
+    }
+
+    if (!nextRole) {
+      continue;
+    }
+
+    var home = bucket.home || chooseHomeRoom(intel.targetRoom, roomsOwned, null);
+    if (!home && roomsOwned.length) {
+      home = roomsOwned[0].name;
+    }
+    if (!home) {
+      continue;
+    }
+
+    if (!plansByHome[home]) {
+      plansByHome[home] = [];
+    }
+    plansByHome[home].push({
+      squadId: id,
+      role: nextRole,
+      homeRoom: home,
+      targetRoom: intel.targetRoom,
+      threatScore: intel.threatScore || 0,
+      details: intel.details || null,
+      desired: desired,
+      counts: census.counts,
+      totalNeeded: totalNeeded,
+      rallyPos: intel.rallyPos
+    });
+  }
+
+  for (var homeRoom in plansByHome) {
+    if (!BeeToolbox.hasOwn(plansByHome, homeRoom)) continue;
+    plansByHome[homeRoom].sort(function (a, b) {
+      return (b.threatScore || 0) - (a.threatScore || 0);
+    });
+  }
+
+  return plansByHome;
+}
+
+function trySpawnSquadMember(spawner, plan) {
+  if (!spawner || !plan) {
+    return 'failed';
+  }
+  var room = spawner.room;
+  if (!room) {
+    return 'failed';
+  }
+
+  var available = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
+    ? spawnLogic.Calculate_Spawn_Resource(spawner)
+    : (room.energyAvailable || 0);
+  var body = (spawnLogic && typeof spawnLogic.getBodyForTask === 'function')
+    ? spawnLogic.getBodyForTask(plan.role, available)
+    : [];
+  var cost = calculateBodyCost(body);
+
+  if (!body.length || cost > available) {
+    return 'waiting';
+  }
+
+  if (Game.cpu && Game.cpu.bucket != null && Game.cpu.bucket < 500) {
+    return 'waiting';
+  }
+
+  if (!spawnLogic || typeof spawnLogic.Generate_Creep_Name !== 'function') {
+    return 'failed';
+  }
+
+  var name = spawnLogic.Generate_Creep_Name(plan.role);
+  if (!name) {
+    return 'failed';
+  }
+
+  var homeRoom = plan.homeRoom || room.name;
+  var memory = {
+    role: 'squad',
+    squadRole: plan.role,
+    squadId: plan.squadId,
+    task: plan.role,
+    home: homeRoom,
+    state: 'rally',
+    targetRoom: plan.targetRoom,
+    bornTask: plan.role,
+    birthBody: body.slice()
+  };
+
+  var result = spawner.spawnCreep(body, name, { memory: memory });
+  if (result === OK) {
+    var bucket = ensureSquadMemoryRecord(plan.squadId);
+    bucket.home = homeRoom;
+    bucket.lastSpawnTick = Game.time;
+    bucket.lastSpawnRole = plan.role;
+    if (plan.totalNeeded > 0) {
+      bucket.minReady = plan.totalNeeded;
+    }
+    hiveLog.info('🛡️[Squad ' + plan.squadId + '] Spawning ' + plan.role + ' @ RCL' + ((room.controller && room.controller.level) || 0) + ' (cost ~' + cost + ')');
+    return 'spawned';
+  }
+
+  if (result === ERR_NOT_ENOUGH_ENERGY) {
+    return 'waiting';
+  }
+
+  return 'failed';
+}
+
 function logBuilderSpawnBlock(spawner, room, builderSites, reason, available, capacity, builderFailLog) {
   if (!room || builderSites <= 0) {
     return;
@@ -565,6 +855,7 @@ var BeeHiveMind = {
   assignTask: function (creep) {
     if (!creep || !creep.memory) return;
     if (creep.memory.task) return;
+    if (creep.memory.role === 'squad') return;
     var defaultTask = defaultTaskForRole(creep.memory.role);
     if (defaultTask) {
       creep.memory.task = defaultTask;
@@ -584,6 +875,8 @@ var BeeHiveMind = {
     var lunaCountsByHome = cloneCounts(cache.lunaCountsByHome);
     var spawns = cache.spawns || [];
     var builderFailLog = GLOBAL_CACHE.builderFailLog || (GLOBAL_CACHE.builderFailLog = Object.create(null));
+    var squadPlansByRoom = buildSquadSpawnPlans(cache);
+    var roomSpawned = Object.create(null);
     var defaultTaskOrder = [
       'queen',
       'baseharvest',
@@ -606,12 +899,12 @@ var BeeHiveMind = {
       var spawner = spawns[i];
       if (!spawner) continue;
 
-      if (typeof spawnLogic.Spawn_Squad === 'function') {
-        // Squad spawning left disabled by default; enable when configured externally.
-      }
-
       var room = spawner.room;
       if (!room) continue;
+
+      if (roomSpawned[room.name]) {
+        continue;
+      }
 
       var builderSites = needBuilder(room, cache);
       var builderLimit = builderSites > 0 ? 1 : 0;
@@ -625,6 +918,29 @@ var BeeHiveMind = {
         if (builderLimit > 0) {
           logBuilderSpawnBlock(spawner, room, builderSites, 'SPAWN_BUSY', spawnResource, spawnCapacity, builderFailLog);
         }
+        continue;
+      }
+
+      var planQueue = squadPlansByRoom[room.name];
+      if (!planQueue) {
+        planQueue = [];
+        squadPlansByRoom[room.name] = planQueue;
+      }
+
+      if (!roomSpawned[room.name] && planQueue.length) {
+        var planOutcome = trySpawnSquadMember(spawner, planQueue[0]);
+        if (planOutcome === 'spawned') {
+          planQueue.shift();
+          roomSpawned[room.name] = true;
+          continue;
+        }
+        if (planOutcome === 'waiting') {
+          roomSpawned[room.name] = true;
+          continue;
+        }
+      }
+
+      if (roomSpawned[room.name]) {
         continue;
       }
 
@@ -710,6 +1026,7 @@ var BeeHiveMind = {
           if (task === 'luna') {
             lunaCountsByHome[room.name] = (lunaCountsByHome[room.name] || 0) + 1;
           }
+          roomSpawned[room.name] = true;
           break;
         }
       }

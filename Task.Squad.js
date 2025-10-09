@@ -18,6 +18,7 @@ var TaskSquad = (function () {
   var TARGET_STICKY_TICKS = 12; // how long to keep a chosen target before re-eval
   var RALLY_FLAG_PREFIX   = 'Squad'; // e.g. "SquadAlpha", "Squad_Beta"
   var MAX_TARGET_RANGE    = 30;
+  var MEMBER_STALE_TICKS  = 50;
 
   // Target scoring
   var HEALER_WEIGHT = -500, RANGED_WEIGHT = -260, MELEE_WEIGHT = -140, HURT_WEIGHT = -160, TOUGH_PENALTY = +25;
@@ -109,13 +110,57 @@ var TaskSquad = (function () {
   function _ensureSquadBucket(id) {
     if (!Memory.squads) Memory.squads = {};
     if (!Memory.squads[id]) Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
-    return Memory.squads[id];
+    var bucket = Memory.squads[id];
+    if (!bucket.members) bucket.members = {};
+    if (!bucket.desiredRoles) bucket.desiredRoles = {};
+    if (!bucket.roleOrder || !bucket.roleOrder.length) bucket.roleOrder = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
+    if (!bucket.minReady || bucket.minReady < 1) bucket.minReady = 1;
+    return bucket;
   }
 
   function _rallyFlagFor(id) {
     return Game.flags[RALLY_FLAG_PREFIX + id] ||
            Game.flags[RALLY_FLAG_PREFIX + '_' + id] ||
            Game.flags[id] || null;
+  }
+
+  function _cleanupMembers(bucket) {
+    if (!bucket || !bucket.members) return;
+    for (var name in bucket.members) {
+      if (!BeeToolbox || !BeeToolbox.hasOwn(bucket.members, name)) continue;
+      var rec = bucket.members[name];
+      if (!rec) {
+        delete bucket.members[name];
+        continue;
+      }
+      if (!Game.creeps[name]) {
+        delete bucket.members[name];
+        continue;
+      }
+      if (rec.updated && Game.time - rec.updated > MEMBER_STALE_TICKS) {
+        var c = Game.creeps[name];
+        if (c && c.my) {
+          rec.updated = Game.time;
+        } else {
+          delete bucket.members[name];
+        }
+      }
+    }
+  }
+
+  function getRallyPos(squadId) {
+    var id = squadId || 'Alpha';
+    var bucket = _ensureSquadBucket(id);
+    var rally = bucket && bucket.rally;
+    if (rally && rally.roomName != null) {
+      return new RoomPosition(rally.x, rally.y, rally.roomName);
+    }
+    var flag = _rallyFlagFor(id);
+    if (flag) {
+      bucket.rally = { x: flag.pos.x, y: flag.pos.y, roomName: flag.pos.roomName };
+      return flag.pos;
+    }
+    return null;
   }
 
   function _isGood(obj) { return obj && obj.hits != null && obj.hits > 0 && obj.pos && obj.pos.roomName; }
@@ -166,8 +211,13 @@ var TaskSquad = (function () {
   }
 
   function getAnchor(creep) {
-    var id = getSquadId(creep), S = _ensureSquadBucket(id), f = _rallyFlagFor(id);
-    if (f) { S.anchor = { x: f.pos.x, y: f.pos.y, room: f.pos.roomName }; S.anchorAt = Game.time; return f.pos; }
+    var id = getSquadId(creep), S = _ensureSquadBucket(id);
+    var rally = getRallyPos(id);
+    if (rally) {
+      S.anchor = { x: rally.x, y: rally.y, room: rally.roomName };
+      S.anchorAt = Game.time;
+      return rally;
+    }
 
     // Fallback: the first melee in squad, else any member
     var names = Object.keys(Game.creeps).sort(), leader = null, i, c;
@@ -344,13 +394,99 @@ var TaskSquad = (function () {
     if (bestDir) creep.move(bestDir);
   }
 
+  function registerMember(squadId, creepName, role, opts) {
+    var id = squadId || 'Alpha';
+    var bucket = _ensureSquadBucket(id);
+    if (!creepName) return;
+
+    _cleanupMembers(bucket);
+
+    var entry = bucket.members[creepName];
+    if (!entry) {
+      entry = bucket.members[creepName] = { role: role || 'unknown', rallied: false };
+    }
+    if (role) entry.role = role;
+    entry.updated = Game.time;
+
+    var rallyPos = null;
+    if (opts && opts.rallyPos) {
+      rallyPos = opts.rallyPos;
+    } else if (opts && opts.creep) {
+      rallyPos = getRallyPos(id);
+    }
+    if (rallyPos && (!bucket.rally || bucket.rally.x !== rallyPos.x || bucket.rally.y !== rallyPos.y || bucket.rally.roomName !== rallyPos.roomName)) {
+      bucket.rally = { x: rallyPos.x, y: rallyPos.y, roomName: rallyPos.roomName };
+    }
+
+    var rallied = false;
+    if (opts) {
+      if (typeof opts.rallied === 'boolean') {
+        rallied = opts.rallied;
+      } else if (opts.creep && rallyPos) {
+        rallied = opts.creep.pos && opts.creep.pos.inRangeTo(rallyPos, 1);
+      }
+    }
+
+    if (rallied) {
+      entry.rallied = true;
+      entry.ralliedAt = Game.time;
+    }
+  }
+
+  function isReady(squadId) {
+    var id = squadId || 'Alpha';
+    var bucket = _ensureSquadBucket(id);
+    _cleanupMembers(bucket);
+
+    var desired = bucket.desiredRoles || {};
+    var counts = {};
+    var totalRallied = 0;
+
+    for (var name in bucket.members) {
+      if (!BeeToolbox || !BeeToolbox.hasOwn(bucket.members, name)) continue;
+      var rec = bucket.members[name];
+      if (!rec) continue;
+      var live = Game.creeps[name];
+      if (!live || !live.my) continue;
+      var role = rec.role || (live.memory && (live.memory.squadRole || live.memory.task)) || 'unknown';
+      if (rec.rallied) {
+        counts[role] = (counts[role] || 0) + 1;
+        totalRallied += 1;
+      }
+    }
+
+    var totalNeeded = 0;
+    var allMet = true;
+    for (var key in desired) {
+      if (!BeeToolbox || !BeeToolbox.hasOwn(desired, key)) continue;
+      var need = desired[key] | 0;
+      if (need <= 0) continue;
+      totalNeeded += need;
+      if ((counts[key] || 0) < need) {
+        allMet = false;
+      }
+    }
+
+    if (allMet && totalNeeded > 0) {
+      return true;
+    }
+
+    var threshold = bucket.minReady || 1;
+    if (threshold < 1) threshold = 1;
+    return totalRallied >= threshold;
+  }
+
   // -----------------------------
   // Public API
   // -----------------------------
-  API.getSquadId   = getSquadId;
-  API.sharedTarget = sharedTarget;
-  API.getAnchor    = getAnchor;
-  API.stepToward   = stepToward;
+  API.getSquadId     = getSquadId;
+  API.sharedTarget   = sharedTarget;
+  API.getAnchor      = getAnchor;
+  API.getRallyPos    = getRallyPos;
+  API.stepToward     = stepToward;
+  API.politelyYieldFor = _politelyYieldFor;
+  API.registerMember = registerMember;
+  API.isReady        = isReady;
 
   return API;
 })();

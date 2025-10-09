@@ -5,6 +5,8 @@
 
 'use strict';
 
+var BeeToolbox = require('BeeToolbox');
+
 var SquadFlagManager = (function () {
 
   // ------------- Config -------------
@@ -88,19 +90,28 @@ var SquadFlagManager = (function () {
 
   // Compute threat score + a representative position (anchor)
   function _scoreRoom(room) {
-    if (!room) return { score: 0, pos: null };
+    if (!room) return { score: 0, pos: null, details: null };
 
     var s = 0;
     var pos = null;
 
     var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
     var i, invCount = 0, otherCount = 0;
+    var hasRanged = false;
+    var hasAttack = false;
+    var hasHeal = false;
 
     for (i = 0; i < hostiles.length; i++) {
       var h = hostiles[i];
       var inv = (h.owner && h.owner.username === 'Invader');
       if (inv) invCount++;
       else if (CFG.includeNonInvaderHostiles) otherCount++;
+
+      if (h.getActiveBodyparts) {
+        if (h.getActiveBodyparts(RANGED_ATTACK) > 0) hasRanged = true;
+        if (h.getActiveBodyparts(ATTACK) > 0 || h.getActiveBodyparts(WORK) > 0) hasAttack = true;
+        if (h.getActiveBodyparts(HEAL) > 0) hasHeal = true;
+      }
     }
 
     if (invCount > 0) {
@@ -116,26 +127,40 @@ var SquadFlagManager = (function () {
       if (!pos && hostiles.length) pos = hostiles[0].pos;
     }
 
-    var cores = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_INVADER_CORE; } }) || [];
-    if (cores.length) {
-      s += CFG.score.invaderCore;
-      if (!pos) pos = cores[0].pos;
-    }
-
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_TOWER; } }) || [];
-    if (towers.length) {
-      s += towers.length * CFG.score.hostileTower;
-      if (!pos) pos = towers[0].pos;
-    }
-
-    var spawns = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_SPAWN; } }) || [];
-    if (spawns.length) {
-      s += spawns.length * CFG.score.hostileSpawn;
-      if (!pos) pos = spawns[0].pos;
+    var structures = room.find(FIND_HOSTILE_STRUCTURES) || [];
+    var hasHostileTower = false;
+    var hasHostileSpawn = false;
+    for (i = 0; i < structures.length; i++) {
+      var st = structures[i];
+      if (st.structureType === STRUCTURE_INVADER_CORE) {
+        s += CFG.score.invaderCore;
+        if (!pos) pos = st.pos;
+        continue;
+      }
+      if (st.structureType === STRUCTURE_TOWER) {
+        hasHostileTower = true;
+        s += CFG.score.hostileTower;
+        if (!pos) pos = st.pos;
+      } else if (st.structureType === STRUCTURE_SPAWN) {
+        hasHostileSpawn = true;
+        s += CFG.score.hostileSpawn;
+        if (!pos) pos = st.pos;
+      }
     }
 
     if (!pos) pos = new RoomPosition(25, 25, room.name);
-    return { score: s, pos: pos };
+    return {
+      score: s,
+      pos: pos,
+      details: {
+        hasRanged: hasRanged,
+        hasAttack: hasAttack,
+        hasHeal: hasHeal,
+        hasHostileTower: hasHostileTower,
+        hasHostileSpawn: hasHostileSpawn,
+        hostileCount: hostiles.length
+      }
+    };
   }
 
   // Ensure a flag is at a position (idempotent, slight nudge if tile blocked)
@@ -184,10 +209,13 @@ var SquadFlagManager = (function () {
       if ((tick + _roomHashMod(rn, 4)) % (CFG.scanModulo || 1)) continue; // stagger
 
       var info = _scoreRoom(room);
-      var rec = mem.rooms[rn] || (mem.rooms[rn] = { lastSeen: 0, lastThreatAt: 0, lastPos: null, lastScore: 0 });
+      var rec = mem.rooms[rn] || (mem.rooms[rn] = { lastSeen: 0, lastThreatAt: 0, lastPos: null, lastScore: 0, lastDetails: null });
 
       rec.lastSeen = tick;
       rec.lastScore = info.score | 0;
+      if (info.details) {
+        rec.lastDetails = info.details;
+      }
       if (info.score >= CFG.minThreatScore) {
         rec.lastThreatAt = tick;
         rec.lastPos = { x: info.pos.x, y: info.pos.y, roomName: info.pos.roomName };
@@ -300,8 +328,92 @@ var SquadFlagManager = (function () {
     }
   }
 
+  function _deriveSquadId(flagName) {
+    if (!flagName) return 'Alpha';
+    var base = flagName;
+    if (base.indexOf('Squad_') === 0) base = base.substr(6);
+    else if (base.indexOf('Squad') === 0) base = base.substr(5);
+    if (!base) base = flagName;
+    return base;
+  }
+
+  function _positionFromRecord(rec, roomName) {
+    if (rec && rec.lastPos && BeeToolbox && BeeToolbox.isValidRoomName(rec.lastPos.roomName)) {
+      return new RoomPosition(rec.lastPos.x, rec.lastPos.y, rec.lastPos.roomName);
+    }
+    if (BeeToolbox && BeeToolbox.isValidRoomName(roomName)) {
+      return new RoomPosition(25, 25, roomName);
+    }
+    return null;
+  }
+
+  function _pickHomeRoom(targetRoom, ownedRooms, currentHome) {
+    if (currentHome && Game.rooms[currentHome] && Game.rooms[currentHome].controller && Game.rooms[currentHome].controller.my) {
+      return currentHome;
+    }
+    if (!ownedRooms || !ownedRooms.length) return currentHome || null;
+    var best = null;
+    var bestDist = Infinity;
+    for (var i = 0; i < ownedRooms.length; i++) {
+      var room = ownedRooms[i];
+      if (!room || !room.controller || !room.controller.my) continue;
+      var dist = BeeToolbox.safeLinearDistance(room.name, targetRoom, true);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = room.name;
+      }
+    }
+    return best || currentHome || null;
+  }
+
+  function getActiveSquads(options) {
+    var mem = _mem();
+    var ownedRooms = (options && options.ownedRooms) || [];
+    var out = [];
+
+    if (!Memory.squads) Memory.squads = {};
+
+    for (var nameIdx = 0; nameIdx < CFG.names.length; nameIdx++) {
+      var fname = CFG.names[nameIdx];
+      var boundRoom = mem.bindings[fname];
+      if (!boundRoom) continue;
+
+      var squadId = _deriveSquadId(fname);
+      var bucket = Memory.squads[squadId];
+      if (!bucket) {
+        bucket = Memory.squads[squadId] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
+      }
+
+      var rec = mem.rooms[boundRoom];
+      var flag = Game.flags[fname];
+      var rallyPos = flag ? flag.pos : _positionFromRecord(rec, boundRoom);
+      if (rallyPos) {
+        bucket.rally = { x: rallyPos.x, y: rallyPos.y, roomName: rallyPos.roomName };
+      }
+      bucket.targetRoom = boundRoom;
+      bucket.home = _pickHomeRoom(boundRoom, ownedRooms, bucket.home);
+      bucket.lastIntelTick = Game.time;
+      bucket.lastIntelScore = rec && typeof rec.lastScore === 'number' ? rec.lastScore : 0;
+      bucket.lastIntelDetails = rec && rec.lastDetails ? rec.lastDetails : null;
+
+      out.push({
+        squadId: squadId,
+        flagName: fname,
+        targetRoom: boundRoom,
+        rallyPos: rallyPos,
+        threatScore: bucket.lastIntelScore || 0,
+        details: bucket.lastIntelDetails || null,
+        homeRoom: bucket.home,
+        flag: flag
+      });
+    }
+
+    return out;
+  }
+
   return {
-    ensureSquadFlags: ensureSquadFlags
+    ensureSquadFlags: ensureSquadFlags,
+    getActiveSquads: getActiveSquads
   };
 })();
 
