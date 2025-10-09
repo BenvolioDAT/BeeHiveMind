@@ -1,8 +1,3 @@
-// CHANGES:
-// - Adjusted spawn loop to stop breaking on failed attempts and improved builder prioritization per tick.
-// - Added builder spawn fallback coordination with diagnostics and cached body helpers.
-// - Maintained construction tracking utilities for logging and quota calculations.
-// - Refined builder demand calculations to only consider owned construction in home and remote rooms.
 
 "use strict";
 
@@ -61,14 +56,6 @@ var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE =
 
 var GLOBAL_CACHE = global.__BHM_CACHE || (global.__BHM_CACHE = { tick: -1 });
 
-/**
- * Shallow clone a task count dictionary into a fresh object.
- * @param {object} source Original count mapping.
- * @returns {object} Clone with the same numeric values.
- * @sideeffects None.
- * @cpu O(n) over keys.
- * @memory Allocates a new object storing primitive values.
- */
 function cloneCounts(source) {
   var result = Object.create(null);
   if (!source) return result;
@@ -79,13 +66,6 @@ function cloneCounts(source) {
   return result;
 }
 
-/**
- * Build and cache frequently used data for the current tick.
- * @returns {object} The shared cache object for this tick.
- * @sideeffects Populates global.__BHM_CACHE with per-tick state.
- * @cpu Moderate on first call per tick due to object scans.
- * @memory Keeps lightweight arrays and maps for reuse during the tick.
- */
 function prepareTickCaches() {
   var tick = Game.time | 0;
   var cache = GLOBAL_CACHE;
@@ -183,14 +163,6 @@ function prepareTickCaches() {
   return cache;
 }
 
-/**
- * Normalize remote room descriptors into an array of room name strings.
- * @param {*} input Source data describing remote rooms.
- * @returns {string[]} Array of remote room names without duplicates.
- * @sideeffects None.
- * @cpu O(n) over provided descriptors.
- * @memory Allocates arrays for normalized output.
- */
 function normalizeRemoteRooms(input) {
   var result = [];
   var seen = Object.create(null);
@@ -244,11 +216,6 @@ function normalizeRemoteRooms(input) {
   return result;
 }
 
-/**
- * Basic heuristic to detect Screeps room name strings.
- * @param {string} name Candidate value.
- * @returns {boolean} True when the string resembles a room name.
- */
 function looksLikeRoomName(name) {
   if (typeof name !== 'string') return false;
   if (name.length < 4) return false;
@@ -258,28 +225,11 @@ function looksLikeRoomName(name) {
   return true;
 }
 
-/**
- * Resolve a default task string for a creep role.
- * @param {string} role Role identifier stored on creep memory.
- * @returns {string|undefined} Default task name when one exists.
- * @sideeffects None.
- * @cpu O(1).
- * @memory None.
- */
 function defaultTaskForRole(role) {
   if (!role) return undefined;
   return ROLE_DEFAULT_TASK[role];
 }
 
-/**
- * Determine how many construction sites require builder attention.
- * @param {Room} room Owned room under evaluation.
- * @param {object} cache Per-tick cache data.
- * @returns {number} Count of construction sites in home and remotes.
- * @sideeffects None.
- * @cpu O(remotes) to inspect cached lists.
- * @memory Temporary counters only.
- */
 function needBuilder(room, cache) {
   if (!room) return 0;
   cache = cache || prepareTickCaches();
@@ -302,14 +252,6 @@ function needBuilder(room, cache) {
   return totalSites;
 }
 
-/**
- * Compute the total energy cost of a body definition.
- * @param {string[]} body Array of body part constants.
- * @returns {number} Aggregate energy cost for the body.
- * @sideeffects None.
- * @cpu O(parts) per evaluation.
- * @memory None.
- */
 function calculateBodyCost(body) {
   if (!body || !body.length) return 0;
   var cost = 0;
@@ -320,13 +262,6 @@ function calculateBodyCost(body) {
   return cost;
 }
 
-/**
- * Fetch cached builder body configurations from spawn logic.
- * @returns {Array} Array of builder body arrays.
- * @sideeffects Caches the configuration on the global cache for reuse.
- * @cpu Low; iterates exported configuration list once per reset.
- * @memory Stores references to configuration arrays.
- */
 function getBuilderBodyConfigs() {
   if (GLOBAL_CACHE.builderBodyConfigs) {
     return GLOBAL_CACHE.builderBodyConfigs;
@@ -349,15 +284,6 @@ function getBuilderBodyConfigs() {
   return result;
 }
 
-/**
- * Determine the failure reason when a builder cannot be spawned.
- * @param {number} available Current room energy available.
- * @param {number} capacity Room energy capacity available.
- * @returns {string} Diagnostic reason identifier.
- * @sideeffects None.
- * @cpu O(configs) for builder body inspection.
- * @memory None.
- */
 function determineBuilderFailureReason(available, capacity) {
   var configs = getBuilderBodyConfigs();
   if (!configs.length) {
@@ -697,15 +623,6 @@ function countSourcesInMemory(mem) {
   return 0;
 }
 
-/**
- * Compute how many luna (remote harvest) creeps a home room should spawn.
- * @param {Room} room Owned room dispatching remote harvesters.
- * @param {object} cache Per-tick cache data.
- * @returns {number} Target number of luna creeps for the room.
- * @sideeffects Reads Memory.remoteAssignments for active tasks.
- * @cpu Moderate depending on remote count.
- * @memory Temporary maps only.
- */
 function determineLunaQuota(room, cache) {
   if (!room) return 0;
 
@@ -773,13 +690,7 @@ function determineLunaQuota(room, cache) {
 }
 
 var BeeHiveMind = {
-  /**
-   * Main entry point executed each tick to coordinate the colony.
-   * @returns {void}
-   * @sideeffects Manages memory, creeps, spawns, planners, and trade routines.
-   * @cpu High but amortized via caches.
-   * @memory Writes to Memory and global cache structures.
-   */
+
   run: function () {
     this.initializeMemory();
     var cache = prepareTickCaches();
@@ -797,15 +708,6 @@ var BeeHiveMind = {
     }
   },
 
-  /**
-   * Execute per-room planning hooks for owned rooms.
-   * @param {Room} room Room to manage.
-   * @param {object} cache Per-tick cache data.
-   * @returns {void}
-   * @sideeffects May place construction sites or road plans.
-   * @cpu Moderate depending on planner work.
-   * @memory No additional persistent data.
-   */
   manageRoom: function (room, cache) {
     if (!room) return;
     if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
@@ -816,14 +718,6 @@ var BeeHiveMind = {
     }
   },
 
-  /**
-   * Run behavior logic for each cached creep.
-   * @param {object} cache Per-tick cache data.
-   * @returns {void}
-   * @sideeffects Issues creep actions and may log errors.
-   * @cpu High proportional to creep count.
-   * @memory No new persistent data.
-   */
   runCreeps: function (cache) {
     var creeps = cache.creeps || [];
     for (var i = 0; i < creeps.length; i++) {
@@ -844,14 +738,6 @@ var BeeHiveMind = {
     }
   },
 
-  /**
-   * Assign a default task to creeps lacking explicit orders.
-   * @param {Creep} creep Creep requiring a task assignment.
-   * @returns {void}
-   * @sideeffects Mutates creep.memory.task when empty.
-   * @cpu O(1).
-   * @memory None.
-   */
   assignTask: function (creep) {
     if (!creep || !creep.memory) return;
     if (creep.memory.task) return;
@@ -862,14 +748,6 @@ var BeeHiveMind = {
     }
   },
 
-  /**
-   * Spawn creeps based on task quotas for each spawn structure.
-   * @param {object} cache Per-tick cache data.
-   * @returns {void}
-   * @sideeffects Calls spawn logic modules to create creeps.
-   * @cpu Moderate depending on spawn count and quotas.
-   * @memory Updates count tracking maps during the tick.
-   */
   manageSpawns: function (cache) {
     var roleCounts = cloneCounts(cache.roleCounts);
     var lunaCountsByHome = cloneCounts(cache.lunaCountsByHome);
@@ -969,7 +847,7 @@ var BeeHiveMind = {
         baseharvest: 2,
         courier: 1,
         queen: 2,
-        upgrader: 1,
+        upgrader: 2,
         builder: builderLimit,
         repair: 0,
         luna: determineLunaQuota(room, cache),
