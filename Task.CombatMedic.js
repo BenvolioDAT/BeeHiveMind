@@ -16,7 +16,7 @@ var CONFIG = {
   fleePct: 0.35,
   stickiness: 25,          // ticks before re-evaluating buddy
   reusePath: 3,
-  maxRooms: 2,
+  maxRooms: 10,
   towerAvoidRadius: 20,
   maxMedicsPerTarget: 1,   // enforce per-buddy medic cap
   avoidMeleeRange: 2       // try to keep >=2 tiles from enemy melee

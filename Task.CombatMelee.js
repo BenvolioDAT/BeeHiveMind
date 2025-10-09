@@ -9,7 +9,7 @@ var CONFIG = {
   focusSticky: 15,
   fleeHpPct: 0.35,
   towerAvoidRadius: 20,
-  maxRooms: 2,
+  maxRooms: 10,
   reusePath: 10,
   maxOps: 2000,
   waitForMedic: false,
