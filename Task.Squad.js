@@ -175,10 +175,19 @@ var TaskSquad = (function () {
     return healer + ranged + melee + tough + hurt + dist;
   }
 
+  function _isNpcUsername(name) {
+    return !name || name === 'Invader' || name === 'Source Keeper';
+  }
+
   function _chooseRoomTarget(me) {
     var room = me.room; if (!room) return null;
 
-    var hostiles = room.find(FIND_HOSTILE_CREEPS);
+    var hostiles = room.find(FIND_HOSTILE_CREEPS, {
+      filter: function (h) {
+        var owner = h.owner && h.owner.username;
+        return _isNpcUsername(owner);
+      }
+    });
     if (hostiles && hostiles.length) {
       var scored = _.map(hostiles, function (h) { return { h: h, s: _scoreHostile(me, h) }; });
       var best = _.min(scored, 's');
@@ -186,11 +195,16 @@ var TaskSquad = (function () {
     }
 
     var key = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
+      var owner = s.owner && s.owner.username;
+      if (!_isNpcUsername(owner)) return false;
       return s.structureType === STRUCTURE_TOWER || s.structureType === STRUCTURE_SPAWN;
     }});
     if (key.length) return me.pos.findClosestByRange(key);
 
-    var others = room.find(FIND_HOSTILE_STRUCTURES);
+    var others = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
+      var owner = s.owner && s.owner.username;
+      return _isNpcUsername(owner);
+    }});
     if (others.length) return me.pos.findClosestByRange(others);
 
     return null;
