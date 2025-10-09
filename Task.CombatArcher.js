@@ -23,6 +23,30 @@ var TaskCombatArcher = {
   run: function (creep) {
     if (creep.spawning) return;
 
+    creep.memory = creep.memory || {};
+    var mem = creep.memory;
+    if (!mem.state) mem.state = 'rally';
+    var squadId = mem.squadId || TaskSquad.getSquadId(creep);
+    var squadRole = mem.squadRole || mem.task || 'CombatArcher';
+    var rallyPos = TaskSquad.getRallyPos(squadId) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
+    TaskSquad.registerMember(squadId, creep.name, squadRole, {
+      creep: creep,
+      rallyPos: rallyPos,
+      rallied: rallyPos ? creep.pos.inRangeTo(rallyPos, 1) : false
+    });
+
+    if (mem.state === 'rally') {
+      if (rallyPos && !creep.pos.inRangeTo(rallyPos, 1)) {
+        creep.travelTo(rallyPos, { range: 1, reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
+        return;
+      }
+      if (TaskSquad.isReady(squadId)) {
+        mem.state = 'engage';
+      } else {
+        return;
+      }
+    }
+
     // (0) Optional: wait for medic / rally
     if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
       var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);

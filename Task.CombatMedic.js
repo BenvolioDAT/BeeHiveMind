@@ -34,6 +34,34 @@ var TaskCombatMedic = {
     var canHeal = bodyHeal > 0;
     var healedThisTick = false; // cast at most once/tick
 
+    creep.memory = creep.memory || {};
+    var mem = creep.memory;
+    if (!mem.state) mem.state = 'rally';
+    var squadId = mem.squadId || TaskSquad.getSquadId(creep);
+    var squadRole = mem.squadRole || mem.task || 'CombatMedic';
+    var rallyPos = TaskSquad.getRallyPos(squadId) || TaskSquad.getAnchor(creep);
+    TaskSquad.registerMember(squadId, creep.name, squadRole, {
+      creep: creep,
+      rallyPos: rallyPos,
+      rallied: rallyPos ? creep.pos.inRangeTo(rallyPos, 1) : false
+    });
+
+    if (mem.state === 'rally') {
+      if (rallyPos && !creep.pos.inRangeTo(rallyPos, 1)) {
+        creep.travelTo(rallyPos, { range: 1, reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
+        return;
+      }
+      if (TaskSquad.isReady(squadId)) {
+        mem.state = 'engage';
+      } else {
+        if (!healedThisTick) {
+          var standby = BeeToolbox.findLowestInjuredAlly(creep.pos, CONFIG.triageRange);
+          if (BeeToolbox.tryHealTarget(creep, standby)) healedThisTick = true;
+        }
+        return;
+      }
+    }
+
     // ---------- 1) choose / refresh buddy ----------
     var buddy = Game.getObjectById(creep.memory.followTarget);
     var needNewBuddy = (!buddy || !buddy.my || buddy.hits <= 0);
