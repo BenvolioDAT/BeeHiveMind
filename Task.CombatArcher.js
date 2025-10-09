@@ -12,7 +12,7 @@ var CONFIG = {
   shuffleCooldown: 2,       // ticks to wait after any move before moving again
   fleeHpPct: 0.40,
   focusSticky: 15,
-  maxRooms: 2,
+  maxRooms: 10,
   reusePath: 10,
   maxOps: 2000,
   towerAvoidRadius: 20,
