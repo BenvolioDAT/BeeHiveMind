@@ -7,7 +7,7 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('Task.Squad');
+var TaskSquad  = require('./Task.Squad');
 
 var CONFIG = {
   followRange: 1,          // how close we try to stay to buddy
