@@ -1,9 +1,44 @@
 "use strict";
+
+/*
+ * Design Notes: Adaptive BaseHarvester Scaling
+ * ------------------------------------------------------------
+ * Base harvesters are now scaled using the room's energy capacity.
+ * Rooms step through predefined body tiers (small → medium → max)
+ * as extensions are added. Replacement creeps respect the target
+ * tier, preferring upgrades when the energy economy allows it and
+ * falling back to emergency spawns only when necessary to preserve
+ * uptime.
+ */
+
 // ---------- Logging ----------
 var Logger = require('core.logger');
 var BeeToolbox = require('BeeToolbox');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
+
+var HARVESTER_CFG = BeeToolbox && BeeToolbox.HARVESTER_CFG
+  ? BeeToolbox.HARVESTER_CFG
+  : { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
+
+function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
+  var cost = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    cost += BODYPART_COST[part] || 0;
+  }
+  return cost;
+}
+
+function countBodyParts(body, partType) {
+  if (!body || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    if (body[i] === partType) total++;
+  }
+  return total;
+}
 
 function repeatPart(target, part, count) {
   for (var i = 0; i < count; i++) {
@@ -80,11 +115,17 @@ function C(c, m) {
 var CONFIGS = {
   // Workers
   baseharvest: [
+    // ≥850 energy → full miner (6 WORK cap via HARVESTER_CFG)
     B(6,0,5),
+    // 800–849 energy → beefy workhorse, adds carry buffer for link/container handoff
     B(5,1,5),
+    // 650–799 energy → mid-tier miner with carry assist
     B(4,1,4),
+    // 500–649 energy → bridge tier while expanding extensions
     B(3,1,3),
+    // 350–499 energy → starter miner once extensions unlock
     B(2,1,2),
+    // <350 energy → emergency spawn (RCL1 bootstrap)
     B(1,1,1)
   ],
   courier: [
@@ -128,7 +169,9 @@ var CONFIGS = {
   ],
   upgrader: [
     // Larger bodies listed first so higher RCLs still prefer beefier creeps
-    B(4,1,5),
+    B(4,4,4),
+    B(4,3,4),
+    B(3,2,4),
     B(3,1,4),
     B(2,1,3),
     B(1,1,1)
@@ -208,12 +251,39 @@ var CONFIGS = {
 
   // Special
   Claimer: [
-    C(4,4),
-    C(3,3),
+    //C(4,4),
+    //C(3,3),
     C(2,2),
     C(1,1)
   ]
 };
+
+function cloneBodyArray(body) {
+  if (!body || !body.length) return [];
+  var out = [];
+  for (var i = 0; i < body.length; i++) {
+    out.push(body[i]);
+  }
+  return out;
+}
+
+function buildHarvesterTiers() {
+  var tiers = [];
+  var configs = CONFIGS.baseharvest || [];
+  for (var i = 0; i < configs.length; i++) {
+    var body = configs[i];
+    if (!body || !body.length) continue;
+    var workCount = countBodyParts(body, WORK);
+    if (HARVESTER_CFG && typeof HARVESTER_CFG.MAX_WORK === 'number' && workCount > HARVESTER_CFG.MAX_WORK) {
+      continue;
+    }
+    tiers.push({ body: cloneBodyArray(body), cost: calculateBodyCost(body), work: workCount });
+  }
+  tiers.sort(function (a, b) { return a.cost - b.cost; });
+  return tiers;
+}
+
+var HARVESTER_BODY_TIERS = buildHarvesterTiers();
 
 // ---------- Task Aliases (normalize user-facing names) ----------
 // This lets getBodyForTask('Trucker') resolve to courier configs, etc.
@@ -283,6 +353,41 @@ function Generate_Body_From_Config(taskKey, energyAvailable) {
   return [];
 }
 
+function getHarvesterBodyForEnergy(energyAvailable) {
+  if (!HARVESTER_BODY_TIERS.length) return [];
+  var best = null;
+  for (var i = 0; i < HARVESTER_BODY_TIERS.length; i++) {
+    var tier = HARVESTER_BODY_TIERS[i];
+    if (tier.cost <= energyAvailable) {
+      best = tier;
+    } else {
+      break;
+    }
+  }
+  return best ? cloneBodyArray(best.body) : [];
+}
+
+function getBestHarvesterBody(room) {
+  if (!HARVESTER_BODY_TIERS.length) return [];
+  var capacity = 0;
+  if (room && typeof room.energyCapacityAvailable === 'number') {
+    capacity = room.energyCapacityAvailable;
+  } else if (typeof room === 'number') {
+    capacity = room;
+  }
+  var best = null;
+  for (var i = 0; i < HARVESTER_BODY_TIERS.length; i++) {
+    var tier = HARVESTER_BODY_TIERS[i];
+    if (tier.cost <= capacity) {
+      best = tier;
+    } else {
+      break;
+    }
+  }
+  if (best) return cloneBodyArray(best.body);
+  return cloneBodyArray(HARVESTER_BODY_TIERS[0].body);
+}
+
 function Select_Builder_Body(capacityEnergy, availableEnergy) {
   var configs = CONFIGS.builder;
   if (!configs || !configs.length) return [];
@@ -325,7 +430,7 @@ function normalizeTask(task) {
 
 // ---------- Role-specific wrappers (kept for API compatibility) ----------
 function Generate_Courier_Body(e) { return Generate_Body_From_Config('courier', e); }
-function Generate_BaseHarvest_Body(e) { return Generate_Body_From_Config('baseharvest', e); }
+function Generate_BaseHarvest_Body(e) { return getHarvesterBodyForEnergy(e); }
 function Generate_Builder_Body(e) { return Generate_Body_From_Config('builder', e); }
 function Generate_Repair_Body(e) { return Generate_Body_From_Config('repair', e); }
 function Generate_Queen_Body(e) { return Generate_Body_From_Config('Queen', e); }
@@ -421,7 +526,11 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   var normalizedTask = normalizeTask(neededTask);
   var normalizedLower = normalizedTask ? String(normalizedTask).toLowerCase() : '';
   var body;
-  if (normalizedLower === 'builder') {
+  var overrideBody = (extraMemory && extraMemory._harvesterBodyOverride) ? extraMemory._harvesterBodyOverride : null;
+
+  if (overrideBody && overrideBody.length) {
+    body = cloneBodyArray(overrideBody);
+  } else if (normalizedLower === 'builder') {
     var capacity = 0;
     if (spawn && spawn.room) {
       capacity = spawn.room.energyCapacityAvailable || 0;
@@ -430,8 +539,14 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
       capacity = energy;
     }
     body = Select_Builder_Body(capacity, energy);
+  } else if (normalizedLower === 'baseharvest' && spawn && spawn.room) {
+    body = getBestHarvesterBody(spawn.room);
   } else {
     body = getBodyForTask(neededTask, energy);
+  }
+
+  if (extraMemory && extraMemory._harvesterBodyOverride) {
+    delete extraMemory._harvesterBodyOverride;
   }
 
   if (!body || !body.length) {
@@ -605,5 +720,6 @@ module.exports = {
 
   // existing helpers
   getBodyForTask: getBodyForTask,
+  getBestHarvesterBody: getBestHarvesterBody,
   Spawn_Worker_Bee: Spawn_Worker_Bee
 };

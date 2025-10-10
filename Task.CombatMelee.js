@@ -3,13 +3,13 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('Task.Squad');
+var TaskSquad  = require('./Task.Squad');
 
 var CONFIG = {
   focusSticky: 15,
   fleeHpPct: 0.35,
   towerAvoidRadius: 20,
-  maxRooms: 2,
+  maxRooms: 10,
   reusePath: 10,
   maxOps: 2000,
   waitForMedic: false,
@@ -20,6 +20,30 @@ var CONFIG = {
 var CombatMelee = {
   run: function (creep) {
     if (creep.spawning) return;
+
+    creep.memory = creep.memory || {};
+    var mem = creep.memory;
+    if (!mem.state) mem.state = 'rally';
+    var squadId = mem.squadId || TaskSquad.getSquadId(creep);
+    var squadRole = mem.squadRole || mem.task || 'CombatMelee';
+    var rallyPos = TaskSquad.getRallyPos(squadId) || TaskSquad.getAnchor(creep);
+    TaskSquad.registerMember(squadId, creep.name, squadRole, {
+      creep: creep,
+      rallyPos: rallyPos,
+      rallied: rallyPos ? creep.pos.inRangeTo(rallyPos, 1) : false
+    });
+
+    if (mem.state === 'rally') {
+      if (rallyPos && !creep.pos.inRangeTo(rallyPos, 1)) {
+        creep.travelTo(rallyPos, { range: 1, maxRooms: CONFIG.maxRooms, reusePath: 5 });
+        return;
+      }
+      if (TaskSquad.isReady(squadId)) {
+        mem.state = 'engage';
+      } else {
+        return;
+      }
+    }
 
     // (0) optional: wait for medic if you want tighter stack
     if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {

@@ -7,7 +7,7 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('Task.Squad');
+var TaskSquad  = require('./Task.Squad');
 
 var CONFIG = {
   followRange: 1,          // how close we try to stay to buddy
@@ -16,7 +16,7 @@ var CONFIG = {
   fleePct: 0.35,
   stickiness: 25,          // ticks before re-evaluating buddy
   reusePath: 3,
-  maxRooms: 2,
+  maxRooms: 10,
   towerAvoidRadius: 20,
   maxMedicsPerTarget: 1,   // enforce per-buddy medic cap
   avoidMeleeRange: 2       // try to keep >=2 tiles from enemy melee
@@ -33,6 +33,34 @@ var TaskCombatMedic = {
     var bodyHeal = creep.getActiveBodyparts(HEAL);
     var canHeal = bodyHeal > 0;
     var healedThisTick = false; // cast at most once/tick
+
+    creep.memory = creep.memory || {};
+    var mem = creep.memory;
+    if (!mem.state) mem.state = 'rally';
+    var squadId = mem.squadId || TaskSquad.getSquadId(creep);
+    var squadRole = mem.squadRole || mem.task || 'CombatMedic';
+    var rallyPos = TaskSquad.getRallyPos(squadId) || TaskSquad.getAnchor(creep);
+    TaskSquad.registerMember(squadId, creep.name, squadRole, {
+      creep: creep,
+      rallyPos: rallyPos,
+      rallied: rallyPos ? creep.pos.inRangeTo(rallyPos, 1) : false
+    });
+
+    if (mem.state === 'rally') {
+      if (rallyPos && !creep.pos.inRangeTo(rallyPos, 1)) {
+        creep.travelTo(rallyPos, { range: 1, reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
+        return;
+      }
+      if (TaskSquad.isReady(squadId)) {
+        mem.state = 'engage';
+      } else {
+        if (!healedThisTick) {
+          var standby = BeeToolbox.findLowestInjuredAlly(creep.pos, CONFIG.triageRange);
+          if (BeeToolbox.tryHealTarget(creep, standby)) healedThisTick = true;
+        }
+        return;
+      }
+    }
 
     // ---------- 1) choose / refresh buddy ----------
     var buddy = Game.getObjectById(creep.memory.followTarget);
