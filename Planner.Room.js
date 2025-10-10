@@ -1,14 +1,3 @@
-// Design Notes:
-// - RoomPlanner.plan(room) returns the authoritative blueprint for a room: hub anchor,
-//   stamped structure positions, planned road graph, and milestone checklists per RCL.
-// - ensureSites(room) consumes that plan and creates missing construction sites in
-//   deterministic priority order (critical milestones → containers → controller ring → roads → extras).
-// - The layout keeps a clear service spine around the hub with extension clusters placed
-//   symmetrically so roads form unobstructed corridors for Traveler-based pathing.
-// - All placement is idempotent: tiles are checked for existing structures/sites before
-//   creating new sites. Paths reuse RoadPlanner helpers so remote/home road graphs stay
-//   consistent. Re-running the planner never increases identical site counts.
-
 'use strict';
 
 var RoadPlanner = require('Planner.Road');

@@ -1,6 +1,3 @@
-// BeeToolbox.js — ES5-safe helpers shared across roles/tasks
-// NOTE: Compatible with Screeps runtime (no arrow funcs, no const/let, no includes, etc.)
-
 'use strict';
 
 var Traveler = require('Traveler');
@@ -53,9 +50,6 @@ IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_FACTORY] = true;
 IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LAB] = true;
 IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LINK] = true;
 
-// Interval (in ticks) before we rescan containers adjacent to sources.
-// Kept small enough to react to construction/destruction, but large enough
-// to avoid expensive FIND_STRUCTURES work every few ticks.
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
 
 var BeeToolbox = {
@@ -64,36 +58,15 @@ var BeeToolbox = {
   // 🧰 GENERIC HELPERS
   // ---------------------------------------------------------------------------
 
-  /**
-   * Determine if an object owns a property key without walking the prototype chain.
-   * @param {object} obj Potential owner of the key.
-   * @param {string} key Property name to inspect.
-   * @returns {boolean} True when the property exists directly on the object.
-   * @sideeffects None.
-   * @cpu O(1).
-   * @memory None beyond call stack.
-   */
   hasOwn: function (obj, key) {
     return !!(obj && Object.prototype.hasOwnProperty.call(obj, key));
   },
 
-  /**
-   * Determine if a string is a valid Screeps room name (e.g. W12N34).
-   * @param {string} name Candidate room name.
-   * @returns {boolean} True when the name matches the required pattern.
-   */
   isValidRoomName: function (name) {
     if (typeof name !== 'string') return false;
     return /^[WE]\d+[NS]\d+$/.test(name);
   },
 
-  /**
-   * Safely compute linear distance between rooms, guarding against invalid inputs.
-   * @param {string} a Origin room name.
-   * @param {string} b Destination room name.
-   * @param {boolean} allowInexact Optional Screeps flag to allow highway approximations.
-   * @returns {number} Distance or a high sentinel when names are invalid.
-   */
   safeLinearDistance: function (a, b, allowInexact) {
     if (!BeeToolbox.isValidRoomName(a) || !BeeToolbox.isValidRoomName(b)) {
       return 9999;
@@ -104,26 +77,10 @@ var BeeToolbox = {
     return Game.map.getRoomLinearDistance(a, b, allowInexact);
   },
 
-  /**
-   * Check whether a value behaves like an object (non-null, type object).
-   * @param {*} value Candidate value.
-   * @returns {boolean} True when the value is an object.
-   * @sideeffects None.
-   * @cpu O(1).
-   * @memory None beyond call stack.
-   */
   isObject: function (value) {
     return value !== null && typeof value === 'object';
   },
 
-  /**
-   * Evaluate if an object has no enumerable own properties.
-   * @param {object} obj Object to evaluate.
-   * @returns {boolean} True if the object is empty.
-   * @sideeffects None.
-   * @cpu O(n) over enumerable keys.
-   * @memory None beyond iteration variables.
-   */
   isEmptyObject: function (obj) {
     if (!BeeToolbox.isObject(obj)) return true;
     for (var key in obj) {
@@ -138,14 +95,6 @@ var BeeToolbox = {
   // 📒 SOURCE & CONTAINER INTEL
   // ---------------------------------------------------------------------------
 
-  /**
-   * Persist the list of energy sources within a room to room memory.
-   * @param {Room} room Screeps room to scan.
-   * @returns {void}
-   * @sideeffects Ensures Memory.rooms[room.name].sources exists and is populated.
-   * @cpu O(sources) on first scan, O(1) on subsequent ticks.
-   * @memory Stores source identifiers in persistent memory.
-   */
   logSourcesInRoom: function (room) {
     if (!room) return;
 
@@ -175,11 +124,6 @@ var BeeToolbox = {
     }
   },
 
-  /**
-   * Ensure a Memory.rooms entry exists for the requested room and return it.
-   * @param {string} roomName Screeps room name.
-   * @returns {?Object} Memory blob for the room (or null when name invalid).
-   */
   getRoomMemory: function (roomName) {
     if (!BeeToolbox.isValidRoomName(roomName)) return null;
     Memory.rooms = Memory.rooms || {};
@@ -187,10 +131,6 @@ var BeeToolbox = {
     return Memory.rooms[roomName];
   },
 
-  /**
-   * Cache and return the current player's username.
-   * @returns {string}
-   */
   getMyUsername: function () {
     if (_cachedUsername) return _cachedUsername;
     var name = null;
@@ -211,10 +151,6 @@ var BeeToolbox = {
     return _cachedUsername;
   },
 
-  /**
-   * Remove expired avoid markers for foreign ownership from room memory.
-   * @param {?Object} roomMem Memory blob for the room.
-   */
   cleanupRoomForeignAvoid: function (roomMem) {
     if (!roomMem) return;
     if (typeof roomMem._avoidOtherOwnerUntil === 'number' && roomMem._avoidOtherOwnerUntil <= Game.time) {
@@ -224,13 +160,6 @@ var BeeToolbox = {
     }
   },
 
-  /**
-   * Mark a room as temporarily avoided due to another player's presence.
-   * @param {?Object} roomMem Memory blob for the room.
-   * @param {?string} owner Username responsible for the avoid condition.
-   * @param {?string} reason Short reason token.
-   * @param {?number} ttl Optional TTL override in ticks.
-   */
   markRoomForeignAvoid: function (roomMem, owner, reason, ttl) {
     if (!roomMem) return;
     var expire = Game.time + (typeof ttl === 'number' ? ttl : DEFAULT_FOREIGN_AVOID_TTL);
@@ -239,13 +168,6 @@ var BeeToolbox = {
     roomMem._avoidOtherOwnerReason = reason || null;
   },
 
-  /**
-   * Determine if a room should be avoided due to foreign ownership or hostiles.
-   * @param {string} roomName Name of the room being evaluated.
-   * @param {?Room} roomObj Visible Room object (optional).
-   * @param {?Object} roomMem Memory blob for the room (optional).
-   * @returns {{avoid:boolean, owner:?string, reason:?string, memo?:boolean}}
-   */
   detectForeignPresence: function (roomName, roomObj, roomMem) {
     var mem = roomMem;
     if (!mem) mem = BeeToolbox.getRoomMemory(roomName);
@@ -310,14 +232,6 @@ var BeeToolbox = {
     return { avoid: false };
   },
 
-  /**
-   * Track containers adjacent to energy sources within the room.
-   * @param {Room} room Screeps room to inspect.
-   * @returns {void}
-   * @sideeffects Updates Memory.rooms[room.name].sourceContainers with container IDs.
-   * @cpu Moderate when scans execute due to FIND_STRUCTURES, otherwise minimal.
-   * @memory Persists container assignments and scan timestamps.
-   */
   logSourceContainersInRoom: function (room) {
     if (!room) return;
     if (!Memory.rooms) Memory.rooms = {};
@@ -369,14 +283,6 @@ var BeeToolbox = {
     scanState.lastKnownCount = containers.length;
   },
 
-  /**
-   * Reserve an unassigned source container for a courier creep.
-   * @param {Creep} creep Courier creep requesting a container.
-   * @returns {void}
-   * @sideeffects Writes creep.memory.assignedContainer and updates Memory.rooms[targetRoom].sourceContainers.
-   * @cpu Iterates over stored container map; low overhead.
-   * @memory No additional persistent memory allocations beyond assignment strings.
-   */
   assignContainerFromMemory: function (creep) {
     if (!creep || creep.memory.assignedContainer) return;
 
@@ -400,14 +306,6 @@ var BeeToolbox = {
     }
   },
 
-  /**
-   * Flag a room as hostile when an invader core is detected.
-   * @param {Room} room Room to analyze.
-   * @returns {void}
-   * @sideeffects Sets Memory.rooms[room.name].hostile when a core is present.
-   * @cpu Low due to targeted FIND_HOSTILE_STRUCTURES query.
-   * @memory Minimal; only stores a boolean flag.
-   */
   logHostileStructures: function (room) {
     if (!room) return;
     var invaderCore = room.find(FIND_HOSTILE_STRUCTURES, {
@@ -427,14 +325,6 @@ var BeeToolbox = {
   // 🔁 SIMPLE STATE HELPERS
   // ---------------------------------------------------------------------------
 
-  /**
-   * Flip a creep's returning flag based on carried energy.
-   * @param {Creep} creep Worker creep to update.
-   * @returns {void}
-   * @sideeffects Mutates creep.memory.returning.
-   * @cpu O(1).
-   * @memory No new allocations.
-   */
   updateReturnState: function (creep) {
     if (!creep) return;
     if (creep.memory.returning && creep.store[RESOURCE_ENERGY] === 0) {
@@ -445,15 +335,6 @@ var BeeToolbox = {
     }
   },
 
-  /**
-   * Discover nearby rooms that already have source intel recorded in memory.
-   * @param {string} roomName Origin room name.
-   * @param {number} range Manhattan radius to inspect.
-   * @returns {string[]} Array of neighboring room names with known sources.
-   * @sideeffects None.
-   * @cpu O(range^2) string work.
-   * @memory Allocates a transient array of room names.
-   */
   getNearbyRoomsWithSources: function (roomName, range) {
     range = (typeof range === 'number') ? range : 1;
     if (!roomName) return [];
@@ -492,13 +373,6 @@ var BeeToolbox = {
   // ⚡ ENERGY GATHER & DELIVERY
   // ---------------------------------------------------------------------------
 
-  /**
-   * Prepare a per-tick global energy target cache structure.
-   * @returns {object|null} Cache bucket stored on global or a fresh object when global unavailable.
-   * @sideeffects Mutates global.__energyTargets each tick.
-   * @cpu O(1).
-   * @memory Keeps lightweight cache per room each tick.
-   */
   _ensureGlobalEnergyCache: function () {
     if (typeof global === 'undefined') return null;
     if (!global.__energyTargets || global.__energyTargets.tick !== Game.time) {
@@ -510,14 +384,6 @@ var BeeToolbox = {
     return global.__energyTargets;
   },
 
-  /**
-   * Build a list of energy-bearing objects within a room.
-   * @param {Room} room Room to analyze.
-   * @returns {object} Cache with arrays of object IDs keyed by energy source type.
-   * @sideeffects None beyond returned structure.
-   * @cpu Moderate due to multiple FIND queries.
-   * @memory Allocates arrays of identifiers.
-   */
   _buildEnergyCacheForRoom: function (room) {
     var cache = { ruins: [], tombstones: [], dropped: [], containers: [] };
     if (!room) return cache;
@@ -555,14 +421,6 @@ var BeeToolbox = {
     return cache;
   },
 
-  /**
-   * Fetch the cached energy lookup for a room, rebuilding when missing.
-   * @param {Room} room Room of interest.
-   * @returns {object} Energy cache entry.
-   * @sideeffects May update global cache.
-   * @cpu Low when cache exists; moderate when rebuilding.
-   * @memory Reuses cached arrays.
-   */
   _getRoomEnergyCache: function (room) {
     if (!room) return { ruins: [], tombstones: [], dropped: [], containers: [] };
     var globalCache = BeeToolbox._ensureGlobalEnergyCache();
@@ -578,14 +436,6 @@ var BeeToolbox = {
     return roomCache;
   },
 
-  /**
-   * Force a rebuild of the room energy cache.
-   * @param {Room} room Room to refresh.
-   * @returns {object} Newly built cache.
-   * @sideeffects Replaces cache entry for the room.
-   * @cpu Moderate due to repeated FIND calls.
-   * @memory Reallocates arrays for the refreshed cache.
-   */
   _refreshRoomEnergyCache: function (room) {
     if (!room) return { ruins: [], tombstones: [], dropped: [], containers: [] };
     var globalCache = BeeToolbox._ensureGlobalEnergyCache();
@@ -596,16 +446,6 @@ var BeeToolbox = {
     return newCache;
   },
 
-  /**
-   * Retrieve live energy targets from cache while validating availability.
-   * @param {Room} room Room of interest.
-   * @param {string} key Cache key (ruins, tombstones, dropped, containers).
-   * @param {function} validator Callback verifying objects still hold energy.
-   * @returns {Array} Array of Screeps objects ready for interaction.
-   * @sideeffects Updates cached ID lists to reflect validity.
-   * @cpu Low when cache entries valid; moderate when rebuild required.
-   * @memory No additional persistent use; temporary arrays only.
-   */
   _getEnergyTargetsFromCache: function (room, key, validator) {
     var cache = BeeToolbox._getRoomEnergyCache(room);
     var ids = cache[key] || [];
@@ -642,14 +482,6 @@ var BeeToolbox = {
     return valid;
   },
   
-  /**
-   * Pull energy from prioritized cached targets for a creep.
-   * @param {Creep} creep Worker creep to refuel.
-   * @returns {void}
-   * @sideeffects Initiates movement and pickup/withdraw actions; may refresh caches.
-   * @cpu Moderate depending on pathfinding and cache refreshes.
-   * @memory Uses cached ID arrays; no persistent allocation.
-   */
   collectEnergy: function (creep) {
     if (!creep) return;
 
@@ -704,15 +536,6 @@ var BeeToolbox = {
     }
   },
 
-  /**
-   * Transfer carried energy to the highest priority target structure.
-   * @param {Creep} creep Worker creep delivering energy.
-   * @param {string[]} structureTypes Array of acceptable structure type constants.
-   * @returns {number} Screeps return code indicating action status.
-   * @sideeffects Issues transfer or move orders.
-   * @cpu Moderate due to filtering and pathfinding.
-   * @memory No new persistent data.
-   */
   deliverEnergy: function (creep, structureTypes) {
     if (!creep) return ERR_INVALID_TARGET;
     structureTypes = structureTypes || [];
@@ -766,16 +589,6 @@ var BeeToolbox = {
     return ERR_NOT_FOUND;
   },
 
-  // Ensure a CONTAINER exists 0–1 tiles from targetSource; place site if missing
-  /**
-   * Guarantee a container is built adjacent to a harvesting source.
-   * @param {Creep} creep Builder or worker creep executing the task.
-   * @param {Source} targetSource Source requiring container support.
-   * @returns {void}
-   * @sideeffects May create construction sites or issue build orders.
-   * @cpu Moderate when scanning terrain and creating sites.
-   * @memory No persistent data beyond possible construction site objects.
-   */
   ensureContainerNearSource: function (creep, targetSource) {
     if (!creep || !targetSource) return;
 
@@ -822,15 +635,6 @@ var BeeToolbox = {
   // 🎯 TARGET SELECTION (COMBAT)
   // ---------------------------------------------------------------------------
 
-  // Priorities: hostiles → invader core → prio structures → other structures → (no walls/ramparts unless blocking)
-  /**
-   * Choose the highest priority hostile target for an offensive creep.
-   * @param {Creep} creep Attacking creep seeking a target.
-   * @returns {Structure|Creep|null} Target object or null if none found.
-   * @sideeffects None beyond computation.
-   * @cpu Moderate due to multiple FIND queries.
-   * @memory Temporary arrays only.
-   */
   findAttackTarget: function (creep) {
     if (!creep) return null;
 
@@ -896,15 +700,6 @@ var BeeToolbox = {
     return null;
   },
 
-  // Should an attacker pause to let its medic catch up?
-  /**
-   * Decide if an attacker should pause to let its assigned medic close distance.
-   * @param {Creep} attacker Combat creep potentially waiting.
-   * @returns {boolean} True when the unit should wait.
-   * @sideeffects Mutates attacker.memory.waitTicks and may trigger move orders.
-   * @cpu Low.
-   * @memory Uses existing creep memory fields only.
-   */
   shouldWaitForMedic: function (attacker) {
     if (!attacker) return false;
 
@@ -941,15 +736,6 @@ var BeeToolbox = {
   // 🛡️ COMBAT HELPERS
   // ---------------------------------------------------------------------------
 
-  /**
-   * Determine if a position is within danger range of any hostile tower.
-   * @param {RoomPosition} pos Screeps position to inspect.
-   * @param {number} radius Maximum range from a tower considered dangerous.
-   * @returns {boolean} True if any hostile tower is within the radius.
-   * @sideeffects None.
-   * @cpu O(towers).
-   * @memory Temporary list only.
-   */
   isInTowerDanger: function (pos, radius) {
     if (!pos) return false;
     var room = Game.rooms[pos.roomName];
@@ -966,15 +752,6 @@ var BeeToolbox = {
     return false;
   },
 
-  /**
-   * Estimate per-tick damage from hostile towers focused on a position.
-   * @param {Room} room The room containing the position.
-   * @param {RoomPosition} pos Target position for damage estimation.
-   * @returns {number} Estimated damage for one tick.
-   * @sideeffects None.
-   * @cpu O(towers).
-   * @memory No persistent allocations.
-   */
   estimateTowerDamage: function (room, pos) {
     if (!room || !pos) return 0;
     var towers = room.find(FIND_HOSTILE_STRUCTURES, {
@@ -995,16 +772,6 @@ var BeeToolbox = {
     return total;
   },
 
-  /**
-   * Check if a range sits inside the configured hold band for archer behavior.
-   * @param {number} range Current distance to target.
-   * @param {number} desiredRange Preferred range to hold.
-   * @param {number} holdBand Acceptable slack range above desired.
-   * @returns {boolean} True if range lies inside the hold band.
-   * @sideeffects None.
-   * @cpu O(1).
-   * @memory None.
-   */
   combatInHoldBand: function (range, desiredRange, holdBand) {
     if (typeof range !== 'number') return false;
     var desired = (typeof desiredRange === 'number') ? desiredRange : 1;
@@ -1014,22 +781,6 @@ var BeeToolbox = {
     return true;
   },
 
-  /**
-   * List hostile threats (attackers and towers) in a room.
-   * @param {Room} room Screeps room to scan.
-   * @returns {Array} Array of hostile creeps/structures threatening the room.
-   * @sideeffects None.
-   * @example
-   * var threats = BeeToolbox.combatThreats(creep.room);
-   */
-  /**
-   * Enumerate hostile creeps and towers posing threats inside a room.
-   * @param {Room} room Room to analyze.
-   * @returns {object} Object containing hostile arrays.
-   * @sideeffects None beyond computation.
-   * @cpu Moderate due to FIND operations.
-   * @memory Temporary arrays returned to caller.
-   */
   combatThreats: function (room) {
     if (!room) return [];
     var creeps = room.find(FIND_HOSTILE_CREEPS, {
@@ -1043,22 +794,6 @@ var BeeToolbox = {
     return creeps.concat(towers);
   },
 
-  /**
-   * Fire at the closest valid hostile within ranged distance.
-   * @param {Creep} creep Acting ranged creep.
-   * @returns {boolean} True if an attack was attempted.
-   * @sideeffects Performs ranged attack orders.
-   * @example
-   * BeeToolbox.combatShootOpportunistic(creep);
-   */
-  /**
-   * Fire at the best opportunistic hostile within range for a ranged creep.
-   * @param {Creep} creep Ranged combat creep.
-   * @returns {boolean} True when an attack was issued.
-   * @sideeffects Executes rangedAttack on the creep.
-   * @cpu Low.
-   * @memory None.
-   */
   combatShootOpportunistic: function (creep) {
     if (!creep) return false;
     var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
@@ -1069,26 +804,6 @@ var BeeToolbox = {
     return false;
   },
 
-  /**
-   * Primary archer attack logic with mass-attack fallback.
-   * @param {Creep} creep Archer creep issuing attacks.
-   * @param {RoomObject} target Preferred target.
-   * @param {Object} config Behavior configuration ({ desiredRange, massAttackThreshold }).
-   * @returns {boolean} True if any attack order was issued.
-   * @sideeffects Issues ranged attacks.
-   * @example
-   * BeeToolbox.combatShootPrimary(creep, hostile, { desiredRange: 2 });
-   */
-  /**
-   * Execute primary ranged attack logic against a selected target.
-   * @param {Creep} creep Ranged combat creep.
-   * @param {Creep|Structure} target Target to attack.
-   * @param {object} config Additional behavior flags.
-   * @returns {boolean} True when an attack or move command issued.
-   * @sideeffects Issues attack and movement orders.
-   * @cpu Moderate because of range checks and movement.
-   * @memory No persistent usage.
-   */
   combatShootPrimary: function (creep, target, config) {
     if (!creep || !target) return false;
     var opts = config || {};
@@ -1106,28 +821,6 @@ var BeeToolbox = {
     return BeeToolbox.combatShootOpportunistic(creep);
   },
 
-  /**
-   * Attempt a flee path away from threats, with TaskSquad-friendly swap support.
-   * @param {Creep} creep Creep that should flee.
-   * @param {Array} fromThings Array of hostile objects to avoid.
-   * @param {number} safeRange Desired separation distance.
-   * @param {Object} options Extra knobs ({ maxOps, taskSquad, roomCallback }).
-   * @returns {boolean} True if a flee move was attempted.
-   * @sideeffects Orders movement and may swap tiles via TaskSquad.
-   * @example
-   * BeeToolbox.combatFlee(creep, [hostile], 3, { maxOps: 2000, taskSquad: TaskSquad });
-   */
-  /**
-   * Flee away from threats using Traveler pathing.
-   * @param {Creep} creep Creep attempting to retreat.
-   * @param {Array} fromThings Array of hostile objects or positions.
-   * @param {number} safeRange Desired minimum distance from threats.
-   * @param {object} options Traveler options override.
-   * @returns {number} Traveler result code from travelTo.
-   * @sideeffects Issues movement orders.
-   * @cpu Moderate due to pathfinding.
-   * @memory Relies on Traveler's caching (no new persistent data).
-   */
   combatFlee: function (creep, fromThings, safeRange, options) {
     if (!creep) return false;
     var goals = [];
@@ -1191,28 +884,6 @@ var BeeToolbox = {
     return false;
   },
 
-  /**
-   * TaskSquad-aware step helper (Traveler shim).
-   * @param {Creep} creep Unit to move.
-   * @param {RoomPosition|RoomObject} targetPos Destination position or object.
-   * @param {number} range Desired range to stop at.
-   * @param {Object} taskSquad Optional Task.Squad module for stepToward usage.
-   * @returns {number|undefined} Traveler/stepToward result when available.
-   * @sideeffects Moves the creep.
-   * @example
-   * BeeToolbox.combatStepToward(creep, hostile.pos, 1, TaskSquad);
-   */
-  /**
-   * Advance a combat creep toward a target position while respecting task squad rules.
-   * @param {Creep} creep Combat creep to move.
-   * @param {RoomPosition} targetPos Destination position.
-   * @param {number} range Desired stopping range.
-   * @param {object} taskSquad Optional squad metadata.
-   * @returns {number} Movement result code.
-   * @sideeffects Issues move orders via Traveler.
-   * @cpu Moderate because of pathfinding.
-   * @memory Depends on Traveler's cache; no extra persistence.
-   */
   combatStepToward: function (creep, targetPos, range, taskSquad) {
     if (!creep || !targetPos) return ERR_INVALID_TARGET;
     var destination = (targetPos.pos || targetPos);
@@ -1223,24 +894,6 @@ var BeeToolbox = {
     return BeeToolbox.BeeTravel(creep, destination, { range: desiredRange });
   },
 
-  /**
-   * Heal self or squadmates opportunistically when HEAL parts exist.
-   * @param {Creep} creep Healer or hybrid creep.
-   * @param {string} squadId Optional squad identifier override.
-   * @returns {boolean} True if any heal command issued.
-   * @sideeffects Executes heal/rangedHeal calls.
-   * @example
-   * BeeToolbox.combatAuxHeal(creep, 'Alpha');
-   */
-  /**
-   * Perform passive heal support for nearby squadmates.
-   * @param {Creep} creep Medic creep to act.
-   * @param {string} squadId Squad identifier filter.
-   * @returns {boolean} True when a heal command executed.
-   * @sideeffects Issues heal commands.
-   * @cpu Moderate due to filtering.
-   * @memory No persistent data.
-   */
   combatAuxHeal: function (creep, squadId) {
     if (!creep) return false;
     var healParts = creep.getActiveBodyparts(HEAL);
@@ -1270,24 +923,6 @@ var BeeToolbox = {
     return false;
   },
 
-  /**
-   * Guard vulnerable squadmates by swapping or stepping toward them.
-   * @param {Creep} creep Melee protector.
-   * @param {Object} options Options ({ taskSquad, squadId, protectRoles, threatFilter }).
-   * @returns {boolean} True if guard action executed.
-   * @sideeffects May move or swap tiles.
-   * @example
-   * BeeToolbox.combatGuardSquadmate(creep, { taskSquad: TaskSquad });
-   */
-  /**
-   * Position a guard near a squadmate and engage threats attacking them.
-   * @param {Creep} creep Guard creep executing behavior.
-   * @param {object} options Configuration overrides.
-   * @returns {boolean} True when defending actions executed.
-   * @sideeffects Issues move and attack commands.
-   * @cpu Moderate with multiple searches.
-   * @memory Temporary arrays only.
-   */
   combatGuardSquadmate: function (creep, options) {
     if (!creep) return false;
     var opts = options || {};
@@ -1332,26 +967,6 @@ var BeeToolbox = {
     return true;
   },
 
-  /**
-   * Score adjacent tiles for melee positioning.
-   * @param {Creep} creep Melee creep evaluating movement.
-   * @param {RoomObject} target Target to remain adjacent to.
-   * @param {Object} options Extra options ({ edgePenalty, towerRadius }).
-   * @returns {RoomPosition} Best adjacent position (may equal current).
-   * @sideeffects None.
-   * @example
-   * var pos = BeeToolbox.combatBestAdjacentTile(creep, hostile, { edgePenalty: 8 });
-   */
-  /**
-   * Identify the optimal adjacent tile around a target for melee engagement.
-   * @param {Creep} creep Evaluating creep.
-   * @param {Creep|Structure} target Object to surround.
-   * @param {object} options Behavior tuning parameters.
-   * @returns {RoomPosition|null} Best adjacent position or null.
-   * @sideeffects None.
-   * @cpu Moderate due to path/terrain checks.
-   * @memory Temporary arrays and calculations only.
-   */
   combatBestAdjacentTile: function (creep, target, options) {
     if (!creep || !target) return creep && creep.pos;
     var room = creep.room;
@@ -1407,24 +1022,6 @@ var BeeToolbox = {
     return best;
   },
 
-  /**
-   * Identify a hostile structure blocking melee pathing right next to the creep.
-   * @param {Creep} creep Acting melee creep.
-   * @param {RoomObject} target Target the creep wants to reach.
-   * @returns {Structure|null} Blocking wall or rampart if one exists.
-   * @sideeffects None.
-   * @example
-   * var blocker = BeeToolbox.combatBlockingDoor(creep, target);
-   */
-  /**
-   * Detect a blocking structure at an entrance when pursuing a target.
-   * @param {Creep} creep Attacking creep.
-   * @param {RoomObject} target Intended hostile target.
-   * @returns {Structure|null} Blocking structure if found.
-   * @sideeffects None.
-   * @cpu Moderate because of spatial scans.
-   * @memory Temporary lists only.
-   */
   combatBlockingDoor: function (creep, target) {
     if (!creep || !target) return null;
     var closeStructs = creep.pos.findInRange(FIND_STRUCTURES, 1, {
@@ -1440,24 +1037,6 @@ var BeeToolbox = {
     return distThru < distNow ? best : null;
   },
 
-  /**
-   * Return the weakest hostile within a given range band.
-   * @param {Creep} creep Reference creep.
-   * @param {number} range Maximum range to consider.
-   * @returns {Creep|null} Hostile creep with lowest health fraction.
-   * @sideeffects None.
-   * @example
-   * var weak = BeeToolbox.combatWeakestHostile(creep, 2);
-   */
-  /**
-   * Select the weakest hostile unit within a specific range.
-   * @param {Creep} creep Evaluating creep.
-   * @param {number} range Search radius.
-   * @returns {Creep|null} Weakest hostile or null.
-   * @sideeffects None.
-   * @cpu Moderate due to filtering.
-   * @memory Temporary arrays only.
-   */
   combatWeakestHostile: function (creep, range) {
     if (!creep) return null;
     var maxRange = (typeof range === 'number') ? range : 2;
@@ -1466,24 +1045,6 @@ var BeeToolbox = {
     return _.min(xs, function (c) { return c.hits / Math.max(1, c.hitsMax); });
   },
 
-  /**
-   * Retreat toward rally flags or anchor, else back away from closest hostile.
-   * @param {Creep} creep Creep that should retreat.
-   * @param {Object} options Options ({ taskSquad, anchorProvider, range }).
-   * @returns {boolean} True if any retreat movement occurred.
-   * @sideeffects Issues movement commands.
-   * @example
-   * BeeToolbox.combatRetreatToRally(creep, { taskSquad: TaskSquad });
-   */
-  /**
-   * Retreat a creep toward a rally point while healing if possible.
-   * @param {Creep} creep Retreating creep.
-   * @param {object} options Contains rallyPos and healWhileMoving flags.
-   * @returns {boolean} True when retreat orders issued.
-   * @sideeffects Issues move/heal commands and updates memory flags.
-   * @cpu Moderate from movement.
-   * @memory Minimal; only memory flags toggled.
-   */
   combatRetreatToRally: function (creep, options) {
     if (!creep) return false;
     var opts = options || {};
@@ -1508,24 +1069,6 @@ var BeeToolbox = {
     return false;
   },
 
-  /**
-   * Find the most injured ally within range of a position.
-   * @param {RoomPosition} origin Center position for the scan.
-   * @param {number} range Maximum search radius.
-   * @returns {Creep|null} Ally with lowest health fraction.
-   * @sideeffects None.
-   * @example
-   * var target = BeeToolbox.findLowestInjuredAlly(creep.pos, 3);
-   */
-  /**
-   * Locate the most injured friendly creep near a position.
-   * @param {RoomObject|RoomPosition} origin Search origin.
-   * @param {number} range Search radius.
-   * @returns {Creep|null} Ally requiring healing or null.
-   * @sideeffects None.
-   * @cpu Moderate due to FIND filtering.
-   * @memory Temporary arrays only.
-   */
   findLowestInjuredAlly: function (origin, range) {
     if (!origin) return null;
     var rad = (typeof range === 'number') ? range : 3;
@@ -1536,24 +1079,6 @@ var BeeToolbox = {
     return _.min(allies, function (ally) { return ally.hits / Math.max(1, ally.hitsMax); });
   },
 
-  /**
-   * Attempt to heal or ranged-heal a target.
-   * @param {Creep} creep Healer creep.
-   * @param {Creep} target Patient to heal.
-   * @returns {boolean} True if a heal command succeeded.
-   * @sideeffects Issues heal or rangedHeal.
-   * @example
-   * if (!BeeToolbox.tryHealTarget(creep, buddy)) { creep.say('No heal'); }
-   */
-  /**
-   * Attempt to heal a target creep with optimal method based on range.
-   * @param {Creep} creep Medic or hybrid creep.
-   * @param {Creep} target Ally to heal.
-   * @returns {boolean} True when a heal action occurred.
-   * @sideeffects Issues heal or rangedHeal commands.
-   * @cpu Low.
-   * @memory None.
-   */
   tryHealTarget: function (creep, target) {
     if (!creep || !target) return false;
     if (target.hits >= target.hitsMax) return false;
@@ -1566,26 +1091,6 @@ var BeeToolbox = {
     return false;
   },
 
-  /**
-   * Count creeps of a given role following a target within a squad.
-   * @param {string} squadId Squad identifier.
-   * @param {string} targetId Target creep id to follow.
-   * @param {string} roleName Role or task name to match.
-   * @returns {number} Number of creeps following the target.
-   * @sideeffects None.
-   * @example
-   * var medics = BeeToolbox.countRoleFollowingTarget('Alpha', buddy.id, 'CombatMedic');
-   */
-  /**
-   * Count creeps of a specific role following a target within a squad.
-   * @param {string} squadId Squad identifier.
-   * @param {string} targetId ID of the followed creep.
-   * @param {string} roleName Role name to match.
-   * @returns {number} Number of matching creeps.
-   * @sideeffects None.
-   * @cpu O(creeps).
-   * @memory Temporary counters only.
-   */
   countRoleFollowingTarget: function (squadId, targetId, roleName) {
     if (!targetId) return 0;
     var sid = squadId || 'Alpha';
@@ -1607,24 +1112,6 @@ var BeeToolbox = {
   // 🚚 MOVEMENT: Traveler wrapper
   // ---------------------------------------------------------------------------
 
-  /**
-   * BeeTravel — Unified wrapper around Traveler.
-   * Supports BOTH call styles:
-   *   BeeTravel(creep, target, { range: 1, ignoreCreeps: true })
-   *   BeeTravel(creep, target, 1, /* reuse= * / 30, { ignoreCreeps:true })
-   */
-  /**
-   * Travel to a destination using Traveler while preserving legacy signatures.
-   * @param {Creep} creep Moving creep.
-   * @param {RoomObject|RoomPosition} target Destination or object with pos.
-   * @param {*} a3 Legacy argument (range or options).
-   * @param {*} a4 Legacy argument (unused).
-   * @param {*} a5 Legacy argument (options object in legacy mode).
-   * @returns {number} Traveler travel result or moveTo fallback.
-   * @sideeffects Issues movement commands and may update Traveler state.
-   * @cpu Moderate because of pathfinding.
-   * @memory Relies on Traveler caching without new persistent data.
-   */
   BeeTravel: function (creep, target, a3, a4, a5) {
     if (!creep || !target) return ERR_INVALID_TARGET;
 

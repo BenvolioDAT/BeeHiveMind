@@ -1,11 +1,3 @@
-// BeeMaintenance.cpu.es5.js
-// ES5-safe, CPU-lean maintenance utilities.
-// - Throttled memory cleanup (rooms/creeps/assignments)
-// - Deep compaction: remove empty sub-objects & delete truly-empty rooms
-// - Robust stale-room detection + grace window
-// - Cached, interval-based repair target list per room
-// - No ES6 syntax
-
 'use strict';
 
 var CoreConfig = require('core.config');
@@ -35,33 +27,10 @@ var BeeMaintenance = (function () {
   // Small helpers
   // -----------------------------
 
-  /**
-   * Read the current game time as an integer.
-   * @returns {number} Current Game.time value.
-   * @sideeffects None.
-   * @cpu O(1).
-   * @memory None.
-   */
   function _now() { return Game.time | 0; }
 
-  /**
-   * Emit a debug log entry when debug logging is enabled.
-   * @param {string} msg Message to log.
-   * @returns {void}
-   * @sideeffects Writes to console when enabled.
-   * @cpu O(1).
-   * @memory None.
-   */
   function _log(msg) { if (CFG.LOG) maintLog.debug(msg); }
 
-  /**
-   * Safely read the most recent visibility timestamp recorded in room memory.
-   * @param {object} mem Room memory reference.
-   * @returns {number} Last seen tick or -Infinity if unknown.
-   * @sideeffects None.
-   * @cpu O(1).
-   * @memory None.
-   */
   function _lastSeen(mem) {
     if (!mem) return -Infinity;
     if (typeof mem.lastSeenAt === 'number') return mem.lastSeenAt;
@@ -71,17 +40,6 @@ var BeeMaintenance = (function () {
     return -Infinity;
   }
 
-  // ---- Deep compaction of a single room mem ----
-  // Returns true if the room is "now empty" after compaction
-  /**
-   * Prune stale metadata within a room memory blob.
-   * @param {string} roomName Room identifier for logging context.
-   * @param {object} mem Room memory object to compact.
-   * @returns {boolean} True when the room memory is effectively empty afterwards.
-   * @sideeffects Deletes stale keys from the provided memory object.
-   * @cpu Moderate depending on nested keys.
-   * @memory No new allocations beyond iteration temporaries.
-   */
   function _compactRoomMem(roomName, mem) {
     if (!mem) return true;
     var now = _now();
@@ -162,13 +120,7 @@ var BeeMaintenance = (function () {
   // -----------------------------
   // Public: prune old/inactive room memory (cheap, interval)
   // -----------------------------
-  /**
-   * Periodically remove stale or empty room memory entries.
-   * @returns {void}
-   * @sideeffects Deletes keys from Memory.rooms and updates Memory.recentlyCleanedRooms.
-   * @cpu Moderate when sweep triggers; minimal otherwise.
-   * @memory No persistent allocations beyond logs.
-   */
+
   function cleanStaleRooms() {
     var T = _now();
 
@@ -224,13 +176,7 @@ var BeeMaintenance = (function () {
   // -----------------------------
   // Public: creep + assignment cleanup (interval-gated)
   // -----------------------------
-  /**
-   * Reconcile creep and assignment memory with live game state.
-   * @returns {void}
-   * @sideeffects Deletes Memory.creeps entries, cleans Memory.rooms substructures, and prunes assignments.
-   * @cpu Moderate on sweep ticks.
-   * @memory No additional persistent data.
-   */
+
   function cleanUpMemory() {
     var T = _now();
 
@@ -323,14 +269,7 @@ var BeeMaintenance = (function () {
   // Returns an ARRAY of {id,hits,hitsMax,type}, sorted by priority then damage.
   // Rebuilt only every REPAIR_SCAN_INTERVAL ticks per room.
   // -----------------------------
-  /**
-   * List structures in need of repair, cached per room for performance.
-   * @param {Room} room Room to analyze.
-   * @returns {Array} Array of repair target descriptors sorted by priority.
-   * @sideeffects Writes cached data into Memory.rooms[room.name]._maint.
-   * @cpu Moderate when rescanning, low when using cache.
-   * @memory Stores target arrays in persistent memory for reuse.
-   */
+
   function findStructuresNeedingRepair(room) {
     if (!room) return [];
     if (!Memory.rooms) Memory.rooms = {};

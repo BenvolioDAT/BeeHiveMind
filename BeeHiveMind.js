@@ -1044,7 +1044,7 @@ var BeeHiveMind = {
         baseharvest: harvesterIntel.desiredCount || 1,
         courier: 1,
         queen: 2,
-        upgrader: 2,
+        upgrader: 1,
         builder: builderLimit,
         repair: 0,
         luna: determineLunaQuota(room, cache),
@@ -1122,25 +1122,11 @@ var BeeHiveMind = {
       }
     }
   },
-
-  /**
-   * Placeholder for remote operations (reserved for future use).
-   * @returns {void}
-   * @sideeffects None currently.
-   * @cpu None.
-   * @memory None.
-   */
+  
   manageRemoteOps: function () {
     // Reserved for future remote task coordination.
   },
 
-  /**
-   * Ensure Memory.rooms exists and contains valid objects.
-   * @returns {void}
-   * @sideeffects Initializes Memory.rooms entries to empty objects.
-   * @cpu O(n) over existing room keys.
-   * @memory May allocate empty objects for missing rooms.
-   */
   initializeMemory: function () {
     if (!Memory.rooms) {
       Memory.rooms = {};

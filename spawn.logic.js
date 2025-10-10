@@ -251,8 +251,8 @@ var CONFIGS = {
 
   // Special
   Claimer: [
-    C(4,4),
-    C(3,3),
+    //C(4,4),
+    //C(3,3),
     C(2,2),
     C(1,1)
   ]

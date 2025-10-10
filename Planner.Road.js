@@ -1,15 +1,3 @@
-// Design Notes:
-// - Provides deterministic road planning helpers shared by room and remote planners.
-// - Exposes computeHub(), getOrCreatePath(), materializePath(), ensureRemoteRoads(),
-//   and getActiveRemoteRooms() so other modules can rely on a single road graph.
-// - Paths are cached in Memory.rooms[room].roadPlanner.paths keyed by logical names to
-//   keep re-planning cheap and idempotent. materializePath() only queues construction
-//   sites for missing tiles so repeated runs never spam sites.
-// - Remote planning honours throttles (MAX_ACTIVE_REMOTES, STORAGE_ENERGY_MIN_BEFORE_REMOTES)
-//   and scores candidates by round-trip path length plus swamp penalties.
-// - Road repairs hook: when a tile is missing or below ROAD_REPAIR_THRESHOLD, the edge is
-//   marked "dirty" so higher level repair logic can react.
-
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
