@@ -3,13 +3,17 @@
 
 var BeeToolbox = require('BeeToolbox');
 
+var HARVESTER_CFG = BeeToolbox && BeeToolbox.HARVESTER_CFG
+  ? BeeToolbox.HARVESTER_CFG
+  : { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
+
 /** =========================
  *  Config knobs
  *  ========================= */
 var CONFIG = {
   maxHarvestersPerSource: 1,   // 1 = strict single-seat miners (best w/ container)
   avoidTicksAfterYield: 20,    // loser avoids yielded source for this many ticks
-  handoffTtl: 120,             // if incumbent's TTL <= this, allow queueing
+  handoffTtl: HARVESTER_CFG.RENEWAL_TTL,             // if incumbent's TTL <= this, allow queueing
   queueRange: 1,               // park within this range when queueing (1 = adjacent)
   travelReuse: 12              // reusePath hint for travel helper (if used internally)
 };
