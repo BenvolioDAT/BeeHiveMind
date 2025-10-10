@@ -18,15 +18,15 @@ var CFG = {
   MAX_SITES_PER_TICK: 5
 };
 
-// README-style milestone checklist consumed by the builder task.
-// RCL 1: spawn online, keep hub tiles clear.
-// RCL 2: establish hub cross roads to sources + controller.
-// RCL 3: finish Extension Block A (10 extensions) before anything else.
-// RCL 4: finish Extension Block B, then first tower, then storage + hub loop roads.
-// RCL 5: link pair (hub + controller) and Extension Block C, container on mineral.
-// RCL 6: second tower + terminal, fill Extension Block D.
-// RCL 7: factory + labs ring reserved (no auto placement yet).
-// RCL 8: observer + power spawn reserved for manual trigger.
+// RCL Milestone Checklist (consumed by Task.Builder and remote throttles):
+// RCL1: online spawn with hub↔source and hub↔controller roads so harvesters never slog.
+// RCL2: finish the first extension block to unlock bigger worker bodies and stable economy.
+// RCL3: complete Extension Block A before touching side projects for tier upgrades.
+// RCL4: drop tower #1, place storage (hub anchor), then finish Extension Block B and hub roads.
+// RCL5: add source↔hub links plus controller↔hub link once extension blocks are filled.
+// RCL6: raise additional towers as allowed and prep terminal infrastructure.
+// RCL7-8: reserve lab, factory, observer, powerSpawn, and nuker stamps for late-tech builds.
+// Rule: NO remote buildout until storage energy beats ECON_CFG and home milestones for the current RCL are satisfied.
 
 var HUB_STAMP = [
   { key: 'storage',      type: STRUCTURE_STORAGE,   dx: 0,  dy: 0,  rcl: 4, priority: 5 },
@@ -309,7 +309,7 @@ function _planRoadGraph(room, hubPos, state) {
     var src = sources[i];
     var key = 'hub:source:' + src.id;
     var path = RoadPlanner.getOrCreatePath(hubPos, src.pos, { label: key, range: 1 });
-    if (path) {
+    if (path && path.length) {
       graph[key] = {
         key: key,
         from: hubPos,
@@ -324,7 +324,7 @@ function _planRoadGraph(room, hubPos, state) {
   if (room.controller) {
     var keyCtrl = 'hub:controller';
     var ctrlPath = RoadPlanner.getOrCreatePath(hubPos, room.controller.pos, { label: keyCtrl, range: 1 });
-    if (ctrlPath) {
+    if (ctrlPath && ctrlPath.length) {
       graph[keyCtrl] = {
         key: keyCtrl,
         from: hubPos,
@@ -340,7 +340,7 @@ function _planRoadGraph(room, hubPos, state) {
   if (minerals.length) {
     var minKey = 'hub:mineral';
     var minPath = RoadPlanner.getOrCreatePath(hubPos, minerals[0].pos, { label: minKey, range: 1 });
-    if (minPath) {
+    if (minPath && minPath.length) {
       graph[minKey] = {
         key: minKey,
         from: hubPos,
@@ -535,8 +535,16 @@ function ensureSites(room) {
     var task = tasks[i];
     if (_hasStructureOrSite(state, task.type, task.pos)) continue;
     if (task.type === STRUCTURE_ROAD) {
-      RoadPlanner.materializePath([task.pos], { maxSites: 1, dirtyKey: task.key, roomName: room.name });
-      placed++;
+      var stubPath = [];
+      if (task.pos) {
+        stubPath.push({ x: task.pos.x, y: task.pos.y, roomName: task.pos.roomName });
+      }
+      if (stubPath.length) {
+        var created = RoadPlanner.materializePath(stubPath, { maxSites: 1, dirtyKey: task.key, roomName: room.name });
+        if (created > 0) {
+          placed += created;
+        }
+      }
       continue;
     }
     var rc = room.createConstructionSite(task.pos.x, task.pos.y, task.type);

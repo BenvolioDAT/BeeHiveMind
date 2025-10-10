@@ -8,6 +8,29 @@ var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+var ECON_DEFAULTS = {
+  STORAGE_ENERGY_MIN_BEFORE_REMOTES: 80000,
+  MAX_ACTIVE_REMOTES: 2,
+  ROAD_REPAIR_THRESHOLD: 0.45
+};
+
+if (!global.__beeEconomyConfig) {
+  global.__beeEconomyConfig = {
+    STORAGE_ENERGY_MIN_BEFORE_REMOTES: ECON_DEFAULTS.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
+    MAX_ACTIVE_REMOTES: ECON_DEFAULTS.MAX_ACTIVE_REMOTES,
+    ROAD_REPAIR_THRESHOLD: ECON_DEFAULTS.ROAD_REPAIR_THRESHOLD
+  };
+}
+
+var _econOverrideLog = {};
+
+function _logEconomyOverride(sourceName, key, value) {
+  var cacheKey = sourceName + ':' + key;
+  if (_econOverrideLog[cacheKey]) return;
+  _econOverrideLog[cacheKey] = Game.time || 0;
+  toolboxLog.info('ECON_CFG override from', sourceName, key, '→', value);
+}
+
 var _cachedUsername = null;
 var DEFAULT_FOREIGN_AVOID_TTL = 500;
 
@@ -1639,5 +1662,19 @@ var BeeToolbox = {
   }
 
 }; // end BeeToolbox
+
+BeeToolbox.ECON_CFG = global.__beeEconomyConfig;
+
+BeeToolbox.registerEconomyOverrides = function (sourceName, overrides) {
+  if (!overrides) return BeeToolbox.ECON_CFG;
+  var cfg = BeeToolbox.ECON_CFG;
+  for (var key in overrides) {
+    if (!BeeToolbox.hasOwn(overrides, key)) continue;
+    if (cfg[key] === overrides[key]) continue;
+    cfg[key] = overrides[key];
+    _logEconomyOverride(sourceName || 'unknown', key, overrides[key]);
+  }
+  return cfg;
+};
 
 module.exports = BeeToolbox;

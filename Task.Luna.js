@@ -19,7 +19,11 @@
 var BeeToolbox = require('BeeToolbox');
 var RoadPlanner = require('Planner.Road');
 var RoomPlanner = require('Planner.Room');
+var Logger = require('core.logger');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
+
+var LOG_LEVEL = Logger.LOG_LEVEL;
+var lunaLog = Logger.createLogger('Luna', LOG_LEVEL.BASIC);
 
 // ============================
 // Tunables
@@ -31,13 +35,15 @@ var MAX_PF_OPS    = 3000;
 var PLAIN_COST    = 2;
 var SWAMP_COST    = 10;
 var RP_CONFIG = RoadPlanner && RoadPlanner.CONFIG ? RoadPlanner.CONFIG : {};
+var ECON_CFG = BeeToolbox.ECON_CFG || {};
 
 var MAX_LUNA_PER_SOURCE = 1;
-var MAX_ACTIVE_REMOTES = (typeof RP_CONFIG.MAX_ACTIVE_REMOTES === 'number') ? RP_CONFIG.MAX_ACTIVE_REMOTES : 2;
-var STORAGE_ENERGY_MIN_BEFORE_REMOTES = (typeof RP_CONFIG.STORAGE_ENERGY_MIN_BEFORE_REMOTES === 'number')
-  ? RP_CONFIG.STORAGE_ENERGY_MIN_BEFORE_REMOTES
+var MAX_ACTIVE_REMOTES = (typeof ECON_CFG.MAX_ACTIVE_REMOTES === 'number') ? ECON_CFG.MAX_ACTIVE_REMOTES : 2;
+var STORAGE_ENERGY_MIN_BEFORE_REMOTES = (typeof ECON_CFG.STORAGE_ENERGY_MIN_BEFORE_REMOTES === 'number')
+  ? ECON_CFG.STORAGE_ENERGY_MIN_BEFORE_REMOTES
   : 40000;
 var REMOTE_ROI_WEIGHTING = RP_CONFIG.REMOTE_ROI_WEIGHTING || { pathLength: 1, swampTiles: 3, hostilePenalty: 5000 };
+var THROTTLE_LOG_INTERVAL = (typeof RP_CONFIG.THROTTLE_LOG_INTERVAL === 'number') ? RP_CONFIG.THROTTLE_LOG_INTERVAL : 1000;
 
 var PF_CACHE_TTL = 150;
 var INVADER_LOCK_MEMO_TTL = 1500;
@@ -124,6 +130,30 @@ function ensureSourceFlag(source) {
     srec.flagName = rc;
     touchSourceActive(roomName, source.id);
   }
+}
+
+function _shouldLogThrottle(roomName, reason) {
+  if (!roomName) return false;
+  Memory._remoteThrottleLog = Memory._remoteThrottleLog || {};
+  var rec = Memory._remoteThrottleLog[roomName];
+  if (!rec) {
+    rec = {};
+    Memory._remoteThrottleLog[roomName] = rec;
+  }
+  var key = reason || 'generic';
+  var last = rec[key] || 0;
+  if ((Game.time || 0) - last < THROTTLE_LOG_INTERVAL) return false;
+  rec[key] = Game.time || 0;
+  Memory._remoteThrottleLog[roomName] = rec;
+  return true;
+}
+
+function _logRemoteThrottle(roomName, storage, threshold, active, max, reason) {
+  if (!_shouldLogThrottle(roomName, reason)) return;
+  var msg = '[Remotes] Skipped planning: storage=' + storage + '/threshold=' + threshold;
+  msg += ', active=' + active + '/max=' + max;
+  msg += ', reason=' + reason + ', room=' + roomName;
+  lunaLog.info(msg);
 }
 
 // ============================
@@ -517,11 +547,6 @@ function homeAllowsNewRemote(homeName){
   var room = Game.rooms[homeName];
   if (!room || !room.controller || !room.controller.my) return state;
   if (room.controller.level < 4) return state;
-  if (!room.storage) return state;
-  if ((room.storage.store[RESOURCE_ENERGY] || 0) < STORAGE_ENERGY_MIN_BEFORE_REMOTES) return state;
-  // Acceptance test: throttle expansion until home milestones + storage energy threshold are satisfied.
-  var plan = RoomPlanner && typeof RoomPlanner.plan === 'function' ? RoomPlanner.plan(room) : null;
-  if (plan && plan.readyForRemotes === false) return state;
   var active = (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function')
     ? RoadPlanner.getActiveRemoteRooms(room)
     : [];
@@ -529,8 +554,26 @@ function homeAllowsNewRemote(homeName){
   var set = {};
   for (var i = 0; i < active.length; i++) { set[active[i]] = true; }
   state.activeSet = set;
+
+  var storageEnergy = room.storage ? (room.storage.store[RESOURCE_ENERGY] || 0) : 0;
+  if (!room.storage) {
+    _logRemoteThrottle(homeName, storageEnergy, STORAGE_ENERGY_MIN_BEFORE_REMOTES, active.length, MAX_ACTIVE_REMOTES, 'storage');
+    return state;
+  }
+  if (storageEnergy < STORAGE_ENERGY_MIN_BEFORE_REMOTES) {
+    _logRemoteThrottle(homeName, storageEnergy, STORAGE_ENERGY_MIN_BEFORE_REMOTES, active.length, MAX_ACTIVE_REMOTES, 'storage');
+    return state;
+  }
+
+  // Acceptance test: throttle expansion until home milestones + storage energy threshold are satisfied.
+  var plan = RoomPlanner && typeof RoomPlanner.plan === 'function' ? RoomPlanner.plan(room) : null;
+  if (plan && plan.readyForRemotes === false) return state;
+
   state.allowed = true;
   state.allowNewRoom = active.length < MAX_ACTIVE_REMOTES;
+  if (!state.allowNewRoom) {
+    _logRemoteThrottle(homeName, storageEnergy, STORAGE_ENERGY_MIN_BEFORE_REMOTES, active.length, MAX_ACTIVE_REMOTES, 'limit');
+  }
   return state;
 }
 

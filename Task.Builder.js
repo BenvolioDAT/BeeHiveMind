@@ -189,25 +189,43 @@ function _chooseSite(creep, planIndex) {
   }
   var best = null;
   var bestScore = -1;
+  var fallback = null;
+  var fallbackScore = -1;
+  var fallbackDist = 999;
+  var lowTTL = creep.ticksToLive && creep.ticksToLive < 250;
   for (var i = 0; i < sites.length; i++) {
     var site = sites[i];
     if (!site || !site.my) continue;
     var score = _priorityForSite(site, planIndex);
     if (score < 0) continue;
     if (_wouldStrand(creep, site)) continue;
+    var dist = creep.pos.getRangeTo(site.pos);
+    var far = site.pos.roomName !== creep.pos.roomName || dist > 25;
+    if (lowTTL && far) {
+      if (score > fallbackScore || (score === fallbackScore && dist < fallbackDist)) {
+        fallback = site;
+        fallbackScore = score;
+        fallbackDist = dist;
+      }
+      continue;
+    }
     if (score > bestScore) {
       best = site;
       bestScore = score;
     } else if (score === bestScore) {
       var curDist = best ? creep.pos.getRangeTo(best.pos) : 999;
-      var newDist = creep.pos.getRangeTo(site.pos);
+      var newDist = dist;
       if (newDist < curDist) {
         best = site;
         bestScore = score;
       }
     }
   }
-  return best;
+  if (best) return best;
+  if (lowTTL) {
+    return null;
+  }
+  return fallback;
 }
 
 function _wouldStrand(creep, site) {
