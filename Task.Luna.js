@@ -17,7 +17,13 @@
 // Dependencies
 // ============================
 var BeeToolbox = require('BeeToolbox');
+var RoadPlanner = require('Planner.Road');
+var RoomPlanner = require('Planner.Room');
+var Logger = require('core.logger');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
+
+var LOG_LEVEL = Logger.LOG_LEVEL;
+var lunaLog = Logger.createLogger('Luna', LOG_LEVEL.BASIC);
 
 // ============================
 // Tunables
@@ -28,7 +34,16 @@ var REMOTE_RADIUS = 4;
 var MAX_PF_OPS    = 3000;
 var PLAIN_COST    = 2;
 var SWAMP_COST    = 10;
+var RP_CONFIG = RoadPlanner && RoadPlanner.CONFIG ? RoadPlanner.CONFIG : {};
+var ECON_CFG = BeeToolbox.ECON_CFG || {};
+
 var MAX_LUNA_PER_SOURCE = 1;
+var MAX_ACTIVE_REMOTES = (typeof ECON_CFG.MAX_ACTIVE_REMOTES === 'number') ? ECON_CFG.MAX_ACTIVE_REMOTES : 2;
+var STORAGE_ENERGY_MIN_BEFORE_REMOTES = (typeof ECON_CFG.STORAGE_ENERGY_MIN_BEFORE_REMOTES === 'number')
+  ? ECON_CFG.STORAGE_ENERGY_MIN_BEFORE_REMOTES
+  : 40000;
+var REMOTE_ROI_WEIGHTING = RP_CONFIG.REMOTE_ROI_WEIGHTING || { pathLength: 1, swampTiles: 3, hostilePenalty: 5000 };
+var THROTTLE_LOG_INTERVAL = (typeof RP_CONFIG.THROTTLE_LOG_INTERVAL === 'number') ? RP_CONFIG.THROTTLE_LOG_INTERVAL : 1000;
 
 var PF_CACHE_TTL = 150;
 var INVADER_LOCK_MEMO_TTL = 1500;
@@ -115,6 +130,30 @@ function ensureSourceFlag(source) {
     srec.flagName = rc;
     touchSourceActive(roomName, source.id);
   }
+}
+
+function _shouldLogThrottle(roomName, reason) {
+  if (!roomName) return false;
+  Memory._remoteThrottleLog = Memory._remoteThrottleLog || {};
+  var rec = Memory._remoteThrottleLog[roomName];
+  if (!rec) {
+    rec = {};
+    Memory._remoteThrottleLog[roomName] = rec;
+  }
+  var key = reason || 'generic';
+  var last = rec[key] || 0;
+  if ((Game.time || 0) - last < THROTTLE_LOG_INTERVAL) return false;
+  rec[key] = Game.time || 0;
+  Memory._remoteThrottleLog[roomName] = rec;
+  return true;
+}
+
+function _logRemoteThrottle(roomName, storage, threshold, active, max, reason) {
+  if (!_shouldLogThrottle(roomName, reason)) return;
+  var msg = '[Remotes] Skipped planning: storage=' + storage + '/threshold=' + threshold;
+  msg += ', active=' + active + '/max=' + max;
+  msg += ', reason=' + reason + ', room=' + roomName;
+  lunaLog.info(msg);
 }
 
 // ============================
@@ -408,10 +447,12 @@ if (!Memory._pfCost) Memory._pfCost = {};
 function pfCostCached(anchorPos, targetPos, sourceId) {
   var key = anchorPos.roomName + ':' + sourceId;
   var rec = Memory._pfCost[key];
-  if (rec && (Game.time - rec.t) < PF_CACHE_TTL) return rec.c;
-  var c = pfCost(anchorPos, targetPos);
-  Memory._pfCost[key] = { c: c, t: Game.time };
-  return c;
+  if (rec && (Game.time - rec.t) < PF_CACHE_TTL) {
+    return { cost: rec.c, length: rec.l || 0, swamp: rec.s || 0 };
+  }
+  var meta = pfCost(anchorPos, targetPos);
+  Memory._pfCost[key] = { c: meta.cost, l: meta.length, s: meta.swamp, t: Game.time };
+  return meta;
 }
 function pfCost(anchorPos, targetPos) {
   var ret = PathFinder.search(
@@ -433,7 +474,16 @@ function pfCost(anchorPos, targetPos) {
       }
     }
   );
-  return ret.incomplete ? Infinity : ret.cost;
+  if (ret.incomplete) return { cost: Infinity, length: 0, swamp: 0 };
+  var swamp = 0;
+  var pathLen = ret.path ? ret.path.length : 0;
+  if (ret.path) {
+    for (var i = 0; i < ret.path.length; i++) {
+      var step = ret.path[i];
+      if (Game.map.getRoomTerrain(step.roomName).get(step.x, step.y) === TERRAIN_MASK_SWAMP) swamp++;
+    }
+  }
+  return { cost: ret.cost, length: pathLen, swamp: swamp };
 }
 function go(creep, dest, opts){
   opts = opts || {};
@@ -490,6 +540,49 @@ function bfsNeighborRooms(startName, radius){
   }
   var out=[]; for (var k in seen) if (k!==startName) out.push(k);
   return out;
+}
+
+function homeAllowsNewRemote(homeName){
+  var state = { allowed: false, allowNewRoom: false, active: [], activeSet: {} };
+  var room = Game.rooms[homeName];
+  if (!room || !room.controller || !room.controller.my) return state;
+  if (room.controller.level < 4) return state;
+  var active = (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function')
+    ? RoadPlanner.getActiveRemoteRooms(room)
+    : [];
+  state.active = active;
+  var set = {};
+  for (var i = 0; i < active.length; i++) { set[active[i]] = true; }
+  state.activeSet = set;
+
+  var storageEnergy = room.storage ? (room.storage.store[RESOURCE_ENERGY] || 0) : 0;
+  if (!room.storage) {
+    _logRemoteThrottle(homeName, storageEnergy, STORAGE_ENERGY_MIN_BEFORE_REMOTES, active.length, MAX_ACTIVE_REMOTES, 'storage');
+    return state;
+  }
+  if (storageEnergy < STORAGE_ENERGY_MIN_BEFORE_REMOTES) {
+    _logRemoteThrottle(homeName, storageEnergy, STORAGE_ENERGY_MIN_BEFORE_REMOTES, active.length, MAX_ACTIVE_REMOTES, 'storage');
+    return state;
+  }
+
+  // Acceptance test: throttle expansion until home milestones + storage energy threshold are satisfied.
+  var plan = RoomPlanner && typeof RoomPlanner.plan === 'function' ? RoomPlanner.plan(room) : null;
+  if (plan && plan.readyForRemotes === false) return state;
+
+  state.allowed = true;
+  state.allowNewRoom = active.length < MAX_ACTIVE_REMOTES;
+  if (!state.allowNewRoom) {
+    _logRemoteThrottle(homeName, storageEnergy, STORAGE_ENERGY_MIN_BEFORE_REMOTES, active.length, MAX_ACTIVE_REMOTES, 'limit');
+  }
+  return state;
+}
+
+function remoteScore(meta, linear){
+  if (!meta) return 999999;
+  var score = (meta.length || meta.cost || 9999) * (REMOTE_ROI_WEIGHTING.pathLength || 1);
+  score += (meta.swamp || 0) * (REMOTE_ROI_WEIGHTING.swampTiles || 0);
+  score += (linear || 0) * 5;
+  return score;
 }
 
 // ============================
@@ -559,6 +652,9 @@ function pickRemoteSource(creep){
   var memAssign = ensureAssignmentsMem();
   var homeName = getHomeName(creep);
 
+  var remoteState = homeAllowsNewRemote(homeName);
+  if (!remoteState.allowed) return null;
+
   if ((Game.time + creep.name.charCodeAt(0)) % 50 === 0) markValidRemoteSourcesForHome(homeName);
   var anchor = getAnchorPos(homeName);
 
@@ -578,17 +674,22 @@ function pickRemoteSource(creep){
     var sources = room.find(FIND_SOURCES);
     for (var j=0;j<sources.length;j++){
       var s=sources[j];
-      var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
+      if (!remoteState.allowNewRoom && !remoteState.activeSet[s.pos.roomName]) continue;
+      var metaCost = pfCostCached(anchor, s.pos, s.id); if (!metaCost || metaCost.cost===Infinity) continue;
       var lin = BeeToolbox.safeLinearDistance(homeName, rn);
+      var score = remoteScore(metaCost, lin);
 
-      if (shouldAvoid(creep, s.id)){ avoided.push({id:s.id,roomName:rn,cost:cost,lin:lin,left:avoidRemaining(creep,s.id)}); continue; }
+      if (shouldAvoid(creep, s.id)){
+        avoided.push({id:s.id,roomName:rn,cost:metaCost.cost,lin:lin,left:avoidRemaining(creep,s.id),score:score});
+        continue;
+      }
       // Skip if another owner is active
       var ownerNow = maOwner(memAssign, s.id);
       if (ownerNow && ownerNow !== creep.name) continue;
       if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
 
       var sticky = (creep.memory.sourceId===s.id) ? 1 : 0;
-      candidates.push({ id:s.id, roomName:rn, cost:cost, lin:lin, sticky:sticky });
+      candidates.push({ id:s.id, roomName:rn, cost:metaCost.cost, lin:lin, sticky:sticky, score:score });
     }
   }
 
@@ -602,29 +703,39 @@ function pickRemoteSource(creep){
       if (foreignNV.avoid){ if (!foreignNV.memo) markRoomForeignAvoid(rm, foreignNV.owner, foreignNV.reason, OTHER_OWNER_AVOID_TTL); continue; }
       if (!rm.sources) continue;
       for (var sid in rm.sources){
-        if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
+        if (!remoteState.allowNewRoom && !remoteState.activeSet[rn]) continue;
+        if (shouldAvoid(creep, sid)){
+          avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid),score:scoreNV});
+          continue;
+        }
         var ownerNow2 = maOwner(memAssign, sid);
         if (ownerNow2 && ownerNow2 !== creep.name) continue;
         if (maCount(memAssign, sid) >= MAX_LUNA_PER_SOURCE) continue;
 
         var lin2 = BeeToolbox.safeLinearDistance(homeName, rn);
         var synth = (lin2*200)+800;
+        var scoreNV = remoteScore({ cost: synth, length: lin2*50, swamp: 0 }, lin2);
         var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
-        candidates.push({ id:sid, roomName:rn, cost:synth, lin:lin2, sticky:sticky2 });
+        candidates.push({ id:sid, roomName:rn, cost:synth, lin:lin2, sticky:sticky2, score:scoreNV });
       }
     }
   }
 
   if (!candidates.length){
     if (!avoided.length) return null;
-    avoided.sort(function(a,b){ return (a.left-b.left)||(a.cost-b.cost)||(a.lin-b.lin)||(a.id<b.id?-1:1); });
+    avoided.sort(function(a,b){ return (a.left-b.left)||((a.score||remoteScore({cost:a.cost,length:a.cost,swamp:0},a.lin))-(b.score||remoteScore({cost:b.cost,length:b.cost,swamp:0},b.lin))); });
     var soonest = avoided[0];
-    if (soonest.left <= 5) candidates.push(soonest); else return null;
+    if (soonest.left <= 5) {
+      soonest.sticky = soonest.sticky || 0;
+      soonest.score = soonest.score || remoteScore({cost:soonest.cost,length:soonest.cost,swamp:0},soonest.lin);
+      candidates.push(soonest);
+    } else return null;
   }
 
   candidates.sort(function(a,b){
     if (b.sticky !== a.sticky) return (b.sticky - a.sticky);
-    return (a.cost-b.cost) || (a.lin-b.lin) || (a.id<b.id?-1:1);
+    if (a.score !== b.score) return a.score - b.score;
+    return (a.lin-b.lin) || (a.id<b.id?-1:1);
   });
 
   for (var k=0;k+candidates.length>k;k++){
@@ -876,9 +987,20 @@ var TaskLuna = {
   },
 
   initializeAndAssign: function(creep){
+    var homeName = getHomeName(creep);
+    var remoteState = homeAllowsNewRemote(homeName);
+    if (!remoteState.allowed) return;
     var targetRooms = this.getNearbyRoomsWithSources(creep);
+    if (!remoteState.allowNewRoom) {
+      var filtered = [];
+      for (var i = 0; i < targetRooms.length; i++) {
+        var rn = targetRooms[i];
+        if (remoteState.activeSet[rn]) filtered.push(rn);
+      }
+      targetRooms = filtered;
+    }
     if (!creep.memory.targetRoom || !creep.memory.sourceId){
-      var least = this.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
+      var least = this.findRoomWithLeastForagers(targetRooms, homeName);
       if (!least){ if (Game.time%25===0) console.log('🚫 Forager '+creep.name+' found no suitable room with unclaimed sources.'); return; }
       creep.memory.targetRoom = least;
 
