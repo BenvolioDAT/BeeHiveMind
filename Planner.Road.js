@@ -520,7 +520,9 @@ RoadPlanner.getActiveRemoteRooms = function (homeRoom) {
   var keys = Object.keys(mem.paths);
   for (var i = 0; i < keys.length; i++) {
     var key = keys[i];
-    if (key.indexOf(homeRoom.name + ':remote:') !== 0) continue;
+    var labelIndex = key.indexOf('#');
+    var label = labelIndex >= 0 ? key.substring(labelIndex + 1) : key;
+    if (label.indexOf(homeRoom.name + ':remote:') !== 0) continue;
     var pathRec = mem.paths[key];
     if (!pathRec || !pathRec.path || !pathRec.path.length) continue;
     var last = pathRec.path[pathRec.path.length - 1];
