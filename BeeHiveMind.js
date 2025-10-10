@@ -18,6 +18,10 @@ var TaskCombatMedic = require('Task.CombatMedic');
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
+var HARVESTER_CFG = BeeToolbox && BeeToolbox.HARVESTER_CFG
+  ? BeeToolbox.HARVESTER_CFG
+  : { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
+
 var SQUAD_ROLE_RUNNERS = {
   CombatArcher: (TaskCombatArcher && typeof TaskCombatArcher.run === 'function') ? TaskCombatArcher.run : null,
   CombatMelee: (TaskCombatMelee && typeof TaskCombatMelee.run === 'function') ? TaskCombatMelee.run : null,
@@ -64,6 +68,192 @@ function cloneCounts(source) {
     result[key] = source[key];
   }
   return result;
+}
+
+function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODYPART_COST[body[i]] || 0;
+  }
+  return total;
+}
+
+function determineHarvesterRoom(memory, creep) {
+  if (!memory) memory = {};
+  var keys = ['home', '_home', 'spawnRoom', 'origin', 'targetRoom'];
+  for (var i = 0; i < keys.length; i++) {
+    var value = memory[keys[i]];
+    if (typeof value === 'string' && value.length) {
+      return value;
+    }
+  }
+  if (creep && creep.room && creep.room.name) {
+    return creep.room.name;
+  }
+  return null;
+}
+
+function buildHarvesterIntelCache() {
+  var store = GLOBAL_CACHE.harvesterIntel;
+  var tick = Game.time | 0;
+  if (!store || store.tick !== tick) {
+    store = { tick: tick, perRoom: Object.create(null) };
+
+    for (var creepName in Game.creeps) {
+      if (!BeeToolbox.hasOwn(Game.creeps, creepName)) continue;
+      var creep = Game.creeps[creepName];
+      if (!creep || !creep.memory || creep.memory.task !== 'baseharvest') continue;
+      var roomName = determineHarvesterRoom(creep.memory, creep);
+      if (!roomName) continue;
+      var info = store.perRoom[roomName];
+      if (!info) {
+        info = { active: 0, hatching: 0, lowestTtl: null, highestCost: 0 };
+        store.perRoom[roomName] = info;
+      }
+      info.active += 1;
+      var ttl = creep.ticksToLive;
+      if (typeof ttl === 'number') {
+        if (info.lowestTtl === null || ttl < info.lowestTtl) {
+          info.lowestTtl = ttl;
+        }
+      }
+      var birthBody = (creep.memory && creep.memory.birthBody && creep.memory.birthBody.length)
+        ? creep.memory.birthBody
+        : null;
+      if (!birthBody || !birthBody.length) {
+        birthBody = [];
+        var b;
+        for (b = 0; b < creep.body.length; b++) {
+          birthBody.push(creep.body[b].type);
+        }
+      }
+      var cost = calculateBodyCost(birthBody);
+      if (cost > info.highestCost) {
+        info.highestCost = cost;
+      }
+    }
+
+    if (Memory.creeps) {
+      for (var name in Memory.creeps) {
+        if (!BeeToolbox.hasOwn(Memory.creeps, name)) continue;
+        if (Game.creeps[name]) continue;
+        var mem = Memory.creeps[name];
+        if (!mem || mem.task !== 'baseharvest') continue;
+        var memRoom = determineHarvesterRoom(mem, null);
+        if (!memRoom) continue;
+        var memInfo = store.perRoom[memRoom];
+        if (!memInfo) {
+          memInfo = { active: 0, hatching: 0, lowestTtl: null, highestCost: 0 };
+          store.perRoom[memRoom] = memInfo;
+        }
+        memInfo.hatching += 1;
+        var memCost = calculateBodyCost(mem.birthBody || mem.body || []);
+        if (memCost > memInfo.highestCost) {
+          memInfo.highestCost = memCost;
+        }
+      }
+    }
+
+    GLOBAL_CACHE.harvesterIntel = store;
+  }
+  return store.perRoom;
+}
+
+function ensureHarvesterIntelForRoom(room) {
+  if (!room) {
+    return { active: 0, hatching: 0, lowestTtl: null, highestCost: 0, sources: 0, desiredCount: 0, coverage: 0 };
+  }
+  var perRoom = buildHarvesterIntelCache();
+  var info = perRoom[room.name];
+  if (!info) {
+    info = { active: 0, hatching: 0, lowestTtl: null, highestCost: 0 };
+    perRoom[room.name] = info;
+  }
+  if (!info.sourcesComputed) {
+    var sources = room.find(FIND_SOURCES) || [];
+    var sourceCount = sources.length || 0;
+    info.sources = sourceCount;
+    info.desiredCount = sourceCount > 0 ? sourceCount : 1;
+    info.sourcesComputed = true;
+  }
+  info.coverage = (info.active | 0) + (info.hatching | 0);
+  return info;
+}
+
+function planHarvesterSpawn(room, spawnEnergy, spawnCapacity, intel) {
+  var plan = { shouldSpawn: false, body: [], cost: 0 };
+  if (!room || !spawnLogic) return plan;
+
+  var targetBody = (typeof spawnLogic.getBestHarvesterBody === 'function')
+    ? spawnLogic.getBestHarvesterBody(room)
+    : spawnLogic.Generate_BaseHarvest_Body(spawnCapacity);
+  var targetCost = calculateBodyCost(targetBody);
+  var fallbackBody = (typeof spawnLogic.Generate_BaseHarvest_Body === 'function')
+    ? spawnLogic.Generate_BaseHarvest_Body(spawnEnergy)
+    : [];
+  var fallbackCost = calculateBodyCost(fallbackBody);
+
+  var desired = intel && typeof intel.desiredCount === 'number' ? intel.desiredCount : 1;
+  var coverage = intel && typeof intel.coverage === 'number' ? intel.coverage : 0;
+  var active = intel && typeof intel.active === 'number' ? intel.active : 0;
+  var hatching = intel && typeof intel.hatching === 'number' ? intel.hatching : 0;
+  var lowestTtl = (intel && typeof intel.lowestTtl === 'number') ? intel.lowestTtl : null;
+  var highestCost = intel && typeof intel.highestCost === 'number' ? intel.highestCost : 0;
+
+  if (coverage < desired) {
+    var canAffordTarget = targetBody && targetBody.length && spawnEnergy >= targetCost && targetCost > 0;
+    var chosenBody = canAffordTarget ? targetBody : fallbackBody;
+    var chosenCost = canAffordTarget ? targetCost : fallbackCost;
+    if (chosenBody && chosenBody.length && chosenCost > 0 && spawnEnergy >= chosenCost) {
+      plan.shouldSpawn = true;
+      plan.body = chosenBody;
+      plan.cost = chosenCost;
+    }
+    return plan;
+  }
+
+  if (active <= 0) {
+    return plan;
+  }
+
+  if (lowestTtl === null || lowestTtl > HARVESTER_CFG.RENEWAL_TTL) {
+    return plan;
+  }
+
+  if (hatching > 0) {
+    return plan;
+  }
+
+  var canUpgrade = targetCost > highestCost;
+  if (targetBody && targetBody.length && targetCost > 0 && spawnEnergy >= targetCost) {
+    plan.shouldSpawn = true;
+    plan.body = targetBody;
+    plan.cost = targetCost;
+    return plan;
+  }
+
+  if (!canUpgrade && fallbackBody && fallbackBody.length && fallbackCost > 0 && spawnEnergy >= fallbackCost && fallbackCost === targetCost) {
+    plan.shouldSpawn = true;
+    plan.body = fallbackBody;
+    plan.cost = fallbackCost;
+    return plan;
+  }
+
+  if (lowestTtl <= HARVESTER_CFG.EMERGENCY_TTL && fallbackBody && fallbackBody.length && fallbackCost > 0 && spawnEnergy >= fallbackCost) {
+    plan.shouldSpawn = true;
+    plan.body = fallbackBody;
+    plan.cost = fallbackCost;
+    return plan;
+  }
+
+  if (!canUpgrade && targetCost > 0 && spawnEnergy >= targetCost && targetBody && targetBody.length) {
+    plan.shouldSpawn = true;
+    plan.body = targetBody;
+    plan.cost = targetCost;
+  }
+
+  return plan;
 }
 
 function prepareTickCaches() {
@@ -755,6 +945,7 @@ var BeeHiveMind = {
     var builderFailLog = GLOBAL_CACHE.builderFailLog || (GLOBAL_CACHE.builderFailLog = Object.create(null));
     var squadPlansByRoom = buildSquadSpawnPlans(cache);
     var roomSpawned = Object.create(null);
+    var harvesterIntelByRoom = Object.create(null);
     var defaultTaskOrder = [
       'queen',
       'baseharvest',
@@ -779,6 +970,12 @@ var BeeHiveMind = {
 
       var room = spawner.room;
       if (!room) continue;
+
+      var harvesterIntel = harvesterIntelByRoom[room.name];
+      if (!harvesterIntel) {
+        harvesterIntel = ensureHarvesterIntelForRoom(room);
+        harvesterIntelByRoom[room.name] = harvesterIntel;
+      }
 
       if (roomSpawned[room.name]) {
         continue;
@@ -844,7 +1041,7 @@ var BeeHiveMind = {
       }
 
       var workerTaskLimits = {
-        baseharvest: 2,
+        baseharvest: harvesterIntel.desiredCount || 1,
         courier: 1,
         queen: 2,
         upgrader: 2,
@@ -873,7 +1070,7 @@ var BeeHiveMind = {
 
         var current = (task === 'luna')
           ? (lunaCountsByHome[room.name] || 0)
-          : (roleCounts[task] || 0);
+          : (task === 'baseharvest' ? (harvesterIntel.coverage || 0) : (roleCounts[task] || 0));
         if (current >= limit) {
           if (task === 'builder' && builderLimit > 0) {
             logBuilderSpawnBlock(spawner, room, builderSites, 'ROLE_LIMIT_REACHED', spawnResource, spawnCapacity, builderFailLog);
@@ -889,7 +1086,22 @@ var BeeHiveMind = {
         }
 
         var didSpawn = false;
-        if (task === 'builder') {
+        if (task === 'baseharvest') {
+          var harvesterPlan = planHarvesterSpawn(room, spawnResource, spawnCapacity, harvesterIntel);
+          if (!harvesterPlan.shouldSpawn) {
+            continue;
+          }
+          var overrideBody = harvesterPlan.body && harvesterPlan.body.slice ? harvesterPlan.body.slice() : harvesterPlan.body;
+          var harvesterMemory = { home: room.name, _harvesterBodyOverride: overrideBody };
+          didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource, harvesterMemory);
+          if (didSpawn === true) {
+            harvesterIntel.hatching = (harvesterIntel.hatching || 0) + 1;
+            harvesterIntel.coverage = (harvesterIntel.coverage || 0) + 1;
+            if (!harvesterIntel.highestCost || harvesterPlan.cost > harvesterIntel.highestCost) {
+              harvesterIntel.highestCost = harvesterPlan.cost;
+            }
+          }
+        } else if (task === 'builder') {
           didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
           if (didSpawn !== true && builderLimit > 0) {
             var reason = determineBuilderFailureReason(spawnResource, spawnCapacity);

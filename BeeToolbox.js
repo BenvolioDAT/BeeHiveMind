@@ -14,6 +14,12 @@ var ECON_DEFAULTS = {
   ROAD_REPAIR_THRESHOLD: 0.45
 };
 
+var HARVESTER_CFG = {
+  MAX_WORK: 6,
+  RENEWAL_TTL: 150,
+  EMERGENCY_TTL: 50
+};
+
 if (!global.__beeEconomyConfig) {
   global.__beeEconomyConfig = {
     STORAGE_ENERGY_MIN_BEFORE_REMOTES: ECON_DEFAULTS.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
@@ -1664,6 +1670,7 @@ var BeeToolbox = {
 }; // end BeeToolbox
 
 BeeToolbox.ECON_CFG = global.__beeEconomyConfig;
+BeeToolbox.HARVESTER_CFG = HARVESTER_CFG;
 
 BeeToolbox.registerEconomyOverrides = function (sourceName, overrides) {
   if (!overrides) return BeeToolbox.ECON_CFG;
