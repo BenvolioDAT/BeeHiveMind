@@ -105,6 +105,8 @@ var BeeVisuals = {
       var counter = Memory.GameTickRepairCounter || 0;
       visual.text('Repair Tick Count: ' + counter + '/5', 20, 3, { color: 'white', font: 0.6, opacity: 1 });
     }
+
+    BeeVisuals.drawLunaDebug(room, visual);
   },
 
   drawEnergyBar: function () {
@@ -260,6 +262,65 @@ function _hasRoadOrSiteFast(roomObj, x, y) {
     }
 
     drawnPaths++;
+  }
+};
+
+function _statusColor(status) {
+  switch (status) {
+    case 'READY':
+    case 'HATCHING':
+      return '#88ff88';
+    case 'DEFERRED':
+    case 'SATURATED':
+      return '#ffd966';
+    case 'BLOCKED':
+    default:
+      return '#ff8888';
+  }
+}
+
+BeeVisuals.drawLunaDebug = function (room, visual) {
+  if (!global.CFG || global.CFG.DEBUG_LUNA !== true) return;
+  var debugCache = global.__lunaDebugCache;
+  if (!debugCache || debugCache.tick !== Game.time) return;
+
+  var roomInfo = debugCache.rooms ? debugCache.rooms[room.name] : null;
+  if (roomInfo) {
+    var status = roomInfo.status || 'UNKNOWN';
+    var color = _statusColor(status);
+    var reason = roomInfo.reason ? (' (' + roomInfo.reason + ')') : '';
+    var nextStr = '';
+    if (roomInfo.nextAttempt != null) {
+      var delta = roomInfo.nextAttempt - Game.time;
+      if (delta > 0) nextStr = ' next:' + delta;
+    }
+    var spawn = null;
+    var spawns = room.find(FIND_MY_SPAWNS) || [];
+    if (spawns.length) spawn = spawns[0];
+    var labelX = spawn ? spawn.pos.x : 2;
+    var labelY = spawn ? (spawn.pos.y - 1) : 1;
+    visual.text('Luna: ' + status + reason + nextStr, labelX, labelY, {
+      color: color,
+      font: 0.6,
+      opacity: 0.9,
+      stroke: '#000000',
+      align: 'center'
+    });
+  }
+
+  var creepInfo = debugCache.creeps || {};
+  for (var name in creepInfo) {
+    if (!creepInfo.hasOwnProperty(name)) continue;
+    var info = creepInfo[name];
+    if (!info || info.room !== room.name) continue;
+    if (info.x == null || info.y == null) continue;
+    var line1 = (info.state || 'STATE') + ' ttl:' + (info.ttl || 0);
+    var line2 = info.target ? ('→ ' + info.target) : '';
+    var ypos = info.y - 0.8;
+    visual.text(line1, info.x, ypos, { color: '#ffffff', font: 0.5, opacity: 0.9, stroke: '#000000', align: 'center' });
+    if (line2) {
+      visual.text(line2, info.x, ypos - 0.6, { color: '#aaaaaa', font: 0.4, opacity: 0.8, stroke: '#000000', align: 'center' });
+    }
   }
 };
 

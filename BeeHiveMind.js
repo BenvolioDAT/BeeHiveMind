@@ -990,6 +990,11 @@ var BeeHiveMind = {
       var spawnCapacity = room.energyCapacityAvailable || spawnResource;
 
       if (spawner.spawning) {
+        if (TaskLuna && typeof TaskLuna.noteSpawnBlocked === 'function') {
+          try {
+            TaskLuna.noteSpawnBlocked(room.name, 'SPAWN_BUSY', Game.time + 1, spawnResource, spawnCapacity);
+          } catch (lunaNoteErr) {}
+        }
         if (builderLimit > 0) {
           logBuilderSpawnBlock(spawner, room, builderSites, 'SPAWN_BUSY', spawnResource, spawnCapacity, builderFailLog);
         }
@@ -1086,7 +1091,42 @@ var BeeHiveMind = {
         }
 
         var didSpawn = false;
-        if (task === 'baseharvest') {
+        if (task === 'luna') {
+          var lunaPlan = null;
+          if (TaskLuna && typeof TaskLuna.planSpawnForRoom === 'function') {
+            try {
+              lunaPlan = TaskLuna.planSpawnForRoom(spawner, {
+                availableEnergy: spawnResource,
+                capacityEnergy: spawnCapacity,
+                current: current,
+                limit: limit
+              });
+            } catch (planErr) {
+              lunaPlan = null;
+            }
+          }
+          if (!lunaPlan || lunaPlan.shouldSpawn !== true) {
+            continue;
+          }
+          var spawnResult;
+          if (TaskLuna && typeof TaskLuna.spawnFromPlan === 'function') {
+            try {
+              spawnResult = TaskLuna.spawnFromPlan(spawner, lunaPlan);
+            } catch (spawnErr) {
+              spawnResult = spawnErr && typeof spawnErr === 'number' ? spawnErr : ERR_INVALID_TARGET;
+            }
+          } else {
+            spawnResult = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+          }
+          if (spawnResult === OK || spawnResult === true) {
+            didSpawn = true;
+          } else if (spawnResult === ERR_BUSY) {
+            roomSpawned[room.name] = true;
+            continue;
+          } else {
+            continue;
+          }
+        } else if (task === 'baseharvest') {
           var harvesterPlan = planHarvesterSpawn(room, spawnResource, spawnCapacity, harvesterIntel);
           if (!harvesterPlan.shouldSpawn) {
             continue;

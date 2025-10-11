@@ -20,7 +20,11 @@ var BeeToolbox = require('BeeToolbox');
 var RoadPlanner = require('Planner.Road');
 var RoomPlanner = require('Planner.Room');
 var Logger = require('core.logger');
+var spawnLogic = require('spawn.logic');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
+
+var CFG = (global.CFG = global.CFG || {});
+if (typeof CFG.DEBUG_LUNA !== 'boolean') CFG.DEBUG_LUNA = false;
 
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var lunaLog = Logger.createLogger('Luna', LOG_LEVEL.BASIC);
@@ -36,6 +40,439 @@ var PLAIN_COST    = 2;
 var SWAMP_COST    = 10;
 var RP_CONFIG = RoadPlanner && RoadPlanner.CONFIG ? RoadPlanner.CONFIG : {};
 var ECON_CFG = BeeToolbox.ECON_CFG || {};
+
+var DEBUG_CACHE = (global.__lunaDebugCache = global.__lunaDebugCache || { tick: -1, rooms: {}, creeps: {} });
+
+function debugEnabled() {
+  return CFG.DEBUG_LUNA === true;
+}
+
+function _resetDebugCacheIfNeeded() {
+  if (!debugEnabled()) return;
+  if (DEBUG_CACHE.tick === Game.time) return;
+  DEBUG_CACHE.tick = Game.time;
+  DEBUG_CACHE.rooms = {};
+  DEBUG_CACHE.creeps = {};
+}
+
+function logDebug(roomName, action, result, details) {
+  if (!debugEnabled()) return;
+  var msg = '[LUNA] room=' + (roomName || '??') + ' action=' + action + ' result=' + result;
+  if (details) {
+    if (details.reason) msg += ' reason=' + details.reason;
+    if (details.bodyCost != null) msg += ' body=' + details.bodyCost;
+    if (details.energyAvailable != null && details.energyCapacity != null) {
+      msg += ' energy=' + details.energyAvailable + '/' + details.energyCapacity;
+    }
+    if (details.nextAttempt != null) msg += ' next=' + details.nextAttempt;
+  }
+  console.log(msg);
+}
+
+function recordRoomDebugStatus(roomName, status, reason, plan) {
+  if (!debugEnabled()) return;
+  _resetDebugCacheIfNeeded();
+  DEBUG_CACHE.rooms[roomName || 'unknown'] = {
+    status: status || 'UNKNOWN',
+    reason: reason || null,
+    nextAttempt: plan && plan.nextAttempt != null ? plan.nextAttempt : null,
+    energyAvailable: plan && plan.energyAvailable != null ? plan.energyAvailable : null,
+    energyCapacity: plan && plan.energyCapacity != null ? plan.energyCapacity : null,
+    bodyCost: plan && plan.bodyCost != null ? plan.bodyCost : null,
+    tier: plan && plan.bodyTier != null ? plan.bodyTier : null
+  };
+}
+
+function recordCreepDebugInfo(creep, info) {
+  if (!debugEnabled()) return;
+  if (!creep) return;
+  _resetDebugCacheIfNeeded();
+  DEBUG_CACHE.creeps[creep.name || ('creep_' + Game.time)] = {
+    room: creep.pos && creep.pos.roomName || null,
+    x: creep.pos && creep.pos.x,
+    y: creep.pos && creep.pos.y,
+    state: info && info.state || 'UNKNOWN',
+    ttl: creep.ticksToLive,
+    target: info && info.target || null,
+    load: info && info.load,
+    reason: info && info.reason || null
+  };
+}
+
+function ensureSpawnMemo() {
+  if (!Memory._lunaSpawn) Memory._lunaSpawn = {};
+  return Memory._lunaSpawn;
+}
+
+function getSpawnMemo(homeName) {
+  var map = ensureSpawnMemo();
+  var key = homeName || 'unknown';
+  if (!map[key]) map[key] = { status: 'INIT', reason: null, nextAttempt: Game.time, counter: 0 };
+  return map[key];
+}
+
+function updateSpawnStatus(homeName, status, reason, plan) {
+  var memo = getSpawnMemo(homeName);
+  memo.status = status || memo.status;
+  memo.reason = reason || null;
+  memo.nextAttempt = plan && plan.nextAttempt != null ? plan.nextAttempt : (Game.time + 5);
+  memo.energyAvailable = plan && plan.energyAvailable != null ? plan.energyAvailable : memo.energyAvailable;
+  memo.energyCapacity = plan && plan.energyCapacity != null ? plan.energyCapacity : memo.energyCapacity;
+  memo.bodyCost = plan && plan.bodyCost != null ? plan.bodyCost : memo.bodyCost;
+  memo.bodyTier = plan && plan.bodyTier != null ? plan.bodyTier : memo.bodyTier;
+  memo.lastResult = plan && plan.lastResult != null ? plan.lastResult : memo.lastResult;
+  memo.updatedAt = Game.time;
+  if (plan && plan.body && plan.body.length) memo.body = plan.body.slice();
+  recordRoomDebugStatus(homeName, memo.status, memo.reason, memo);
+  logDebug(homeName, 'spawnPlan', memo.status, {
+    reason: memo.reason,
+    bodyCost: memo.bodyCost,
+    energyAvailable: memo.energyAvailable,
+    energyCapacity: memo.energyCapacity,
+    nextAttempt: memo.nextAttempt
+  });
+  return memo;
+}
+
+function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODYPART_COST[body[i]] || 0;
+  }
+  return total;
+}
+
+function cloneBody(body) {
+  if (!body || !body.length) return [];
+  var out = [];
+  for (var i = 0; i < body.length; i++) out.push(body[i]);
+  return out;
+}
+
+var LUNA_BODY_CONFIGS = null;
+
+function ensureLunaBodyConfigs() {
+  if (LUNA_BODY_CONFIGS) return LUNA_BODY_CONFIGS;
+  LUNA_BODY_CONFIGS = [];
+  if (spawnLogic && spawnLogic.configurations && spawnLogic.configurations.length) {
+    for (var i = 0; i < spawnLogic.configurations.length; i++) {
+      var cfg = spawnLogic.configurations[i];
+      if (!cfg || cfg.task !== 'luna') continue;
+      var bodyList = cfg.body || [];
+      for (var j = 0; j < bodyList.length; j++) {
+        var body = bodyList[j];
+        if (!body || !body.length) continue;
+        // Bodies mirror spawn.logic tiers: roughly 2 CARRY per WORK with MOVE headroom to cover remote haul distance.
+        LUNA_BODY_CONFIGS.push(cloneBody(body));
+      }
+    }
+  }
+  if (!LUNA_BODY_CONFIGS.length) {
+    LUNA_BODY_CONFIGS.push([WORK, CARRY, MOVE]);
+  }
+  return LUNA_BODY_CONFIGS;
+}
+
+function pickLunaBodyForEnergy(energy) {
+  var configs = ensureLunaBodyConfigs();
+  var best = null;
+  for (var i = 0; i < configs.length; i++) {
+    var body = configs[i];
+    var cost = calculateBodyCost(body);
+    if (cost <= energy) {
+      best = { body: cloneBody(body), cost: cost, index: i };
+      break;
+    }
+  }
+  return best;
+}
+
+function getIdealLunaBodyForCapacity(capacity) {
+  var configs = ensureLunaBodyConfigs();
+  var ideal = null;
+  for (var i = 0; i < configs.length; i++) {
+    var body = configs[i];
+    var cost = calculateBodyCost(body);
+    if (cost <= capacity) {
+      if (!ideal || cost > ideal.cost) ideal = { body: cloneBody(body), cost: cost, index: i };
+    }
+  }
+  if (ideal) return ideal;
+  if (configs.length) {
+    var fallback = cloneBody(configs[configs.length - 1]);
+    return { body: fallback, cost: calculateBodyCost(fallback), index: configs.length - 1 };
+  }
+  return { body: [WORK, CARRY, MOVE], cost: calculateBodyCost([WORK, CARRY, MOVE]), index: 0 };
+}
+
+function getMinimumLunaCost() {
+  var configs = ensureLunaBodyConfigs();
+  if (!configs.length) return calculateBodyCost([WORK, CARRY, MOVE]);
+  var last = configs[configs.length - 1];
+  return calculateBodyCost(last);
+}
+
+function sanitizeRoomName(name) {
+  if (!name) return 'UNKNOWN';
+  return String(name).replace(/[^A-Za-z0-9]/g, '');
+}
+
+function generateLunaName(homeName) {
+  var memo = getSpawnMemo(homeName);
+  var baseRoom = sanitizeRoomName(homeName || 'HOME');
+  var counter = memo.counter | 0;
+  var name;
+  do {
+    counter += 1;
+    name = 'Luna_' + baseRoom + '_' + counter;
+  } while (Game.creeps[name]);
+  memo.counter = counter;
+  return name;
+}
+
+function hasAvailableRemoteSlot(homeName) {
+  var memAssign = ensureAssignmentsMem();
+  var open = 0;
+  for (var sid in memAssign) {
+    if (!memAssign.hasOwnProperty(sid)) continue;
+    var entry = _maEnsure(memAssign[sid], memAssign[sid] && memAssign[sid].roomName);
+    if (!entry) continue;
+    var roomName = entry.roomName || entry.room || null;
+    if (roomName && BeeToolbox.safeLinearDistance(homeName, roomName) > REMOTE_RADIUS) continue;
+    var count = entry.count | 0;
+    if (count < MAX_LUNA_PER_SOURCE) {
+      open += (MAX_LUNA_PER_SOURCE - count);
+    }
+  }
+  if (open > 0) return true;
+
+  var rooms = Memory.rooms || {};
+  for (var rn in rooms) {
+    if (!rooms.hasOwnProperty(rn)) continue;
+    if (BeeToolbox.safeLinearDistance(homeName, rn) > REMOTE_RADIUS) continue;
+    var rm = rooms[rn];
+    if (!rm || rm.hostile) continue;
+    var sources = rm.sources ? Object.keys(rm.sources) : [];
+    if (sources.length > 0) return true;
+  }
+  return false;
+}
+
+function planSpawnForRoom(spawn, context) {
+  var room = spawn && spawn.room;
+  var homeName = room ? room.name : (context && context.homeName) || null;
+  var plan = {
+    homeName: homeName,
+    spawnName: (spawn && spawn.name) || null,
+    shouldSpawn: false,
+    status: 'BLOCKED',
+    reason: 'UNSET',
+    energyAvailable: 0,
+    energyCapacity: 0,
+    current: 0,
+    limit: 0,
+    nextAttempt: Game.time + 5,
+    body: null,
+    bodyCost: 0,
+    bodyTier: null
+  };
+
+  if (!spawn || !room || !room.controller || !room.controller.my) {
+    plan.reason = 'INVALID_ROOM';
+    plan.status = 'BLOCKED';
+    plan.nextAttempt = Game.time + 50;
+    updateSpawnStatus(homeName, plan.status, plan.reason, plan);
+    return plan;
+  }
+
+  plan.energyAvailable = (context && typeof context.availableEnergy === 'number')
+    ? context.availableEnergy
+    : (room.energyAvailable || 0);
+  plan.energyCapacity = (context && typeof context.capacityEnergy === 'number')
+    ? context.capacityEnergy
+    : (room.energyCapacityAvailable || plan.energyAvailable);
+  plan.current = (context && context.current) || 0;
+  plan.limit = (context && context.limit) || 0;
+
+  if (plan.limit <= 0) {
+    plan.reason = 'QUOTA_ZERO';
+    plan.status = 'SATURATED';
+    plan.nextAttempt = Game.time + 25;
+    updateSpawnStatus(homeName, plan.status, plan.reason, plan);
+    return plan;
+  }
+
+  if (plan.current >= plan.limit) {
+    plan.reason = 'QUOTA_MET';
+    plan.status = 'SATURATED';
+    plan.nextAttempt = Game.time + 25;
+    updateSpawnStatus(homeName, plan.status, plan.reason, plan);
+    return plan;
+  }
+
+  var remoteState = homeAllowsNewRemote(homeName);
+  if (!remoteState.allowed) {
+    plan.reason = 'REMOTE_GATED';
+    plan.status = 'BLOCKED';
+    plan.nextAttempt = Game.time + 50;
+    updateSpawnStatus(homeName, plan.status, plan.reason, plan);
+    return plan;
+  }
+
+  if (!hasAvailableRemoteSlot(homeName)) {
+    plan.reason = 'NO_OPEN_SOURCES';
+    plan.status = 'DEFERRED';
+    plan.nextAttempt = Game.time + 25;
+    updateSpawnStatus(homeName, plan.status, plan.reason, plan);
+    return plan;
+  }
+
+  var bodyPlan = pickLunaBodyForEnergy(plan.energyAvailable);
+  var ideal = getIdealLunaBodyForCapacity(plan.energyCapacity);
+  if (!bodyPlan || !bodyPlan.body || !bodyPlan.body.length) {
+    plan.body = ideal.body;
+    plan.bodyCost = ideal.cost;
+    plan.bodyTier = ideal.index;
+    plan.reason = 'ERR_NO_ENERGY';
+    plan.status = 'DEFERRED';
+    plan.nextAttempt = Game.time + 10;
+    updateSpawnStatus(homeName, plan.status, plan.reason, plan);
+    return plan;
+  }
+
+  plan.body = bodyPlan.body;
+  plan.bodyCost = bodyPlan.cost;
+  plan.bodyTier = bodyPlan.index;
+  plan.reason = (ideal && bodyPlan.cost < ideal.cost) ? 'DOWNSHIFT' : 'IDEAL';
+  plan.status = 'READY';
+  plan.shouldSpawn = true;
+  plan.nextAttempt = Game.time;
+  updateSpawnStatus(homeName, plan.status, plan.reason, plan);
+  return plan;
+}
+
+function spawnFromPlan(spawn, plan) {
+  if (!spawn || !plan || !plan.body || !plan.body.length) return ERR_INVALID_ARGS;
+  var homeName = plan.homeName || (spawn.room ? spawn.room.name : null);
+  var name = plan.name || generateLunaName(homeName);
+  var memory = {
+    role: 'Worker_Bee',
+    task: 'luna',
+    bornTask: 'luna',
+    home: homeName,
+    birthBody: plan.body.slice(),
+    spawnTick: Game.time,
+    lunaState: 'INIT',
+    returning: false,
+    planReason: plan.reason,
+    planCost: plan.bodyCost
+  };
+
+  if (plan.extraMemory) {
+    for (var key in plan.extraMemory) {
+      if (plan.extraMemory.hasOwnProperty(key)) {
+        memory[key] = plan.extraMemory[key];
+      }
+    }
+  }
+
+  var result = spawn.spawnCreep(plan.body, name, { memory: memory });
+  plan.lastResult = result;
+
+  if (result === OK) {
+    var memo = getSpawnMemo(homeName);
+    memo.status = 'HATCHING';
+    memo.reason = 'SPAWNING';
+    memo.nextAttempt = Game.time + 1;
+    memo.lastResult = result;
+    memo.lastSpawnName = name;
+    memo.bodyCost = plan.bodyCost;
+    memo.energyAvailable = plan.energyAvailable;
+    memo.energyCapacity = plan.energyCapacity;
+    recordRoomDebugStatus(homeName, memo.status, memo.reason, memo);
+    logDebug(homeName, 'spawn', 'OK', { bodyCost: plan.bodyCost, energyAvailable: plan.energyAvailable, energyCapacity: plan.energyCapacity });
+  } else if (result === ERR_NAME_EXISTS) {
+    plan.name = generateLunaName(homeName);
+    plan.nextAttempt = Game.time + 1;
+    updateSpawnStatus(homeName, 'DEFERRED', 'NAME_COLLISION', plan);
+  } else if (result === ERR_NOT_ENOUGH_ENERGY) {
+    plan.nextAttempt = Game.time + 10;
+    updateSpawnStatus(homeName, 'DEFERRED', 'ERR_NOT_ENOUGH_ENERGY', plan);
+  } else if (result === ERR_BUSY) {
+    plan.nextAttempt = Game.time + 2;
+    updateSpawnStatus(homeName, 'DEFERRED', 'SPAWN_BUSY', plan);
+  } else {
+    plan.nextAttempt = Game.time + 5;
+    updateSpawnStatus(homeName, 'BLOCKED', 'ERR_' + result, plan);
+  }
+
+  return result;
+}
+
+function noteSpawnBlocked(homeName, reason, nextAttempt, availableEnergy, capacityEnergy) {
+  var plan = {
+    nextAttempt: nextAttempt != null ? nextAttempt : (Game.time + 1),
+    energyAvailable: availableEnergy,
+    energyCapacity: capacityEnergy
+  };
+  updateSpawnStatus(homeName, 'DEFERRED', reason, plan);
+}
+
+var LUNA_STATE = {
+  INIT: 'INIT',
+  ACQUIRE: 'ACQUIRE_TARGET',
+  TRAVEL: 'TRAVEL',
+  HARVEST: 'MINE',
+  DELIVER: 'DEPOSIT',
+  RECOVER: 'RECOVER',
+  RETIRE: 'RETIRE'
+};
+
+var LUNA_STATE_DISPLAY = {
+  INIT: 'IDLE',
+  ACQUIRE_TARGET: 'IDLE',
+  TRAVEL: 'TRAVEL',
+  MINE: 'MINING',
+  DEPOSIT: 'HAULING',
+  RECOVER: 'RECOVER',
+  RETIRE: 'RETIRE'
+};
+
+function getLunaState(creep) {
+  if (!creep || !creep.memory) return LUNA_STATE.INIT;
+  var state = creep.memory.lunaState;
+  if (!state || !LUNA_STATE_DISPLAY[state]) {
+    creep.memory.lunaState = LUNA_STATE.INIT;
+    creep.memory._stateSince = Game.time;
+    state = LUNA_STATE.INIT;
+  }
+  return state;
+}
+
+function setLunaState(creep, newState, reason) {
+  if (!creep || !creep.memory) return;
+  if (!newState || !LUNA_STATE_DISPLAY[newState]) newState = LUNA_STATE.INIT;
+  var current = creep.memory.lunaState;
+  if (current === newState) return;
+  creep.memory.lunaState = newState;
+  creep.memory._stateSince = Game.time;
+  creep.memory._stateReason = reason || null;
+  if (debugEnabled()) {
+    recordCreepDebugInfo(creep, {
+      state: LUNA_STATE_DISPLAY[newState] || newState,
+      target: creep.memory && creep.memory.targetRoom,
+      load: creep.store ? creep.store.getUsedCapacity(RESOURCE_ENERGY) : null,
+      reason: reason || null
+    });
+  }
+}
+
+function stateAge(creep) {
+  if (!creep || !creep.memory) return 0;
+  var since = creep.memory._stateSince | 0;
+  return Game.time - since;
+}
 
 var MAX_LUNA_PER_SOURCE = 1;
 var MAX_ACTIVE_REMOTES = (typeof ECON_CFG.MAX_ACTIVE_REMOTES === 'number') ? ECON_CFG.MAX_ACTIVE_REMOTES : 2;
@@ -824,108 +1261,252 @@ function validateExclusiveSource(creep){
 // ============================
 var TaskLuna = {
   run: function(creep){
-    if (creep && creep.memory && creep.memory.task === 'remoteharvest') {
+    if (!creep) return;
+    if (creep.memory && creep.memory.task === 'remoteharvest') {
       creep.memory.task = 'luna';
     }
+
     auditOncePerTick();
-    if (!creep.memory.home) getHomeName(creep);
 
-    // Anti-stuck tracking
-    var lastX=creep.memory._lx|0, lastY=creep.memory._ly|0, lastR=creep.memory._lr||'';
-    var samePos = (lastX===creep.pos.x && lastY===creep.pos.y && lastR===creep.pos.roomName);
-    creep.memory._stuck = samePos ? ((creep.memory._stuck|0)+1) : 0;
-    creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
+    if (creep.memory && !creep.memory.home) getHomeName(creep);
 
-    // Carry state
-    this.updateReturnState(creep);
-    if (creep.memory.returning){ this.returnToStorage(creep); return; }
-
-    // Gentle EOL slot free
-    if (creep.ticksToLive!==undefined && creep.ticksToLive<5 && creep.memory.assigned){ releaseAssignment(creep); }
-
-    // Cooldown after yield
-    if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt){
-      var _anchor = getAnchorPos(getHomeName(creep)); go(creep,_anchor,{range:2,reusePath:10}); return;
+    if (creep.memory) {
+      var lastX = creep.memory._lx | 0;
+      var lastY = creep.memory._ly | 0;
+      var lastR = creep.memory._lr || '';
+      var samePos = (lastX === creep.pos.x && lastY === creep.pos.y && lastR === creep.pos.roomName);
+      creep.memory._stuck = samePos ? ((creep.memory._stuck | 0) + 1) : 0;
+      creep.memory._lx = creep.pos.x;
+      creep.memory._ly = creep.pos.y;
+      creep.memory._lr = creep.pos.roomName;
     }
 
-    // If we were flagged to yield by resolver, obey & stop
-    if (creep.memory._forceYield){
+    var state = getLunaState(creep);
+
+    if (creep.ticksToLive !== undefined && creep.ticksToLive < 5 && creep.memory && creep.memory.assigned) {
+      releaseAssignment(creep);
+      setLunaState(creep, LUNA_STATE.RETIRE, 'lowTTL');
+      state = LUNA_STATE.RETIRE;
+    }
+
+    if (creep.memory && creep.memory._forceYield) {
       delete creep.memory._forceYield;
       releaseAssignment(creep);
+      setLunaState(creep, LUNA_STATE.RECOVER, 'yield');
+      state = LUNA_STATE.RECOVER;
+    }
+
+    if (creep.memory && creep.memory._retargetAt && Game.time < creep.memory._retargetAt) {
+      setLunaState(creep, LUNA_STATE.RECOVER, 'cooldown');
+      state = LUNA_STATE.RECOVER;
+    }
+
+    switch (state) {
+      case LUNA_STATE.INIT:
+        this.stepInit(creep);
+        break;
+      case LUNA_STATE.ACQUIRE:
+        this.stepAcquire(creep);
+        break;
+      case LUNA_STATE.TRAVEL:
+        this.stepTravel(creep);
+        break;
+      case LUNA_STATE.HARVEST:
+        this.stepHarvest(creep);
+        break;
+      case LUNA_STATE.DELIVER:
+        this.stepDeliver(creep);
+        break;
+      case LUNA_STATE.RECOVER:
+        this.stepRecover(creep);
+        break;
+      case LUNA_STATE.RETIRE:
+        this.stepRetire(creep);
+        break;
+      default:
+        setLunaState(creep, LUNA_STATE.INIT, 'unknown');
+        break;
+    }
+
+    if (debugEnabled()) {
+      recordCreepDebugInfo(creep, {
+        state: LUNA_STATE_DISPLAY[creep.memory.lunaState] || creep.memory.lunaState,
+        target: creep.memory && creep.memory.targetRoom,
+        load: creep.store ? creep.store.getUsedCapacity(RESOURCE_ENERGY) : null,
+        reason: creep.memory._stateReason || null
+      });
+    }
+  },
+
+  stepInit: function(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.returning = false;
+    getHomeName(creep);
+    setLunaState(creep, LUNA_STATE.ACQUIRE, 'init');
+  },
+
+  stepAcquire: function(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.returning = false;
+
+    if (creep.ticksToLive !== undefined && creep.ticksToLive <= 3) {
+      releaseAssignment(creep);
+      setLunaState(creep, LUNA_STATE.RETIRE, 'aging');
       return;
     }
 
-    // Assignment phase
-    if (!creep.memory.sourceId){
+    if (!creep.memory.sourceId || !creep.memory.targetRoom) {
       var pick = pickRemoteSource(creep);
-      if (pick){
-        creep.memory.sourceId   = pick.id;
+      if (pick) {
+        creep.memory.sourceId = pick.id;
         creep.memory.targetRoom = pick.roomName;
-        creep.memory.assigned   = true;
+        creep.memory.assigned = true;
         creep.memory._assignTick = Game.time;
-      }else{
+      } else {
         this.initializeAndAssign(creep);
-        if (!creep.memory.sourceId){ var anchor=getAnchorPos(getHomeName(creep)); go(creep,anchor,{range:2}); return; }
-        else creep.memory._assignTick = Game.time;
+        if (!creep.memory.sourceId) {
+          creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+          setLunaState(creep, LUNA_STATE.RECOVER, 'noSource');
+          return;
+        }
       }
     }
 
-    // If room got locked by invader activity, drop and repick
-    if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)){
-      console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
+    if (!creep.memory.targetRoom || !creep.memory.sourceId) {
+      setLunaState(creep, LUNA_STATE.RECOVER, 'missingAssign');
+      return;
+    }
+
+    if (isRoomLockedByInvaderCore(creep.memory.targetRoom)) {
       releaseAssignment(creep);
+      creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+      setLunaState(creep, LUNA_STATE.RECOVER, 'invaderLock');
       return;
     }
 
-    // Ensure exclusivity or yield
-    if (!validateExclusiveSource(creep)) return;
-
-    // Travel to target room
-    if (creep.memory.targetRoom && creep.pos.roomName !== creep.memory.targetRoom){
-      go(creep, new RoomPosition(25,25,creep.memory.targetRoom), { range:20, reusePath:20 });
+    if (!validateExclusiveSource(creep)) {
+      creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+      setLunaState(creep, LUNA_STATE.RECOVER, 'duplicate');
       return;
     }
 
-    // Defensive: memory wipe mid-run
-    if (!creep.memory.targetRoom || !creep.memory.sourceId){
-      this.initializeAndAssign(creep);
-      if (!creep.memory.targetRoom || !creep.memory.sourceId){
-        if (Game.time % 25 === 0) console.log('🚫 Forager '+creep.name+' could not be assigned a room/source.');
-        return;
-      }
-    }
-
-    // Optional metadata
     var targetRoomObj = Game.rooms[creep.memory.targetRoom];
-    if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ BeeToolbox.logSourcesInRoom(targetRoomObj); }
+    if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom) {
+      BeeToolbox.logSourcesInRoom(targetRoomObj);
+    }
 
-    // Avoid rooms you marked hostile in Memory
     var tmem = _roomMem(creep.memory.targetRoom);
-    if (tmem && tmem.hostile){
-      console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
+    if (tmem && tmem.hostile) {
       releaseAssignment(creep);
+      creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+      setLunaState(creep, LUNA_STATE.RECOVER, 'hostile');
       return;
     }
+
     var foreignRun = detectForeignPresence(creep.memory.targetRoom, targetRoomObj, tmem);
-    if (foreignRun.avoid){
+    if (foreignRun.avoid) {
       if (!foreignRun.memo) markRoomForeignAvoid(tmem, foreignRun.owner, foreignRun.reason, OTHER_OWNER_AVOID_TTL);
-      if (!creep.memory._lastForeignLog || (Game.time - creep.memory._lastForeignLog) >= 10){
+      if (!creep.memory._lastForeignLog || (Game.time - creep.memory._lastForeignLog) >= 10) {
         var reasonNote = foreignRun.reason || 'foreign presence';
-        var ownerNote = foreignRun.owner ? (' by '+foreignRun.owner) : '';
-        console.log('⚠️ Forager '+creep.name+' avoiding room '+creep.memory.targetRoom+' due to '+reasonNote+ownerNote+'.');
+        var ownerNote = foreignRun.owner ? (' by ' + foreignRun.owner) : '';
+        console.log('⚠️ Forager ' + creep.name + ' avoiding room ' + creep.memory.targetRoom + ' due to ' + reasonNote + ownerNote + '.');
         creep.memory._lastForeignLog = Game.time;
       }
       releaseAssignment(creep);
+      creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+      setLunaState(creep, LUNA_STATE.RECOVER, 'foreign');
       return;
     }
-    if (!tmem || !tmem.sources) return;
 
-    // NEW: while we’re actively working this room, ensure a controller flag exists
+    var tmemSources = tmem && tmem.sources;
+    if (!tmemSources || !tmemSources[creep.memory.sourceId]) {
+      delete creep.memory.sourceId;
+      setLunaState(creep, LUNA_STATE.ACQUIRE, 'missingSourceMem');
+      return;
+    }
+
     var ctl = targetRoomObj && targetRoomObj.controller;
     if (ctl) ensureControllerFlag(ctl);
 
-    // Work the source
+    if (creep.pos.roomName === creep.memory.targetRoom) {
+      setLunaState(creep, LUNA_STATE.HARVEST, 'inRoom');
+    } else {
+      setLunaState(creep, LUNA_STATE.TRAVEL, 'travel');
+    }
+  },
+
+  stepTravel: function(creep) {
+    if (!creep || !creep.memory) return;
+    if (!creep.memory.targetRoom || !creep.memory.sourceId) {
+      setLunaState(creep, LUNA_STATE.ACQUIRE, 'lostTarget');
+      return;
+    }
+    if (creep.pos.roomName === creep.memory.targetRoom) {
+      setLunaState(creep, LUNA_STATE.HARVEST, 'arrived');
+      return;
+    }
+    go(creep, new RoomPosition(25, 25, creep.memory.targetRoom), { range: 20, reusePath: 20 });
+  },
+
+  stepHarvest: function(creep) {
+    if (!creep || !creep.memory) return;
+    if (!creep.memory.targetRoom || !creep.memory.sourceId) {
+      setLunaState(creep, LUNA_STATE.ACQUIRE, 'lostSource');
+      return;
+    }
+    if (creep.store && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+      creep.memory.returning = true;
+      setLunaState(creep, LUNA_STATE.DELIVER, 'full');
+      return;
+    }
+    if (creep.pos.roomName !== creep.memory.targetRoom) {
+      setLunaState(creep, LUNA_STATE.TRAVEL, 'wrongRoom');
+      return;
+    }
+    if (!validateExclusiveSource(creep)) {
+      creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+      setLunaState(creep, LUNA_STATE.RECOVER, 'contested');
+      return;
+    }
+
     this.harvestSource(creep);
+
+    if (creep.store && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+      creep.memory.returning = true;
+      setLunaState(creep, LUNA_STATE.DELIVER, 'full');
+    }
+  },
+
+  stepDeliver: function(creep) {
+    if (!creep || !creep.memory) return;
+    if (!creep.store || creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
+      creep.memory.returning = false;
+      setLunaState(creep, LUNA_STATE.ACQUIRE, 'empty');
+      return;
+    }
+    this.returnToStorage(creep);
+  },
+
+  stepRecover: function(creep) {
+    if (!creep || !creep.memory) return;
+    var home = getHomeName(creep);
+    var anchor = getAnchorPos(home);
+    go(creep, anchor, { range: 2, reusePath: 10 });
+    if (!creep.memory._retargetAt || Game.time >= creep.memory._retargetAt) {
+      delete creep.memory._retargetAt;
+      setLunaState(creep, LUNA_STATE.ACQUIRE, 'recovered');
+    }
+  },
+
+  stepRetire: function(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.returning = true;
+    if (creep.store && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      this.returnToStorage(creep);
+    } else {
+      var anchor = getAnchorPos(getHomeName(creep));
+      go(creep, anchor, { range: 2, reusePath: 15 });
+    }
   },
 
   // ---- Legacy fallback (no vision) — now radius-bounded ----
@@ -1115,6 +1696,18 @@ var TaskLuna = {
       // harvesting is also activity
       touchSourceActive(creep.room.name, sid);
     }
+  },
+
+  planSpawnForRoom: function(spawn, context) {
+    return planSpawnForRoom(spawn, context);
+  },
+
+  spawnFromPlan: function(spawn, plan) {
+    return spawnFromPlan(spawn, plan);
+  },
+
+  noteSpawnBlocked: function(homeName, reason, nextAttempt, availableEnergy, capacityEnergy) {
+    noteSpawnBlocked(homeName, reason, nextAttempt, availableEnergy, capacityEnergy);
   }
 };
 
