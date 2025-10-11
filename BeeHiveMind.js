@@ -1043,7 +1043,7 @@ var BeeHiveMind = {
       var workerTaskLimits = {
         baseharvest: harvesterIntel.desiredCount || 1,
         courier: 1,
-        queen: 2,
+        queen: 1,
         upgrader: 1,
         builder: builderLimit,
         repair: 0,
