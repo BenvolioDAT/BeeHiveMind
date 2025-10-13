@@ -34,15 +34,13 @@ var LUNA_UI = {
   showLegend: true
 };
 
-CONFIG.visualsEnabled = CONFIG_VIS.enabled;
-
 var CONFIG = {
   maxHarvestersPerSource: 1,
   reserverRefreshAt: 1200,
   haulerTripTimeMax: 150,
   containerFullDropPolicy: 'avoid',
   containerFullDropThreshold: 0.85,
-  visualsEnabled: true,
+  visualsEnabled: CONFIG_VIS.enabled,
   logLevel: 'BASIC',
   healthLogInterval: 150,
   memoryAuditInterval: 150,
