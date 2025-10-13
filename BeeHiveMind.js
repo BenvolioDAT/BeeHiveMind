@@ -303,7 +303,7 @@ function prepareTickCaches() {
     if (!creep.memory) creep.memory = {};
     var creepMemory = creep.memory;
     var task = creepMemory.task;
-    if (task === 'remoteharvest') {
+    if (task === 'luna') {
       task = 'luna';
       creepMemory.task = 'luna';
     }
@@ -1064,9 +1064,9 @@ var BeeHiveMind = {
         courier: 1,
         queen: 1,
         upgrader: 1,
-        builder: builderLimit,
         repair: 0,
         luna: determineLunaQuota(room, cache),
+        builder: builderLimit,
         scout: 1,
         CombatArcher: 0,
         CombatMelee: 0,
