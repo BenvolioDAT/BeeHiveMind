@@ -1111,7 +1111,7 @@ var BeeHiveMind = {
         baseharvest: harvesterIntel.desiredCount || 1,
         courier: 1,
         queen: 1,
-        upgrader: 4,
+        upgrader: 2,
         repair: 0,
         luna: determineLunaQuota(room, cache),
         builder: builderLimit,
