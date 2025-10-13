@@ -324,6 +324,49 @@ BeeVisuals.drawLunaDebug = function (room, visual) {
   }
 };
 
+BeeVisuals.drawRemoteStatus = function () {
+  var cache = global.__lunaVisualCache;
+  if (!cache || cache.tick !== Game.time) return;
+  for (var remoteName in cache.remotes) {
+    if (!cache.remotes.hasOwnProperty(remoteName)) continue;
+    var data = cache.remotes[remoteName];
+    var room = Game.rooms[remoteName];
+    if (!room) continue;
+    var visual = new RoomVisual(remoteName);
+    var color = '#ffd966';
+    if (data.status === 'OK') color = '#88ff88';
+    else if (data.status === 'BLOCKED') color = '#ff7777';
+    var header = '[' + data.status + '] ' + (data.reason || '');
+    visual.text(header, 1, 1, { align: 'left', color: color, font: 0.6, stroke: '#000000', opacity: 0.9 });
+    var quotaText = 'M ' + (data.actual.miners || 0) + '/' + (data.quotas.miners || 0) +
+      ' H ' + (data.actual.haulers || 0) + '/' + (data.quotas.haulers || 0) +
+      ' R ' + (data.actual.reserver || 0) + '/' + (data.quotas.reserver || 0);
+    visual.text(quotaText, 1, 1.8, { align: 'left', color: '#ffffff', font: 0.5, stroke: '#000000', opacity: 0.9 });
+
+    if (room.controller) {
+      visual.text('Reserve: ' + (data.reserverTicks || 0) + 't', room.controller.pos.x, room.controller.pos.y - 1.1, {
+        align: 'center', color: '#ffffff', font: 0.5, stroke: '#000000', opacity: 0.8
+      });
+    }
+
+    var sources = data.sources || [];
+    for (var i = 0; i < sources.length; i++) {
+      var seat = sources[i];
+      if (!seat || !seat.pos) continue;
+      var pos = new RoomPosition(seat.pos.x, seat.pos.y, remoteName);
+      var status = seat.occupant ? 'OCC' : 'FREE';
+      if (!seat.occupant && seat.queue && seat.queue.length) status = 'QUE';
+      var ttl = seat.ttl != null ? seat.ttl : '-';
+      var label = status + ' (' + ttl + ')';
+      visual.text(label, pos.x, pos.y - 0.8, { align: 'center', color: '#ffffff', font: 0.5, stroke: '#000000' });
+      if (seat.containerFill != null) {
+        var pct = Math.floor(seat.containerFill * 100);
+        visual.text('C:' + pct + '%', pos.x, pos.y - 1.5, { align: 'center', color: '#ffd966', font: 0.4, stroke: '#000000' });
+      }
+    }
+  }
+};
+
 BeeVisuals.drawWorldOverview = function () {
   // Throttle — treat 0/false as "disabled"
   var mod = CFG.worldDrawModulo | 0;

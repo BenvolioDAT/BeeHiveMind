@@ -91,6 +91,133 @@ var BeeToolbox = {
     return true;
   },
 
+  /**
+   * Compute energy per tick for a given source capacity. Pure helper.
+   * @param {number} capacity - Total energy contained in the source when full.
+   * @returns {number} energy per tick (float).
+   */
+  energyPerTickFromCapacity: function (capacity) {
+    if (!capacity || capacity <= 0) return 0;
+    return capacity / ENERGY_REGEN_TIME;
+  },
+
+  /**
+   * Estimate a neutral room's source capacity based on reservation status.
+   * @param {boolean} isReserved - true if controller is reserved by us.
+   * @param {boolean} isKeeperRoom - true if source is in an SK room (higher yield).
+   * @returns {number} expected full capacity.
+   */
+  estimateRemoteSourceCapacity: function (isReserved, isKeeperRoom) {
+    if (isKeeperRoom) return 4000;
+    return isReserved ? 3000 : 1500;
+  },
+
+  /**
+   * Estimate two-way trip length in ticks for a hauler on a path.
+   * @param {number} pathLength - Number of tiles in the cached path (one-way).
+   * @param {object} opts - Optional tuning values {speedMultiplier, buffer}.
+   * @returns {number} total expected ticks to go source→home→source.
+   */
+  estimateRoundTripTicks: function (pathLength, opts) {
+    var length = pathLength || 0;
+    if (length <= 0) return 0;
+    var speed = (opts && opts.speedMultiplier) ? opts.speedMultiplier : 1;
+    var buffer = (opts && opts.buffer != null) ? opts.buffer : 4;
+    var travel = Math.ceil((length * 2) / speed);
+    return travel + buffer;
+  },
+
+  /**
+   * Estimate number of haulers required to move a flow of energy.
+   * Pure math (no game object references).
+   *
+   * @param {number} pathLength - Tiles one-way between source and deposit.
+   * @param {number} energyPerTick - Energy produced per tick at the source.
+   * @param {number} haulerCapacity - Energy one hauler can transport per trip.
+   * @param {number} tripTimeMax - Optional cap to avoid oversizing.
+   * @returns {{count:number, roundTrip:number, energyPerTrip:number}}
+   */
+  estimateHaulerRequirement: function (pathLength, energyPerTick, haulerCapacity, tripTimeMax) {
+    var capacity = haulerCapacity || 0;
+    if (capacity <= 0) {
+      return { count: 0, roundTrip: 0, energyPerTrip: 0 };
+    }
+    var roundTrip = BeeToolbox.estimateRoundTripTicks(pathLength, { buffer: 6 });
+    if (tripTimeMax && roundTrip > tripTimeMax) {
+      roundTrip = tripTimeMax;
+    }
+    var energyPerTrip = energyPerTick * roundTrip;
+    var count = 0;
+    if (energyPerTrip > 0) {
+      count = Math.ceil(energyPerTrip / capacity);
+    }
+    if (count < 1 && energyPerTick > 0) count = 1;
+    return {
+      count: count,
+      roundTrip: roundTrip,
+      energyPerTrip: energyPerTrip
+    };
+  },
+
+  /**
+   * Count body parts of a specific type.
+   * @param {Array} body - Array of body part constants.
+   * @param {string} part - Body part constant (WORK, CARRY, MOVE, ...).
+   * @returns {number} count.
+   */
+  countBodyParts: function (body, part) {
+    if (!body || !body.length) return 0;
+    var total = 0;
+    for (var i = 0; i < body.length; i++) {
+      if (body[i] === part) total++;
+    }
+    return total;
+  },
+
+  /**
+   * Calculate the total carry capacity for a body definition.
+   * @param {Array} body - Body array (symbols or BodyPartDefinition objects).
+   * @returns {number} total energy capacity when full.
+   */
+  bodyCarryCapacity: function (body) {
+    if (!body || !body.length) return 0;
+    var total = 0;
+    for (var i = 0; i < body.length; i++) {
+      var part = body[i];
+      var partType = part && part.type ? part.type : part;
+      if (partType === CARRY) total += CARRY_CAPACITY;
+    }
+    return total;
+  },
+
+  /**
+   * Estimate the lead time required to replace a creep.
+   * @param {number} travelTicks - Estimated ticks to travel from spawn to seat.
+   * @param {number} bodyLength - Body length (used for spawn time calc).
+   * @returns {number} ticks before expiry that a replacement should be queued.
+   */
+  estimateSpawnLeadTime: function (travelTicks, bodyLength) {
+    var spawnTicks = (bodyLength || 0) * CREEP_SPAWN_TIME;
+    if (spawnTicks < 0) spawnTicks = 0;
+    var travel = travelTicks || 0;
+    var buffer = 20;
+    return spawnTicks + travel + buffer;
+  },
+
+  /**
+   * Detect whether a room is a highway (either W0* or *N0 style).
+   * @param {string} roomName - Room coordinate.
+   * @returns {boolean} true if the room is a highway.
+   */
+  isHighwayRoom: function (roomName) {
+    if (!BeeToolbox.isValidRoomName(roomName)) return false;
+    var parsed = /([WE])(\d+)([NS])(\d+)/.exec(roomName);
+    if (!parsed) return false;
+    var x = parseInt(parsed[2], 10);
+    var y = parseInt(parsed[4], 10);
+    return (x % 10 === 0) || (y % 10 === 0);
+  },
+
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL
   // ---------------------------------------------------------------------------
