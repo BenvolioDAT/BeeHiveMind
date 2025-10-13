@@ -169,6 +169,14 @@ var CONFIGS = {
   ],
   upgrader: [
     // Larger bodies listed first so higher RCLs still prefer beefier creeps
+    B(8,8,8),
+    B(8,7,7),
+    B(8,6,6),
+    B(8,5,5),
+    B(8,4,4),
+    B(7,4,4),
+    B(6,4,4),
+    B(5,4,4),
     B(4,4,4),
     B(4,3,4),
     B(3,2,4),
