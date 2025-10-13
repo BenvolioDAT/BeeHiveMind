@@ -12,11 +12,27 @@
 
 'use strict';
 
+var CONFIG_VIS = {
+  enabled: true,
+  drawBudgetRemote: 120,
+  drawBudgetBase: 60,
+  showPathsRemote: true,
+  showPathsBase: false
+};
+
 var BeeToolbox = require('BeeToolbox');
 var BeeVisuals = require('BeeVisuals');
 var Logger = require('core.logger');
 var spawnLogic = require('spawn.logic');
 try { require('Traveler'); } catch (e) {}
+
+var LUNA_UI = {
+  enabled: CONFIG_VIS.enabled,
+  drawBudget: CONFIG_VIS.drawBudgetRemote,
+  showPaths: CONFIG_VIS.showPathsRemote,
+  anchor: { x: 1, y: 1 },
+  showLegend: true
+};
 
 var CONFIG = {
   maxHarvestersPerSource: 1,
@@ -24,7 +40,7 @@ var CONFIG = {
   haulerTripTimeMax: 150,
   containerFullDropPolicy: 'avoid',
   containerFullDropThreshold: 0.85,
-  visualsEnabled: true,
+  visualsEnabled: CONFIG_VIS.enabled,
   logLevel: 'BASIC',
   healthLogInterval: 150,
   memoryAuditInterval: 150,
@@ -46,7 +62,7 @@ var HAULER_ROLE_KEY = 'remoteHauler';
 var RESERVER_ROLE_KEY = 'reserver';
 
 var _phaseState = global.__lunaPhaseState || (global.__lunaPhaseState = { tick: -1 });
-var _visualCache = global.__lunaVisualCache || (global.__lunaVisualCache = { tick: -1, remotes: {} });
+var _visualCache = global.__lunaVisualCache || (global.__lunaVisualCache = { tick: -1, remotes: {}, byHome: {} });
 
 function ensurePhaseState(cache) {
   var tick = Game.time | 0;
@@ -70,6 +86,7 @@ function ensureVisualCacheTick() {
   if (_visualCache.tick !== Game.time) {
     _visualCache.tick = Game.time;
     _visualCache.remotes = {};
+    _visualCache.byHome = {};
   }
   return _visualCache;
 }
@@ -885,10 +902,135 @@ function reserverAct(creep) {
   }
 }
 
+function buildRemoteHudLedger(summary) {
+  if (!summary) return null;
+  var ledger = summary.ledger || {};
+  var remoteRoom = Game.rooms[summary.remote] || null;
+  var status = summary.status || REMOTE_STATUS.DEGRADED;
+  if (!remoteRoom && status === REMOTE_STATUS.OK) status = 'NOVISION';
+  var normalized = {
+    roomName: summary.remote,
+    homeName: summary.home,
+    status: status,
+    notes: summary.reason || (ledger.statusReason || ''),
+    sources: [],
+    haulers: {
+      countHave: (summary.actual && summary.actual.haulers != null) ? summary.actual.haulers : 0,
+      countNeed: (summary.quotas && summary.quotas.haulers != null) ? summary.quotas.haulers : 0,
+      avgLoadPct: 0,
+      avgEtaTicks: 0
+    },
+    reserver: {
+      needed: (summary.quotas && summary.quotas.reserver != null) ? summary.quotas.reserver : (summary.reserverNeed ? 1 : 0),
+      have: (summary.actual && summary.actual.reserver != null) ? summary.actual.reserver : 0,
+      ttl: summary.reserverTicks != null ? summary.reserverTicks : 0,
+      refreshAt: CONFIG.reserverRefreshAt
+    },
+    energyFlow: {
+      inPerTick: 0,
+      outPerTick: summary.energyPerTick != null ? summary.energyPerTick : 0
+    },
+    lastUpdate: Game.time,
+    minersHave: (summary.actual && summary.actual.miners != null) ? summary.actual.miners : 0,
+    minersNeed: (summary.quotas && summary.quotas.miners != null) ? summary.quotas.miners : 0
+  };
+
+  var haulerPlan = summary.haulerInfo || null;
+  var capacity = (ledger && ledger.haulers && ledger.haulers.lastBodyCapacity) ? ledger.haulers.lastBodyCapacity : 0;
+  if (haulerPlan) {
+    if (haulerPlan.roundTrip != null) {
+      normalized.haulers.avgEtaTicks = haulerPlan.roundTrip > 0 ? Math.round(haulerPlan.roundTrip / 2) : 0;
+    }
+    if (capacity > 0 && haulerPlan.energyPerTrip != null && haulerPlan.count > 0) {
+      var perHauler = haulerPlan.energyPerTrip / Math.max(1, haulerPlan.count);
+      normalized.haulers.avgLoadPct = Math.max(0, Math.min(100, Math.round((perHauler / capacity) * 100)));
+    }
+    if (haulerPlan.count != null) {
+      var need = normalized.haulers.countNeed;
+      if (haulerPlan.count > need) normalized.haulers.countNeed = haulerPlan.count;
+    }
+  }
+
+  var sourceList = summary.sources || [];
+  for (var i = 0; i < sourceList.length; i++) {
+    var seat = sourceList[i];
+    if (!seat) continue;
+    var seatState = 'FREE';
+    if (seat.needReplacement || (seat.queue && seat.queue.length)) seatState = 'QUEUED';
+    else if (seat.occupant) seatState = 'OCCUPIED';
+    var ttl = seat.occupantTtl != null ? seat.occupantTtl : 0;
+    if (ttl < 0) ttl = 0;
+    var entry = {
+      id: seat.id,
+      pos: null,
+      containerId: seat.containerId || null,
+      containerPos: seat.containerPos || (seat.entry && seat.entry.containerPos ? seat.entry.containerPos : null),
+      linkId: seat.linkId || null,
+      seatState: seatState,
+      minerTtl: ttl,
+      containerFill: seat.containerFill != null ? seat.containerFill : null,
+      linkEnergy: 0
+    };
+    if (seat.entry && seat.entry.pos) {
+      entry.pos = {
+        x: seat.entry.pos.x,
+        y: seat.entry.pos.y,
+        roomName: seat.entry.pos.roomName || summary.remote
+      };
+    } else if (seat.pos) {
+      entry.pos = {
+        x: seat.pos.x,
+        y: seat.pos.y,
+        roomName: seat.pos.roomName || summary.remote
+      };
+    } else if (remoteRoom && seat.id) {
+      var srcObj = Game.getObjectById(seat.id);
+      if (srcObj && srcObj.pos) {
+        entry.pos = { x: srcObj.pos.x, y: srcObj.pos.y, roomName: srcObj.pos.roomName };
+      }
+    }
+    if (entry.pos && !entry.pos.roomName) entry.pos.roomName = summary.remote;
+    if (remoteRoom) {
+      if (entry.containerId) {
+        var container = Game.getObjectById(entry.containerId);
+        if (container && container.pos) {
+          entry.containerPos = { x: container.pos.x, y: container.pos.y, roomName: container.pos.roomName };
+        }
+        if (container && container.store) {
+          if (typeof container.store.getCapacity === 'function') {
+            var cap = container.store.getCapacity(RESOURCE_ENERGY);
+            if (cap > 0) {
+              var used = container.store[RESOURCE_ENERGY] || 0;
+              entry.containerFill = used / cap;
+            }
+          } else if (container.storeCapacity != null && container.storeCapacity > 0) {
+            entry.containerFill = (container.store[RESOURCE_ENERGY] || 0) / container.storeCapacity;
+          }
+        }
+      }
+      if (entry.linkId) {
+        var link = Game.getObjectById(entry.linkId);
+        if (link) {
+          if (link.store && link.store[RESOURCE_ENERGY] != null) entry.linkEnergy = link.store[RESOURCE_ENERGY];
+          else if (link.energy != null) entry.linkEnergy = link.energy;
+        }
+      }
+    }
+    if (entry.containerFill != null) {
+      if (entry.containerFill < 0) entry.containerFill = 0;
+      if (entry.containerFill > 1) entry.containerFill = 1;
+    }
+    normalized.sources.push(entry);
+  }
+
+  return normalized;
+}
+
 function gatherVisualData(state) {
   var cache = ensureVisualCacheTick();
   for (var i = 0; i < state.plan.list.length; i++) {
     var summary = state.plan.list[i];
+    var hud = buildRemoteHudLedger(summary);
     cache.remotes[summary.remote] = {
       status: summary.status,
       reason: summary.reason,
@@ -913,8 +1055,13 @@ function gatherVisualData(state) {
           });
         }
         return arr;
-      })()
+      })(),
+      hud: hud
     };
+    if (hud) {
+      if (!cache.byHome[summary.home]) cache.byHome[summary.home] = [];
+      cache.byHome[summary.home].push(hud);
+    }
   }
 }
 
@@ -948,6 +1095,14 @@ function runSelfTest(state) {
   if (plan.count <= 0) {
     lunaLog.error('[LUNA-TEST] hauler sizing failed');
   }
+}
+
+function getVisualLedgersForHome(homeName) {
+  if (!homeName) return [];
+  var cache = ensureVisualCacheTick();
+  var bucket = cache.byHome && cache.byHome[homeName];
+  if (!bucket || !bucket.length) return [];
+  return bucket.slice();
 }
 
 function selectBodyForRole(roleKey, available, capacity) {
@@ -1093,7 +1248,10 @@ var TaskLuna = {
   spawnFromPlan: spawnFromPlan,
   noteSpawnBlocked: noteSpawnBlocked,
   MAX_LUNA_PER_SOURCE: CONFIG.maxHarvestersPerSource,
-  getHomeQuota: getHomeQuota
+  getHomeQuota: getHomeQuota,
+  getVisualLedgersForHome: getVisualLedgersForHome,
+  LUNA_UI: LUNA_UI,
+  CONFIG_VIS: CONFIG_VIS
 };
 
 module.exports = TaskLuna;
