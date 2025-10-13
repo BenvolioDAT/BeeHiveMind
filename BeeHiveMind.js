@@ -816,6 +816,11 @@ function countSourcesInMemory(mem) {
 function determineLunaQuota(room, cache) {
   if (!room) return 0;
 
+  if (TaskLuna && typeof TaskLuna.getHomeQuota === 'function') {
+    var quota = TaskLuna.getHomeQuota(room.name);
+    if (quota > 0) return quota;
+  }
+
   var remotes = cache.remotesByHome[room.name] || [];
   if (remotes.length === 0) return 0;
 
@@ -885,12 +890,21 @@ var BeeHiveMind = {
     this.initializeMemory();
     var cache = prepareTickCaches();
 
+    if (TaskLuna && typeof TaskLuna.tick === 'function') {
+      TaskLuna.tick(cache);
+    }
+
     var ownedRooms = cache.roomsOwned || [];
     for (var i = 0; i < ownedRooms.length; i++) {
       this.manageRoom(ownedRooms[i], cache);
     }
 
     this.runCreeps(cache);
+
+    if (TaskLuna && typeof TaskLuna.report === 'function') {
+      TaskLuna.report(cache);
+    }
+
     this.manageSpawns(cache);
 
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
