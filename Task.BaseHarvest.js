@@ -1,6 +1,14 @@
 // TaskBaseHarvest.js — queued handoff + conflict-safe miner + container autoplacer/builder
 'use strict';
 
+var CONFIG_VIS = {
+  enabled: true,
+  drawBudgetRemote: 120,
+  drawBudgetBase: 60,
+  showPathsRemote: true,
+  showPathsBase: false
+};
+
 var BeeToolbox = require('BeeToolbox');
 
 var HARVESTER_CFG = BeeToolbox && BeeToolbox.HARVESTER_CFG
@@ -17,6 +25,14 @@ var CONFIG = {
   queueRange: 1,               // park within this range when queueing (1 = adjacent)
   travelReuse: 12              // reusePath hint for travel helper (if used internally)
 };
+
+var BASE_UI = {
+  enabled: CONFIG_VIS.enabled,
+  drawBudget: CONFIG_VIS.drawBudgetBase,
+  showPaths: CONFIG_VIS.showPathsBase
+};
+
+var _seatVisualCache = global.__baseSeatVisualCache || (global.__baseSeatVisualCache = { tick: -1, rooms: {} });
 
 /** =========================
  *  Small utils
@@ -112,6 +128,102 @@ function getIncumbents(roomName, sourceId, excludeName) {
 // Count assigned harvesters (live)
 function countAssignedHarvesters(roomName, sourceId) {
   return getIncumbents(roomName, sourceId, null).length;
+}
+
+function ensureSeatVisualCacheTick() {
+  if (_seatVisualCache.tick !== Game.time) {
+    _seatVisualCache.tick = Game.time;
+    _seatVisualCache.rooms = {};
+  }
+  return _seatVisualCache;
+}
+
+function getBaseSeatsForVisual(roomName) {
+  if (!roomName) return [];
+  var cache = ensureSeatVisualCacheTick();
+  if (cache.rooms[roomName]) return cache.rooms[roomName];
+  var result = [];
+  var room = Game.rooms[roomName];
+  if (!room) {
+    cache.rooms[roomName] = result;
+    return result;
+  }
+  var assigned = Object.create(null);
+  var name;
+  for (name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory || creep.memory.task !== 'baseharvest') continue;
+    if (!creep.memory.assignedSource) continue;
+    var sid = creep.memory.assignedSource;
+    if (!assigned[sid]) assigned[sid] = { creeps: [], queued: false };
+    assigned[sid].creeps.push(creep);
+    if (creep.memory.waitingForSeat) assigned[sid].queued = true;
+  }
+  if (Memory.creeps) {
+    for (name in Memory.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Memory.creeps, name)) continue;
+      if (Game.creeps[name]) continue;
+      var mem = Memory.creeps[name];
+      if (!mem || mem.task !== 'baseharvest') continue;
+      if (!mem.assignedSource) continue;
+      if (!assigned[mem.assignedSource]) assigned[mem.assignedSource] = { creeps: [], queued: false };
+      if (mem.waitingForSeat || mem.queueing || mem.queued) assigned[mem.assignedSource].queued = true;
+    }
+  }
+  var sources = room.find(FIND_SOURCES) || [];
+  for (var i = 0; i < sources.length; i++) {
+    var source = sources[i];
+    if (!source) continue;
+    var bucket = assigned[source.id] || { creeps: [], queued: false };
+    var occupantTtl = null;
+    for (var c = 0; c < bucket.creeps.length; c++) {
+      var worker = bucket.creeps[c];
+      if (!worker) continue;
+      if (worker.memory && worker.memory.waitingForSeat) bucket.queued = true;
+      var ttl = worker.ticksToLive;
+      if (ttl != null && (occupantTtl === null || ttl > occupantTtl)) occupantTtl = ttl;
+    }
+    var seatState = 'FREE';
+    if (occupantTtl != null) seatState = 'OCCUPIED';
+    var ttlValue = occupantTtl != null ? occupantTtl : 0;
+    if (ttlValue < 0) ttlValue = 0;
+    var queued = bucket.queued || bucket.creeps.length > 1 || (occupantTtl != null && occupantTtl <= CONFIG.handoffTtl);
+    if (queued) seatState = 'QUEUED';
+    var container = getAdjacentContainerForSource(source);
+    var fill = null;
+    if (container && container.store) {
+      if (typeof container.store.getCapacity === 'function') {
+        var cap = container.store.getCapacity(RESOURCE_ENERGY);
+        if (cap > 0) {
+          fill = (container.store[RESOURCE_ENERGY] || 0) / cap;
+        }
+      } else if (container.storeCapacity != null && container.storeCapacity > 0) {
+        fill = (container.store[RESOURCE_ENERGY] || 0) / container.storeCapacity;
+      }
+    }
+    if (fill != null) {
+      if (fill < 0) fill = 0;
+      if (fill > 1) fill = 1;
+    }
+    var roomMem = Memory.rooms && Memory.rooms[roomName];
+    var sourceMem = roomMem && roomMem.sources && roomMem.sources[source.id];
+    var contestedUntil = sourceMem && sourceMem.contestedUntilTick != null ? sourceMem.contestedUntilTick : null;
+    var lastYieldTick = sourceMem && sourceMem.lastYieldTick != null ? sourceMem.lastYieldTick : null;
+    var record = {
+      sourceId: source.id,
+      pos: { x: source.pos.x, y: source.pos.y, roomName: roomName },
+      seatState: seatState,
+      minerTtl: ttlValue,
+      containerFill: fill,
+      queuedMiner: !!queued,
+      lastYieldTick: lastYieldTick,
+      contestedUntilTick: contestedUntil
+    };
+    result.push(record);
+  }
+  cache.rooms[roomName] = result;
+  return result;
 }
 
 /** =========================
@@ -509,5 +621,9 @@ var TaskBaseHarvest = {
     }
   }
 };
+
+TaskBaseHarvest.getBaseSeatsForVisual = getBaseSeatsForVisual;
+TaskBaseHarvest.BASE_UI = BASE_UI;
+TaskBaseHarvest.CONFIG_VIS = CONFIG_VIS;
 
 module.exports = TaskBaseHarvest;
