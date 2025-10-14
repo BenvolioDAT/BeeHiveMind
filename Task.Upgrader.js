@@ -50,52 +50,73 @@ var TaskUpgrader = {
       }
       BeeToolbox.collectEnergy(creep);
       // Check if there is energy in storage
-      var storageWithEnergy = room ? room.storage : null;
-      if (storageWithEnergy && storageWithEnergy.store[RESOURCE_ENERGY] > 0) {
-        if (creep.withdraw(storageWithEnergy, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-          BeeToolbox.BeeTravel(creep, storageWithEnergy);
-          //creep.moveTo(storageWithEnergy, { reusePath: 10 });
-        }
-      } else {
-        // If no energy in storage, look for energy in containers
-        var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+      // Prefer controller-adjacent container first
+      var controllerContainer = null;
+
+      if (room && room.controller) {
+        controllerContainer = room.controller.pos.findClosestByRange(FIND_STRUCTURES, {
           filter: function (structure) {
             return (
               structure.structureType === STRUCTURE_CONTAINER &&
-              structure.store[RESOURCE_ENERGY] > 0
+              structure.store[RESOURCE_ENERGY] > 0 &&
+              structure.pos.getRangeTo(room.controller) <= 5
             );
           }
         });
-        if (containerWithEnergy) {
-          if (creep.withdraw(containerWithEnergy, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            BeeToolbox.BeeTravel(creep, containerWithEnergy);
-            //creep.moveTo(containerWithEnergy, { reusePath: 10 });
+      }
+
+      // Primary choice: controller container (if valid)
+      if (controllerContainer) {
+        if (creep.withdraw(controllerContainer, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+          BeeToolbox.BeeTravel(creep, controllerContainer);
+        }
+      } else {
+        // Next preference: storage with energy
+        var storageWithEnergy = room ? room.storage : null;
+        if (storageWithEnergy && storageWithEnergy.store[RESOURCE_ENERGY] > 0) {
+          if (creep.withdraw(storageWithEnergy, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            BeeToolbox.BeeTravel(creep, storageWithEnergy);
           }
         } else {
-          // If no energy in containers, look for dropped energy
-          var targetDroppedEnergyId = creep.memory.targetDroppedEnergyId;
-          var droppedResource;
-          if (targetDroppedEnergyId) {
-            droppedResource = Game.getObjectById(targetDroppedEnergyId);
-          }
-          // If the target dropped resource is not valid, find a new one
-          if (!droppedResource || droppedResource.amount === 0) {
-            var droppedResources = room ? room.find(FIND_DROPPED_RESOURCES, {
-              filter: function (resource) {
-                return resource.resourceType === RESOURCE_ENERGY;
-              }
-            }) : [];
-            if (droppedResources.length > 0) {
-              droppedResources.sort(function (a, b) {
-                return b.amount - a.amount;
-              });
-              droppedResource = droppedResources[0];
-              creep.memory.targetDroppedEnergyId = droppedResource.id;
+          // Next: any other container with energy
+          var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+            filter: function (structure) {
+              return (
+                structure.structureType === STRUCTURE_CONTAINER &&
+                structure.store[RESOURCE_ENERGY] > 0
+              );
             }
-          }
-          if (droppedResource && creep.pickup(droppedResource) === ERR_NOT_IN_RANGE) {
-            BeeToolbox.BeeTravel(creep, droppedResource);
-            //creep.moveTo(droppedResource, { reusePath: 10 });
+          });
+
+          if (containerWithEnergy) {
+            if (creep.withdraw(containerWithEnergy, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+              BeeToolbox.BeeTravel(creep, containerWithEnergy);
+            }
+          } else {
+            // Last resort: dropped energy
+            var targetDroppedEnergyId = creep.memory.targetDroppedEnergyId;
+            var droppedResource = targetDroppedEnergyId ? Game.getObjectById(targetDroppedEnergyId) : null;
+
+            // Find new target if old one is gone or empty
+            if (!droppedResource || droppedResource.amount === 0) {
+              var droppedResources = room ? room.find(FIND_DROPPED_RESOURCES, {
+                filter: function (resource) {
+                  return resource.resourceType === RESOURCE_ENERGY;
+                }
+              }) : [];
+
+              if (droppedResources.length > 0) {
+                droppedResources.sort(function (a, b) {
+                  return b.amount - a.amount;
+                });
+                droppedResource = droppedResources[0];
+                creep.memory.targetDroppedEnergyId = droppedResource.id;
+              }
+            }
+
+            if (droppedResource && creep.pickup(droppedResource) === ERR_NOT_IN_RANGE) {
+              BeeToolbox.BeeTravel(creep, droppedResource);
+            }
           }
         }
       }
