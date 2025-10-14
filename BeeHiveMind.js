@@ -1110,7 +1110,7 @@ var BeeHiveMind = {
       var workerTaskLimits = {
         baseharvest: harvesterIntel.desiredCount || 1,
         courier: 1,
-        queen: 1,
+        queen: 2,
         upgrader: 2,
         repair: 0,
         luna: determineLunaQuota(room, cache),
