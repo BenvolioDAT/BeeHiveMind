@@ -60,6 +60,10 @@ var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE =
   ? TaskLuna.MAX_LUNA_PER_SOURCE
   : 1;
 
+var SCOUT_REMOTE_MAX_RANGE = 6;
+var SCOUT_REMOTE_STALE_TICKS = 15000;
+var SCOUT_REMOTE_BLOCK_COOLDOWN = 10000;
+
 var GLOBAL_CACHE = global.__BHM_CACHE || (global.__BHM_CACHE = { tick: -1 });
 
 function cloneCounts(source) {
@@ -342,6 +346,7 @@ function prepareTickCaches() {
   cache.totalSites = totalSites;
 
   var remotesByHome = Object.create(null);
+  var scoutRemotes = buildScoutRemoteCandidates(ownedRooms);
   for (var idx = 0; idx < ownedRooms.length; idx++) {
     var ownedRoom = ownedRooms[idx];
     var remoteNames = [];
