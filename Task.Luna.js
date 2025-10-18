@@ -362,16 +362,7 @@ function planPhase(state) {
         if (roomMem.sources) {
           for (var sid in roomMem.sources) {
             if (!Object.prototype.hasOwnProperty.call(roomMem.sources, sid)) continue;
-            var srcRec = roomMem.sources[sid];
-            var srcPos = null;
-            if (srcRec) {
-              if (srcRec.pos && typeof srcRec.pos.x === 'number' && typeof srcRec.pos.y === 'number') {
-                srcPos = new RoomPosition(srcRec.pos.x, srcRec.pos.y, remoteName);
-              } else if (typeof srcRec.x === 'number' && typeof srcRec.y === 'number') {
-                srcPos = new RoomPosition(srcRec.x, srcRec.y, remoteName);
-              }
-            }
-            sourceList.push({ id: sid, pos: srcPos });
+            sourceList.push({ id: sid, pos: roomMem.sources[sid].pos ? new RoomPosition(roomMem.sources[sid].pos.x, roomMem.sources[sid].pos.y, remoteName) : null });
           }
         }
       }
@@ -392,9 +383,6 @@ function planPhase(state) {
 
         var entry = touchSourceEntry(ledger, sourceId, homeName);
         if (sourceObj) updateSourceVision(entry, sourceObj);
-        else if (!entry.pos && src.pos) {
-          entry.pos = { x: src.pos.x, y: src.pos.y, roomName: src.pos.roomName };
-        }
 
         var reservedTicks = summary.reserverTicks;
         entry.energyPerTick = energyPerTick(entry, remoteRoom, reservedTicks);
