@@ -60,6 +60,10 @@ var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE =
   ? TaskLuna.MAX_LUNA_PER_SOURCE
   : 1;
 
+var SCOUT_REMOTE_MAX_RANGE = 6;
+var SCOUT_REMOTE_STALE_TICKS = 15000;
+var SCOUT_REMOTE_BLOCK_COOLDOWN = 10000;
+
 var GLOBAL_CACHE = global.__BHM_CACHE || (global.__BHM_CACHE = { tick: -1 });
 
 function cloneCounts(source) {
@@ -342,12 +346,20 @@ function prepareTickCaches() {
   cache.totalSites = totalSites;
 
   var remotesByHome = Object.create(null);
+  var scoutRemotes = buildScoutRemoteCandidates(ownedRooms);
   for (var idx = 0; idx < ownedRooms.length; idx++) {
     var ownedRoom = ownedRooms[idx];
     var remoteNames = [];
+    var remoteSeen = Object.create(null);
     if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-      remoteNames = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
+      var activeRemotes = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
+      for (var ar = 0; ar < activeRemotes.length; ar++) {
+        addRemoteCandidate(remoteNames, remoteSeen, activeRemotes[ar]);
+      }
     }
+    gatherRemotesFromAssignments(ownedRoom.name, remoteNames, remoteSeen);
+    gatherRemotesFromLedger(ownedRoom.name, remoteNames, remoteSeen);
+    gatherRemotesFromScoutIntel(ownedRoom, remoteNames, remoteSeen, scoutRemotes[ownedRoom.name]);
     remotesByHome[ownedRoom.name] = remoteNames;
   }
   cache.remotesByHome = remotesByHome;
@@ -415,6 +427,187 @@ function looksLikeRoomName(name) {
   if (first !== 'W' && first !== 'E') return false;
   if (name.indexOf('N') === -1 && name.indexOf('S') === -1) return false;
   return true;
+}
+
+function addRemoteCandidate(target, seen, remoteName) {
+  if (!remoteName || typeof remoteName !== 'string') return;
+  if (!looksLikeRoomName(remoteName)) return;
+  if (seen[remoteName]) return;
+  seen[remoteName] = true;
+  target.push(remoteName);
+}
+
+function hasScoutSourceIntel(mem) {
+  if (!mem) return false;
+  if (mem.sources) {
+    if (Array.isArray(mem.sources)) {
+      if (mem.sources.length > 0) return true;
+    } else if (BeeToolbox.isObject(mem.sources)) {
+      for (var key in mem.sources) {
+        if (BeeToolbox.hasOwn(mem.sources, key)) return true;
+      }
+    }
+  }
+  if (mem.intel && typeof mem.intel.sources === 'number' && mem.intel.sources > 0) return true;
+  return false;
+}
+
+function scoutLastVisitedTick(mem) {
+  if (!mem) return -Infinity;
+  if (mem.scout && typeof mem.scout.lastVisited === 'number') return mem.scout.lastVisited;
+  if (mem.intel) {
+    if (typeof mem.intel.lastVisited === 'number') return mem.intel.lastVisited;
+    if (typeof mem.intel.lastScanAt === 'number') return mem.intel.lastScanAt;
+  }
+  if (typeof mem.lastVisited === 'number') return mem.lastVisited;
+  if (typeof mem.lastSeenAt === 'number') return mem.lastSeenAt;
+  return -Infinity;
+}
+
+function isScoutRemoteBlocked(mem, myName) {
+  if (!mem) return false;
+  if (typeof mem.blocked === 'number' && (Game.time - mem.blocked) < SCOUT_REMOTE_BLOCK_COOLDOWN) return true;
+  if (mem.hostile) return true;
+  if (mem._avoidOtherOwnerUntil && mem._avoidOtherOwnerUntil > Game.time) return true;
+  if (mem.intel) {
+    if (mem.intel.owner && myName && mem.intel.owner !== myName) return true;
+    if (mem.intel.reservation && myName && mem.intel.reservation !== myName) return true;
+  }
+  return false;
+}
+
+function buildScoutRemoteCandidates(ownedRooms) {
+  var result = Object.create(null);
+  if (!ownedRooms || !ownedRooms.length) return result;
+  if (!Memory.rooms) return result;
+
+  var myName = (BeeToolbox && typeof BeeToolbox.getMyUsername === 'function')
+    ? BeeToolbox.getMyUsername()
+    : null;
+
+  for (var idx = 0; idx < ownedRooms.length; idx++) {
+    result[ownedRooms[idx].name] = [];
+  }
+
+  for (var roomName in Memory.rooms) {
+    if (!BeeToolbox.hasOwn(Memory.rooms, roomName)) continue;
+    var mem = Memory.rooms[roomName];
+    if (!mem) continue;
+    if (!hasScoutSourceIntel(mem)) continue;
+
+    var lastVisited = scoutLastVisitedTick(mem);
+    if (lastVisited !== -Infinity && (Game.time - lastVisited) > SCOUT_REMOTE_STALE_TICKS) continue;
+    if (isScoutRemoteBlocked(mem, myName)) continue;
+
+    var bestHome = null;
+    var bestDist = Infinity;
+    for (var i = 0; i < ownedRooms.length; i++) {
+      var owned = ownedRooms[i];
+      if (!owned || !owned.name) continue;
+      if (owned.name === roomName) { bestHome = null; bestDist = Infinity; break; }
+      var dist = BeeToolbox.safeLinearDistance(owned.name, roomName, true);
+      if (typeof dist !== 'number' || !isFinite(dist) || dist <= 0) continue;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestHome = owned.name;
+      }
+    }
+    if (!bestHome) continue;
+    if (bestDist > SCOUT_REMOTE_MAX_RANGE) continue;
+
+    if (!result[bestHome]) result[bestHome] = [];
+    result[bestHome].push({ roomName: roomName, distance: bestDist, lastVisited: lastVisited });
+  }
+
+  return result;
+}
+
+function gatherRemotesFromScoutIntel(homeRoom, target, seen, candidates) {
+  if (!candidates || !candidates.length) return;
+  candidates.sort(function (a, b) {
+    if (a.distance !== b.distance) return a.distance - b.distance;
+    var at = (typeof a.lastVisited === 'number') ? a.lastVisited : -Infinity;
+    var bt = (typeof b.lastVisited === 'number') ? b.lastVisited : -Infinity;
+    return bt - at;
+  });
+  for (var i = 0; i < candidates.length; i++) {
+    addRemoteCandidate(target, seen, candidates[i].roomName);
+  }
+}
+
+function processAssignmentRecord(homeName, key, record, target, seen) {
+  if (!homeName || !record) return;
+  if (typeof record === 'string') {
+    if (key === homeName && looksLikeRoomName(record)) {
+      addRemoteCandidate(target, seen, record);
+    } else if (looksLikeRoomName(key) && record === homeName) {
+      addRemoteCandidate(target, seen, key);
+    }
+    return;
+  }
+  if (Array.isArray(record)) {
+    for (var i = 0; i < record.length; i++) {
+      processAssignmentRecord(homeName, key, record[i], target, seen);
+    }
+    return;
+  }
+  if (typeof record !== 'object') return;
+
+  var remoteName = null;
+  if (typeof record.roomName === 'string') remoteName = record.roomName;
+  else if (typeof record.remote === 'string') remoteName = record.remote;
+  else if (typeof record.targetRoom === 'string') remoteName = record.targetRoom;
+  else if (typeof record.room === 'string') remoteName = record.room;
+  else if (looksLikeRoomName(key)) remoteName = key;
+
+  var assignedHome = null;
+  if (typeof record.home === 'string') assignedHome = record.home;
+  else if (typeof record.homeRoom === 'string') assignedHome = record.homeRoom;
+  else if (typeof record.spawn === 'string') assignedHome = record.spawn;
+  else if (typeof record.origin === 'string') assignedHome = record.origin;
+  else if (typeof record.base === 'string') assignedHome = record.base;
+  else if (!looksLikeRoomName(key)) assignedHome = key;
+
+  if (assignedHome === homeName && typeof remoteName === 'string') {
+    addRemoteCandidate(target, seen, remoteName);
+  }
+
+  for (var nestedKey in record) {
+    if (!BeeToolbox.hasOwn(record, nestedKey)) continue;
+    if (nestedKey === 'roomName' || nestedKey === 'remote' || nestedKey === 'targetRoom' || nestedKey === 'room' ||
+        nestedKey === 'home' || nestedKey === 'homeRoom' || nestedKey === 'spawn' || nestedKey === 'origin' || nestedKey === 'base') {
+      continue;
+    }
+    processAssignmentRecord(homeName, nestedKey, record[nestedKey], target, seen);
+  }
+}
+
+function gatherRemotesFromAssignments(homeName, target, seen) {
+  if (!homeName || !Memory.remoteAssignments) return;
+  var assignments = Memory.remoteAssignments;
+  for (var key in assignments) {
+    if (!BeeToolbox.hasOwn(assignments, key)) continue;
+    processAssignmentRecord(homeName, key, assignments[key], target, seen);
+  }
+}
+
+function gatherRemotesFromLedger(homeName, target, seen) {
+  if (!homeName || !Memory.remotes) return;
+  for (var remoteName in Memory.remotes) {
+    if (!BeeToolbox.hasOwn(Memory.remotes, remoteName)) continue;
+    if (remoteName === 'version') continue;
+    var entry = Memory.remotes[remoteName];
+    if (!entry || typeof entry !== 'object') continue;
+    var ledgerHome = null;
+    if (typeof entry.home === 'string') ledgerHome = entry.home;
+    else if (typeof entry.homeRoom === 'string') ledgerHome = entry.homeRoom;
+    else if (typeof entry.origin === 'string') ledgerHome = entry.origin;
+    if (ledgerHome !== homeName) continue;
+    var finalRemote = null;
+    if (typeof entry.roomName === 'string') finalRemote = entry.roomName;
+    else finalRemote = remoteName;
+    addRemoteCandidate(target, seen, finalRemote);
+  }
 }
 
 function defaultTaskForRole(role) {
