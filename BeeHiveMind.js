@@ -359,7 +359,6 @@ function prepareTickCaches() {
     }
     gatherRemotesFromAssignments(ownedRoom.name, remoteNames, remoteSeen);
     gatherRemotesFromLedger(ownedRoom.name, remoteNames, remoteSeen);
-    gatherRemotesFromScoutIntel(ownedRoom, remoteNames, remoteSeen, scoutRemotes[ownedRoom.name]);
     remotesByHome[ownedRoom.name] = remoteNames;
   }
   cache.remotesByHome = remotesByHome;
@@ -435,104 +434,6 @@ function addRemoteCandidate(target, seen, remoteName) {
   if (seen[remoteName]) return;
   seen[remoteName] = true;
   target.push(remoteName);
-}
-
-function hasScoutSourceIntel(mem) {
-  if (!mem) return false;
-  if (mem.sources) {
-    if (Array.isArray(mem.sources)) {
-      if (mem.sources.length > 0) return true;
-    } else if (BeeToolbox.isObject(mem.sources)) {
-      for (var key in mem.sources) {
-        if (BeeToolbox.hasOwn(mem.sources, key)) return true;
-      }
-    }
-  }
-  if (mem.intel && typeof mem.intel.sources === 'number' && mem.intel.sources > 0) return true;
-  return false;
-}
-
-function scoutLastVisitedTick(mem) {
-  if (!mem) return -Infinity;
-  if (mem.scout && typeof mem.scout.lastVisited === 'number') return mem.scout.lastVisited;
-  if (mem.intel) {
-    if (typeof mem.intel.lastVisited === 'number') return mem.intel.lastVisited;
-    if (typeof mem.intel.lastScanAt === 'number') return mem.intel.lastScanAt;
-  }
-  if (typeof mem.lastVisited === 'number') return mem.lastVisited;
-  if (typeof mem.lastSeenAt === 'number') return mem.lastSeenAt;
-  return -Infinity;
-}
-
-function isScoutRemoteBlocked(mem, myName) {
-  if (!mem) return false;
-  if (typeof mem.blocked === 'number' && (Game.time - mem.blocked) < SCOUT_REMOTE_BLOCK_COOLDOWN) return true;
-  if (mem.hostile) return true;
-  if (mem._avoidOtherOwnerUntil && mem._avoidOtherOwnerUntil > Game.time) return true;
-  if (mem.intel) {
-    if (mem.intel.owner && myName && mem.intel.owner !== myName) return true;
-    if (mem.intel.reservation && myName && mem.intel.reservation !== myName) return true;
-  }
-  return false;
-}
-
-function buildScoutRemoteCandidates(ownedRooms) {
-  var result = Object.create(null);
-  if (!ownedRooms || !ownedRooms.length) return result;
-  if (!Memory.rooms) return result;
-
-  var myName = (BeeToolbox && typeof BeeToolbox.getMyUsername === 'function')
-    ? BeeToolbox.getMyUsername()
-    : null;
-
-  for (var idx = 0; idx < ownedRooms.length; idx++) {
-    result[ownedRooms[idx].name] = [];
-  }
-
-  for (var roomName in Memory.rooms) {
-    if (!BeeToolbox.hasOwn(Memory.rooms, roomName)) continue;
-    var mem = Memory.rooms[roomName];
-    if (!mem) continue;
-    if (!hasScoutSourceIntel(mem)) continue;
-
-    var lastVisited = scoutLastVisitedTick(mem);
-    if (lastVisited !== -Infinity && (Game.time - lastVisited) > SCOUT_REMOTE_STALE_TICKS) continue;
-    if (isScoutRemoteBlocked(mem, myName)) continue;
-
-    var bestHome = null;
-    var bestDist = Infinity;
-    for (var i = 0; i < ownedRooms.length; i++) {
-      var owned = ownedRooms[i];
-      if (!owned || !owned.name) continue;
-      if (owned.name === roomName) { bestHome = null; bestDist = Infinity; break; }
-      var dist = BeeToolbox.safeLinearDistance(owned.name, roomName, true);
-      if (typeof dist !== 'number' || !isFinite(dist) || dist <= 0) continue;
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestHome = owned.name;
-      }
-    }
-    if (!bestHome) continue;
-    if (bestDist > SCOUT_REMOTE_MAX_RANGE) continue;
-
-    if (!result[bestHome]) result[bestHome] = [];
-    result[bestHome].push({ roomName: roomName, distance: bestDist, lastVisited: lastVisited });
-  }
-
-  return result;
-}
-
-function gatherRemotesFromScoutIntel(homeRoom, target, seen, candidates) {
-  if (!candidates || !candidates.length) return;
-  candidates.sort(function (a, b) {
-    if (a.distance !== b.distance) return a.distance - b.distance;
-    var at = (typeof a.lastVisited === 'number') ? a.lastVisited : -Infinity;
-    var bt = (typeof b.lastVisited === 'number') ? b.lastVisited : -Infinity;
-    return bt - at;
-  });
-  for (var i = 0; i < candidates.length; i++) {
-    addRemoteCandidate(target, seen, candidates[i].roomName);
-  }
 }
 
 function processAssignmentRecord(homeName, key, record, target, seen) {
