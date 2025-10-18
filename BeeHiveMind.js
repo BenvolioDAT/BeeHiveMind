@@ -345,9 +345,15 @@ function prepareTickCaches() {
   for (var idx = 0; idx < ownedRooms.length; idx++) {
     var ownedRoom = ownedRooms[idx];
     var remoteNames = [];
+    var remoteSeen = Object.create(null);
     if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-      remoteNames = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
+      var activeRemotes = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
+      for (var ar = 0; ar < activeRemotes.length; ar++) {
+        addRemoteCandidate(remoteNames, remoteSeen, activeRemotes[ar]);
+      }
     }
+    gatherRemotesFromAssignments(ownedRoom.name, remoteNames, remoteSeen);
+    gatherRemotesFromLedger(ownedRoom.name, remoteNames, remoteSeen);
     remotesByHome[ownedRoom.name] = remoteNames;
   }
   cache.remotesByHome = remotesByHome;
@@ -415,6 +421,89 @@ function looksLikeRoomName(name) {
   if (first !== 'W' && first !== 'E') return false;
   if (name.indexOf('N') === -1 && name.indexOf('S') === -1) return false;
   return true;
+}
+
+function addRemoteCandidate(target, seen, remoteName) {
+  if (!remoteName || typeof remoteName !== 'string') return;
+  if (!looksLikeRoomName(remoteName)) return;
+  if (seen[remoteName]) return;
+  seen[remoteName] = true;
+  target.push(remoteName);
+}
+
+function processAssignmentRecord(homeName, key, record, target, seen) {
+  if (!homeName || !record) return;
+  if (typeof record === 'string') {
+    if (key === homeName && looksLikeRoomName(record)) {
+      addRemoteCandidate(target, seen, record);
+    } else if (looksLikeRoomName(key) && record === homeName) {
+      addRemoteCandidate(target, seen, key);
+    }
+    return;
+  }
+  if (Array.isArray(record)) {
+    for (var i = 0; i < record.length; i++) {
+      processAssignmentRecord(homeName, key, record[i], target, seen);
+    }
+    return;
+  }
+  if (typeof record !== 'object') return;
+
+  var remoteName = null;
+  if (typeof record.roomName === 'string') remoteName = record.roomName;
+  else if (typeof record.remote === 'string') remoteName = record.remote;
+  else if (typeof record.targetRoom === 'string') remoteName = record.targetRoom;
+  else if (typeof record.room === 'string') remoteName = record.room;
+  else if (looksLikeRoomName(key)) remoteName = key;
+
+  var assignedHome = null;
+  if (typeof record.home === 'string') assignedHome = record.home;
+  else if (typeof record.homeRoom === 'string') assignedHome = record.homeRoom;
+  else if (typeof record.spawn === 'string') assignedHome = record.spawn;
+  else if (typeof record.origin === 'string') assignedHome = record.origin;
+  else if (typeof record.base === 'string') assignedHome = record.base;
+  else if (!looksLikeRoomName(key)) assignedHome = key;
+
+  if (assignedHome === homeName && typeof remoteName === 'string') {
+    addRemoteCandidate(target, seen, remoteName);
+  }
+
+  for (var nestedKey in record) {
+    if (!BeeToolbox.hasOwn(record, nestedKey)) continue;
+    if (nestedKey === 'roomName' || nestedKey === 'remote' || nestedKey === 'targetRoom' || nestedKey === 'room' ||
+        nestedKey === 'home' || nestedKey === 'homeRoom' || nestedKey === 'spawn' || nestedKey === 'origin' || nestedKey === 'base') {
+      continue;
+    }
+    processAssignmentRecord(homeName, nestedKey, record[nestedKey], target, seen);
+  }
+}
+
+function gatherRemotesFromAssignments(homeName, target, seen) {
+  if (!homeName || !Memory.remoteAssignments) return;
+  var assignments = Memory.remoteAssignments;
+  for (var key in assignments) {
+    if (!BeeToolbox.hasOwn(assignments, key)) continue;
+    processAssignmentRecord(homeName, key, assignments[key], target, seen);
+  }
+}
+
+function gatherRemotesFromLedger(homeName, target, seen) {
+  if (!homeName || !Memory.remotes) return;
+  for (var remoteName in Memory.remotes) {
+    if (!BeeToolbox.hasOwn(Memory.remotes, remoteName)) continue;
+    if (remoteName === 'version') continue;
+    var entry = Memory.remotes[remoteName];
+    if (!entry || typeof entry !== 'object') continue;
+    var ledgerHome = null;
+    if (typeof entry.home === 'string') ledgerHome = entry.home;
+    else if (typeof entry.homeRoom === 'string') ledgerHome = entry.homeRoom;
+    else if (typeof entry.origin === 'string') ledgerHome = entry.origin;
+    if (ledgerHome !== homeName) continue;
+    var finalRemote = null;
+    if (typeof entry.roomName === 'string') finalRemote = entry.roomName;
+    else finalRemote = remoteName;
+    addRemoteCandidate(target, seen, finalRemote);
+  }
 }
 
 function defaultTaskForRole(role) {
