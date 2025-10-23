@@ -7,8 +7,8 @@
 // -----------------------------------------------------------------------------
 
 var FRIENDLY_USERNAMES = [
-  'SushiMoto',
-  'BeeBoi',
+  'haha233jpg',
+  'Court_of_Silver',
   'BuzzingBro'
 ];
 
