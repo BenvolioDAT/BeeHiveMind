@@ -126,10 +126,13 @@ var TaskCombatMedic = {
 
     // ---------- 3) flee logic (keep heals going) ----------
     var underHp = (creep.hits / creep.hitsMax) < CONFIG.fleePct;
-    var hostilesNear = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0; } });
+    var hostilesNear = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: function (h){
+      if (!BeeToolbox.isEnemyCreep(h)) return false;
+      return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0;
+    } });
     var needToFlee = underHp || (hostilesNear.length && BeeToolbox.isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius));
     if (needToFlee) {
-      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: BeeToolbox.isEnemyCreep });
       if (bad) {
         var flee = PathFinder.search(creep.pos, [{ pos: bad.pos, range: 4 }], { flee: true });
         if (!flee.incomplete && flee.path.length) {
@@ -157,7 +160,10 @@ var TaskCombatMedic = {
     // ---------- 4) follow buddy with safe spacing ----------
     var wantRange = CONFIG.followRange;
     var meleeThreat = creep.pos.findInRange(FIND_HOSTILE_CREEPS, CONFIG.avoidMeleeRange, {
-      filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
+      filter: function (h){
+        if (!BeeToolbox.isEnemyCreep(h)) return false;
+        return h.getActiveBodyparts(ATTACK)>0 && h.hits>0;
+      }
     }).length > 0;
 
     if (!creep.pos.inRangeTo(buddy, wantRange)) {
@@ -175,7 +181,10 @@ var TaskCombatMedic = {
     } else if (meleeThreat) {
       // small nudge away from closest melee if we're too close
       var hm = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
-        filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
+        filter: function (h){
+          if (!BeeToolbox.isEnemyCreep(h)) return false;
+          return h.getActiveBodyparts(ATTACK)>0 && h.hits>0;
+        }
       });
       if (hm && creep.pos.getRangeTo(hm) < CONFIG.avoidMeleeRange) {
         var dir = hm.pos.getDirectionTo(creep.pos); // step away

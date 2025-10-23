@@ -2,6 +2,7 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
+var AllianceManager = require('AllianceManager');
 
 var TaskDismantler = {
   run: function (creep) {
@@ -11,6 +12,11 @@ var TaskDismantler = {
     if (creep.memory.delay && Game.time < creep.memory.delay) return;
 
     var target = Game.getObjectById(creep.memory.tid);
+    if (target && target.owner && !BeeToolbox.isEnemyUsername(target.owner.username)) {
+      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-memoryTarget');
+      delete creep.memory.tid;
+      target = null;
+    }
 
     // Small helper: pathable closest-by-path from a list
     function closest(arr) { return (arr && arr.length) ? creep.pos.findClosestByPath(arr) : null; }
@@ -19,9 +25,19 @@ var TaskDismantler = {
     if (!target) {
       // 1) High-priority threats first
       var towers = creep.room.find(FIND_HOSTILE_STRUCTURES, {
-        filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+        filter: function (s) {
+          if (s.structureType !== STRUCTURE_TOWER) return false;
+          if (s.owner && !BeeToolbox.isEnemyStructure(s)) return false;
+          return true;
+        }
       });
-      var spawns = creep.room.find(FIND_HOSTILE_SPAWNS);
+      var spawns = creep.room.find(FIND_HOSTILE_SPAWNS, {
+        filter: function (s) {
+          if (!s) return false;
+          if (s.owner && !BeeToolbox.isEnemyUsername(s.owner.username)) return false;
+          return true;
+        }
+      });
 
       // 2) Explicitly include Invader Cores
       var cores = creep.room.find(FIND_HOSTILE_STRUCTURES, {
@@ -31,7 +47,8 @@ var TaskDismantler = {
       // 3) Everything else that’s dismantle-worthy
       var others = creep.room.find(FIND_HOSTILE_STRUCTURES, {
         filter: function (s) {
-          if (s.hits === undefined) return false;
+          if (!s || s.hits === undefined) return false;
+          if (s.owner && !BeeToolbox.isEnemyStructure(s)) return false;
           // exclude types we don't want to waste time dismantling
           if (s.structureType === STRUCTURE_CONTROLLER) return false;
           if (s.structureType === STRUCTURE_ROAD)        return false;
@@ -68,6 +85,12 @@ var TaskDismantler = {
     }
 
     // -------- B) Execute action --------
+    if (target && target.owner && !BeeToolbox.isEnemyUsername(target.owner.username)) {
+      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-active');
+      delete creep.memory.tid;
+      target = null;
+    }
+
     if (target) {
       var inMelee = creep.pos.isNearTo(target);
       var range = creep.pos.getRangeTo(target);

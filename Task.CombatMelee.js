@@ -4,6 +4,7 @@
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('./Task.Squad');
+var AllianceManager = require('AllianceManager');
 
 var CONFIG = {
   focusSticky: 15,
@@ -59,7 +60,7 @@ var CombatMelee = {
     var lowHp = (creep.hits / creep.hitsMax) < CONFIG.fleeHpPct;
     if (lowHp || BeeToolbox.isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius)) {
       BeeToolbox.combatRetreatToRally(creep, { taskSquad: TaskSquad, anchorProvider: TaskSquad.getAnchor, range: 1 });
-      var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
+      var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: BeeToolbox.isEnemyCreep })[0];
       if (adjBad) creep.attack(adjBad);
       return;
     }
@@ -70,7 +71,7 @@ var CombatMelee = {
       edgePenalty: CONFIG.edgePenalty,
       towerRadius: CONFIG.towerAvoidRadius
     })) {
-      var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
+      var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: BeeToolbox.isEnemyCreep })[0];
       if (hugger) creep.attack(hugger);
       return;
     }
@@ -80,6 +81,10 @@ var CombatMelee = {
     if (!target) {
       var anc = TaskSquad.getAnchor(creep);
       if (anc) BeeToolbox.combatStepToward(creep, anc, 1, TaskSquad);
+      return;
+    }
+    if (target.owner && !BeeToolbox.isEnemyUsername(target.owner.username)) {
+      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'melee-sharedTarget');
       return;
     }
 
@@ -117,7 +122,7 @@ var CombatMelee = {
     BeeToolbox.combatStepToward(creep, target.pos, 1, TaskSquad);
 
     // opportunistic hit if we brushed into melee
-    var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
+    var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: BeeToolbox.isEnemyCreep })[0];
     if (adj) creep.attack(adj);
 
     // (7) occasional opportunistic retarget to weaklings in 1..2
