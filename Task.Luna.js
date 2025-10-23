@@ -437,6 +437,7 @@ function assignMiner(creep, summary, seat) {
   creep.memory.remoteRoom = summary.remote;
   creep.memory.targetRoom = summary.remote;
   creep.memory.sourceId = seat.id;
+  creep.memory.targetId = seat.id;
   seat.live.push(creep);
 }
 
@@ -684,17 +685,50 @@ function travel(creep, target, range) {
   return creep.moveTo(pos, { reusePath: 15, range: opts.range });
 }
 
+function logInvalidRemote(creep, remote, reason) {
+  if (!creep) return;
+  if (!creep.memory) creep.memory = {};
+  var warnTick = creep.memory._lunaWarnTick || 0;
+  if (warnTick === Game.time) return;
+  creep.memory._lunaWarnTick = Game.time;
+  console.log('[LUNA] invalid remote assignment creep=' + creep.name + ' remote=' + (remote || 'null') + ' reason=' + (reason || 'unknown'));
+}
+
 function findSeatForCreep(creep) {
   if (!creep || !creep.memory) return null;
   var remote = creep.memory.remoteRoom || creep.memory.targetRoom;
-  if (!remote) return null;
+  if (!remote) {
+    logInvalidRemote(creep, null, 'noRemoteMemory');
+    return null;
+  }
   var summary = _phaseState.plan.remotes[remote];
-  if (!summary) return null;
-  var sourceId = creep.memory.sourceId;
-  if (!sourceId) return null;
+  if (!summary) {
+    logInvalidRemote(creep, remote, 'missingSummary');
+    return null;
+  }
+  var sourceId = creep.memory.sourceId || creep.memory.targetId;
+  if (!sourceId) {
+    if (summary.sources && summary.sources.length) {
+      var reassigned = summary.sources[Game.time % summary.sources.length];
+      creep.memory.sourceId = reassigned.id;
+      creep.memory.targetId = reassigned.id;
+      console.log('[LUNA] reassigned ' + creep.name + ' to source ' + reassigned.id + ' in ' + remote);
+      return reassigned;
+    }
+    logInvalidRemote(creep, remote, 'noSourceId');
+    return null;
+  }
   for (var i = 0; i < summary.sources.length; i++) {
     if (summary.sources[i].id === sourceId) return summary.sources[i];
   }
+  if (summary.sources && summary.sources.length) {
+    var fallback = summary.sources[Game.time % summary.sources.length];
+    creep.memory.sourceId = fallback.id;
+    creep.memory.targetId = fallback.id;
+    console.log('[LUNA] restored source assignment for ' + creep.name + ' → ' + fallback.id + ' in ' + remote);
+    return fallback;
+  }
+  logInvalidRemote(creep, remote, 'seatNotFound');
   return null;
 }
 
@@ -775,10 +809,15 @@ function travelHome(creep) {
 
 function minerAct(creep) {
   if (!creep || !creep.memory) return;
+  if (!creep.memory.remoteRoom && creep.memory.targetRoom) {
+    creep.memory.remoteRoom = creep.memory.targetRoom;
+  }
+  var remoteName = creep.memory.remoteRoom || creep.memory.targetRoom;
+  var summary = remoteName ? _phaseState.plan.remotes[remoteName] : null;
   var seat = findSeatForCreep(creep);
-  var summary = seat ? _phaseState.plan.remotes[creep.memory.remoteRoom] : null;
   recordCreepNote(_phaseState, creep, summary, seat);
   if (!seat || !summary) {
+    if (!summary) logInvalidRemote(creep, remoteName, 'noSummaryInAct');
     travelHome(creep);
     return;
   }
@@ -787,20 +826,24 @@ function minerAct(creep) {
     return;
   }
   var source = Game.getObjectById(seat.id);
-  if (!source && seat.entry && seat.entry.pos) {
-    var pos = new RoomPosition(seat.entry.pos.x, seat.entry.pos.y, seat.entry.pos.roomName);
-    travel(creep, pos, 1);
-    return;
-  }
+  if (seat && seat.id && creep.memory.targetId !== seat.id) creep.memory.targetId = seat.id;
   ensureContainer(seat, creep);
   var container = seat.containerId ? Game.getObjectById(seat.containerId) : null;
-  var target = container ? container.pos : (source ? source.pos : null);
-  if (!target) {
+  var targetPos = null;
+  if (container && container.pos) {
+    targetPos = container.pos;
+  } else if (source && source.pos) {
+    targetPos = source.pos;
+  } else if (seat.entry && seat.entry.pos) {
+    targetPos = new RoomPosition(seat.entry.pos.x, seat.entry.pos.y, seat.entry.pos.roomName);
+  }
+  if (!targetPos) {
+    logInvalidRemote(creep, summary.remote, 'noTargetPosition');
     travel(creep, new RoomPosition(25, 25, summary.remote), 5);
     return;
   }
-  if (!creep.pos.isEqualTo(target) && creep.pos.getRangeTo(target) > 0) {
-    travel(creep, target, container ? 0 : 1);
+  if (!creep.pos.isEqualTo(targetPos) && creep.pos.getRangeTo(targetPos) > 0) {
+    travel(creep, targetPos, container ? 0 : 1);
     return;
   }
   if (source) {
@@ -808,6 +851,8 @@ function minerAct(creep) {
     if (harvestResult === ERR_NOT_ENOUGH_RESOURCES) {
       creep.say('⏳');
     }
+  } else if (seat.entry && seat.entry.pos) {
+    creep.say('⛏️?');
   }
   if (container) {
     if (container.store && container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
@@ -835,12 +880,14 @@ function haulerAct(creep) {
   if (!creep || !creep.memory) return;
   var remote = creep.memory.remoteRoom;
   if (!remote) {
+    logInvalidRemote(creep, null, 'haulerNoRemote');
     travelHome(creep);
     return;
   }
   var summary = _phaseState.plan.remotes[remote];
   recordCreepNote(_phaseState, creep, summary, null);
   if (!summary) {
+    logInvalidRemote(creep, remote, 'haulerNoSummary');
     travelHome(creep);
     return;
   }
@@ -873,12 +920,14 @@ function reserverAct(creep) {
   if (!creep || !creep.memory) return;
   var remote = creep.memory.remoteRoom;
   if (!remote) {
+    logInvalidRemote(creep, null, 'reserverNoRemote');
     travelHome(creep);
     return;
   }
   var summary = _phaseState.plan.remotes[remote];
   recordCreepNote(_phaseState, creep, summary, null);
   if (!summary) {
+    logInvalidRemote(creep, remote, 'reserverNoSummary');
     travelHome(creep);
     return;
   }
@@ -1168,7 +1217,8 @@ function spawnFromPlan(spawn, plan) {
     targetRoom: plan.remote,
     home: spawn.room.name,
     birthBody: plan.body.slice(),
-    sourceId: plan.seatId || null
+    sourceId: plan.seatId || null,
+    targetId: plan.seatId || null
   };
   var result = spawn.spawnCreep(plan.body, name, { memory: memory });
   if (result === OK) {
@@ -1216,6 +1266,9 @@ function run(creep) {
   if (!creep) return;
   ensurePhaseState(null);
   if (!creep.memory.remoteRole) creep.memory.remoteRole = ROLE_MINER;
+  if (!creep.memory.remoteRoom && creep.memory.targetRoom) {
+    creep.memory.remoteRoom = creep.memory.targetRoom;
+  }
   var role = String(creep.memory.remoteRole || ROLE_MINER).toLowerCase();
   if (role === ROLE_HAULER) haulerAct(creep);
   else if (role === ROLE_RESERVER) reserverAct(creep);

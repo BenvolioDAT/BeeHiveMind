@@ -3,6 +3,7 @@
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('./Task.Squad');
+var AllianceManager = require('AllianceManager');
 
 var CONFIG = {
   desiredRange: 2,          // ideal standoff distance
@@ -62,6 +63,10 @@ var TaskCombatArcher = {
       BeeToolbox.combatShootOpportunistic(creep); // still shoot if anything in range
       return;
     }
+    if (target.owner && !BeeToolbox.isEnemyUsername(target.owner.username)) {
+      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'archer-sharedTarget');
+      return;
+    }
 
     // (2) Update memory about target motion (for "don’t move if they aren’t" logic)
     var mem = creep.memory;
@@ -78,6 +83,7 @@ var TaskCombatArcher = {
     // (3) Danger gates first
     var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
     var dangerAdj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h){
+      if (!BeeToolbox.isEnemyCreep(h)) return false;
       return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0;
     }}).length > 0;
     var inTowerBad = BeeToolbox.isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius);
@@ -111,7 +117,7 @@ var TaskCombatArcher = {
     }
 
     // If we have a good shot and no extra need to adjust, also prefer holding in the band
-    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
+    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: BeeToolbox.isEnemyCreep });
     if (hostilesIn3 && hostilesIn3.length && BeeToolbox.combatInHoldBand(range, CONFIG.desiredRange, CONFIG.holdBand)) {
       return;
     }

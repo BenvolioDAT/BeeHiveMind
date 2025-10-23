@@ -2,6 +2,7 @@
 
 var Traveler = require('Traveler');
 var Logger = require('core.logger');
+var AllianceManager = require('AllianceManager');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
@@ -51,6 +52,42 @@ IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LAB] = true;
 IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LINK] = true;
 
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
+
+function isAllyUsername(username) {
+  if (!username) return false;
+  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
+    return AllianceManager.isAlly(username);
+  }
+  return false;
+}
+
+function isEnemyUsername(username) {
+  if (!username) return false;
+  if (isAllyUsername(username)) return false;
+  if (BeeToolbox && typeof BeeToolbox.getMyUsername === 'function') {
+    var mine = BeeToolbox.getMyUsername();
+    if (mine && username === mine) return false;
+  } else if (_cachedUsername && username === _cachedUsername) {
+    return false;
+  }
+  return true;
+}
+
+function isEnemyCreepObject(creep) {
+  if (!creep || !creep.owner) return false;
+  return isEnemyUsername(creep.owner.username);
+}
+
+function isEnemyStructureObject(structure) {
+  if (!structure || !structure.owner) return false;
+  return isEnemyUsername(structure.owner.username);
+}
+
+function noteFriendlySkip(creep, target, context) {
+  if (!creep || !target || !target.owner || !target.owner.username) return;
+  if (!AllianceManager || typeof AllianceManager.noteFriendlyFireAvoid !== 'function') return;
+  AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, context);
+}
 
 var BeeToolbox = {
 
@@ -326,7 +363,8 @@ var BeeToolbox = {
         filter: function (h) {
           if (!h || !h.owner) return false;
           var uname = h.owner.username;
-          if (uname === 'Invader') return false;
+          if (uname === 'Invader' || uname === 'Source Keeper') return false;
+          if (isAllyUsername(uname)) return false;
           return uname !== myName;
         }
       }) || [];
@@ -338,6 +376,7 @@ var BeeToolbox = {
         filter: function (s) {
           if (!s || !s.owner) return false;
           if (s.owner.username === myName) return false;
+          if (isAllyUsername(s.owner.username)) return false;
           return IMPORTANT_FOREIGN_STRUCTURES[s.structureType] === true;
         }
       }) || [];
@@ -348,10 +387,10 @@ var BeeToolbox = {
 
     if (mem && mem.intel) {
       var intel = mem.intel;
-      if (intel.owner && intel.owner !== myName) {
+      if (intel.owner && intel.owner !== myName && !isAllyUsername(intel.owner)) {
         return { avoid: true, owner: intel.owner, reason: 'intelOwner' };
       }
-      if (intel.reservation && intel.reservation !== myName) {
+      if (intel.reservation && intel.reservation !== myName && !isAllyUsername(intel.reservation)) {
         return { avoid: true, owner: intel.reservation, reason: 'intelReservation' };
       }
     }
@@ -766,7 +805,9 @@ var BeeToolbox = {
     if (!creep) return null;
 
     // 1) hostile creeps
-    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
+    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (hostile) return hostile;
 
     // 2) invader core
@@ -804,7 +845,11 @@ var BeeToolbox = {
     prioTypes[STRUCTURE_EXTENSION] = true;
 
     var prio = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
-      filter: function (s) { return prioTypes[s.structureType] === true; }
+      filter: function (s) {
+        if (!prioTypes[s.structureType]) return false;
+        if (!s.owner) return true;
+        return isEnemyStructureObject(s);
+      }
     });
     if (prio) {
       return firstBarrierOnPath(creep, prio) || prio;
@@ -816,6 +861,7 @@ var BeeToolbox = {
         if (s.structureType === STRUCTURE_CONTROLLER) return false;
         if (s.structureType === STRUCTURE_WALL) return false;
         if (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic) return false;
+        if (s.owner && !isEnemyStructureObject(s)) return false;
         return true;
       }
     });
@@ -869,7 +915,11 @@ var BeeToolbox = {
     if (!room) return false;
     var limit = (typeof radius === 'number') ? radius : 20;
     var towers = room.find(FIND_HOSTILE_STRUCTURES, {
-      filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+      filter: function (s) {
+        if (s.structureType !== STRUCTURE_TOWER) return false;
+        if (s.owner && !isEnemyStructureObject(s)) return false;
+        return true;
+      }
     });
     for (var i = 0; i < towers.length; i++) {
       if (towers[i].pos.getRangeTo(pos) <= limit) {
@@ -882,7 +932,11 @@ var BeeToolbox = {
   estimateTowerDamage: function (room, pos) {
     if (!room || !pos) return 0;
     var towers = room.find(FIND_HOSTILE_STRUCTURES, {
-      filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+      filter: function (s) {
+        if (s.structureType !== STRUCTURE_TOWER) return false;
+        if (s.owner && !isEnemyStructureObject(s)) return false;
+        return true;
+      }
     });
     var total = 0;
     for (var i = 0; i < towers.length; i++) {
@@ -912,6 +966,7 @@ var BeeToolbox = {
     if (!room) return [];
     var creeps = room.find(FIND_HOSTILE_CREEPS, {
       filter: function (h) {
+        if (!isEnemyCreepObject(h)) return false;
         return h.getActiveBodyparts(ATTACK) > 0 || h.getActiveBodyparts(RANGED_ATTACK) > 0;
       }
     });
@@ -923,7 +978,9 @@ var BeeToolbox = {
 
   combatShootOpportunistic: function (creep) {
     if (!creep) return false;
-    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (closer && creep.pos.inRangeTo(closer, 3)) {
       creep.rangedAttack(closer);
       return true;
@@ -935,13 +992,19 @@ var BeeToolbox = {
     if (!creep || !target) return false;
     var opts = config || {};
     var threshold = (opts.massAttackThreshold != null) ? opts.massAttackThreshold : 3;
-    var hostiles = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
+    var hostiles = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (hostiles.length >= threshold) {
       creep.rangedMassAttack();
       return true;
     }
     var range = creep.pos.getRangeTo(target);
     if (range <= 3) {
+      if (target.owner && !isEnemyCreepObject(target)) {
+        noteFriendlySkip(creep, target, 'ranged-attack');
+        return false;
+      }
       creep.rangedAttack(target);
       return true;
     }
@@ -961,6 +1024,7 @@ var BeeToolbox = {
     if (fromThings && fromThings.length) {
       for (i = 0; i < fromThings.length; i++) {
         if (!fromThings[i] || !fromThings[i].pos) continue;
+        if (fromThings[i].owner && !isEnemyUsername(fromThings[i].owner.username)) continue;
         goals.push({ pos: fromThings[i].pos, range: fleeRange });
       }
     }
@@ -1000,7 +1064,9 @@ var BeeToolbox = {
       }
     }
 
-    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (bad) {
       var dir = creep.pos.getDirectionTo(bad);
       var zero = (dir - 1 + 8) % 8;
@@ -1064,7 +1130,12 @@ var BeeToolbox = {
       if (!ally || !ally.my || !ally.memory || ally.memory.squadId !== squadId) return false;
       var role = ally.memory.task || ally.memory.role || '';
       if (!protectRoles[role]) return false;
-      var nearThreats = ally.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: threatFilter });
+      var nearThreats = ally.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {
+        filter: function (c) {
+          if (!isEnemyCreepObject(c)) return false;
+          return threatFilter(c);
+        }
+      });
       return nearThreats.length > 0;
     });
     if (!threatened.length) return false;
@@ -1076,7 +1147,13 @@ var BeeToolbox = {
       if (taskSquad && taskSquad.tryFriendlySwap && taskSquad.tryFriendlySwap(creep, buddy.pos)) {
         return true;
       }
-      var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: threatFilter })[0];
+      var badList = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {
+        filter: function (c) {
+          if (!isEnemyCreepObject(c)) return false;
+          return threatFilter(c);
+        }
+      });
+      var bad = badList[0];
       if (bad) {
         var best = BeeToolbox.combatBestAdjacentTile(creep, bad, {
           edgePenalty: opts.edgePenalty,
@@ -1104,6 +1181,7 @@ var BeeToolbox = {
     var bestScore = 1e9;
     var threats = room ? room.find(FIND_HOSTILE_CREEPS, {
       filter: function (h) {
+        if (!isEnemyCreepObject(h)) return false;
         return h.getActiveBodyparts(ATTACK) > 0 && h.hits > 0;
       }
     }) : [];
@@ -1167,7 +1245,9 @@ var BeeToolbox = {
   combatWeakestHostile: function (creep, range) {
     if (!creep) return null;
     var maxRange = (typeof range === 'number') ? range : 2;
-    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, maxRange);
+    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, maxRange, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (!xs.length) return null;
     return _.min(xs, function (c) { return c.hits / Math.max(1, c.hitsMax); });
   },
@@ -1185,7 +1265,9 @@ var BeeToolbox = {
       BeeToolbox.combatStepToward(creep, rally.pos || rally, range, opts.taskSquad);
       return true;
     }
-    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (bad) {
       var dir = creep.pos.getDirectionTo(bad);
       var zero = (dir - 1 + 8) % 8;
@@ -1282,6 +1364,11 @@ var BeeToolbox = {
   }
 
 }; // end BeeToolbox
+
+BeeToolbox.isAllyUsername = isAllyUsername;
+BeeToolbox.isEnemyUsername = isEnemyUsername;
+BeeToolbox.isEnemyCreep = isEnemyCreepObject;
+BeeToolbox.isEnemyStructure = isEnemyStructureObject;
 
 BeeToolbox.ECON_CFG = global.__beeEconomyConfig;
 BeeToolbox.HARVESTER_CFG = HARVESTER_CFG;
