@@ -169,12 +169,46 @@ var CONFIGS = {
   ],
   upgrader: [
     // Larger bodies listed first so higher RCLs still prefer beefier creeps
+    B(8,8,8),
+    B(8,7,7),
+    B(8,6,6),
+    B(8,5,5),
+    B(8,4,4),
+    B(7,4,4),
+    B(6,4,4),
+    B(5,4,4),
     B(4,4,4),
     B(4,3,4),
     B(3,2,4),
     B(3,1,4),
     B(2,1,3),
     B(1,1,1)
+  ],
+  remoteMiner: [
+    B(6,1,4),
+    B(5,1,4),
+    B(4,1,3),
+    B(3,1,3),
+    B(2,1,2),
+    B(1,1,1)
+  ],
+  remoteHauler: [
+    CM(25,13),
+    CM(20,10),
+    CM(18,9),
+    CM(15,8),
+    CM(12,6),
+    CM(10,5),
+    CM(8,4),
+    CM(6,3),
+    CM(4,2),
+    CM(2,1),
+    CM(1,1)
+  ],
+  reserver: [
+    C(2,2),
+    C(1,2),
+    C(1,1)
   ],
   repair: [
     B(5,2,7),
@@ -435,6 +469,9 @@ function Generate_Builder_Body(e) { return Generate_Body_From_Config('builder', 
 function Generate_Repair_Body(e) { return Generate_Body_From_Config('repair', e); }
 function Generate_Queen_Body(e) { return Generate_Body_From_Config('Queen', e); }
 function Generate_Luna_Body(e) { return Generate_Body_From_Config('luna', e); }
+function Generate_RemoteMiner_Body(e) { return Generate_Body_From_Config('remoteMiner', e); }
+function Generate_RemoteHauler_Body(e) { return Generate_Body_From_Config('remoteHauler', e); }
+function Generate_Reserver_Body(e) { return Generate_Body_From_Config('reserver', e); }
 function Generate_Upgrader_Body(e) { return Generate_Body_From_Config('upgrader', e); }
 function Generate_Scout_Body(e) { return Generate_Body_From_Config('Scout', e); }
 function Generate_CombatMelee_Body(e) { return Generate_Body_From_Config('CombatMelee', e); }
@@ -709,6 +746,9 @@ module.exports = {
   Generate_Upgrader_Body: Generate_Upgrader_Body,
   Generate_Builder_Body: Generate_Builder_Body,
   Generate_Repair_Body: Generate_Repair_Body,
+  Generate_RemoteMiner_Body: Generate_RemoteMiner_Body,
+  Generate_RemoteHauler_Body: Generate_RemoteHauler_Body,
+  Generate_Reserver_Body: Generate_Reserver_Body,
   Generate_Queen_Body: Generate_Queen_Body,
   Generate_Luna_Body: Generate_Luna_Body,
   Generate_Scout_Body: Generate_Scout_Body,

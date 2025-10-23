@@ -2,6 +2,7 @@
 
 var Traveler = require('Traveler');
 var Logger = require('core.logger');
+var AllianceManager = require('AllianceManager');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
@@ -52,6 +53,42 @@ IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LINK] = true;
 
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
 
+function isAllyUsername(username) {
+  if (!username) return false;
+  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
+    return AllianceManager.isAlly(username);
+  }
+  return false;
+}
+
+function isEnemyUsername(username) {
+  if (!username) return false;
+  if (isAllyUsername(username)) return false;
+  if (BeeToolbox && typeof BeeToolbox.getMyUsername === 'function') {
+    var mine = BeeToolbox.getMyUsername();
+    if (mine && username === mine) return false;
+  } else if (_cachedUsername && username === _cachedUsername) {
+    return false;
+  }
+  return true;
+}
+
+function isEnemyCreepObject(creep) {
+  if (!creep || !creep.owner) return false;
+  return isEnemyUsername(creep.owner.username);
+}
+
+function isEnemyStructureObject(structure) {
+  if (!structure || !structure.owner) return false;
+  return isEnemyUsername(structure.owner.username);
+}
+
+function noteFriendlySkip(creep, target, context) {
+  if (!creep || !target || !target.owner || !target.owner.username) return;
+  if (!AllianceManager || typeof AllianceManager.noteFriendlyFireAvoid !== 'function') return;
+  AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, context);
+}
+
 var BeeToolbox = {
 
   // ---------------------------------------------------------------------------
@@ -89,6 +126,133 @@ var BeeToolbox = {
       }
     }
     return true;
+  },
+
+  /**
+   * Compute energy per tick for a given source capacity. Pure helper.
+   * @param {number} capacity - Total energy contained in the source when full.
+   * @returns {number} energy per tick (float).
+   */
+  energyPerTickFromCapacity: function (capacity) {
+    if (!capacity || capacity <= 0) return 0;
+    return capacity / ENERGY_REGEN_TIME;
+  },
+
+  /**
+   * Estimate a neutral room's source capacity based on reservation status.
+   * @param {boolean} isReserved - true if controller is reserved by us.
+   * @param {boolean} isKeeperRoom - true if source is in an SK room (higher yield).
+   * @returns {number} expected full capacity.
+   */
+  estimateRemoteSourceCapacity: function (isReserved, isKeeperRoom) {
+    if (isKeeperRoom) return 4000;
+    return isReserved ? 3000 : 1500;
+  },
+
+  /**
+   * Estimate two-way trip length in ticks for a hauler on a path.
+   * @param {number} pathLength - Number of tiles in the cached path (one-way).
+   * @param {object} opts - Optional tuning values {speedMultiplier, buffer}.
+   * @returns {number} total expected ticks to go source→home→source.
+   */
+  estimateRoundTripTicks: function (pathLength, opts) {
+    var length = pathLength || 0;
+    if (length <= 0) return 0;
+    var speed = (opts && opts.speedMultiplier) ? opts.speedMultiplier : 1;
+    var buffer = (opts && opts.buffer != null) ? opts.buffer : 4;
+    var travel = Math.ceil((length * 2) / speed);
+    return travel + buffer;
+  },
+
+  /**
+   * Estimate number of haulers required to move a flow of energy.
+   * Pure math (no game object references).
+   *
+   * @param {number} pathLength - Tiles one-way between source and deposit.
+   * @param {number} energyPerTick - Energy produced per tick at the source.
+   * @param {number} haulerCapacity - Energy one hauler can transport per trip.
+   * @param {number} tripTimeMax - Optional cap to avoid oversizing.
+   * @returns {{count:number, roundTrip:number, energyPerTrip:number}}
+   */
+  estimateHaulerRequirement: function (pathLength, energyPerTick, haulerCapacity, tripTimeMax) {
+    var capacity = haulerCapacity || 0;
+    if (capacity <= 0) {
+      return { count: 0, roundTrip: 0, energyPerTrip: 0 };
+    }
+    var roundTrip = BeeToolbox.estimateRoundTripTicks(pathLength, { buffer: 6 });
+    if (tripTimeMax && roundTrip > tripTimeMax) {
+      roundTrip = tripTimeMax;
+    }
+    var energyPerTrip = energyPerTick * roundTrip;
+    var count = 0;
+    if (energyPerTrip > 0) {
+      count = Math.ceil(energyPerTrip / capacity);
+    }
+    if (count < 1 && energyPerTick > 0) count = 1;
+    return {
+      count: count,
+      roundTrip: roundTrip,
+      energyPerTrip: energyPerTrip
+    };
+  },
+
+  /**
+   * Count body parts of a specific type.
+   * @param {Array} body - Array of body part constants.
+   * @param {string} part - Body part constant (WORK, CARRY, MOVE, ...).
+   * @returns {number} count.
+   */
+  countBodyParts: function (body, part) {
+    if (!body || !body.length) return 0;
+    var total = 0;
+    for (var i = 0; i < body.length; i++) {
+      if (body[i] === part) total++;
+    }
+    return total;
+  },
+
+  /**
+   * Calculate the total carry capacity for a body definition.
+   * @param {Array} body - Body array (symbols or BodyPartDefinition objects).
+   * @returns {number} total energy capacity when full.
+   */
+  bodyCarryCapacity: function (body) {
+    if (!body || !body.length) return 0;
+    var total = 0;
+    for (var i = 0; i < body.length; i++) {
+      var part = body[i];
+      var partType = part && part.type ? part.type : part;
+      if (partType === CARRY) total += CARRY_CAPACITY;
+    }
+    return total;
+  },
+
+  /**
+   * Estimate the lead time required to replace a creep.
+   * @param {number} travelTicks - Estimated ticks to travel from spawn to seat.
+   * @param {number} bodyLength - Body length (used for spawn time calc).
+   * @returns {number} ticks before expiry that a replacement should be queued.
+   */
+  estimateSpawnLeadTime: function (travelTicks, bodyLength) {
+    var spawnTicks = (bodyLength || 0) * CREEP_SPAWN_TIME;
+    if (spawnTicks < 0) spawnTicks = 0;
+    var travel = travelTicks || 0;
+    var buffer = 20;
+    return spawnTicks + travel + buffer;
+  },
+
+  /**
+   * Detect whether a room is a highway (either W0* or *N0 style).
+   * @param {string} roomName - Room coordinate.
+   * @returns {boolean} true if the room is a highway.
+   */
+  isHighwayRoom: function (roomName) {
+    if (!BeeToolbox.isValidRoomName(roomName)) return false;
+    var parsed = /([WE])(\d+)([NS])(\d+)/.exec(roomName);
+    if (!parsed) return false;
+    var x = parseInt(parsed[2], 10);
+    var y = parseInt(parsed[4], 10);
+    return (x % 10 === 0) || (y % 10 === 0);
   },
 
   // ---------------------------------------------------------------------------
@@ -199,7 +363,8 @@ var BeeToolbox = {
         filter: function (h) {
           if (!h || !h.owner) return false;
           var uname = h.owner.username;
-          if (uname === 'Invader') return false;
+          if (uname === 'Invader' || uname === 'Source Keeper') return false;
+          if (isAllyUsername(uname)) return false;
           return uname !== myName;
         }
       }) || [];
@@ -211,6 +376,7 @@ var BeeToolbox = {
         filter: function (s) {
           if (!s || !s.owner) return false;
           if (s.owner.username === myName) return false;
+          if (isAllyUsername(s.owner.username)) return false;
           return IMPORTANT_FOREIGN_STRUCTURES[s.structureType] === true;
         }
       }) || [];
@@ -221,10 +387,10 @@ var BeeToolbox = {
 
     if (mem && mem.intel) {
       var intel = mem.intel;
-      if (intel.owner && intel.owner !== myName) {
+      if (intel.owner && intel.owner !== myName && !isAllyUsername(intel.owner)) {
         return { avoid: true, owner: intel.owner, reason: 'intelOwner' };
       }
-      if (intel.reservation && intel.reservation !== myName) {
+      if (intel.reservation && intel.reservation !== myName && !isAllyUsername(intel.reservation)) {
         return { avoid: true, owner: intel.reservation, reason: 'intelReservation' };
       }
     }
@@ -481,7 +647,84 @@ var BeeToolbox = {
 
     return valid;
   },
-  
+
+  // FIX: Cache energy sink targets per room so delivery routines stop issuing full-room structure scans.
+  _ensureEnergySinkCache: function () {
+    if (typeof global === 'undefined') return null;
+    if (!global.__energySinks || global.__energySinks.tick !== Game.time) {
+      global.__energySinks = { tick: Game.time, rooms: {} };
+    }
+    if (!global.__energySinks.rooms) {
+      global.__energySinks.rooms = {};
+    }
+    return global.__energySinks;
+  },
+
+  _buildEnergySinkCacheForRoom: function (room) {
+    var data = { byType: {} };
+    if (!room) return data;
+
+    var sources = room.find(FIND_SOURCES) || [];
+    var structures = room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        if (!s || !s.store || typeof s.store.getFreeCapacity !== 'function') return false;
+        return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+      }
+    });
+
+    for (var i = 0; i < structures.length; i++) {
+      var structure = structures[i];
+      if (!structure) continue;
+      if (structure.structureType === STRUCTURE_CONTAINER) {
+        var nearSource = false;
+        for (var s = 0; s < sources.length; s++) {
+          var source = sources[s];
+          if (!source || !source.pos) continue;
+          if (structure.pos.inRangeTo(source.pos, 1)) { nearSource = true; break; }
+        }
+        if (nearSource) continue;
+      }
+
+      var list = data.byType[structure.structureType];
+      if (!list) {
+        list = [];
+        data.byType[structure.structureType] = list;
+      }
+      list.push(structure);
+    }
+
+    return data;
+  },
+
+  _getEnergySinkTargets: function (room, structureTypes) {
+    if (!room) return [];
+    var types = structureTypes || [];
+    if (!types.length) return [];
+
+    var cache = BeeToolbox._ensureEnergySinkCache();
+    var roomCache = cache ? cache.rooms[room.name] : null;
+    if (!roomCache) {
+      roomCache = BeeToolbox._buildEnergySinkCacheForRoom(room);
+      if (cache) {
+        cache.rooms[room.name] = roomCache;
+      }
+    }
+
+    var results = [];
+    for (var t = 0; t < types.length; t++) {
+      var type = types[t];
+      var list = roomCache.byType[type];
+      if (!list || !list.length) continue;
+      for (var j = 0; j < list.length; j++) {
+        var structure = list[j];
+        if (!structure || !structure.store || typeof structure.store.getFreeCapacity !== 'function') continue;
+        if (structure.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) continue;
+        results.push(structure);
+      }
+    }
+    return results;
+  },
+
   collectEnergy: function (creep) {
     if (!creep) return;
 
@@ -547,26 +790,8 @@ var BeeToolbox = {
     STRUCTURE_PRIORITY[STRUCTURE_STORAGE]   = 1;
     STRUCTURE_PRIORITY[STRUCTURE_CONTAINER] = 5;
 
-    var sources = creep.room.find(FIND_SOURCES);
-
-    var targets = creep.room.find(FIND_STRUCTURES, {
-      filter: function (s) {
-        // filter by type list
-        var okType = false;
-        for (var i = 0; i < structureTypes.length; i++) {
-          if (s.structureType === structureTypes[i]) { okType = true; break; }
-        }
-        if (!okType) return false;
-
-        // exclude source-adjacent containers
-        if (s.structureType === STRUCTURE_CONTAINER) {
-          for (var j = 0; j < sources.length; j++) {
-            if (s.pos.inRangeTo(sources[j].pos, 1)) return false;
-          }
-        }
-        return s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
-      }
-    });
+    // FIX: Pull candidate sinks from the cached per-room list to avoid repeating full structure scans each tick.
+    var targets = BeeToolbox._getEnergySinkTargets(creep.room, structureTypes) || [];
 
     // sort by priority then distance
     targets.sort(function (a, b) {
@@ -639,7 +864,9 @@ var BeeToolbox = {
     if (!creep) return null;
 
     // 1) hostile creeps
-    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
+    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (hostile) return hostile;
 
     // 2) invader core
@@ -677,7 +904,11 @@ var BeeToolbox = {
     prioTypes[STRUCTURE_EXTENSION] = true;
 
     var prio = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
-      filter: function (s) { return prioTypes[s.structureType] === true; }
+      filter: function (s) {
+        if (!prioTypes[s.structureType]) return false;
+        if (!s.owner) return true;
+        return isEnemyStructureObject(s);
+      }
     });
     if (prio) {
       return firstBarrierOnPath(creep, prio) || prio;
@@ -689,6 +920,7 @@ var BeeToolbox = {
         if (s.structureType === STRUCTURE_CONTROLLER) return false;
         if (s.structureType === STRUCTURE_WALL) return false;
         if (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic) return false;
+        if (s.owner && !isEnemyStructureObject(s)) return false;
         return true;
       }
     });
@@ -742,7 +974,11 @@ var BeeToolbox = {
     if (!room) return false;
     var limit = (typeof radius === 'number') ? radius : 20;
     var towers = room.find(FIND_HOSTILE_STRUCTURES, {
-      filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+      filter: function (s) {
+        if (s.structureType !== STRUCTURE_TOWER) return false;
+        if (s.owner && !isEnemyStructureObject(s)) return false;
+        return true;
+      }
     });
     for (var i = 0; i < towers.length; i++) {
       if (towers[i].pos.getRangeTo(pos) <= limit) {
@@ -755,7 +991,11 @@ var BeeToolbox = {
   estimateTowerDamage: function (room, pos) {
     if (!room || !pos) return 0;
     var towers = room.find(FIND_HOSTILE_STRUCTURES, {
-      filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+      filter: function (s) {
+        if (s.structureType !== STRUCTURE_TOWER) return false;
+        if (s.owner && !isEnemyStructureObject(s)) return false;
+        return true;
+      }
     });
     var total = 0;
     for (var i = 0; i < towers.length; i++) {
@@ -785,6 +1025,7 @@ var BeeToolbox = {
     if (!room) return [];
     var creeps = room.find(FIND_HOSTILE_CREEPS, {
       filter: function (h) {
+        if (!isEnemyCreepObject(h)) return false;
         return h.getActiveBodyparts(ATTACK) > 0 || h.getActiveBodyparts(RANGED_ATTACK) > 0;
       }
     });
@@ -796,7 +1037,9 @@ var BeeToolbox = {
 
   combatShootOpportunistic: function (creep) {
     if (!creep) return false;
-    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (closer && creep.pos.inRangeTo(closer, 3)) {
       creep.rangedAttack(closer);
       return true;
@@ -808,13 +1051,19 @@ var BeeToolbox = {
     if (!creep || !target) return false;
     var opts = config || {};
     var threshold = (opts.massAttackThreshold != null) ? opts.massAttackThreshold : 3;
-    var hostiles = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
+    var hostiles = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (hostiles.length >= threshold) {
       creep.rangedMassAttack();
       return true;
     }
     var range = creep.pos.getRangeTo(target);
     if (range <= 3) {
+      if (target.owner && !isEnemyCreepObject(target)) {
+        noteFriendlySkip(creep, target, 'ranged-attack');
+        return false;
+      }
       creep.rangedAttack(target);
       return true;
     }
@@ -834,6 +1083,7 @@ var BeeToolbox = {
     if (fromThings && fromThings.length) {
       for (i = 0; i < fromThings.length; i++) {
         if (!fromThings[i] || !fromThings[i].pos) continue;
+        if (fromThings[i].owner && !isEnemyUsername(fromThings[i].owner.username)) continue;
         goals.push({ pos: fromThings[i].pos, range: fleeRange });
       }
     }
@@ -873,7 +1123,9 @@ var BeeToolbox = {
       }
     }
 
-    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (bad) {
       var dir = creep.pos.getDirectionTo(bad);
       var zero = (dir - 1 + 8) % 8;
@@ -894,6 +1146,23 @@ var BeeToolbox = {
     return BeeToolbox.BeeTravel(creep, destination, { range: desiredRange });
   },
 
+  // FIX: Expose a squad roster helper so combat utilities can iterate the current squad without filtering every creep.
+  _getSquadMembers: function (squadId, excludeName) {
+    var sid = squadId || 'Alpha';
+    var roster = [];
+    if (Memory && Memory.squads && Memory.squads[sid] && Memory.squads[sid].members) {
+      var bucket = Memory.squads[sid].members;
+      for (var name in bucket) {
+        if (!BeeToolbox.hasOwn(bucket, name)) continue;
+        if (excludeName && name === excludeName) continue;
+        var creep = Game.creeps[name];
+        if (!creep || !creep.my) continue;
+        roster.push(creep);
+      }
+    }
+    return roster;
+  },
+
   combatAuxHeal: function (creep, squadId) {
     if (!creep) return false;
     var healParts = creep.getActiveBodyparts(HEAL);
@@ -905,11 +1174,36 @@ var BeeToolbox = {
     }
 
     var sid = squadId || (creep.memory && creep.memory.squadId) || 'Alpha';
-    var mates = _.filter(Game.creeps, function (c) {
-      return c && c.my && c.id !== creep.id && c.memory && c.memory.squadId === sid && c.hits < c.hitsMax;
-    });
+    // FIX: Pull wounded squadmates from the squad roster (with a room-level fallback) instead of filtering every creep in the world each tick.
+    var roster = BeeToolbox._getSquadMembers(sid, creep.name);
+    if ((!roster || !roster.length) && creep.room) {
+      roster = creep.room.find(FIND_MY_CREEPS, {
+        filter: function (ally) {
+          return ally && ally.id !== creep.id && ally.memory && ally.memory.squadId === sid;
+        }
+      });
+    }
+
+    var mates = [];
+    if (roster && roster.length) {
+      for (var i = 0; i < roster.length; i++) {
+        var member = roster[i];
+        if (!member || member.hits >= member.hitsMax) continue;
+        mates.push(member);
+      }
+    }
+
     if (!mates.length) return false;
-    var target = _.min(mates, function (c) { return c.hits / Math.max(1, c.hitsMax); });
+
+    var target = mates[0];
+    var bestRatio = target.hits / Math.max(1, target.hitsMax);
+    for (var m = 1; m < mates.length; m++) {
+      var ratio = mates[m].hits / Math.max(1, mates[m].hitsMax);
+      if (ratio < bestRatio) {
+        bestRatio = ratio;
+        target = mates[m];
+      }
+    }
     if (!target) return false;
 
     if (creep.pos.isNearTo(target)) {
@@ -933,13 +1227,35 @@ var BeeToolbox = {
       return h.getActiveBodyparts(ATTACK) > 0;
     };
 
-    var threatened = _.filter(Game.creeps, function (ally) {
-      if (!ally || !ally.my || !ally.memory || ally.memory.squadId !== squadId) return false;
-      var role = ally.memory.task || ally.memory.role || '';
-      if (!protectRoles[role]) return false;
-      var nearThreats = ally.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: threatFilter });
-      return nearThreats.length > 0;
-    });
+    // FIX: Only scan the current squad (or the local room) to find threatened allies instead of iterating every creep globally.
+    var roster = BeeToolbox._getSquadMembers(squadId, null);
+    if ((!roster || !roster.length) && creep.room) {
+      roster = creep.room.find(FIND_MY_CREEPS, {
+        filter: function (ally) {
+          return ally && ally.memory && ally.memory.squadId === squadId;
+        }
+      });
+    }
+
+    var threatened = [];
+    if (roster && roster.length) {
+      for (var r = 0; r < roster.length; r++) {
+        var ally = roster[r];
+        if (!ally || ally.id === creep.id) continue;
+        if (!ally.memory || ally.memory.squadId !== squadId) continue;
+        var role = ally.memory.task || ally.memory.role || '';
+        if (!protectRoles[role]) continue;
+        var nearThreats = ally.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {
+          filter: function (c) {
+            if (!isEnemyCreepObject(c)) return false;
+            return threatFilter(c);
+          }
+        });
+        if (nearThreats && nearThreats.length > 0) {
+          threatened.push(ally);
+        }
+      }
+    }
     if (!threatened.length) return false;
 
     var buddy = creep.pos.findClosestByRange(threatened);
@@ -949,7 +1265,13 @@ var BeeToolbox = {
       if (taskSquad && taskSquad.tryFriendlySwap && taskSquad.tryFriendlySwap(creep, buddy.pos)) {
         return true;
       }
-      var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: threatFilter })[0];
+      var badList = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {
+        filter: function (c) {
+          if (!isEnemyCreepObject(c)) return false;
+          return threatFilter(c);
+        }
+      });
+      var bad = badList[0];
       if (bad) {
         var best = BeeToolbox.combatBestAdjacentTile(creep, bad, {
           edgePenalty: opts.edgePenalty,
@@ -977,6 +1299,7 @@ var BeeToolbox = {
     var bestScore = 1e9;
     var threats = room ? room.find(FIND_HOSTILE_CREEPS, {
       filter: function (h) {
+        if (!isEnemyCreepObject(h)) return false;
         return h.getActiveBodyparts(ATTACK) > 0 && h.hits > 0;
       }
     }) : [];
@@ -1040,7 +1363,9 @@ var BeeToolbox = {
   combatWeakestHostile: function (creep, range) {
     if (!creep) return null;
     var maxRange = (typeof range === 'number') ? range : 2;
-    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, maxRange);
+    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, maxRange, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (!xs.length) return null;
     return _.min(xs, function (c) { return c.hits / Math.max(1, c.hitsMax); });
   },
@@ -1058,7 +1383,9 @@ var BeeToolbox = {
       BeeToolbox.combatStepToward(creep, rally.pos || rally, range, opts.taskSquad);
       return true;
     }
-    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
+      filter: function (c) { return isEnemyCreepObject(c); }
+    });
     if (bad) {
       var dir = creep.pos.getDirectionTo(bad);
       var zero = (dir - 1 + 8) % 8;
@@ -1155,6 +1482,11 @@ var BeeToolbox = {
   }
 
 }; // end BeeToolbox
+
+BeeToolbox.isAllyUsername = isAllyUsername;
+BeeToolbox.isEnemyUsername = isEnemyUsername;
+BeeToolbox.isEnemyCreep = isEnemyCreepObject;
+BeeToolbox.isEnemyStructure = isEnemyStructureObject;
 
 BeeToolbox.ECON_CFG = global.__beeEconomyConfig;
 BeeToolbox.HARVESTER_CFG = HARVESTER_CFG;

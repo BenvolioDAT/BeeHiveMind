@@ -5,6 +5,7 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
+var AllianceManager = require('AllianceManager');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 
 // ---------- Tunables ----------
@@ -247,6 +248,118 @@ function logRoomIntel(room) {
     if (foreign.avoid && !foreign.memo && typeof BeeToolbox.markRoomForeignAvoid === 'function') {
       BeeToolbox.markRoomForeignAvoid(rm, foreign.owner, foreign.reason);
     }
+  }
+
+  updateAttackOrders(room);
+}
+
+function isEnemyPlayer(username) {
+  if (!username) return false;
+  if (username === 'Invader' || username === 'Source Keeper') return false;
+  if (AllianceManager && typeof AllianceManager.isAlly === 'function' && AllianceManager.isAlly(username)) return false;
+  if (BeeToolbox && typeof BeeToolbox.getMyUsername === 'function') {
+    var mine = BeeToolbox.getMyUsername();
+    if (mine && username === mine) return false;
+  }
+  return true;
+}
+
+function analyzeRoomThreat(room) {
+  if (!room) return null;
+  var info = null;
+  var hostileCreeps = room.find(FIND_HOSTILE_CREEPS, {
+    filter: function (c) {
+      var owner = c.owner && c.owner.username;
+      return isEnemyPlayer(owner);
+    }
+  });
+  if (hostileCreeps.length) {
+    var ownerName = hostileCreeps[0].owner && hostileCreeps[0].owner.username;
+    info = {
+      owner: ownerName,
+      type: 'creep',
+      count: hostileCreeps.length,
+      threat: 'creeps'
+    };
+    return info;
+  }
+
+  var hostileStructures = room.find(FIND_HOSTILE_STRUCTURES, {
+    filter: function (s) {
+      var owner = s.owner && s.owner.username;
+      return isEnemyPlayer(owner);
+    }
+  });
+  if (hostileStructures.length) {
+    var priorities = [STRUCTURE_TOWER, STRUCTURE_SPAWN, STRUCTURE_STORAGE, STRUCTURE_TERMINAL];
+    var selected = hostileStructures[0];
+    for (var i = 0; i < priorities.length; i++) {
+      for (var j = 0; j < hostileStructures.length; j++) {
+        if (hostileStructures[j].structureType === priorities[i]) {
+          selected = hostileStructures[j];
+          break;
+        }
+      }
+      if (selected && selected.structureType === priorities[i]) break;
+    }
+    info = {
+      owner: selected.owner && selected.owner.username,
+      type: selected.structureType || 'structure',
+      count: hostileStructures.length,
+      threat: 'structures'
+    };
+    return info;
+  }
+
+  if (room.controller) {
+    var ctrlOwner = room.controller.owner && room.controller.owner.username;
+    if (isEnemyPlayer(ctrlOwner)) {
+      return {
+        owner: ctrlOwner,
+        type: 'controller',
+        count: 1,
+        threat: 'controller'
+      };
+    }
+    var reservation = room.controller.reservation && room.controller.reservation.username;
+    if (isEnemyPlayer(reservation)) {
+      return {
+        owner: reservation,
+        type: 'reservation',
+        count: 1,
+        threat: 'reservation'
+      };
+    }
+  }
+
+  return null;
+}
+
+function updateAttackOrders(room) {
+  if (!room) return;
+  var intel = analyzeRoomThreat(room);
+  Memory.attackTargets = Memory.attackTargets || {};
+  var record = Memory.attackTargets[room.name];
+
+  if (intel) {
+    var changed = !record || record.owner !== intel.owner || record.type !== intel.type || record.count !== intel.count;
+    Memory.attackTargets[room.name] = {
+      roomName: room.name,
+      owner: intel.owner,
+      type: intel.type,
+      count: intel.count,
+      threat: intel.threat,
+      updatedAt: Game.time,
+      source: 'scout'
+    };
+    if (changed) {
+      var verb = record ? 'updated' : 'created';
+      var ownerName = intel.owner || 'unknown';
+      console.log('[SCOUT] Attack order ' + verb + ' room=' + room.name + ' owner=' + ownerName + ' threat=' + intel.threat + ' count=' + intel.count);
+    }
+  } else if (record && record.source === 'scout') {
+    delete Memory.attackTargets[room.name];
+    console.log('[SCOUT] Attack order cleared room=' + room.name);
   }
 }
 

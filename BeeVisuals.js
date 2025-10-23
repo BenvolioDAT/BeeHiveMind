@@ -39,6 +39,204 @@ function _shouldDraw(mod, roomName) {
   return ((Game.time + (h & 3)) % mod) === 0;
 }
 
+var HUD_CACHE = { tick: -1, header: {}, seatLine1: {}, seatLine2: {}, route: {} };
+var HUD_DEFAULT_PALETTE = {
+  statusOK: '#88ff88',
+  statusDEGRADED: '#ffd966',
+  statusBLOCKED: '#ff6b6b',
+  statusNOVISION: '#c0c0c0',
+  statusROUTEFAIL: '#ffa94d',
+  statusUnknown: '#ffffff',
+  headerText: '#ffffff',
+  headerShadow: '#000000',
+  subText: '#e5e5e5',
+  seatFree: '#66ccff',
+  seatOccupied: '#ffd54f',
+  seatQueued: '#ffa94d',
+  barBg: '#1a1a1a',
+  barFill: '#ffd54f',
+  reserverGood: '#88ff88',
+  reserverWarn: '#ffb347',
+  reserverFail: '#ff6b6b',
+  legendText: '#dddddd',
+  legendShadow: '#000000',
+  pathStroke: '#66ccff',
+  pathLabel: '#ffffff',
+  contested: '#ff6b6b'
+};
+
+function _resetHudCache() {
+  if (HUD_CACHE.tick === Game.time) return;
+  HUD_CACHE.tick = Game.time;
+  HUD_CACHE.header = {};
+  HUD_CACHE.seatLine1 = {};
+  HUD_CACHE.seatLine2 = {};
+  HUD_CACHE.route = {};
+}
+
+function _getCachedString(bucketName, key, hash, builder) {
+  _resetHudCache();
+  var bucket = HUD_CACHE[bucketName];
+  if (!bucket) return builder();
+  var entry = bucket[key];
+  if (!entry || entry.hash !== hash) {
+    entry = { hash: hash, value: builder() };
+    bucket[key] = entry;
+  }
+  return entry.value;
+}
+
+function _mergePalette(custom) {
+  if (!custom) return HUD_DEFAULT_PALETTE;
+  var merged = {};
+  var key;
+  for (key in HUD_DEFAULT_PALETTE) {
+    if (Object.prototype.hasOwnProperty.call(HUD_DEFAULT_PALETTE, key)) {
+      merged[key] = HUD_DEFAULT_PALETTE[key];
+    }
+  }
+  for (key in custom) {
+    if (Object.prototype.hasOwnProperty.call(custom, key)) {
+      merged[key] = custom[key];
+    }
+  }
+  return merged;
+}
+
+function _createHudContext(roomName, opts) {
+  var visual = new RoomVisual(roomName);
+  var drawBudget = Infinity;
+  if (opts && opts.drawBudget != null) {
+    var parsed = opts.drawBudget | 0;
+    if (parsed > 0) drawBudget = parsed;
+  }
+  var palette = _mergePalette(opts && opts.palette);
+  return {
+    visual: visual,
+    usedBudget: 0,
+    budget: drawBudget,
+    palette: palette
+  };
+}
+
+function _consume(ctx, cost) {
+  if (!ctx) return false;
+  var needed = cost || 1;
+  if (ctx.usedBudget + needed > ctx.budget) {
+    return false;
+  }
+  ctx.usedBudget += needed;
+  return true;
+}
+
+function _drawText(ctx, text, x, y, style) {
+  if (!ctx || text == null) return false;
+  if (!_consume(ctx, 1)) return false;
+  ctx.visual.text(text, x, y, style || {});
+  return true;
+}
+
+function _drawRect(ctx, x, y, w, h, style) {
+  if (!ctx) return false;
+  if (!_consume(ctx, 1)) return false;
+  ctx.visual.rect(x, y, w, h, style || {});
+  return true;
+}
+
+function _drawLine(ctx, x1, y1, x2, y2, style) {
+  if (!ctx) return false;
+  if (!_consume(ctx, 1)) return false;
+  ctx.visual.line(x1, y1, x2, y2, style || {});
+  return true;
+}
+
+function _drawPoly(ctx, points, style) {
+  if (!ctx || !points || !points.length) return false;
+  if (!_consume(ctx, 1)) return false;
+  ctx.visual.poly(points, style || {});
+  return true;
+}
+
+function _statusToColor(palette, status) {
+  if (!palette) palette = HUD_DEFAULT_PALETTE;
+  if (status === 'OK') return palette.statusOK;
+  if (status === 'DEGRADED') return palette.statusDEGRADED;
+  if (status === 'BLOCKED') return palette.statusBLOCKED;
+  if (status === 'NOVISION') return palette.statusNOVISION;
+  if (status === 'ROUTEFAIL') return palette.statusROUTEFAIL;
+  return palette.statusUnknown;
+}
+
+function _formatRemoteHeader(ledger) {
+  if (!ledger) return '';
+  var minersHave = ledger.minersHave != null ? ledger.minersHave : 0;
+  var minersNeed = ledger.minersNeed != null ? ledger.minersNeed : 0;
+  var haulersHave = ledger.haulers && ledger.haulers.countHave != null ? ledger.haulers.countHave : 0;
+  var haulersNeed = ledger.haulers && ledger.haulers.countNeed != null ? ledger.haulers.countNeed : 0;
+  var reserverHave = ledger.reserver && ledger.reserver.have != null ? ledger.reserver.have : 0;
+  var reserverNeed = ledger.reserver && ledger.reserver.needed != null ? ledger.reserver.needed : 0;
+  var ttl = ledger.reserver && ledger.reserver.ttl != null ? ledger.reserver.ttl : 0;
+  var net = 0;
+  if (ledger.energyFlow) {
+    var out = ledger.energyFlow.outPerTick || 0;
+    var inn = ledger.energyFlow.inPerTick || 0;
+    net = out - inn;
+  }
+  var status = ledger.status || 'UNKNOWN';
+  var reason = ledger.notes || '';
+  var key = status + '|' + minersHave + '|' + minersNeed + '|' + haulersHave + '|' + haulersNeed + '|' + reserverHave + '|' + reserverNeed + '|' + ttl + '|' + net + '|' + reason;
+  return _getCachedString('header', ledger.roomName || ledger.remote || 'remote', key, function () {
+    var parts = [];
+    var name = ledger.roomName || ledger.remote || 'remote';
+    parts.push(name);
+    parts.push(' | ');
+    var statusLabel = status;
+    if (status !== 'OK' && reason) {
+      statusLabel = status + ' (' + reason + ')';
+    }
+    parts.push(statusLabel);
+    parts.push(' | ');
+    parts.push('miners ' + minersHave + '/' + minersNeed);
+    parts.push(' | ');
+    parts.push('haulers ' + haulersHave + '/' + haulersNeed);
+    parts.push(' | ');
+    parts.push('resv ' + ttl + 's');
+    parts.push(' | ');
+    var netLabel = net >= 0 ? '+' + net : String(net);
+    parts.push(netLabel + '/t');
+    return parts.join('');
+  });
+}
+
+function _formatSourceLine1(source) {
+  if (!source) return '';
+  var state = source.seatState || 'FREE';
+  var ttl = source.minerTtl != null ? source.minerTtl : 0;
+  var hash = state + '|' + ttl;
+  return _getCachedString('seatLine1', source.id || hash, hash, function () {
+    return 'S: ' + state + ' (TTL ' + ttl + ')';
+  });
+}
+
+function _formatSourceLine2(source) {
+  if (!source) return '';
+  var fill = source.containerFill != null ? Math.round(Math.max(0, Math.min(1, source.containerFill)) * 100) : 0;
+  var linkEnergy = source.linkEnergy != null ? source.linkEnergy : 0;
+  var hash = fill + '|' + linkEnergy;
+  return _getCachedString('seatLine2', source.id || hash, hash, function () {
+    return 'Cont: ' + fill + '% | Link: ' + linkEnergy;
+  });
+}
+
+function _formatRouteLabel(eta, load) {
+  var cleanEta = eta != null ? eta : 0;
+  var cleanLoad = load != null ? load : 0;
+  var hash = cleanEta + '|' + cleanLoad;
+  return _getCachedString('route', hash, hash, function () {
+    return 'ETA ~' + cleanEta + 't | load ~' + cleanLoad + '%';
+  });
+}
+
 // ---------- module ----------
 var BeeVisuals = {
 
@@ -105,6 +303,8 @@ var BeeVisuals = {
       var counter = Memory.GameTickRepairCounter || 0;
       visual.text('Repair Tick Count: ' + counter + '/5', 20, 3, { color: 'white', font: 0.6, opacity: 1 });
     }
+
+    BeeVisuals.drawLunaDebug(room, visual);
   },
 
   drawEnergyBar: function () {
@@ -263,6 +463,108 @@ function _hasRoadOrSiteFast(roomObj, x, y) {
   }
 };
 
+function _statusColor(status) {
+  switch (status) {
+    case 'READY':
+    case 'HATCHING':
+      return '#88ff88';
+    case 'DEFERRED':
+    case 'SATURATED':
+      return '#ffd966';
+    case 'BLOCKED':
+    default:
+      return '#ff8888';
+  }
+}
+
+BeeVisuals.drawLunaDebug = function (room, visual) {
+  if (!global.CFG || global.CFG.DEBUG_LUNA !== true) return;
+  var debugCache = global.__lunaDebugCache;
+  if (!debugCache || debugCache.tick !== Game.time) return;
+
+  var roomInfo = debugCache.rooms ? debugCache.rooms[room.name] : null;
+  if (roomInfo) {
+    var status = roomInfo.status || 'UNKNOWN';
+    var color = _statusColor(status);
+    var reason = roomInfo.reason ? (' (' + roomInfo.reason + ')') : '';
+    var nextStr = '';
+    if (roomInfo.nextAttempt != null) {
+      var delta = roomInfo.nextAttempt - Game.time;
+      if (delta > 0) nextStr = ' next:' + delta;
+    }
+    var spawn = null;
+    var spawns = room.find(FIND_MY_SPAWNS) || [];
+    if (spawns.length) spawn = spawns[0];
+    var labelX = spawn ? spawn.pos.x : 2;
+    var labelY = spawn ? (spawn.pos.y - 1) : 1;
+    visual.text('Luna: ' + status + reason + nextStr, labelX, labelY, {
+      color: color,
+      font: 0.6,
+      opacity: 0.9,
+      stroke: '#000000',
+      align: 'center'
+    });
+  }
+
+  var creepInfo = debugCache.creeps || {};
+  for (var name in creepInfo) {
+    if (!creepInfo.hasOwnProperty(name)) continue;
+    var info = creepInfo[name];
+    if (!info || info.room !== room.name) continue;
+    if (info.x == null || info.y == null) continue;
+    var line1 = (info.state || 'STATE') + ' ttl:' + (info.ttl || 0);
+    var line2 = info.target ? ('→ ' + info.target) : '';
+    var ypos = info.y - 0.8;
+    visual.text(line1, info.x, ypos, { color: '#ffffff', font: 0.5, opacity: 0.9, stroke: '#000000', align: 'center' });
+    if (line2) {
+      visual.text(line2, info.x, ypos - 0.6, { color: '#aaaaaa', font: 0.4, opacity: 0.8, stroke: '#000000', align: 'center' });
+    }
+  }
+};
+
+BeeVisuals.drawRemoteStatus = function () {
+  var cache = global.__lunaVisualCache;
+  if (!cache || cache.tick !== Game.time) return;
+  for (var remoteName in cache.remotes) {
+    if (!cache.remotes.hasOwnProperty(remoteName)) continue;
+    var data = cache.remotes[remoteName];
+    var room = Game.rooms[remoteName];
+    if (!room) continue;
+    var visual = new RoomVisual(remoteName);
+    var color = '#ffd966';
+    if (data.status === 'OK') color = '#88ff88';
+    else if (data.status === 'BLOCKED') color = '#ff7777';
+    var header = '[' + data.status + '] ' + (data.reason || '');
+    visual.text(header, 1, 1, { align: 'left', color: color, font: 0.6, stroke: '#000000', opacity: 0.9 });
+    var quotaText = 'M ' + (data.actual.miners || 0) + '/' + (data.quotas.miners || 0) +
+      ' H ' + (data.actual.haulers || 0) + '/' + (data.quotas.haulers || 0) +
+      ' R ' + (data.actual.reserver || 0) + '/' + (data.quotas.reserver || 0);
+    visual.text(quotaText, 1, 1.8, { align: 'left', color: '#ffffff', font: 0.5, stroke: '#000000', opacity: 0.9 });
+
+    if (room.controller) {
+      visual.text('Reserve: ' + (data.reserverTicks || 0) + 't', room.controller.pos.x, room.controller.pos.y - 1.1, {
+        align: 'center', color: '#ffffff', font: 0.5, stroke: '#000000', opacity: 0.8
+      });
+    }
+
+    var sources = data.sources || [];
+    for (var i = 0; i < sources.length; i++) {
+      var seat = sources[i];
+      if (!seat || !seat.pos) continue;
+      var pos = new RoomPosition(seat.pos.x, seat.pos.y, remoteName);
+      var status = seat.occupant ? 'OCC' : 'FREE';
+      if (!seat.occupant && seat.queue && seat.queue.length) status = 'QUE';
+      var ttl = seat.ttl != null ? seat.ttl : '-';
+      var label = status + ' (' + ttl + ')';
+      visual.text(label, pos.x, pos.y - 0.8, { align: 'center', color: '#ffffff', font: 0.5, stroke: '#000000' });
+      if (seat.containerFill != null) {
+        var pct = Math.floor(seat.containerFill * 100);
+        visual.text('C:' + pct + '%', pos.x, pos.y - 1.5, { align: 'center', color: '#ffd966', font: 0.4, stroke: '#000000' });
+      }
+    }
+  }
+};
+
 BeeVisuals.drawWorldOverview = function () {
   // Throttle — treat 0/false as "disabled"
   var mod = CFG.worldDrawModulo | 0;
@@ -317,6 +619,235 @@ BeeVisuals.drawWorldOverview = function () {
 
   // (Optional) If you ever want to draw lines between rooms:
   // Game.map.visual.connectRooms('W38S47', 'W39S47', { color: '#66ccff', width: 1, opacity: 0.4 });
+};
+
+function _drawRemoteLegend(ctx, opts) {
+  if (!ctx || !opts || opts.showLegend === false) return;
+  var remaining = ctx.budget - ctx.usedBudget;
+  if (remaining <= 4) return;
+  var palette = ctx.palette;
+  var baseX = 1;
+  var baseY = 47.5;
+  var fontSize = 0.45;
+  _drawRect(ctx, baseX - 0.2, baseY - 0.4, 6, 1.6, { fill: '#000000', opacity: 0.25, stroke: '#000000', strokeWidth: 0.05 });
+  _drawText(ctx, 'Legend:', baseX, baseY + 0.1, { align: 'left', color: palette.legendText, font: fontSize, stroke: palette.legendShadow, opacity: 0.9 });
+  _drawText(ctx, 'OK/DEG/BLOCK', baseX, baseY - 0.5, { align: 'left', color: palette.legendText, font: fontSize, stroke: palette.legendShadow, opacity: 0.9 });
+  _drawText(ctx, 'Seat FREE/OCC/QUE', baseX + 2.6, baseY + 0.1, { align: 'left', color: palette.legendText, font: fontSize, stroke: palette.legendShadow, opacity: 0.9 });
+  _drawText(ctx, 'Fill%', baseX + 4.6, baseY - 0.5, { align: 'left', color: palette.legendText, font: fontSize, stroke: palette.legendShadow, opacity: 0.9 });
+}
+
+function _drawContainerBar(ctx, x, y, pct) {
+  var palette = ctx.palette;
+  var width = 1.4;
+  var height = 0.08;
+  var clamped = pct;
+  if (clamped == null) clamped = 0;
+  if (clamped < 0) clamped = 0;
+  if (clamped > 1) clamped = 1;
+  _drawRect(ctx, x - width / 2, y, width, height, { fill: palette.barBg, opacity: 0.45, stroke: undefined });
+  if (clamped > 0) {
+    _drawRect(ctx, x - width / 2, y, width * clamped, height, { fill: palette.barFill, opacity: 0.7, stroke: undefined });
+  }
+}
+
+function _drawReserverLabel(ctx, pos, reserver, palette) {
+  if (!ctx || !reserver) return;
+  var ttl = reserver.ttl != null ? reserver.ttl : 0;
+  var refresh = reserver.refreshAt != null ? reserver.refreshAt : 0;
+  var color = palette.reserverGood;
+  if (ttl <= refresh) color = palette.reserverWarn;
+  if (ttl <= Math.max(0, refresh - 400)) color = palette.reserverFail;
+  var text = 'RESV ' + ttl + 's';
+  _drawText(ctx, text, pos.x, pos.y, { align: 'center', color: color, font: 0.6, stroke: '#000000', opacity: 0.9 });
+}
+
+function _remoteRouteTarget(sourcePos) {
+  if (!sourcePos) return null;
+  var edge = { x: sourcePos.x, y: 0, roomName: sourcePos.roomName };
+  if (sourcePos.y < 25) edge.y = 1;
+  else if (sourcePos.y > 25) edge.y = 48;
+  if (sourcePos.x < 25) edge.x = 1;
+  else if (sourcePos.x > 25) edge.x = 48;
+  return edge;
+}
+
+function _drawRemoteRoutes(ctx, source, haulers, opts) {
+  if (!ctx || !source || !opts || opts.showPaths === false) return;
+  if (ctx.usedBudget >= ctx.budget) return;
+  if (!source.containerPos && !source.containerId) return;
+  var containerPos = source.containerPos;
+  if (!containerPos && source.containerId) {
+    var obj = Game.getObjectById(source.containerId);
+    if (obj && obj.pos) containerPos = obj.pos;
+  }
+  if (!containerPos) return;
+  var target = _remoteRouteTarget(containerPos);
+  if (!target) return;
+  var points = [
+    { x: containerPos.x, y: containerPos.y },
+    { x: target.x, y: target.y }
+  ];
+  if (!_drawPoly(ctx, points, { stroke: ctx.palette.pathStroke, opacity: 0.35, width: 0.08 })) return;
+  var midX = (containerPos.x + target.x) / 2;
+  var midY = (containerPos.y + target.y) / 2;
+  var eta = haulers && haulers.avgEtaTicks != null ? haulers.avgEtaTicks : 0;
+  var load = haulers && haulers.avgLoadPct != null ? haulers.avgLoadPct : 0;
+  var label = _formatRouteLabel(eta, load);
+  _drawText(ctx, label, midX, midY, { align: 'center', color: ctx.palette.pathLabel, font: 0.4, stroke: '#000000', opacity: 0.85 });
+}
+
+function _drawRemoteSources(ctx, ledger, roomName) {
+  if (!ctx || !ledger || !ledger.sources) return;
+  for (var i = 0; i < ledger.sources.length; i++) {
+    if (ctx.usedBudget >= ctx.budget) break;
+    var source = ledger.sources[i];
+    if (!source || !source.pos) continue;
+    if (source.pos.roomName !== roomName) continue;
+    var anchorX = source.pos.x + 1;
+    var anchorY = source.pos.y - 0.5;
+    var line1 = _formatSourceLine1(source);
+    var color = ctx.palette.seatFree;
+    if (source.seatState === 'OCCUPIED') color = ctx.palette.seatOccupied;
+    else if (source.seatState === 'QUEUED') color = ctx.palette.seatQueued;
+    _drawText(ctx, line1, anchorX, anchorY, { align: 'left', color: color, font: 0.45, stroke: '#000000', opacity: 0.9 });
+    var line2 = _formatSourceLine2(source);
+    _drawText(ctx, line2, anchorX, anchorY - 0.5, { align: 'left', color: ctx.palette.subText, font: 0.42, stroke: '#000000', opacity: 0.8 });
+    _drawContainerBar(ctx, anchorX + 1.1, anchorY - 0.9, source.containerFill != null ? source.containerFill : 0);
+  }
+}
+
+BeeVisuals.drawRemoteHUD = function (roomName, ledger, opts) {
+  var result = { usedBudget: 0 };
+  if (!roomName || !ledger) return result;
+  opts = opts || {};
+  var remoteRoom = Game.rooms[roomName];
+  var targetRoomName = remoteRoom ? roomName : (opts.ownerRoomName || ledger.homeName || ledger.home || roomName);
+  if (!targetRoomName) return result;
+  var ctx = _createHudContext(targetRoomName, opts);
+  var anchor = opts.anchor || { x: 1, y: 1 };
+  if (remoteRoom) {
+    anchor = { x: 1, y: 1 };
+  }
+  var header = _formatRemoteHeader(ledger);
+  var headerColor = _statusToColor(ctx.palette, ledger.status);
+  _drawText(ctx, header, anchor.x, anchor.y, { align: 'left', color: headerColor, font: 0.6, stroke: ctx.palette.headerShadow, opacity: 0.95 });
+  if (remoteRoom) {
+    var allowDetails = ledger.status !== 'BLOCKED' && ledger.status !== 'ROUTEFAIL';
+    if (allowDetails) {
+      _drawRemoteSources(ctx, ledger, roomName);
+    }
+    if (remoteRoom.controller) {
+      _drawReserverLabel(ctx, { x: remoteRoom.controller.pos.x, y: remoteRoom.controller.pos.y - 1 }, ledger.reserver, ctx.palette);
+    } else if (opts.anchor) {
+      var fallback = { x: opts.anchor.x, y: opts.anchor.y + 1 };
+      _drawReserverLabel(ctx, fallback, ledger.reserver, ctx.palette);
+    }
+    if (allowDetails && opts.showPaths !== false && ctx.usedBudget < ctx.budget) {
+      for (var si = 0; si < ledger.sources.length; si++) {
+        if (ctx.usedBudget >= ctx.budget) break;
+        _drawRemoteRoutes(ctx, ledger.sources[si], ledger.haulers, opts);
+      }
+    }
+    if (ctx.usedBudget < ctx.budget) {
+      _drawRemoteLegend(ctx, opts);
+    }
+  }
+  result.usedBudget = ctx.usedBudget;
+  return result;
+};
+
+function _formatBaseSeatLine(seat) {
+  if (!seat) return '';
+  var state = seat.seatState || 'FREE';
+  var ttl = seat.minerTtl != null ? seat.minerTtl : 0;
+  var pct = seat.containerFill != null ? Math.round(Math.max(0, Math.min(1, seat.containerFill)) * 100) : 0;
+  return 'BaseSeat: ' + state + ' (TTL ' + ttl + ') | C: ' + pct + '%';
+}
+
+function _drawBaseSeatChip(ctx, seat, opts) {
+  if (!ctx || !seat || !seat.pos) return;
+  var anchorX = seat.pos.x + 1;
+  var anchorY = seat.pos.y - 0.4;
+  var color = ctx.palette.seatFree;
+  if (seat.seatState === 'OCCUPIED') color = ctx.palette.seatOccupied;
+  else if (seat.seatState === 'QUEUED') color = ctx.palette.seatQueued;
+  var text = _formatBaseSeatLine(seat);
+  _drawText(ctx, text, anchorX, anchorY, { align: 'left', color: color, font: 0.45, stroke: '#000000', opacity: 0.95 });
+  if (seat.queuedMiner) {
+    _drawText(ctx, 'handoff ...', anchorX, anchorY - 0.5, { align: 'left', color: ctx.palette.subText, font: 0.42, stroke: '#000000', opacity: 0.85 });
+  }
+  if (seat.contestedUntilTick && seat.contestedUntilTick > Game.time) {
+    var remain = seat.contestedUntilTick - Game.time;
+    _drawText(ctx, 'contested ' + remain + 't', anchorX, anchorY - 1, { align: 'left', color: ctx.palette.contested, font: 0.42, stroke: '#000000', opacity: 0.85 });
+  }
+  _drawContainerBar(ctx, anchorX + 1.1, anchorY - 0.85, seat.containerFill != null ? seat.containerFill : 0);
+}
+
+function _ensureBasePathCache() {
+  var cache = global.__baseSeatPathCache;
+  if (!cache || cache.tick !== Game.time) {
+    cache = { tick: Game.time, paths: {} };
+    global.__baseSeatPathCache = cache;
+  }
+  return cache;
+}
+
+function _getSeatPath(roomName, seatPos) {
+  if (!roomName || !seatPos) return null;
+  var cache = _ensureBasePathCache();
+  var key = roomName + ':' + seatPos.x + ':' + seatPos.y;
+  if (cache.paths[key]) return cache.paths[key];
+  var room = Game.rooms[roomName];
+  if (!room) return null;
+  var spawns = room.find(FIND_MY_SPAWNS) || [];
+  if (!spawns.length) return null;
+  var target = spawns[0].pos;
+  var path = room.findPath(new RoomPosition(seatPos.x, seatPos.y, roomName), target, { maxOps: 200, ignoreCreeps: true });
+  cache.paths[key] = path;
+  return path;
+}
+
+function _drawSeatPath(ctx, roomName, seat, opts) {
+  if (!ctx || !seat || !seat.pos || !opts || opts.showPaths !== true) return;
+  if (ctx.usedBudget >= ctx.budget) return;
+  var path = _getSeatPath(roomName, seat.pos);
+  if (!path || !path.length) return;
+  var limit = Math.min(path.length, 12);
+  var points = [{ x: seat.pos.x, y: seat.pos.y }];
+  for (var i = 0; i < limit; i++) {
+    var step = path[i];
+    if (!step) break;
+    points.push({ x: step.x, y: step.y });
+  }
+  if (!_drawPoly(ctx, points, { stroke: ctx.palette.pathStroke, opacity: 0.25, width: 0.06 })) return;
+  for (var j = 5; j < limit; j += 5) {
+    var mark = path[j];
+    if (!mark) continue;
+    _drawText(ctx, '+', mark.x, mark.y, { align: 'center', color: ctx.palette.pathLabel, font: 0.4, stroke: '#000000', opacity: 0.8 });
+  }
+}
+
+BeeVisuals.drawBaseHarvestHUD = function (roomName, seats, opts) {
+  var result = { usedBudget: 0 };
+  if (!roomName) return result;
+  seats = seats || [];
+  opts = opts || {};
+  var ctx = _createHudContext(roomName, opts);
+  for (var i = 0; i < seats.length; i++) {
+    if (ctx.usedBudget >= ctx.budget) break;
+    _drawBaseSeatChip(ctx, seats[i], opts);
+    _drawSeatPath(ctx, roomName, seats[i], opts);
+  }
+  result.usedBudget = ctx.usedBudget;
+  return result;
+};
+
+BeeVisuals.clearRoomHUD = function (roomName) {
+  if (!roomName) return;
+  var visual = new RoomVisual(roomName);
+  if (visual && typeof visual.clear === 'function') {
+    visual.clear();
+  }
 };
 
 module.exports = BeeVisuals;

@@ -5,7 +5,10 @@ var BeeToolbox = require('BeeToolbox');
 
 var PICKUP_FLAG_DEFAULT = 'E-Pickup';     // rename if you like
 var MIN_DROPPED = 50;                     // ignore tiny crumbs
-var SEARCH_RADIUS = 50;                   // how far from flag to look
+// FIX: Replace full-room scans with a small local radius plus a staggered wide sweep to cut CPU load in busy rooms.
+var LOCAL_SEARCH_RADIUS = 12;
+var WIDE_SEARCH_RADIUS = 50;
+var WIDE_SEARCH_COOLDOWN = 25;
 var PARK_POS = new RoomPosition(25, 25, 'W0N0'); // only used if no flag & no home; harmless
 
 var TaskTrucker = {
@@ -54,7 +57,14 @@ var TaskTrucker = {
 
     // we’re in the flag room; look for juicy piles near the flag
     var flagPos = flag.pos;
-    var dropped = flagPos.findInRange(FIND_DROPPED_RESOURCES, SEARCH_RADIUS, {
+
+    var scanRadius = LOCAL_SEARCH_RADIUS;
+    if (!creep.memory._wideScanAt || Game.time - creep.memory._wideScanAt >= WIDE_SEARCH_COOLDOWN) {
+      creep.memory._wideScanAt = Game.time;
+      scanRadius = WIDE_SEARCH_RADIUS;
+    }
+
+    var dropped = flagPos.findInRange(FIND_DROPPED_RESOURCES, scanRadius, {
       filter: function (r) {
         return r.resourceType === RESOURCE_ENERGY && r.amount >= MIN_DROPPED;
       }

@@ -8,6 +8,8 @@ var RoomPlanner = require('Planner.Room');
 var RoadPlanner = require('Planner.Road');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
+var TaskBaseHarvest = require('Task.BaseHarvest');
+var BeeVisuals = require('BeeVisuals');
 var BeeToolbox = require('BeeToolbox');
 var SquadFlagManager = require('SquadFlagManager');
 var TaskSquad = require('./Task.Squad');
@@ -303,7 +305,7 @@ function prepareTickCaches() {
     if (!creep.memory) creep.memory = {};
     var creepMemory = creep.memory;
     var task = creepMemory.task;
-    if (task === 'remoteharvest') {
+    if (task === 'luna') {
       task = 'luna';
       creepMemory.task = 'luna';
     }
@@ -343,9 +345,15 @@ function prepareTickCaches() {
   for (var idx = 0; idx < ownedRooms.length; idx++) {
     var ownedRoom = ownedRooms[idx];
     var remoteNames = [];
+    var remoteSeen = Object.create(null);
     if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-      remoteNames = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
+      var activeRemotes = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
+      for (var ar = 0; ar < activeRemotes.length; ar++) {
+        addRemoteCandidate(remoteNames, remoteSeen, activeRemotes[ar]);
+      }
     }
+    gatherRemotesFromAssignments(ownedRoom.name, remoteNames, remoteSeen);
+    gatherRemotesFromLedger(ownedRoom.name, remoteNames, remoteSeen);
     remotesByHome[ownedRoom.name] = remoteNames;
   }
   cache.remotesByHome = remotesByHome;
@@ -413,6 +421,89 @@ function looksLikeRoomName(name) {
   if (first !== 'W' && first !== 'E') return false;
   if (name.indexOf('N') === -1 && name.indexOf('S') === -1) return false;
   return true;
+}
+
+function addRemoteCandidate(target, seen, remoteName) {
+  if (!remoteName || typeof remoteName !== 'string') return;
+  if (!looksLikeRoomName(remoteName)) return;
+  if (seen[remoteName]) return;
+  seen[remoteName] = true;
+  target.push(remoteName);
+}
+
+function processAssignmentRecord(homeName, key, record, target, seen) {
+  if (!homeName || !record) return;
+  if (typeof record === 'string') {
+    if (key === homeName && looksLikeRoomName(record)) {
+      addRemoteCandidate(target, seen, record);
+    } else if (looksLikeRoomName(key) && record === homeName) {
+      addRemoteCandidate(target, seen, key);
+    }
+    return;
+  }
+  if (Array.isArray(record)) {
+    for (var i = 0; i < record.length; i++) {
+      processAssignmentRecord(homeName, key, record[i], target, seen);
+    }
+    return;
+  }
+  if (typeof record !== 'object') return;
+
+  var remoteName = null;
+  if (typeof record.roomName === 'string') remoteName = record.roomName;
+  else if (typeof record.remote === 'string') remoteName = record.remote;
+  else if (typeof record.targetRoom === 'string') remoteName = record.targetRoom;
+  else if (typeof record.room === 'string') remoteName = record.room;
+  else if (looksLikeRoomName(key)) remoteName = key;
+
+  var assignedHome = null;
+  if (typeof record.home === 'string') assignedHome = record.home;
+  else if (typeof record.homeRoom === 'string') assignedHome = record.homeRoom;
+  else if (typeof record.spawn === 'string') assignedHome = record.spawn;
+  else if (typeof record.origin === 'string') assignedHome = record.origin;
+  else if (typeof record.base === 'string') assignedHome = record.base;
+  else if (!looksLikeRoomName(key)) assignedHome = key;
+
+  if (assignedHome === homeName && typeof remoteName === 'string') {
+    addRemoteCandidate(target, seen, remoteName);
+  }
+
+  for (var nestedKey in record) {
+    if (!BeeToolbox.hasOwn(record, nestedKey)) continue;
+    if (nestedKey === 'roomName' || nestedKey === 'remote' || nestedKey === 'targetRoom' || nestedKey === 'room' ||
+        nestedKey === 'home' || nestedKey === 'homeRoom' || nestedKey === 'spawn' || nestedKey === 'origin' || nestedKey === 'base') {
+      continue;
+    }
+    processAssignmentRecord(homeName, nestedKey, record[nestedKey], target, seen);
+  }
+}
+
+function gatherRemotesFromAssignments(homeName, target, seen) {
+  if (!homeName || !Memory.remoteAssignments) return;
+  var assignments = Memory.remoteAssignments;
+  for (var key in assignments) {
+    if (!BeeToolbox.hasOwn(assignments, key)) continue;
+    processAssignmentRecord(homeName, key, assignments[key], target, seen);
+  }
+}
+
+function gatherRemotesFromLedger(homeName, target, seen) {
+  if (!homeName || !Memory.remotes) return;
+  for (var remoteName in Memory.remotes) {
+    if (!BeeToolbox.hasOwn(Memory.remotes, remoteName)) continue;
+    if (remoteName === 'version') continue;
+    var entry = Memory.remotes[remoteName];
+    if (!entry || typeof entry !== 'object') continue;
+    var ledgerHome = null;
+    if (typeof entry.home === 'string') ledgerHome = entry.home;
+    else if (typeof entry.homeRoom === 'string') ledgerHome = entry.homeRoom;
+    else if (typeof entry.origin === 'string') ledgerHome = entry.origin;
+    if (ledgerHome !== homeName) continue;
+    var finalRemote = null;
+    if (typeof entry.roomName === 'string') finalRemote = entry.roomName;
+    else finalRemote = remoteName;
+    addRemoteCandidate(target, seen, finalRemote);
+  }
 }
 
 function defaultTaskForRole(role) {
@@ -816,6 +907,11 @@ function countSourcesInMemory(mem) {
 function determineLunaQuota(room, cache) {
   if (!room) return 0;
 
+  if (TaskLuna && typeof TaskLuna.getHomeQuota === 'function') {
+    var quota = TaskLuna.getHomeQuota(room.name);
+    if (quota > 0) return quota;
+  }
+
   var remotes = cache.remotesByHome[room.name] || [];
   if (remotes.length === 0) return 0;
 
@@ -885,17 +981,28 @@ var BeeHiveMind = {
     this.initializeMemory();
     var cache = prepareTickCaches();
 
+    if (TaskLuna && typeof TaskLuna.tick === 'function') {
+      TaskLuna.tick(cache);
+    }
+
     var ownedRooms = cache.roomsOwned || [];
     for (var i = 0; i < ownedRooms.length; i++) {
       this.manageRoom(ownedRooms[i], cache);
     }
 
     this.runCreeps(cache);
+
+    if (TaskLuna && typeof TaskLuna.report === 'function') {
+      TaskLuna.report(cache);
+    }
+
     this.manageSpawns(cache);
 
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
       TradeEnergy.runAll();
     }
+
+    this.runVisuals(cache);
   },
 
   manageRoom: function (room, cache) {
@@ -924,6 +1031,50 @@ var BeeHiveMind = {
         }
       } else {
         hiveLog.info('🐝 Unknown role: ' + (roleName || 'undefined') + ' (Creep: ' + (creep.name || 'unknown') + ')');
+      }
+    }
+  },
+
+  runVisuals: function (cache) {
+    if (!BeeVisuals) return;
+    var rooms = (cache && cache.roomsOwned) || [];
+    var remoteUi = (TaskLuna && TaskLuna.LUNA_UI) ? TaskLuna.LUNA_UI : null;
+    var baseUi = (TaskBaseHarvest && TaskBaseHarvest.BASE_UI) ? TaskBaseHarvest.BASE_UI : null;
+    for (var i = 0; i < rooms.length; i++) {
+      var room = rooms[i];
+      if (!room || !room.name) continue;
+      if (typeof BeeVisuals.clearRoomHUD === 'function') {
+        BeeVisuals.clearRoomHUD(room.name);
+      }
+      if (remoteUi && remoteUi.enabled && typeof BeeVisuals.drawRemoteHUD === 'function' && TaskLuna && typeof TaskLuna.getVisualLedgersForHome === 'function') {
+        var ledgers = TaskLuna.getVisualLedgersForHome(room.name) || [];
+        for (var r = 0; r < ledgers.length; r++) {
+          var ledger = ledgers[r];
+          if (!ledger) continue;
+          var anchorX = (remoteUi.anchor && remoteUi.anchor.x != null) ? remoteUi.anchor.x : 1;
+          var anchorYBase = (remoteUi.anchor && remoteUi.anchor.y != null) ? remoteUi.anchor.y : 1;
+          var anchorY = anchorYBase + (r * 1.1);
+          var options = {
+            drawBudget: remoteUi.drawBudget,
+            showPaths: remoteUi.showPaths,
+            showLegend: remoteUi.showLegend,
+            palette: remoteUi.palette,
+            scale: remoteUi.scale,
+            anchor: { x: anchorX, y: anchorY },
+            ownerRoomName: room.name
+          };
+          BeeVisuals.drawRemoteHUD(ledger.roomName || ledger.remote || ledger.name, ledger, options);
+        }
+      }
+      if (baseUi && baseUi.enabled && typeof BeeVisuals.drawBaseHarvestHUD === 'function' && TaskBaseHarvest && typeof TaskBaseHarvest.getBaseSeatsForVisual === 'function') {
+        var seats = TaskBaseHarvest.getBaseSeatsForVisual(room.name) || [];
+        var baseOptions = {
+          drawBudget: baseUi.drawBudget,
+          showPaths: baseUi.showPaths,
+          palette: baseUi.palette,
+          scale: baseUi.scale
+        };
+        BeeVisuals.drawBaseHarvestHUD(room.name, seats, baseOptions);
       }
     }
   },
@@ -990,6 +1141,11 @@ var BeeHiveMind = {
       var spawnCapacity = room.energyCapacityAvailable || spawnResource;
 
       if (spawner.spawning) {
+        if (TaskLuna && typeof TaskLuna.noteSpawnBlocked === 'function') {
+          try {
+            TaskLuna.noteSpawnBlocked(room.name, 'SPAWN_BUSY', Game.time + 1, spawnResource, spawnCapacity);
+          } catch (lunaNoteErr) {}
+        }
         if (builderLimit > 0) {
           logBuilderSpawnBlock(spawner, room, builderSites, 'SPAWN_BUSY', spawnResource, spawnCapacity, builderFailLog);
         }
@@ -1044,11 +1200,11 @@ var BeeHiveMind = {
         baseharvest: harvesterIntel.desiredCount || 1,
         courier: 1,
         queen: 2,
-        upgrader: 1,
-        builder: builderLimit,
+        upgrader: 2,
         repair: 0,
         luna: determineLunaQuota(room, cache),
-        scout: 1,
+        builder: builderLimit,
+        scout: 2,
         CombatArcher: 0,
         CombatMelee: 0,
         CombatMedic: 0,
@@ -1086,7 +1242,42 @@ var BeeHiveMind = {
         }
 
         var didSpawn = false;
-        if (task === 'baseharvest') {
+        if (task === 'luna') {
+          var lunaPlan = null;
+          if (TaskLuna && typeof TaskLuna.planSpawnForRoom === 'function') {
+            try {
+              lunaPlan = TaskLuna.planSpawnForRoom(spawner, {
+                availableEnergy: spawnResource,
+                capacityEnergy: spawnCapacity,
+                current: current,
+                limit: limit
+              });
+            } catch (planErr) {
+              lunaPlan = null;
+            }
+          }
+          if (!lunaPlan || lunaPlan.shouldSpawn !== true) {
+            continue;
+          }
+          var spawnResult;
+          if (TaskLuna && typeof TaskLuna.spawnFromPlan === 'function') {
+            try {
+              spawnResult = TaskLuna.spawnFromPlan(spawner, lunaPlan);
+            } catch (spawnErr) {
+              spawnResult = spawnErr && typeof spawnErr === 'number' ? spawnErr : ERR_INVALID_TARGET;
+            }
+          } else {
+            spawnResult = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+          }
+          if (spawnResult === OK || spawnResult === true) {
+            didSpawn = true;
+          } else if (spawnResult === ERR_BUSY) {
+            roomSpawned[room.name] = true;
+            continue;
+          } else {
+            continue;
+          }
+        } else if (task === 'baseharvest') {
           var harvesterPlan = planHarvesterSpawn(room, spawnResource, spawnCapacity, harvesterIntel);
           if (!harvesterPlan.shouldSpawn) {
             continue;
