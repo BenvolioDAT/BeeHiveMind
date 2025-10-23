@@ -179,13 +179,29 @@ var TaskSquad = (function () {
     return !name || name === 'Invader' || name === 'Source Keeper';
   }
 
+  // FIX: Reuse the alliance helper so we only ignore creeps and structures owned by trusted players.
+  function _isAllyUsername(name) {
+    if (!name) return false;
+    if (BeeToolbox && typeof BeeToolbox.isAllyUsername === 'function') {
+      return BeeToolbox.isAllyUsername(name);
+    }
+    if (typeof AllianceManager !== 'undefined' && AllianceManager && typeof AllianceManager.isAlly === 'function') {
+      return AllianceManager.isAlly(name);
+    }
+    if (typeof global !== 'undefined' && global.AllianceManager && typeof global.AllianceManager.isAlly === 'function') {
+      return global.AllianceManager.isAlly(name);
+    }
+    return false;
+  }
+
   function _chooseRoomTarget(me) {
     var room = me.room; if (!room) return null;
 
+    // FIX: Include all non-allied hostiles (players and NPCs) instead of only NPC creeps.
     var hostiles = room.find(FIND_HOSTILE_CREEPS, {
       filter: function (h) {
         var owner = h.owner && h.owner.username;
-        return _isNpcUsername(owner);
+        return !_isAllyUsername(owner);
       }
     });
     if (hostiles && hostiles.length) {
@@ -196,14 +212,16 @@ var TaskSquad = (function () {
 
     var key = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
       var owner = s.owner && s.owner.username;
-      if (!_isNpcUsername(owner)) return false;
+      if (!owner) return false;
+      if (_isAllyUsername(owner)) return false;
       return s.structureType === STRUCTURE_TOWER || s.structureType === STRUCTURE_SPAWN;
     }});
     if (key.length) return me.pos.findClosestByRange(key);
 
     var others = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
       var owner = s.owner && s.owner.username;
-      return _isNpcUsername(owner);
+      if (!owner) return false;
+      return !_isAllyUsername(owner);
     }});
     if (others.length) return me.pos.findClosestByRange(others);
 

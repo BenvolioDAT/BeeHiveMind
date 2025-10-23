@@ -34,6 +34,9 @@ var BASE_UI = {
 
 var _seatVisualCache = global.__baseSeatVisualCache || (global.__baseSeatVisualCache = { tick: -1, rooms: {} });
 
+// FIX: Build a per-tick cache of harvester assignments and courier totals so we stop re-scanning Game.creeps in hot paths.
+var _harvesterRoomCache = global.__baseHarvesterRoomCache || (global.__baseHarvesterRoomCache = { tick: -1, rooms: {}, globalCourierCount: 0 });
+
 /** =========================
  *  Small utils
  *  ========================= */
@@ -110,24 +113,117 @@ function getPreferredSeatPos(source) {
 }
 
 // Any friendly harvesters currently assigned to this source (live only)
-function getIncumbents(roomName, sourceId, excludeName) {
-  var out = [];
-  for (var name in Game.creeps) {
-    var c = Game.creeps[name];
-    if (!c || !c.my) continue;
-    if (excludeName && name === excludeName) continue;
-    if (c.memory && c.memory.task === 'baseharvest' &&
-        c.memory.assignedSource === sourceId &&
-        c.room && c.room.name === roomName) {
-      out.push(c);
+// FIX: Cache harvester incumbents per room so repeated role lookups do not sweep Game.creeps every tick.
+function ensureHarvesterRoomCacheTick() {
+  if (!_harvesterRoomCache || _harvesterRoomCache.tick !== Game.time) {
+    _harvesterRoomCache = global.__baseHarvesterRoomCache = { tick: Game.time, rooms: {}, globalCourierCount: 0 };
+
+    for (var name in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+      var creep = Game.creeps[name];
+      if (!creep || !creep.my || !creep.memory) continue;
+
+      if (creep.memory.task === 'courier') {
+        _harvesterRoomCache.globalCourierCount++;
+        continue;
+      }
+
+      if (creep.memory.task !== 'baseharvest') continue;
+      if (!creep.memory.assignedSource) continue;
+
+      var roomName = null;
+      if (creep.room && creep.room.name) {
+        roomName = creep.room.name;
+      } else if (creep.memory.seatRoom) {
+        roomName = creep.memory.seatRoom;
+      } else if (creep.memory.homeRoom) {
+        roomName = creep.memory.homeRoom;
+      }
+      if (!roomName) continue;
+
+      var roomBucket = _harvesterRoomCache.rooms[roomName];
+      if (!roomBucket) {
+        roomBucket = { sourceCounts: {}, sourceIncumbents: {} };
+        _harvesterRoomCache.rooms[roomName] = roomBucket;
+      }
+
+      var sid = creep.memory.assignedSource;
+      if (!roomBucket.sourceCounts[sid]) roomBucket.sourceCounts[sid] = 0;
+      roomBucket.sourceCounts[sid]++;
+      if (!roomBucket.sourceIncumbents[sid]) roomBucket.sourceIncumbents[sid] = [];
+      roomBucket.sourceIncumbents[sid].push(creep);
     }
+  }
+  return _harvesterRoomCache;
+}
+
+function getIncumbents(roomName, sourceId, excludeName) {
+  if (!roomName || !sourceId) return [];
+  var cache = ensureHarvesterRoomCacheTick();
+  var roomBucket = cache.rooms[roomName];
+  if (!roomBucket || !roomBucket.sourceIncumbents[sourceId]) return [];
+  var incumbents = roomBucket.sourceIncumbents[sourceId];
+  var out = [];
+  for (var i = 0; i < incumbents.length; i++) {
+    var creep = incumbents[i];
+    if (!creep) continue;
+    if (excludeName && creep.name === excludeName) continue;
+    out.push(creep);
   }
   return out;
 }
 
 // Count assigned harvesters (live)
 function countAssignedHarvesters(roomName, sourceId) {
-  return getIncumbents(roomName, sourceId, null).length;
+  if (!roomName || !sourceId) return 0;
+  var cache = ensureHarvesterRoomCacheTick();
+  var roomBucket = cache.rooms[roomName];
+  if (!roomBucket || !roomBucket.sourceCounts[sourceId]) return 0;
+  return roomBucket.sourceCounts[sourceId];
+}
+
+// FIX: When we assign a source mid-tick, immediately reflect it inside the cache so follow-on creeps see the occupied seat.
+function trackHarvesterAssignment(creep) {
+  if (!creep || !creep.memory || !creep.memory.assignedSource) return;
+  var roomName = null;
+  if (creep.room && creep.room.name) {
+    roomName = creep.room.name;
+  } else if (creep.memory.seatRoom) {
+    roomName = creep.memory.seatRoom;
+  } else if (creep.memory.homeRoom) {
+    roomName = creep.memory.homeRoom;
+  }
+  if (!roomName) return;
+
+  var cache = ensureHarvesterRoomCacheTick();
+  var roomBucket = cache.rooms[roomName];
+  if (!roomBucket) {
+    roomBucket = { sourceCounts: {}, sourceIncumbents: {} };
+    cache.rooms[roomName] = roomBucket;
+  }
+
+  var sid = creep.memory.assignedSource;
+  if (!roomBucket.sourceIncumbents[sid]) roomBucket.sourceIncumbents[sid] = [];
+
+  var already = false;
+  for (var i = 0; i < roomBucket.sourceIncumbents[sid].length; i++) {
+    var seen = roomBucket.sourceIncumbents[sid][i];
+    if (seen && seen.name === creep.name) {
+      already = true;
+      break;
+    }
+  }
+  if (already) return;
+
+  if (!roomBucket.sourceCounts[sid]) roomBucket.sourceCounts[sid] = 0;
+  roomBucket.sourceCounts[sid]++;
+  roomBucket.sourceIncumbents[sid].push(creep);
+}
+
+// FIX: Share the courier total via the same cache to remove the per-tick full creep scan.
+function getGlobalCourierCount() {
+  var cache = ensureHarvesterRoomCacheTick();
+  return cache.globalCourierCount || 0;
 }
 
 function ensureSeatVisualCacheTick() {
@@ -234,7 +330,10 @@ function getBaseSeatsForVisual(roomName) {
 function ensureContainerNearSource(creep, source) {
   if (!creep || !source || !source.pos || !source.pos.roomName) return false;
 
+  // FIX: RoomPosition objects lack a "room" property in remote contexts, so resolve the visible room once and reuse it for structure lookups and construction calls.
   var pos = source.pos;
+  var room = Game.rooms && Game.rooms[pos.roomName];
+  if (!room) return false;
 
   // 1) Existing container adjacent?
   var containers = pos.findInRange(FIND_STRUCTURES, 1, {
@@ -301,7 +400,7 @@ function ensureContainerNearSource(creep, source) {
       if (t === TERRAIN_MASK_WALL) continue;
 
       // Avoid placing on top of non-road structures.
-      var structs = pos.room.lookForAt(LOOK_STRUCTURES, x, y);
+      var structs = room.lookForAt(LOOK_STRUCTURES, x, y);
       var blocked = false;
       var i;
       for (i = 0; i < structs.length; i++) {
@@ -318,10 +417,10 @@ function ensureContainerNearSource(creep, source) {
   }
 
   if (best) {
-    var res = pos.room.createConstructionSite(best.x, best.y, STRUCTURE_CONTAINER);
+    var res = room.createConstructionSite(best.x, best.y, STRUCTURE_CONTAINER);
     if (res === OK) {
       // If we can build right away, step toward it.
-      var nearSiteArr = pos.room.lookForAt(LOOK_CONSTRUCTION_SITES, best.x, best.y);
+      var nearSiteArr = room.lookForAt(LOOK_CONSTRUCTION_SITES, best.x, best.y);
       var nearSite = (nearSiteArr && nearSiteArr.length) ? nearSiteArr[0] : null;
       if (nearSite && creep.getActiveBodyparts(WORK) > 0 && creep.getActiveBodyparts(CARRY) > 0) {
         if (creep.pos.inRangeTo(nearSite, 3)) creep.build(nearSite);
@@ -479,6 +578,9 @@ function assignSource(creep) {
   creep.memory.seatRoom = best.seatPos.roomName;
   creep.memory.waitingForSeat = !!bestWillQueue;
 
+  // FIX: Push the new assignment into the per-tick cache so other miners respect the occupied seat immediately.
+  trackHarvesterAssignment(creep);
+
   return best.source.id;
 }
 
@@ -610,11 +712,8 @@ var TaskBaseHarvest = {
     }
 
     // (3) If no couriers exist, dump to ground as last resort
-    var courierCount = 0;
-    for (var name in Game.creeps) {
-      var c = Game.creeps[name];
-      if (c && c.my && c.memory && c.memory.task === 'courier') courierCount++;
-    }
+    // FIX: Pull the courier tally from the shared cache instead of scanning the entire creep list each tick.
+    var courierCount = getGlobalCourierCount();
     if (courierCount === 0 && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
       creep.drop(RESOURCE_ENERGY);
       return;

@@ -126,11 +126,28 @@ function gatherReserveTargets() {
   }
   for (var cname in Game.creeps) {
     var c = Game.creeps[cname];
-    if (!c.memory || !c.memory.role) continue;
-    if (RESERVE_CONFIG.scanRoleNames.indexOf(c.memory.role) !== -1) {
-      var rn = c.memory.remoteRoom || c.memory.targetRoom || c.memory.targetRoomName;
-      if (rn) set[rn] = true;
+    var mem = c && c.memory;
+    if (!mem) continue;
+
+    // FIX: Remote reservers spawned by Luna tag their specialty in task/remoteRole, so check all fields instead of just role.
+    var isReserveSpecialist = false;
+    if (mem.role && RESERVE_CONFIG.scanRoleNames.indexOf(mem.role) !== -1) {
+      isReserveSpecialist = true;
     }
+    if (!isReserveSpecialist && mem.task && RESERVE_CONFIG.scanRoleNames.indexOf(mem.task) !== -1) {
+      isReserveSpecialist = true;
+    }
+    if (!isReserveSpecialist && mem.remoteRole) {
+      var remoteRole = String(mem.remoteRole).toLowerCase();
+      for (var idx = 0; idx < RESERVE_CONFIG.scanRoleNames.length; idx++) {
+        var entry = String(RESERVE_CONFIG.scanRoleNames[idx]).toLowerCase();
+        if (entry === remoteRole) { isReserveSpecialist = true; break; }
+      }
+    }
+    if (!isReserveSpecialist) continue;
+
+    var rn = mem.remoteRoom || mem.targetRoom || mem.targetRoomName || mem.remote;
+    if (rn) set[rn] = true;
   }
   var out = [];
   for (var rn in set) out.push(rn);
