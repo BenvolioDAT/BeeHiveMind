@@ -9,7 +9,12 @@
 var FRIENDLY_USERNAMES = [
   'haha233jpg',
   'Court_of_Silver',
-  'BuzzingBro'
+  'xianda1314',
+  'Lumen',
+  'ControlNet',
+  'xel',
+  'bg8kiw',
+  'Kazkel',
 ];
 
 // Cache for per-tick alliance log spam suppression.
