@@ -322,71 +322,32 @@ function getBaseSeatsForVisual(roomName) {
   return result;
 }
 
-/** =========================
- *  NEW: Container ensure/build helper
- *  ========================= */
-// ES5-safe helper: ensure there's a container next to a source.
-// Returns true if it took a build/place/move/harvest action this tick (so caller can `return`).
 function ensureContainerNearSource(creep, source) {
   if (!creep || !source || !source.pos || !source.pos.roomName) return false;
 
-  // FIX: RoomPosition objects lack a "room" property in remote contexts, so resolve the visible room once and reuse it for structure lookups and construction calls.
-  var pos = source.pos;
+  // Resolve the visible room (RoomPosition lacks .room for remotes)
+  var pos  = source.pos;
   var room = Game.rooms && Game.rooms[pos.roomName];
-  if (!room) return false;
+  if (!room) return false; // no vision → do nothing
 
-  // 1) Existing container adjacent?
+  // 1) Existing container adjacent? Nothing to place.
   var containers = pos.findInRange(FIND_STRUCTURES, 1, {
     filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
   });
   if (containers && containers.length) {
-    // Container exists; nothing to build/place.
     return false;
   }
 
-  // 2) Container construction site adjacent?
+  // 2) Container construction site adjacent? We will NOT build it—leave it for builders.
   var sites = pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
-    filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.my; }
+    // If you want to respect only your own, keep s.my; or drop it to accept allied planners
+    filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
   });
-
   if (sites && sites.length) {
-    var site = sites[0];
-
-    // Only units with CARRY + energy can build.
-    var canBuild = (creep.getActiveBodyparts(WORK) > 0) &&
-                   (creep.store && creep.store[RESOURCE_ENERGY] > 0);
-
-    if (canBuild) {
-      if (creep.pos.inRangeTo(site, 3)) {
-        creep.build(site);
-      } else if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function') {
-        BeeToolbox.BeeTravel(creep, site.pos || site, 3);
-      } else if (typeof creep.travelTo === 'function') {
-        creep.travelTo(site, { range: 3 });
-      } else {
-        creep.moveTo(site, { reusePath: 10 });
-      }
-      return true; // handled an action
-    } else {
-      // If we have CARRY but no energy yet, harvest a bit then come back.
-      var hasCarry = creep.getActiveBodyparts(CARRY) > 0;
-      if (hasCarry && creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
-        if (creep.pos.inRangeTo(source, 1)) {
-          creep.harvest(source);
-        } else if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function') {
-          BeeToolbox.BeeTravel(creep, source.pos || source, 1);
-        } else if (typeof creep.travelTo === 'function') {
-          creep.travelTo(source, { range: 1 });
-        } else {
-          creep.moveTo(source, { reusePath: 10 });
-        }
-        return true;
-      }
-      // Miners with no CARRY can’t help build; fall through.
-    }
+    return false; // site already exists, nothing to do
   }
 
-  // 3) No site? Place one on the best adjacent walkable tile.
+  // 3) No site? Choose best adjacent walkable tile (prefer plains over swamp, avoid non-road structures)
   var terrain = new Room.Terrain(pos.roomName);
   var best = null;
   var dx, dy;
@@ -399,16 +360,19 @@ function ensureContainerNearSource(creep, source) {
       var t = terrain.get(x, y);
       if (t === TERRAIN_MASK_WALL) continue;
 
-      // Avoid placing on top of non-road structures.
+      // Avoid placing on top of non-road structures
       var structs = room.lookForAt(LOOK_STRUCTURES, x, y);
       var blocked = false;
       var i;
       for (i = 0; i < structs.length; i++) {
-        if (structs[i].structureType !== STRUCTURE_ROAD) { blocked = true; break; }
+        if (structs[i].structureType !== STRUCTURE_ROAD) {
+          blocked = true;
+          break;
+        }
       }
       if (blocked) continue;
 
-      // Prefer plains over swamp (lower score is better).
+      // Lower score is better: plains (1) preferred over swamp (2)
       var score = (t === TERRAIN_MASK_SWAMP) ? 2 : 1;
       if (!best || score < best.score) {
         best = { x: x, y: y, score: score };
@@ -416,19 +380,22 @@ function ensureContainerNearSource(creep, source) {
     }
   }
 
+  // 4) Place the construction site (no building)
   if (best) {
     var res = room.createConstructionSite(best.x, best.y, STRUCTURE_CONTAINER);
     if (res === OK) {
-      // If we can build right away, step toward it.
-      var nearSiteArr = room.lookForAt(LOOK_CONSTRUCTION_SITES, best.x, best.y);
-      var nearSite = (nearSiteArr && nearSiteArr.length) ? nearSiteArr[0] : null;
-      if (nearSite && creep.getActiveBodyparts(WORK) > 0 && creep.getActiveBodyparts(CARRY) > 0) {
-        if (creep.pos.inRangeTo(nearSite, 3)) creep.build(nearSite);
-        else if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function') BeeToolbox.BeeTravel(creep, nearSite.pos || nearSite, 3);
-        else if (typeof creep.travelTo === 'function') creep.travelTo(nearSite, { range: 3 });
-        else creep.moveTo(nearSite, { reusePath: 10 });
+      // Optional: Draw a quick room visual ping for debug
+      if (room.visual) {
+        room.visual.text(
+          '📦',
+          best.x,
+          best.y - 0.3,
+          { color: '#ffaa00', font: 0.8, opacity: 0.9 }
+        );
       }
-      return true;
+      // We deliberately do NOT build or move for building here.
+      // Let dedicated builders / build waves handle it.
+      return true; // we acted this tick (created a site)
     }
   }
 
@@ -607,13 +574,8 @@ function getContainerAtOrAdjacent(pos) {
 
 var TaskBaseHarvest = {
   run: function(creep) {
-    // (0) Simple state flip based on store
-    if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
-      creep.memory.harvesting = true;
-    }
-    if (creep.memory.harvesting && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
-      creep.memory.harvesting = false;
-    }
+    // (0) State logic — always true for miners (they’re harvesters by default)
+    if (!creep.memory.harvesting) creep.memory.harvesting = true;
 
     // (1) Harvesting phase
     if (creep.memory.harvesting) {
@@ -621,86 +583,51 @@ var TaskBaseHarvest = {
       if (!sid) return;
 
       var source = Game.getObjectById(sid);
-      if (!source) { creep.memory.assignedSource = null; creep.memory.waitingForSeat = false; return; }
+      if (!source) {
+        creep.memory.assignedSource = null;
+        creep.memory.waitingForSeat = false;
+        return;
+      }
 
-      // Resolve local conflicts if we are in the scrum
+      // Resolve conflicts
       if (resolveSourceConflict(creep, source)) return;
 
-      // NEW: If there is no container yet, place/build one (handles move/harvest/build). Bail if it acted.
+      // Place container if missing
       if (ensureContainerNearSource(creep, source)) return;
 
-      // Preferred seat position (rebuild if memory room mismatch)
+      // Seat position
       var seatPos = (creep.memory.seatRoom === creep.room.name)
         ? new RoomPosition(creep.memory.seatX, creep.memory.seatY, creep.memory.seatRoom)
         : getPreferredSeatPos(source);
 
-      // Capacity math
-      var seats = getAdjacentContainerForSource(source) ? 1 : countWalkableSeatsAround(source.pos);
-      if (CONFIG.maxHarvestersPerSource > 0) seats = Math.min(seats, CONFIG.maxHarvestersPerSource);
-      var used  = countAssignedHarvesters(creep.room.name, source.id);
+      if (!seatPos) return;
 
-      // Promote out of queue ASAP if capacity exists now
-      if (used < seats) {
-        creep.memory.waitingForSeat = false;
-      }
-
-      // Seat occupancy: any creep (ally or not) blocks the exact tile unless it's me
-      var seatBlocked = isTileOccupiedByAnyCreep(seatPos, creep.name) && !creep.pos.isEqualTo(seatPos);
-
-      // Decide whether to queue this tick
-      var shouldQueue = (seatBlocked || creep.memory.waitingForSeat) && used >= seats && shouldQueueForSource(creep, source, seats, used);
-
-      if (shouldQueue) {
-        // Park near seat (not on it)
-        var queueSpot = findQueueSpotNearSeat(seatPos, creep.name) || seatPos;
-        creep.memory.waitingForSeat = true;
-
-        if (!creep.pos.isEqualTo(queueSpot)) {
-          // Use numeric range for your BeeTravel variant
-          BeeToolbox.BeeTravel(creep, queueSpot, 0);
-          return;
-        }
-
-        // If we can reach the source from here (range 1), go ahead and harvest while waiting
-        if (creep.pos.getRangeTo(source) <= 1) creep.harvest(source);
-
-        // If the seat frees up OR capacity opens, take it now
-        if (!isTileOccupiedByAnyCreep(seatPos, creep.name) || countAssignedHarvesters(creep.room.name, source.id) < seats) {
-          BeeToolbox.BeeTravel(creep, seatPos, 0);
-          creep.memory.waitingForSeat = false;
-        }
-        return;
-      }
-
-      // NO QUEUE: seat free or capacity available → go sit or harvest
+      // Move to seat if needed
       if (!creep.pos.isEqualTo(seatPos)) {
         BeeToolbox.BeeTravel(creep, seatPos, 0);
         return;
       }
-      creep.memory.waitingForSeat = false;
-      creep.harvest(source);
+
+      // Harvest normally
+      var harvestResult = creep.harvest(source);
+
+      // 🟡 FIX: If miner is full but no container nearby → drop energy immediately
+      if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+        var nearbyContainer = getContainerAtOrAdjacent(creep.pos);
+        if (!nearbyContainer) {
+          creep.drop(RESOURCE_ENERGY);
+        } else {
+          creep.transfer(nearbyContainer, RESOURCE_ENERGY);
+        }
+      }
+
       return;
     }
 
-    // (2) Not harvesting (carrying energy): Offload until empty
+    // (2) Offload phase (for creeps with CARRY)
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
       var cont = getContainerAtOrAdjacent(creep.pos);
       if (cont) {
-        var free = 0;
-        if (cont.store && typeof cont.store.getFreeCapacity === 'function') {
-          free = cont.store.getFreeCapacity(RESOURCE_ENERGY);
-        } else if (cont.store && typeof cont.store.getCapacity === 'function') {
-          free = cont.store.getCapacity(RESOURCE_ENERGY);
-          if (typeof cont.store[RESOURCE_ENERGY] === 'number') {
-            free -= cont.store[RESOURCE_ENERGY];
-          }
-        }
-
-        if (free === 0) {
-          creep.drop(RESOURCE_ENERGY);
-          return;
-        }
-
         var tr = creep.transfer(cont, RESOURCE_ENERGY);
         if (tr === ERR_NOT_IN_RANGE) {
           BeeToolbox.BeeTravel(creep, cont.pos || cont, 1);
@@ -709,10 +636,13 @@ var TaskBaseHarvest = {
         }
         return;
       }
+
+      // No container → drop on ground
+      creep.drop(RESOURCE_ENERGY);
+      return;
     }
 
     // (3) If no couriers exist, dump to ground as last resort
-    // FIX: Pull the courier tally from the shared cache instead of scanning the entire creep list each tick.
     var courierCount = getGlobalCourierCount();
     if (courierCount === 0 && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
       creep.drop(RESOURCE_ENERGY);
@@ -720,6 +650,7 @@ var TaskBaseHarvest = {
     }
   }
 };
+
 
 TaskBaseHarvest.getBaseSeatsForVisual = getBaseSeatsForVisual;
 TaskBaseHarvest.BASE_UI = BASE_UI;
