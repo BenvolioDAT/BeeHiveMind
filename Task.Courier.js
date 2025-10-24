@@ -126,11 +126,16 @@ function _closestByRange(pos, arr) {
 
 function _selectDropoffTarget(creep) {
   var room = creep.room;
-  // Prefer storage, then terminal
-  if (room.storage && ((room.storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0)) return room.storage;
-  if (room.terminal && ((room.terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0)) return room.terminal;
 
-  // Nearest non-source container with free capacity
+  // 1️⃣ Prefer storage, then terminal
+  if (room.storage && ((room.storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0)) {
+    return room.storage;
+  }
+  if (room.terminal && ((room.terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0)) {
+    return room.terminal;
+  }
+
+  // 2️⃣ Nearest non-source container with free capacity
   var rc = _roomCache(room);
   var others = _idsToObjects(rc.otherIds);
   var candidates = [];
@@ -140,8 +145,34 @@ function _selectDropoffTarget(creep) {
   }
   if (candidates.length) return _closestByRange(creep.pos, candidates);
 
+  // 3️⃣ 🐝 NEW: Fallback — find the closest spawn or extension that needs energy
+  var spawnsAndExts = room.find(FIND_MY_STRUCTURES, {
+    filter: function (s) {
+      return (
+        (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) &&
+        (s.energy | 0) < s.energyCapacity
+      );
+    }
+  });
+  if (spawnsAndExts.length) {
+    return _closestByRange(creep.pos, spawnsAndExts);
+  }
+
+  // 4️⃣ Bonus fallback: if nothing else, look for towers that need energy
+  var towers = room.find(FIND_MY_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_TOWER &&
+             (s.store[RESOURCE_ENERGY] | 0) < s.store.getCapacity(RESOURCE_ENERGY);
+    }
+  });
+  if (towers.length) {
+    return _closestByRange(creep.pos, towers);
+  }
+
+  // 5️⃣ Nothing? Return null — caller will idle near spawn
   return null;
 }
+
 
 function _clearlyBetter(best, current) {
   var be = (best && best.store && best.store[RESOURCE_ENERGY]) || 0;
