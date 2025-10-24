@@ -145,6 +145,23 @@ function getPriorityList() {
   return DEFAULT_PRIORITY;
 }
 
+/* === FIX: Missing task handler recovery === */
+function selectFallbackTask(creep, previousTask) {
+  var needs = colonyNeeds();
+  var priorityList = getPriorityList();
+  for (var i = 0; i < priorityList.length; i++) {
+    var candidate = priorityList[i];
+    if (candidate === previousTask) continue;
+    if ((needs[candidate] | 0) > 0 && getTaskModule(candidate)) {
+      return candidate;
+    }
+  }
+  if (getTaskModule('idle')) {
+    return 'idle';
+  }
+  return null;
+}
+
 module.exports = {
   run: function (creep) {
     if (!creep) return;
@@ -158,6 +175,21 @@ module.exports = {
         taskLog.debug('No task module registered for', taskName, 'requested by', creep.name);
       }
       creep.say('No task!');
+      if (creep.memory) {
+        var previousTask = creep.memory.task;
+        delete creep.memory.task;
+        var fallbackTask = selectFallbackTask(creep, previousTask);
+        if (fallbackTask) {
+          creep.memory.task = fallbackTask;
+          var fallbackModule = getTaskModule(fallbackTask);
+          if (fallbackModule && fallbackModule.run) {
+            fallbackModule.run(creep);
+          }
+        } else if (TaskIdle && typeof TaskIdle.run === 'function') {
+          creep.memory.task = 'idle';
+          TaskIdle.run(creep);
+        }
+      }
     }
   },
 
