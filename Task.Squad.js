@@ -150,6 +150,32 @@ var TaskSquad = (function () {
     return perRole || {};
   }
 
+  function adjustFollowLoad(squadId, roleName, targetId, delta) {
+    if (!targetId || !delta) return;
+
+    var cache = _ensureTickCache();
+    var id = squadId || 'Alpha';
+    var perSquad = cache.followCounts[id];
+    if (!perSquad) {
+      if (delta < 0) return; // nothing recorded yet; ignore decrements
+      perSquad = cache.followCounts[id] = {};
+    }
+
+    var roleKey = roleName || '';
+    var perRole = perSquad[roleKey];
+    if (!perRole) {
+      if (delta < 0) return;
+      perRole = perSquad[roleKey] = {};
+    }
+
+    var next = (perRole[targetId] || 0) + delta;
+    if (next <= 0) {
+      delete perRole[targetId];
+    } else {
+      perRole[targetId] = next;
+    }
+  }
+
   // -----------------------------
   // Utilities
   // -----------------------------
@@ -634,8 +660,9 @@ var TaskSquad = (function () {
   API.registerMember = registerMember;
   API.isReady        = isReady;
   API.getCachedMembers = getCachedMembers;
-  API.getFollowLoad    = getFollowLoad;
-  API.getRoleFollowMap = getRoleFollowMap;
+  API.getFollowLoad      = getFollowLoad;
+  API.getRoleFollowMap   = getRoleFollowMap;
+  API.adjustFollowLoad   = adjustFollowLoad;
 
   return API;
 })();

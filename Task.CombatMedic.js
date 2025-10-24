@@ -70,10 +70,14 @@ var TaskCombatMedic = {
     }
 
     if (needNewBuddy) {
+      var squadId = creep.memory.squadId || TaskSquad.getSquadId(creep) || 'Alpha';
+      if (creep.memory.followTarget && TaskSquad.adjustFollowLoad) {
+        TaskSquad.adjustFollowLoad(squadId, 'CombatMedic', creep.memory.followTarget, -1);
+      }
+
       delete creep.memory.followTarget;
       delete creep.memory.assignedAt;
 
-      var squadId = creep.memory.squadId || 'Alpha';
       var cachedMembers = TaskSquad.getCachedMembers ? TaskSquad.getCachedMembers(squadId) : null;
       var candidates = [];
       if (cachedMembers && cachedMembers.length) {
@@ -139,7 +143,13 @@ var TaskCombatMedic = {
           }
         }
 
-        if (buddy) { creep.memory.followTarget = buddy.id; creep.memory.assignedAt = now; }
+        if (buddy) {
+          creep.memory.followTarget = buddy.id;
+          creep.memory.assignedAt = now;
+          if (TaskSquad.adjustFollowLoad) {
+            TaskSquad.adjustFollowLoad(squadId, 'CombatMedic', buddy.id, 1);
+          }
+        }
       }
     }
 
