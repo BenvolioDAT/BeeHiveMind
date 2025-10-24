@@ -74,35 +74,65 @@ var TaskCombatMedic = {
       delete creep.memory.assignedAt;
 
       var squadId = creep.memory.squadId || 'Alpha';
-      var candidates = _.filter(Game.creeps, function (a){
-        if (!a || !a.my || !a.memory) return false;
-        if (a.memory.squadId !== squadId) return false;
-        var t = a.memory.task || a.memory.role || '';
-        return !!CombatRoles[t];
-      });
+      var cachedMembers = TaskSquad.getCachedMembers ? TaskSquad.getCachedMembers(squadId) : null;
+      var candidates = [];
+      if (cachedMembers && cachedMembers.length) {
+        for (var idx = 0; idx < cachedMembers.length; idx++) {
+          var member = cachedMembers[idx];
+          if (!member || !member.my || !member.memory) continue;
+          if ((member.memory.squadId || 'Alpha') !== squadId) continue;
+          var taskName = member.memory.task || member.memory.role || '';
+          if (CombatRoles[taskName]) candidates.push(member);
+        }
+      } else {
+        // Fallback if the cache is unavailable for some reason.
+        candidates = _.filter(Game.creeps, function (a){
+          if (!a || !a.my || !a.memory) return false;
+          if (a.memory.squadId !== squadId) return false;
+          var t = a.memory.task || a.memory.role || '';
+          return !!CombatRoles[t];
+        });
+      }
 
       if (candidates.length) {
-        var anyInjured = _.some(candidates, function(a){ return a.hits < a.hitsMax; });
+        var anyInjured = false;
+        var j;
+        for (j = 0; j < candidates.length; j++) {
+          if (candidates[j].hits < candidates[j].hitsMax) { anyInjured = true; break; }
+        }
         if (anyInjured) {
-          buddy = _.min(candidates, function (a){
-            return (a.hits - BeeToolbox.estimateTowerDamage(creep.room, a.pos)) / Math.max(1, a.hitsMax);
-          });
+          var worstScore = null;
+          for (j = 0; j < candidates.length; j++) {
+            var injured = candidates[j];
+            var towerDelta = BeeToolbox.estimateTowerDamage(creep.room, injured.pos);
+            var score = (injured.hits - towerDelta) / Math.max(1, injured.hitsMax);
+            if (worstScore === null || score < worstScore) {
+              worstScore = score;
+              buddy = injured;
+            }
+          }
         } else {
           // Prefer melee as anchor if nobody is hurt
-          buddy = _.find(candidates, function(a){
-            var t = a.memory.task || a.memory.role || '';
-            return t === 'CombatMelee';
-          }) || candidates[0];
+          for (j = 0; j < candidates.length; j++) {
+            var candRole = candidates[j].memory.task || candidates[j].memory.role || '';
+            if (candRole === 'CombatMelee') { buddy = candidates[j]; break; }
+            if (!buddy) buddy = candidates[j];
+          }
+        }
+
+        var followMap = null;
+        if (TaskSquad.getRoleFollowMap) {
+          followMap = TaskSquad.getRoleFollowMap(squadId, 'CombatMedic');
         }
 
         // per-target medic cap
         if (buddy && CONFIG.maxMedicsPerTarget > 0) {
-          var count = BeeToolbox.countRoleFollowingTarget(squadId, buddy.id, 'CombatMedic');
+          var count = followMap ? (followMap[buddy.id] || 0) : BeeToolbox.countRoleFollowingTarget(squadId, buddy.id, 'CombatMedic');
           if (count >= CONFIG.maxMedicsPerTarget) {
-            var alt = null, bestLoad = 999, i;
-            for (i=0;i<candidates.length;i++){
-              var cand = candidates[i];
-              var load = BeeToolbox.countRoleFollowingTarget(squadId, cand.id, 'CombatMedic');
+            var alt = null, bestLoad = 999;
+            for (j = 0; j < candidates.length; j++) {
+              var cand = candidates[j];
+              var load = followMap ? (followMap[cand.id] || 0) : BeeToolbox.countRoleFollowingTarget(squadId, cand.id, 'CombatMedic');
               if (load < bestLoad) { bestLoad = load; alt = cand; }
             }
             if (alt) buddy = alt;

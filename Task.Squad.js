@@ -89,6 +89,68 @@ var TaskSquad = (function () {
   }
 
   // -----------------------------
+  // Squad snapshot cache (members + follow counts per tick)
+  // -----------------------------
+  if (!global.__TASKSQUAD_CACHE) global.__TASKSQUAD_CACHE = { tick: -1, membersBySquad: {}, followCounts: {} };
+
+  function _ensureTickCache() {
+    var cache = global.__TASKSQUAD_CACHE;
+    if (!cache || cache.tick !== Game.time) {
+      cache = { tick: Game.time, membersBySquad: {}, followCounts: {} };
+      for (var name in Game.creeps) {
+        if (!Game.creeps.hasOwnProperty(name)) continue;
+        var creep = Game.creeps[name];
+        if (!creep || !creep.my || !creep.memory) continue;
+        var sid = getSquadId(creep);
+        var list = cache.membersBySquad[sid];
+        if (!list) list = cache.membersBySquad[sid] = [];
+        list.push(creep);
+
+        var followId = creep.memory.followTarget;
+        if (followId) {
+          var role = _roleOf(creep);
+          var perSquad = cache.followCounts[sid];
+          if (!perSquad) perSquad = cache.followCounts[sid] = {};
+          var perRole = perSquad[role];
+          if (!perRole) perRole = perSquad[role] = {};
+          perRole[followId] = (perRole[followId] || 0) + 1;
+        }
+      }
+      global.__TASKSQUAD_CACHE = cache;
+    }
+    return cache;
+  }
+
+  function getCachedMembers(squadId) {
+    var cache = _ensureTickCache();
+    var id = squadId || 'Alpha';
+    var members = cache.membersBySquad[id];
+    // Consumers must not mutate the array; it is reused for all lookups during the tick.
+    return members ? members : [];
+  }
+
+  function getFollowLoad(squadId, targetId, roleName) {
+    if (!targetId) return 0;
+    var cache = _ensureTickCache();
+    var id = squadId || 'Alpha';
+    var perSquad = cache.followCounts[id];
+    if (!perSquad) return 0;
+    var perRole = perSquad[roleName || ''];
+    if (!perRole) return 0;
+    return perRole[targetId] || 0;
+  }
+
+  function getRoleFollowMap(squadId, roleName) {
+    var cache = _ensureTickCache();
+    var id = squadId || 'Alpha';
+    var perSquad = cache.followCounts[id];
+    if (!perSquad) return {};
+    var perRole = perSquad[roleName || ''];
+    // Callers should treat the returned object as read-only because it is shared for the tick.
+    return perRole || {};
+  }
+
+  // -----------------------------
   // Utilities
   // -----------------------------
   function _roleOf(creep) {
@@ -115,6 +177,8 @@ var TaskSquad = (function () {
     if (!bucket.desiredRoles) bucket.desiredRoles = {};
     if (!bucket.roleOrder || !bucket.roleOrder.length) bucket.roleOrder = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
     if (!bucket.minReady || bucket.minReady < 1) bucket.minReady = 1;
+    if (bucket.leader === undefined) bucket.leader = null;
+    if (bucket.leaderPri === undefined) bucket.leaderPri = null;
     return bucket;
   }
 
@@ -124,7 +188,7 @@ var TaskSquad = (function () {
            Game.flags[id] || null;
   }
 
-  function _cleanupMembers(bucket) {
+  function _cleanupMembers(bucket, id) {
     if (!bucket || !bucket.members) return;
     for (var name in bucket.members) {
       if (!BeeToolbox || !BeeToolbox.hasOwn(bucket.members, name)) continue;
@@ -144,6 +208,52 @@ var TaskSquad = (function () {
         } else {
           delete bucket.members[name];
         }
+      }
+    }
+    if (bucket.leader && (!bucket.members[bucket.leader] || !Game.creeps[bucket.leader])) {
+      bucket.leader = null;
+      bucket.leaderPri = null;
+    }
+    if (id) _refreshLeader(bucket, id);
+  }
+
+  function _refreshLeader(bucket, id, candidateName) {
+    if (!bucket) return;
+
+    if (bucket.leader && (!bucket.members[bucket.leader] || !Game.creeps[bucket.leader])) {
+      bucket.leader = null;
+      bucket.leaderPri = null;
+    }
+
+    if (candidateName) {
+      var cand = Game.creeps[candidateName];
+      if (cand && cand.memory && (cand.memory.squadId || 'Alpha') === id) {
+        var pri = _rolePri(cand);
+        if (!bucket.leader || bucket.leaderPri == null || pri > bucket.leaderPri || bucket.leader === candidateName) {
+          bucket.leader = candidateName;
+          bucket.leaderPri = pri;
+        }
+      }
+    }
+
+    if (!bucket.leader) {
+      var cache = _ensureTickCache();
+      var members = cache.membersBySquad[id] || [];
+      var best = null;
+      var bestPri = -9999;
+      for (var i = 0; i < members.length; i++) {
+        var member = members[i];
+        if (!member || !member.memory) continue;
+        if ((member.memory.squadId || 'Alpha') !== id) continue;
+        var priVal = _rolePri(member);
+        if (!best || priVal > bestPri) {
+          best = member;
+          bestPri = priVal;
+        }
+      }
+      if (best) {
+        bucket.leader = best.name;
+        bucket.leaderPri = bestPri;
       }
     }
   }
@@ -251,21 +361,23 @@ var TaskSquad = (function () {
       return rally;
     }
 
-    // Fallback: the first melee in squad, else any member
-    var names = Object.keys(Game.creeps).sort(), leader = null, i, c;
-    for (i = 0; i < names.length; i++) {
-      c = Game.creeps[names[i]];
-      if (c && c.memory && c.memory.squadId === id && (_roleOf(c) === 'CombatMelee')) { leader = c; break; }
+    var leader = null;
+    if (S.leader) {
+      leader = Game.creeps[S.leader] || null;
+      if (!leader || !leader.memory || (leader.memory.squadId || 'Alpha') !== id) {
+        S.leader = null;
+        S.leaderPri = null;
+        leader = null;
+      }
     }
     if (!leader) {
-      for (i = 0; i < names.length; i++) {
-        c = Game.creeps[names[i]];
-        if (c && c.memory && c.memory.squadId === id) { leader = c; break; }
-      }
+      _refreshLeader(S, id);
+      if (S.leader) leader = Game.creeps[S.leader] || null;
     }
     if (leader && leader.pos) {
       S.anchor = { x: leader.pos.x, y: leader.pos.y, room: leader.pos.roomName };
-      S.anchorAt = Game.time; return leader.pos;
+      S.anchorAt = Game.time;
+      return leader.pos;
     }
     return null;
   }
@@ -431,7 +543,7 @@ var TaskSquad = (function () {
     var bucket = _ensureSquadBucket(id);
     if (!creepName) return;
 
-    _cleanupMembers(bucket);
+    _cleanupMembers(bucket, id);
 
     var entry = bucket.members[creepName];
     if (!entry) {
@@ -463,12 +575,14 @@ var TaskSquad = (function () {
       entry.rallied = true;
       entry.ralliedAt = Game.time;
     }
+
+    _refreshLeader(bucket, id, creepName);
   }
 
   function isReady(squadId) {
     var id = squadId || 'Alpha';
     var bucket = _ensureSquadBucket(id);
-    _cleanupMembers(bucket);
+    _cleanupMembers(bucket, id);
 
     var desired = bucket.desiredRoles || {};
     var counts = {};
@@ -519,6 +633,9 @@ var TaskSquad = (function () {
   API.politelyYieldFor = _politelyYieldFor;
   API.registerMember = registerMember;
   API.isReady        = isReady;
+  API.getCachedMembers = getCachedMembers;
+  API.getFollowLoad    = getFollowLoad;
+  API.getRoleFollowMap = getRoleFollowMap;
 
   return API;
 })();

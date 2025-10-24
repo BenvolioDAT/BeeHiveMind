@@ -116,7 +116,18 @@ function releaseRoomLock(rn, creep) {
   if (L.creep === creep.name) delete Memory.reserveLocks[rn];
 }
 
+// Cache reserve target list per tick so every claimer reuses the same scan work.
+if (!global.__CLAIMER_CACHE) {
+  global.__CLAIMER_CACHE = { tick: -1, reserveTargets: [] };
+}
+
 function gatherReserveTargets() {
+  var cache = global.__CLAIMER_CACHE;
+  if (cache.tick === Game.time) {
+    // Return a shallow copy so callers cannot mutate the shared cache.
+    return cache.reserveTargets.slice();
+  }
+
   var set = {};
   for (var fname in Game.flags) {
     if (fname === 'Reserve' || fname.indexOf('Reserve:') === 0) {
@@ -152,7 +163,9 @@ function gatherReserveTargets() {
   var out = [];
   for (var rn in set) out.push(rn);
   if (out.length > RESERVE_CONFIG.maxTargets) out.length = RESERVE_CONFIG.maxTargets;
-  return out;
+  cache.tick = Game.time;
+  cache.reserveTargets = out.slice();
+  return cache.reserveTargets.slice();
 }
 
 // Cache reservation intel we see
