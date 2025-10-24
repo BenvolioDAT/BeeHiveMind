@@ -780,20 +780,79 @@ function selectBestContainer(summary) {
   return best;
 }
 
-function findHomeDeposit(creep) {
+function _hasEnergyFreeCapacity(structure) {
+  // Keep this helper central so every call treats legacy and modern stores consistently.
+  if (!structure) return false;
+  if (structure.store && typeof structure.store.getFreeCapacity === 'function') {
+    return structure.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+  }
+  if (typeof structure.energyCapacity === 'number') {
+    var level = structure.energy || 0;
+    return level < structure.energyCapacity;
+  }
+  return false;
+}
+
+function findHomeDeposit(creep, excludeId) {
   var homeName = creep.memory.home || creep.memory.spawnRoom || (creep.room ? creep.room.name : null);
   if (!homeName) return null;
   var room = Game.rooms[homeName];
   if (!room) return null;
-  if (room.storage && room.storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) return room.storage;
-  if (room.terminal && room.terminal.store.getFreeCapacity(RESOURCE_ENERGY) > 0) return room.terminal;
-  if (room.spawns && room.spawns.length) return room.spawns[0];
-  var spawns = room.find(FIND_MY_SPAWNS);
-  if (spawns && spawns.length) return spawns[0];
-  for (var name in Game.spawns) {
-    if (Game.spawns.hasOwnProperty(name)) return Game.spawns[name];
+
+  var avoidId = excludeId || null;
+  var candidates = [];
+
+  // Large buffers first – storage/terminal soak up remote surges without micro-managing creeps.
+  if (room.storage && (!avoidId || room.storage.id !== avoidId) && _hasEnergyFreeCapacity(room.storage)) {
+    candidates.push(room.storage);
   }
-  return null;
+  if (room.terminal && (!avoidId || room.terminal.id !== avoidId) && _hasEnergyFreeCapacity(room.terminal)) {
+    candidates.push(room.terminal);
+  }
+
+  // Consider every spawn with free energy slots so we do not hard-code index 0.
+  var spawnList = [];
+  if (room.spawns && room.spawns.length) {
+    spawnList = room.spawns;
+  } else {
+    spawnList = room.find(FIND_MY_SPAWNS) || [];
+  }
+  var i;
+  for (i = 0; i < spawnList.length; i++) {
+    var spawn = spawnList[i];
+    if (!spawn || (avoidId && spawn.id === avoidId)) continue;
+    if (_hasEnergyFreeCapacity(spawn)) candidates.push(spawn);
+  }
+
+  // Edge-case: we might lack direct vision; fall back to any owned spawn that still has room.
+  if (!candidates.length) {
+    for (var name in Game.spawns) {
+      if (!Game.spawns.hasOwnProperty(name)) continue;
+      var alt = Game.spawns[name];
+      if (!alt || (avoidId && alt.id === avoidId)) continue;
+      if (alt.room && alt.room.name !== homeName) continue;
+      if (_hasEnergyFreeCapacity(alt)) { candidates.push(alt); break; }
+    }
+  }
+
+  if (!candidates.length) return null;
+
+  // Always pick the closest valid sink so haulers do not shuffle between full structures mid-transfer.
+  var chosen = candidates[0];
+  if (candidates.length > 1) {
+    var bestRange = null;
+    for (i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      if (!c || !c.pos) continue;
+      var range = creep.pos.getRangeTo(c);
+      if (bestRange === null || range < bestRange) {
+        bestRange = range;
+        chosen = c;
+      }
+    }
+  }
+
+  return chosen;
 }
 
 function travelHome(creep) {
@@ -906,14 +965,32 @@ function haulerAct(creep) {
   }
   var deposit = findHomeDeposit(creep);
   if (!deposit) {
-    travelHome(creep);
+    // When every deposit is saturated we dump immediately to keep remotes flowing.
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      creep.drop(RESOURCE_ENERGY);
+    }
     return;
   }
   if (!creep.pos.inRangeTo(deposit, 1)) {
     travel(creep, deposit.pos || deposit, 1);
     return;
   }
-  creep.transfer(deposit, RESOURCE_ENERGY);
+  var transferResult = creep.transfer(deposit, RESOURCE_ENERGY);
+  if (transferResult === ERR_FULL || transferResult === ERR_INVALID_TARGET) {
+    // Reselect after walking; the spawn might have filled while we travelled.
+    var alternate = findHomeDeposit(creep, deposit.id);
+    if (alternate && alternate.id !== deposit.id) {
+      if (!creep.pos.inRangeTo(alternate, 1)) {
+        travel(creep, alternate.pos || alternate, 1);
+        return;
+      }
+      transferResult = creep.transfer(alternate, RESOURCE_ENERGY);
+    }
+    if (transferResult === ERR_FULL || transferResult === ERR_INVALID_TARGET) {
+      // No structure can take it; drop to avoid blocking the remote chain.
+      creep.drop(RESOURCE_ENERGY);
+    }
+  }
 }
 
 function reserverAct(creep) {

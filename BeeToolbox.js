@@ -37,6 +37,16 @@ function _logEconomyOverride(sourceName, key, value) {
 
 var _cachedUsername = null;
 var DEFAULT_FOREIGN_AVOID_TTL = 500;
+var _cachedTaskSquadModule;
+
+function _getTaskSquadModule() {
+  // Lazy require to avoid circular dependency cost when Task.Squad already imported BeeToolbox.
+  if (_cachedTaskSquadModule === undefined) {
+    try { _cachedTaskSquadModule = require('Task.Squad'); }
+    catch (err) { _cachedTaskSquadModule = null; }
+  }
+  return _cachedTaskSquadModule;
+}
 
 var IMPORTANT_FOREIGN_STRUCTURES = {};
 IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_TOWER] = true;
@@ -1422,6 +1432,14 @@ var BeeToolbox = {
     if (!targetId) return 0;
     var sid = squadId || 'Alpha';
     var role = roleName || '';
+
+    var taskSquad = _getTaskSquadModule();
+    if (taskSquad && typeof taskSquad.getFollowLoad === 'function') {
+      // Use TaskSquad's per-tick cache so callers avoid O(n) scans on every query.
+      var cached = taskSquad.getFollowLoad(sid, targetId, role);
+      if (cached !== null && cached !== undefined) return cached;
+    }
+
     var count = 0;
     for (var name in Game.creeps) {
       if (!Game.creeps.hasOwnProperty(name)) continue;
