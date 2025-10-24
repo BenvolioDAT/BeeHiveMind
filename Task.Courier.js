@@ -154,7 +154,7 @@ function _clearlyBetter(best, current) {
 // Predictive Intent Buffer (PIB)
 // -----------------------------
 function _pibSet(creep, type, targetId, nextTargetId) {
-  // type: 'withdraw' | 'transfer'
+  // type: 'withdraw' | 'transfer' | 'pickup'
   creep.memory.pib = { t: type, id: targetId, next: nextTargetId, setAt: Game.time | 0 };
 }
 
@@ -171,13 +171,21 @@ function _pibTry(creep) {
   if (creep.pos.getRangeTo(target) > 1) { _pibClear(creep); return false; }
 
   var rc;
-  if (pib.t === 'withdraw') rc = creep.withdraw(target, RESOURCE_ENERGY);
-  else if (pib.t === 'transfer') rc = creep.transfer(target, RESOURCE_ENERGY);
-  else rc = ERR_INVALID_ARGS;
+  if (pib.t === 'withdraw') {
+    rc = creep.withdraw(target, RESOURCE_ENERGY);
+  } else if (pib.t === 'transfer') {
+    rc = creep.transfer(target, RESOURCE_ENERGY);
+  } else if (pib.t === 'pickup') {
+    // Handle predictive pickups so we do not waste a tick when a drop was pre-planned.
+    rc = creep.pickup(target);
+  } else {
+    rc = ERR_INVALID_ARGS;
+  }
 
   if (rc === OK) {
     if (pib.t === 'withdraw' && creep.store.getFreeCapacity() === 0) creep.memory.transferring = true;
     if (pib.t === 'transfer' && (creep.store[RESOURCE_ENERGY] | 0) === 0) creep.memory.transferring = false;
+    if (pib.t === 'pickup' && creep.store.getFreeCapacity() === 0) creep.memory.transferring = true;
 
     // Immediately step toward the next target this tick
     var next = pib.next ? Game.getObjectById(pib.next) : null;
