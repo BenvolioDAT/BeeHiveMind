@@ -610,6 +610,7 @@ function ensureSquadMemoryRecord(squadId) {
   if (!bucket.roleOrder || !bucket.roleOrder.length) bucket.roleOrder = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
   if (!bucket.minReady || bucket.minReady < 1) bucket.minReady = 1;
   if (!bucket.members) bucket.members = bucket.members || {};
+  if (typeof bucket.spawnCooldownUntil !== 'number') bucket.spawnCooldownUntil = 0;
   return bucket;
 }
 
@@ -721,6 +722,7 @@ function selectNextSquadRole(bucket, desired, counts) {
   return null;
 }
 
+/* === FIX: Squad spawn blocking === */
 function buildSquadSpawnPlans(cache) {
   var plansByHome = Object.create(null);
   if (!SquadFlagManager || typeof SquadFlagManager.getActiveSquads !== 'function') {
@@ -742,6 +744,11 @@ function buildSquadSpawnPlans(cache) {
       bucket.targetRoom = intel.targetRoom;
     }
     bucket.home = chooseHomeRoom(intel.targetRoom, roomsOwned, bucket.home || intel.homeRoom);
+
+    if (bucket.spawnCooldownUntil && bucket.spawnCooldownUntil > Game.time) {
+      // Skip planning while cooldown is active so failed squads do not block other spawns.
+      continue;
+    }
 
     var desired = deriveSquadDesiredRoles(intel, bucket);
     var census = gatherSquadCensus(id);
@@ -796,6 +803,7 @@ function buildSquadSpawnPlans(cache) {
   return plansByHome;
 }
 
+/* === FIX: Squad spawn blocking === */
 function trySpawnSquadMember(spawner, plan) {
   if (!spawner || !plan) {
     return 'failed';
@@ -808,10 +816,29 @@ function trySpawnSquadMember(spawner, plan) {
   var available = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
     ? spawnLogic.Calculate_Spawn_Resource(spawner)
     : (room.energyAvailable || 0);
+  var capacity = room.energyCapacityAvailable || available;
   var body = (spawnLogic && typeof spawnLogic.getBodyForTask === 'function')
     ? spawnLogic.getBodyForTask(plan.role, available)
     : [];
   var cost = calculateBodyCost(body);
+
+  if (!body.length || cost <= 0) {
+    // Check the best possible body at full capacity to decide if the plan is ever viable.
+    var bestBody = (spawnLogic && typeof spawnLogic.getBodyForTask === 'function')
+      ? spawnLogic.getBodyForTask(plan.role, capacity)
+      : [];
+    var bestCost = calculateBodyCost(bestBody);
+    if (!bestBody.length || bestCost <= 0 || bestCost > capacity) {
+      return 'skip';
+    }
+    body = bestBody;
+    cost = bestCost;
+  }
+
+  if (cost > capacity) {
+    // Abort plans that can never fit within the room's energy capacity.
+    return 'skip';
+  }
 
   if (!body.length || cost > available) {
     return 'waiting';
@@ -849,6 +876,8 @@ function trySpawnSquadMember(spawner, plan) {
     bucket.home = homeRoom;
     bucket.lastSpawnTick = Game.time;
     bucket.lastSpawnRole = plan.role;
+    // Clear any previous cooldown once spawning succeeds so follow-up members queue normally.
+    bucket.spawnCooldownUntil = 0;
     if (plan.totalNeeded > 0) {
       bucket.minReady = plan.totalNeeded;
     }
@@ -1159,7 +1188,8 @@ var BeeHiveMind = {
       }
 
       if (!roomSpawned[room.name] && planQueue.length) {
-        var planOutcome = trySpawnSquadMember(spawner, planQueue[0]);
+        var currentPlan = planQueue[0];
+        var planOutcome = trySpawnSquadMember(spawner, currentPlan);
         if (planOutcome === 'spawned') {
           planQueue.shift();
           roomSpawned[room.name] = true;
@@ -1167,6 +1197,20 @@ var BeeHiveMind = {
         }
         if (planOutcome === 'waiting') {
           roomSpawned[room.name] = true;
+          continue;
+        }
+        if (planOutcome === 'skip') {
+          // Drop impossible plans for a while so they stop hogging the spawn slot.
+          planQueue.shift();
+          var skipBucket = ensureSquadMemoryRecord(currentPlan.squadId);
+          skipBucket.spawnCooldownUntil = Game.time + 50;
+          continue;
+        }
+        if (planOutcome === 'failed') {
+          // Back off briefly after an unexpected failure so other roles can spawn.
+          planQueue.shift();
+          var planBucket = ensureSquadMemoryRecord(currentPlan.squadId);
+          planBucket.spawnCooldownUntil = Game.time + 10;
           continue;
         }
       }
