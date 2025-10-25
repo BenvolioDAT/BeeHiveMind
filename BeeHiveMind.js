@@ -1147,13 +1147,41 @@ function determineLunaQuota(room, cache) {
   }
 
   var roomsMem = Memory.rooms || {};
+  var remoteLedgers = (Memory.remotes && typeof Memory.remotes === 'object') ? Memory.remotes : null;
   var totalSources = 0;
 
   for (i = 0; i < remotes.length; i++) {
     var remoteName = remotes[i];
     var mem = roomsMem[remoteName] || {};
 
-    if (mem.hostile) continue;
+    var ledger = remoteLedgers && remoteLedgers[remoteName];
+    var status = ledger && ledger.status;
+    var blockedUntil = ledger && typeof ledger.blockedUntil === 'number' ? ledger.blockedUntil : 0;
+    var isBlocked = false;
+    if (status === 'BLOCKED') {
+      if (blockedUntil > Game.time) {
+        isBlocked = true;
+      } else if (blockedUntil && (Game.time - blockedUntil) > 1500) {
+        status = 'DEGRADED';
+      } else if (!blockedUntil) {
+        var auditAge = ledger && typeof ledger.lastAudit === 'number' ? (Game.time - ledger.lastAudit) : 0;
+        if (auditAge <= 1500) {
+          isBlocked = true;
+        }
+      }
+    }
+
+    var hostileFlag = !!mem.hostile;
+    var hostileTick = mem.hostileTick || mem.hostileSince || mem.hostileLastSeen || mem.lastHostile || mem.hostileSeen || 0;
+    if (hostileFlag && hostileTick && (Game.time - hostileTick) > 1500) {
+      hostileFlag = false;
+    }
+    if (hostileFlag && status !== 'BLOCKED') {
+      hostileFlag = false;
+    }
+
+    if (hostileFlag) continue;
+    if (isBlocked) continue;
 
     if (mem._invaderLock && mem._invaderLock.locked) {
       var lockTick = typeof mem._invaderLock.t === 'number' ? mem._invaderLock.t : null;
