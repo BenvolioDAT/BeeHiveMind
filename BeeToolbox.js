@@ -206,6 +206,60 @@ var BeeToolbox = {
     };
   },
 
+  // ensures combat plans trigger from scout intel
+  consumeAttackTargets: function (options) {
+    Memory.attackTargets = Memory.attackTargets || {};
+    var results = [];
+    if (!Memory.attackTargets || typeof Memory.attackTargets !== 'object') {
+      return results;
+    }
+    var now = Game.time | 0;
+    var maxAge = (options && options.maxAge != null) ? options.maxAge : 2000;
+    var requeueInterval = (options && options.requeueInterval != null) ? options.requeueInterval : 150;
+    for (var rn in Memory.attackTargets) {
+      if (!this.hasOwn(Memory.attackTargets, rn)) continue;
+      var rec = Memory.attackTargets[rn];
+      if (!rec || typeof rec !== 'object') {
+        delete Memory.attackTargets[rn];
+        continue;
+      }
+      var roomName = rec.roomName || rn;
+      if (!roomName) {
+        delete Memory.attackTargets[rn];
+        continue;
+      }
+      if (this.isValidRoomName && !this.isValidRoomName(roomName)) {
+        delete Memory.attackTargets[rn];
+        continue;
+      }
+      var owner = rec.owner || null;
+      if (owner && typeof isEnemyUsername === 'function' && !isEnemyUsername(owner)) {
+        continue;
+      }
+      var updatedAt = rec.updatedAt | 0;
+      if (maxAge > 0 && (now - updatedAt) > maxAge) {
+        delete Memory.attackTargets[rn];
+        continue;
+      }
+      var lastConsumed = rec.lastConsumedAt | 0;
+      if (requeueInterval > 0 && (now - lastConsumed) < requeueInterval) {
+        continue;
+      }
+      rec.lastConsumedAt = now;
+      Memory.attackTargets[rn] = rec;
+      results.push({
+        roomName: roomName,
+        owner: owner,
+        type: rec.type || null,
+        count: rec.count || 0,
+        threat: rec.threat || null,
+        updatedAt: updatedAt,
+        source: rec.source || null
+      });
+    }
+    return results;
+  },
+
   /**
    * Count body parts of a specific type.
    * @param {Array} body - Array of body part constants.
