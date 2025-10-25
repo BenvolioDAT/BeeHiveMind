@@ -73,11 +73,14 @@ function ensurePhaseState(cache) {
       plan: { remotes: {}, list: [] },
       spawnQueueByHome: {},
       creepNotes: Object.create(null),
-      auditLog: []
+      auditLog: [],
+      spawnLogFlags: Object.create(null)
     };
     global.__lunaPhaseState = _phaseState;
   } else if (cache && !_phaseState.cache) {
     _phaseState.cache = cache;
+  } else if (_phaseState.spawnLogFlags == null) {
+    _phaseState.spawnLogFlags = Object.create(null);
   }
   return _phaseState;
 }
@@ -479,7 +482,11 @@ function pushSpawnNeed(state, summary, type, amount, reason, seatId) {
     plannedAt: Game.time,
     seatId: seatId || null,
     status: summary.status,
-    statusReason: summary.reason
+    statusReason: summary.reason,
+    spawnState: 'pending',
+    waitingTick: 0,
+    lastLogReason: null,
+    lastLogTick: 0
   });
 }
 
@@ -1231,18 +1238,155 @@ function getVisualLedgersForHome(homeName) {
   return bucket.slice();
 }
 
-function selectBodyForRole(roleKey, available, capacity) {
-  var generator = null;
-  if (roleKey === MINER_ROLE_KEY) generator = spawnLogic.Generate_RemoteMiner_Body;
-  else if (roleKey === HAULER_ROLE_KEY) generator = spawnLogic.Generate_RemoteHauler_Body;
-  else if (roleKey === RESERVER_ROLE_KEY) generator = spawnLogic.Generate_Reserver_Body;
-  if (generator) {
-    var body = generator(Math.min(available, capacity));
-    var cost = 0;
-    for (var i = 0; i < body.length; i++) cost += BODYPART_COST[body[i]] || 0;
-    return { body: body, cost: cost };
+function calculateBodyCost(body) {
+  if (!Array.isArray(body) || body.length === 0) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODYPART_COST[body[i]] || 0;
   }
-  return { body: [], cost: 0 };
+  return total;
+}
+
+function cloneBody(body) {
+  return Array.isArray(body) ? body.slice() : [];
+}
+
+var remoteConfigCache = null;
+function getRemoteConfigTiers(taskKey) {
+  if (!taskKey) return [];
+  if (!remoteConfigCache) {
+    remoteConfigCache = Object.create(null);
+    var configs = spawnLogic && spawnLogic.configurations;
+    if (Array.isArray(configs)) {
+      for (var i = 0; i < configs.length; i++) {
+        var entry = configs[i];
+        if (!entry || !entry.task) continue;
+        var tiers = [];
+        if (Array.isArray(entry.body)) {
+          for (var j = 0; j < entry.body.length; j++) {
+            var candidate = entry.body[j];
+            if (!candidate || !candidate.length) continue;
+            tiers.push({ body: cloneBody(candidate), cost: calculateBodyCost(candidate) });
+          }
+        }
+        remoteConfigCache[entry.task] = tiers;
+      }
+    }
+  }
+  return remoteConfigCache[taskKey] || [];
+}
+
+function generateRemoteBody(taskKey, energy) {
+  if (!taskKey || !spawnLogic) return [];
+  if (taskKey === 'remoteMiner' && typeof spawnLogic.Generate_RemoteMiner_Body === 'function') {
+    return cloneBody(spawnLogic.Generate_RemoteMiner_Body(energy));
+  }
+  if (taskKey === 'remoteHauler' && typeof spawnLogic.Generate_RemoteHauler_Body === 'function') {
+    return cloneBody(spawnLogic.Generate_RemoteHauler_Body(energy));
+  }
+  if (taskKey === 'reserver' && typeof spawnLogic.Generate_Reserver_Body === 'function') {
+    return cloneBody(spawnLogic.Generate_Reserver_Body(energy));
+  }
+  if (typeof spawnLogic.Generate_Body_From_Config === 'function') {
+    return cloneBody(spawnLogic.Generate_Body_From_Config(taskKey, energy));
+  }
+  return [];
+}
+
+function mapRemoteTypeToTaskKey(remoteType) {
+  if (remoteType === ROLE_MINER) return 'remoteMiner';
+  if (remoteType === ROLE_HAULER) return 'remoteHauler';
+  if (remoteType === ROLE_RESERVER) return 'reserver';
+  return null;
+}
+
+function evaluateRemoteBodyPlan(remoteType, available, capacity) {
+  var taskKey = mapRemoteTypeToTaskKey(remoteType);
+  var result = {
+    configKey: taskKey,
+    body: [],
+    cost: 0,
+    idealBody: [],
+    idealCost: 0,
+    minCost: 0,
+    availableEnergy: available || 0,
+    capacityEnergy: capacity || 0
+  };
+
+  if (!taskKey) {
+    return result;
+  }
+
+  var tiers = getRemoteConfigTiers(taskKey);
+  if (tiers.length) {
+    result.minCost = tiers[tiers.length - 1].cost || 0;
+  }
+
+  var idealBody = generateRemoteBody(taskKey, capacity);
+  var idealCost = calculateBodyCost(idealBody);
+  if ((!idealBody.length || idealCost > capacity) && tiers.length) {
+    for (var i = 0; i < tiers.length; i++) {
+      if (tiers[i].cost <= capacity) {
+        idealBody = cloneBody(tiers[i].body);
+        idealCost = tiers[i].cost;
+        break;
+      }
+    }
+  }
+  if (!idealBody.length && tiers.length) {
+    idealBody = cloneBody(tiers[tiers.length - 1].body);
+    idealCost = tiers[tiers.length - 1].cost;
+  }
+  result.idealBody = idealBody;
+  result.idealCost = idealCost;
+
+  var workingBody = generateRemoteBody(taskKey, available);
+  var workingCost = calculateBodyCost(workingBody);
+  if ((!workingBody.length || workingCost > available) && tiers.length) {
+    for (var j = 0; j < tiers.length; j++) {
+      if (tiers[j].cost <= available) {
+        workingBody = cloneBody(tiers[j].body);
+        workingCost = tiers[j].cost;
+        break;
+      }
+    }
+  }
+  result.body = workingBody;
+  result.cost = workingCost;
+
+  if (!result.minCost && tiers.length) {
+    result.minCost = tiers[tiers.length - 1].cost || 0;
+  }
+
+  return result;
+}
+
+function markQueueWaiting(homeName, reason) {
+  if (!homeName) return null;
+  var state = ensurePhaseState(null);
+  var queue = state.spawnQueueByHome[homeName];
+  if (!queue || !queue.length) return null;
+  var head = queue[0];
+  head.spawnState = 'waiting';
+  head.waitingTick = Game.time;
+  if (reason) head.statusReason = reason;
+  return head;
+}
+
+function logSpawnSkip(spawn, plan, reason, details) {
+  if (!lunaLog || typeof lunaLog.info !== 'function') return;
+  var state = ensurePhaseState(null);
+  if (!state.spawnLogFlags) state.spawnLogFlags = Object.create(null);
+  var home = (spawn && spawn.room && spawn.room.name) || 'unknown';
+  var remote = (plan && (plan.remote || plan.remoteRoom)) || '-';
+  var role = (plan && (plan.type || plan.remoteRole)) || '-';
+  var key = home + ':' + remote + ':' + role + ':' + reason;
+  if (state.spawnLogFlags[key] === Game.time) return;
+  state.spawnLogFlags[key] = Game.time;
+  var spawnName = (spawn && spawn.name) || 'spawn';
+  var message = '[LUNA] spawn skip ' + reason + ' spawn=' + spawnName + ' home=' + home + ' remote=' + remote + ' role=' + role;
+  if (details) message += ' ' + details;
+  lunaLog.info(message);
 }
 
 function planSpawnForRoom(spawn, context) {
@@ -1250,24 +1394,47 @@ function planSpawnForRoom(spawn, context) {
   var home = spawn && spawn.room ? spawn.room.name : null;
   if (!home) return { shouldSpawn: false };
   var queue = state.spawnQueueByHome[home];
-  if (!queue || !queue.length) return { shouldSpawn: false };
+  if (!queue || !queue.length) {
+    logSpawnSkip(spawn, null, 'QUEUE_EMPTY', null);
+    return { shouldSpawn: false };
+  }
   queue.sort(function (a, b) {
     if (a.priority !== b.priority) return a.priority - b.priority;
     return a.plannedAt - b.plannedAt;
   });
   var plan = queue[0];
-  var roleKey = MINER_ROLE_KEY;
-  if (plan.type === ROLE_HAULER) roleKey = HAULER_ROLE_KEY;
-  else if (plan.type === ROLE_RESERVER) roleKey = RESERVER_ROLE_KEY;
+  if (plan.spawnState === 'waiting' && plan.waitingTick !== Game.time) {
+    plan.spawnState = 'pending';
+  }
+  if (plan.status === REMOTE_STATUS.BLOCKED) {
+    logSpawnSkip(spawn, plan, 'REMOTE_BLOCKED', plan.statusReason || '');
+    plan.spawnState = 'waiting';
+    plan.waitingTick = Game.time;
+    markQueueWaiting(home, plan.statusReason || 'BLOCKED');
+    return { shouldSpawn: false, skipReason: 'REMOTE_BLOCKED' };
+  }
   var available = context && context.availableEnergy != null ? context.availableEnergy : spawn.room.energyAvailable;
   var capacity = context && context.capacityEnergy != null ? context.capacityEnergy : spawn.room.energyCapacityAvailable;
-  var bodyPlan = selectBodyForRole(roleKey, available, capacity);
-  if (!bodyPlan.body.length || bodyPlan.cost > available) {
-    if (Logger && Logger.shouldLog && Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-      lunaLog.debug('[LUNA] defer spawn role=' + plan.type + ' remote=' + plan.remote + ' energy=' + available + ' cost=' + bodyPlan.cost);
-    }
-    return { shouldSpawn: false };
+  var bodyPlan = evaluateRemoteBodyPlan(plan.type, available, capacity);
+  if (!bodyPlan.idealBody.length || bodyPlan.idealCost > capacity) {
+    var detail = 'idealCost=' + bodyPlan.idealCost + ' capacity=' + capacity;
+    logSpawnSkip(spawn, plan, 'BODY_TOO_LARGE', detail);
+    plan.spawnState = 'waiting';
+    plan.waitingTick = Game.time;
+    markQueueWaiting(home, 'CAPACITY');
+    return { shouldSpawn: false, skipReason: 'BODY_TOO_LARGE', idealCost: bodyPlan.idealCost };
   }
+  if (!bodyPlan.body.length || bodyPlan.cost > available) {
+    var needed = bodyPlan.minCost || bodyPlan.idealCost || 0;
+    var energyDetail = 'need=' + needed + ' have=' + available + '/' + capacity;
+    logSpawnSkip(spawn, plan, 'INSUFFICIENT_ENERGY', energyDetail);
+    plan.spawnState = 'waiting';
+    plan.waitingTick = Game.time;
+    markQueueWaiting(home, 'WAIT_ENERGY');
+    return { shouldSpawn: false, skipReason: 'INSUFFICIENT_ENERGY', minCost: needed };
+  }
+  plan.spawnState = 'ready';
+  plan.waitingTick = Game.time;
   return {
     shouldSpawn: true,
     body: bodyPlan.body,
@@ -1278,14 +1445,38 @@ function planSpawnForRoom(spawn, context) {
     remoteRole: plan.type,
     priority: plan.priority,
     seatId: plan.seatId || null,
-    reason: plan.reason
+    reason: plan.reason,
+    configKey: bodyPlan.configKey,
+    idealBody: bodyPlan.idealBody,
+    idealCost: bodyPlan.idealCost,
+    minCost: bodyPlan.minCost
   };
 }
 
 function spawnFromPlan(spawn, plan) {
   if (!spawn || !plan || !plan.body || !plan.body.length) return ERR_INVALID_ARGS;
+  var room = spawn.room;
+  var available = room && room.energyAvailable != null ? room.energyAvailable : 0;
+  var capacity = room && room.energyCapacityAvailable != null ? room.energyCapacityAvailable : available;
   var name = spawnLogic.Generate_Creep_Name('Luna');
   if (!name) return ERR_FULL;
+  var body = plan.body.slice();
+  var cost = plan.bodyCost != null ? plan.bodyCost : calculateBodyCost(body);
+  if (cost > available) {
+    var fallback = evaluateRemoteBodyPlan(plan.remoteRole, available, capacity);
+    if (fallback.body.length && fallback.cost > 0 && fallback.cost <= available) {
+      body = fallback.body.slice();
+      cost = fallback.cost;
+    }
+  }
+  if (!body.length || cost > available) {
+    var queueHead = markQueueWaiting(room && room.name, 'WAIT_ENERGY');
+    var detail = 'have=' + available + '/' + capacity + ' planCost=' + cost;
+    logSpawnSkip(spawn, queueHead || plan, 'AFFORDABILITY', detail);
+    return ERR_NOT_ENOUGH_ENERGY;
+  }
+  plan.body = body.slice();
+  plan.bodyCost = cost;
   var memory = {
     role: 'Worker_Bee',
     task: 'luna',
@@ -1293,27 +1484,31 @@ function spawnFromPlan(spawn, plan) {
     remoteRoom: plan.remote,
     targetRoom: plan.remote,
     home: spawn.room.name,
-    birthBody: plan.body.slice(),
+    birthBody: body.slice(),
     sourceId: plan.seatId || null,
     targetId: plan.seatId || null
   };
-  var result = spawn.spawnCreep(plan.body, name, { memory: memory });
+  var result = spawn.spawnCreep(body, name, { memory: memory });
   if (result === OK) {
     var ledger = getRemoteLedger(plan.remote);
     if (plan.remoteRole === ROLE_HAULER) {
-      ledger.haulers.lastBodyCapacity = BeeToolbox.bodyCarryCapacity(plan.body);
-      ledger.haulers.lastBodyLength = plan.body.length;
+      ledger.haulers.lastBodyCapacity = BeeToolbox.bodyCarryCapacity(body);
+      ledger.haulers.lastBodyLength = body.length;
     } else if (plan.remoteRole === ROLE_MINER) {
-      ledger.miners.lastBodyLength = plan.body.length;
+      ledger.miners.lastBodyLength = body.length;
     } else if (plan.remoteRole === ROLE_RESERVER) {
-      ledger.reserver.lastBodyLength = plan.body.length;
+      ledger.reserver.lastBodyLength = body.length;
     }
     var queue = _phaseState.spawnQueueByHome[spawn.room.name];
     if (queue && queue.length && queue[0].remote === plan.remote && queue[0].type === plan.remoteRole) {
       queue.shift();
     }
-    lunaLog.info('[LUNA] spawn ' + plan.remoteRole + ' ' + name + ' → ' + plan.remote);
+    lunaLog.info('[LUNA] spawn ' + plan.remoteRole + ' ' + name + ' → ' + plan.remote + ' (cost=' + cost + ')');
     return OK;
+  }
+  if (result === ERR_NOT_ENOUGH_ENERGY) {
+    markQueueWaiting(room && room.name, 'WAIT_ENERGY');
+    logSpawnSkip(spawn, plan, 'AFFORDABILITY_RETRY', 'result=ERR_NOT_ENOUGH_ENERGY');
   }
   return result;
 }
@@ -1324,6 +1519,8 @@ function noteSpawnBlocked(homeName, reason) {
   var queue = state.spawnQueueByHome[homeName];
   if (!queue || !queue.length) return;
   queue[0].statusReason = reason;
+  queue[0].spawnState = 'waiting';
+  queue[0].waitingTick = Game.time;
 }
 
 function tick(cache) {
