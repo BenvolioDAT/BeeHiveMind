@@ -1,39 +1,3 @@
-// Design Notes:
-// - Deterministic builder that pulls milestones from Planner.Room and assigns one
-//   construction site at a time using a strict priority queue.
-// - Priorities follow the requested sequence: critical milestones (storage, extensions,
-//   towers, arterial roads) → source containers → controller approach → remaining roads → extras.
-// - Uses Traveler-compatible creep.travelTo() for navigation; no new construction sites are
-//   created here (Planner.Room.ensureSites handles placement), so the role never spams sites.
-// - Includes TTL-aware task swapping to avoid stranding builders on distant targets.
-
-'use strict';
-
-var BeeToolbox = require('BeeToolbox');
-var RoomPlanner = require('Planner.Room');
-var RoadPlanner = require('Planner.Road');
-try { require('Traveler'); } catch (e) {}
-
-var ENERGY_MIN_BUILD = 10;
-var TTL_STRAND_BUFFER = 15;
-
-if (!global.__BUILDER_CACHE) {
-  global.__BUILDER_CACHE = { tick: -1, sitesByRoom: {}, siteArray: [] };
-}
-
-function _getHomeName(creep) {
-  if (creep.memory.home) return creep.memory.home;
-  var nearest = null;
-  var best = 9999;// Design Notes:
-// - Deterministic builder that pulls milestones from Planner.Room and assigns one
-//   construction site at a time using a strict priority queue.
-// - Priorities follow the requested sequence: critical milestones (storage, extensions,
-//   towers, arterial roads) → source containers → controller approach → remaining roads → extras.
-// - Uses Traveler-compatible creep.travelTo() for navigation; no new construction sites are
-//   created here (Planner.Room.ensureSites handles placement), so the role never spams sites.
-// - Includes TTL-aware task swapping to avoid stranding builders on distant targets.
-
-'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 var RoomPlanner = require('Planner.Room');
