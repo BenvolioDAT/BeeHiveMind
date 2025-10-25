@@ -25,16 +25,19 @@ var DEFAULT_NEEDS = Object.freeze({
   builder: 2,
   repair: 1,
   courier: 2,
+  queen: 1,
   upgrader: 2,
   scout: 1
 });
 
+// Economic priority ensures worker bees refill the income pipeline before utility duties.
 var DEFAULT_PRIORITY = Object.freeze([
   'baseharvest',
-  'repair',
-  'builder',
   'courier',
-  'upgrader'
+  'queen',
+  'builder',
+  'upgrader',
+  'repair'
 ]);
 
 var TASK_REGISTRY = Object.create(null);
