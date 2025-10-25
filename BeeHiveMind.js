@@ -11,11 +11,13 @@ var TaskLuna = require('Task.Luna');
 var TaskBaseHarvest = require('Task.BaseHarvest');
 var BeeVisuals = require('BeeVisuals');
 var BeeToolbox = require('BeeToolbox');
+var AllianceManager = require('AllianceManager');
 var SquadFlagManager = require('SquadFlagManager');
 var TaskSquad = require('./Task.Squad');
 var TaskCombatArcher = require('Task.CombatArcher');
 var TaskCombatMelee = require('Task.CombatMelee');
 var TaskCombatMedic = require('Task.CombatMedic');
+var TaskDismantler = require('Task.Dismantler');
 
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
@@ -27,7 +29,8 @@ var HARVESTER_CFG = BeeToolbox && BeeToolbox.HARVESTER_CFG
 var SQUAD_ROLE_RUNNERS = {
   CombatArcher: (TaskCombatArcher && typeof TaskCombatArcher.run === 'function') ? TaskCombatArcher.run : null,
   CombatMelee: (TaskCombatMelee && typeof TaskCombatMelee.run === 'function') ? TaskCombatMelee.run : null,
-  CombatMedic: (TaskCombatMedic && typeof TaskCombatMedic.run === 'function') ? TaskCombatMedic.run : null
+  CombatMedic: (TaskCombatMedic && typeof TaskCombatMedic.run === 'function') ? TaskCombatMedic.run : null,
+  Dismantler: (TaskDismantler && typeof TaskDismantler.run === 'function') ? TaskDismantler.run : null
 };
 
 function runSquadRole(creep) {
@@ -46,7 +49,8 @@ var ROLE_DISPATCH = Object.freeze({
   squad: runSquadRole,
   CombatArcher: SQUAD_ROLE_RUNNERS.CombatArcher,
   CombatMelee: SQUAD_ROLE_RUNNERS.CombatMelee,
-  CombatMedic: SQUAD_ROLE_RUNNERS.CombatMedic
+  CombatMedic: SQUAD_ROLE_RUNNERS.CombatMedic,
+  Dismantler: SQUAD_ROLE_RUNNERS.Dismantler
 });
 
 var ROLE_DEFAULT_TASK = Object.freeze({
@@ -61,6 +65,35 @@ var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE =
   : 1;
 
 var GLOBAL_CACHE = global.__BHM_CACHE || (global.__BHM_CACHE = { tick: -1 });
+
+// Auto-include dismantler when hostile player structures detected
+var DISMANTLER_STRUCTURE_TYPES = (function () {
+  var map = Object.create(null);
+  map[STRUCTURE_TOWER] = true;
+  map[STRUCTURE_SPAWN] = true;
+  map[STRUCTURE_EXTENSION] = true;
+  map[STRUCTURE_STORAGE] = true;
+  map[STRUCTURE_TERMINAL] = true;
+  map[STRUCTURE_LAB] = true;
+  map[STRUCTURE_FACTORY] = true;
+  map[STRUCTURE_LINK] = true;
+  map[STRUCTURE_POWER_SPAWN] = true;
+  map[STRUCTURE_OBSERVER] = true;
+  map[STRUCTURE_NUKER] = true;
+  return map;
+})();
+
+function normalizeUser(name) {
+  if (!name || typeof name !== 'string') return '';
+  return name.toLowerCase();
+}
+
+function isSameUser(a, b) {
+  var na = normalizeUser(a);
+  var nb = normalizeUser(b);
+  if (!na || !nb) return false;
+  return na === nb;
+}
 
 function cloneCounts(source) {
   var result = Object.create(null);
@@ -670,6 +703,7 @@ function deriveSquadDesiredRoles(intel, bucket) {
   var melee = 1;
   var medic = 1;
   var archer = 0;
+  var needDismantler = false;
 
   if (details.hasRanged || score >= 10) {
     archer = 1;
@@ -684,12 +718,21 @@ function deriveSquadDesiredRoles(intel, bucket) {
   if (score >= 22 || (details.hasRanged && details.hasHostileTower)) {
     archer = Math.max(archer, 2);
   }
+  if (details && details.requireDismantler) {
+    needDismantler = true;
+  } else if (intel && intel.requireDismantler) {
+    needDismantler = true;
+  }
 
   var desired = Object.create(null);
   desired.CombatMelee = melee;
   desired.CombatMedic = medic;
   if (archer > 0) {
     desired.CombatArcher = archer;
+  }
+  if (needDismantler) {
+    // Enables siege capability after scout intel triggers combat plan
+    desired.Dismantler = 1;
   }
 
   bucket.desiredRoles = desired;
@@ -698,9 +741,12 @@ function deriveSquadDesiredRoles(intel, bucket) {
     order.push('CombatArcher');
   }
   order.push('CombatMedic');
+  if (needDismantler) {
+    order.push('Dismantler');
+  }
   bucket.roleOrder = order;
 
-  var total = melee + medic + (archer > 0 ? archer : 0);
+  var total = melee + medic + (archer > 0 ? archer : 0) + (needDismantler ? 1 : 0);
   bucket.minReady = total > 0 ? total : 1;
 
   return desired;
@@ -731,9 +777,79 @@ function buildSquadSpawnPlans(cache) {
 
   var roomsOwned = (cache && cache.roomsOwned) || [];
   var active = SquadFlagManager.getActiveSquads({ ownedRooms: roomsOwned }) || [];
+  var intelQueue = [];
+  var seenTargets = Object.create(null);
 
   for (var i = 0; i < active.length; i++) {
     var intel = active[i];
+    if (!intel) continue;
+    if (intel.targetRoom) {
+      seenTargets[intel.targetRoom] = true;
+    }
+    intelQueue.push(intel);
+  }
+
+  // ensures combat plans trigger from scout intel
+  var fallbackIntel = [];
+  if (BeeToolbox && typeof BeeToolbox.consumeAttackTargets === 'function') {
+    fallbackIntel = BeeToolbox.consumeAttackTargets({ maxAge: 2500, requeueInterval: 200 }) || [];
+  } else if (Memory.attackTargets && typeof Memory.attackTargets === 'object') {
+    fallbackIntel = [];
+    for (var tn in Memory.attackTargets) {
+      if (!Object.prototype.hasOwnProperty.call(Memory.attackTargets, tn)) continue;
+      var raw = Memory.attackTargets[tn];
+      if (!raw || typeof raw !== 'object') continue;
+      var owner = raw.owner || null;
+      if (owner && BeeToolbox && typeof BeeToolbox.isEnemyUsername === 'function' && !BeeToolbox.isEnemyUsername(owner)) {
+        continue;
+      }
+      fallbackIntel.push(raw);
+    }
+  }
+
+  for (var f = 0; f < fallbackIntel.length; f++) {
+    var rec = fallbackIntel[f];
+    if (!rec) continue;
+    var roomName = rec.roomName || rec.targetRoom || rec.room || null;
+    if (!roomName || (BeeToolbox && typeof BeeToolbox.isValidRoomName === 'function' && !BeeToolbox.isValidRoomName(roomName))) {
+      continue;
+    }
+    if (seenTargets[roomName]) {
+      continue;
+    }
+    seenTargets[roomName] = true;
+    var detailInfo = {
+      hasRanged: rec.type === 'creep',
+      hasAttack: rec.type === 'creep',
+      hasHeal: false,
+      hasHostileTower: rec.type === STRUCTURE_TOWER,
+      hasHostileSpawn: rec.type === STRUCTURE_SPAWN,
+      hostileCount: rec.count || 0,
+      targetOwner: rec.owner || null
+    };
+    var baseScore = 10;
+    if (rec.type === 'creep') {
+      baseScore = Math.max(baseScore, 10 + ((rec.count || 0) * 3));
+    } else if (rec.type === STRUCTURE_TOWER) {
+      baseScore = Math.max(baseScore, 20);
+    } else if (rec.type === STRUCTURE_SPAWN) {
+      baseScore = Math.max(baseScore, 16);
+    } else if (rec.type === 'controller') {
+      baseScore = Math.max(baseScore, 18);
+    }
+    intelQueue.push({
+      squadId: 'Scout' + roomName,
+      targetRoom: roomName,
+      rallyPos: new RoomPosition(25, 25, roomName),
+      threatScore: baseScore,
+      details: detailInfo,
+      source: rec.source || 'scout',
+      owner: rec.owner || null
+    });
+  }
+
+  for (i = 0; i < intelQueue.length; i++) {
+    intel = intelQueue[i];
     if (!intel) continue;
     var id = intel.squadId || 'Alpha';
     var bucket = ensureSquadMemoryRecord(id);
@@ -748,6 +864,86 @@ function buildSquadSpawnPlans(cache) {
     if (bucket.spawnCooldownUntil && bucket.spawnCooldownUntil > Game.time) {
       // Skip planning while cooldown is active so failed squads do not block other spawns.
       continue;
+    }
+
+    if (intel.targetRoom) {
+      var targetRoomName = intel.targetRoom;
+      var ownerHint = null;
+      if (intel.owner) {
+        ownerHint = intel.owner;
+      } else if (intel.details && intel.details.targetOwner) {
+        ownerHint = intel.details.targetOwner;
+      }
+      if (Memory.attackTargets && Memory.attackTargets[targetRoomName] && Memory.attackTargets[targetRoomName].owner) {
+        ownerHint = Memory.attackTargets[targetRoomName].owner;
+      }
+      var visionRoom = Game.rooms && Game.rooms[targetRoomName] ? Game.rooms[targetRoomName] : null;
+      if (visionRoom && visionRoom.controller && visionRoom.controller.owner && visionRoom.controller.owner.username) {
+        ownerHint = visionRoom.controller.owner.username;
+      }
+
+      var myName = (BeeToolbox && typeof BeeToolbox.getMyUsername === 'function') ? BeeToolbox.getMyUsername() : null;
+      var isMine = ownerHint && myName && isSameUser(ownerHint, myName);
+      var isAlly = ownerHint && AllianceManager && typeof AllianceManager.isAlly === 'function' && AllianceManager.isAlly(ownerHint);
+      var hasStructureIntel = false;
+
+      if (intel.details) {
+        if (intel.details.hasHostileTower || intel.details.hasHostileSpawn) {
+          hasStructureIntel = true;
+        }
+      }
+
+      if (!hasStructureIntel && Memory.attackTargets && Memory.attackTargets[targetRoomName]) {
+        var memAttack = Memory.attackTargets[targetRoomName];
+        var attType = memAttack && memAttack.type;
+        if (attType && (DISMANTLER_STRUCTURE_TYPES[attType] || attType === 'structure')) {
+          hasStructureIntel = true;
+        }
+      }
+
+      if (!hasStructureIntel && visionRoom) {
+        var structures = visionRoom.find(FIND_HOSTILE_STRUCTURES, {
+          filter: function (s) {
+            if (!s) return false;
+            if (!s.owner || !s.owner.username) return false;
+            if (BeeToolbox && typeof BeeToolbox.isEnemyStructure === 'function') {
+              if (!BeeToolbox.isEnemyStructure(s)) return false;
+            }
+            return DISMANTLER_STRUCTURE_TYPES[s.structureType] === true;
+          }
+        }) || [];
+        if (structures.length <= 0) {
+          structures = visionRoom.find(FIND_HOSTILE_SPAWNS, {
+            filter: function (s) {
+              if (!s || !s.owner || !s.owner.username) return false;
+              if (BeeToolbox && typeof BeeToolbox.isEnemyUsername === 'function') {
+                if (!BeeToolbox.isEnemyUsername(s.owner.username)) return false;
+              }
+              return true;
+            }
+          }) || [];
+        }
+        if (structures.length > 0) {
+          hasStructureIntel = true;
+        }
+      }
+
+      var needsDismantler = ownerHint && !isMine && !isAlly && hasStructureIntel;
+
+      if (needsDismantler) {
+        // Auto-include dismantler when hostile player structures detected
+        if (!intel.details) {
+          intel.details = {};
+        }
+        intel.details.requireDismantler = true;
+      }
+      if (ownerHint) {
+        if (!intel.details) {
+          intel.details = {};
+        }
+        intel.details.targetOwner = ownerHint;
+        intel.owner = ownerHint;
+      }
     }
 
     var desired = deriveSquadDesiredRoles(intel, bucket);

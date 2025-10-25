@@ -75,6 +75,23 @@ var SquadFlagManager = (function () {
       if (tag === 'scout' || tag.indexOf('scout') === 0) continue;
       set[c.pos.roomName] = true;
     }
+    // integrates scout attack intel into squad flag system
+    if (Memory.attackTargets) {
+      for (var tn in Memory.attackTargets) {
+        if (!Memory.attackTargets.hasOwnProperty(tn)) continue;
+        var target = Memory.attackTargets[tn];
+        if (!target) continue;
+        var roomName = target.roomName || tn;
+        if (!roomName) continue;
+        if (BeeToolbox && typeof BeeToolbox.isValidRoomName === 'function') {
+          if (!BeeToolbox.isValidRoomName(roomName)) continue;
+        }
+        if (target.owner && BeeToolbox && typeof BeeToolbox.isEnemyUsername === 'function') {
+          if (!BeeToolbox.isEnemyUsername(target.owner)) continue;
+        }
+        set[roomName] = true;
+      }
+    }
     var out = [];
     for (var rn in set) out.push(rn);
     return out;
