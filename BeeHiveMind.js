@@ -731,9 +731,77 @@ function buildSquadSpawnPlans(cache) {
 
   var roomsOwned = (cache && cache.roomsOwned) || [];
   var active = SquadFlagManager.getActiveSquads({ ownedRooms: roomsOwned }) || [];
+  var intelQueue = [];
+  var seenTargets = Object.create(null);
 
   for (var i = 0; i < active.length; i++) {
     var intel = active[i];
+    if (!intel) continue;
+    if (intel.targetRoom) {
+      seenTargets[intel.targetRoom] = true;
+    }
+    intelQueue.push(intel);
+  }
+
+  // ensures combat plans trigger from scout intel
+  var fallbackIntel = [];
+  if (BeeToolbox && typeof BeeToolbox.consumeAttackTargets === 'function') {
+    fallbackIntel = BeeToolbox.consumeAttackTargets({ maxAge: 2500, requeueInterval: 200 }) || [];
+  } else if (Memory.attackTargets && typeof Memory.attackTargets === 'object') {
+    fallbackIntel = [];
+    for (var tn in Memory.attackTargets) {
+      if (!Object.prototype.hasOwnProperty.call(Memory.attackTargets, tn)) continue;
+      var raw = Memory.attackTargets[tn];
+      if (!raw || typeof raw !== 'object') continue;
+      var owner = raw.owner || null;
+      if (owner && BeeToolbox && typeof BeeToolbox.isEnemyUsername === 'function' && !BeeToolbox.isEnemyUsername(owner)) {
+        continue;
+      }
+      fallbackIntel.push(raw);
+    }
+  }
+
+  for (var f = 0; f < fallbackIntel.length; f++) {
+    var rec = fallbackIntel[f];
+    if (!rec) continue;
+    var roomName = rec.roomName || rec.targetRoom || rec.room || null;
+    if (!roomName || (BeeToolbox && typeof BeeToolbox.isValidRoomName === 'function' && !BeeToolbox.isValidRoomName(roomName))) {
+      continue;
+    }
+    if (seenTargets[roomName]) {
+      continue;
+    }
+    seenTargets[roomName] = true;
+    var detailInfo = {
+      hasRanged: rec.type === 'creep',
+      hasAttack: rec.type === 'creep',
+      hasHeal: false,
+      hasHostileTower: rec.type === STRUCTURE_TOWER,
+      hasHostileSpawn: rec.type === STRUCTURE_SPAWN,
+      hostileCount: rec.count || 0
+    };
+    var baseScore = 10;
+    if (rec.type === 'creep') {
+      baseScore = Math.max(baseScore, 10 + ((rec.count || 0) * 3));
+    } else if (rec.type === STRUCTURE_TOWER) {
+      baseScore = Math.max(baseScore, 20);
+    } else if (rec.type === STRUCTURE_SPAWN) {
+      baseScore = Math.max(baseScore, 16);
+    } else if (rec.type === 'controller') {
+      baseScore = Math.max(baseScore, 18);
+    }
+    intelQueue.push({
+      squadId: 'Scout' + roomName,
+      targetRoom: roomName,
+      rallyPos: new RoomPosition(25, 25, roomName),
+      threatScore: baseScore,
+      details: detailInfo,
+      source: rec.source || 'scout'
+    });
+  }
+
+  for (i = 0; i < intelQueue.length; i++) {
+    intel = intelQueue[i];
     if (!intel) continue;
     var id = intel.squadId || 'Alpha';
     var bucket = ensureSquadMemoryRecord(id);
