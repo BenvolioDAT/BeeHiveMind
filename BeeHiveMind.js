@@ -62,6 +62,14 @@ var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE =
 
 var GLOBAL_CACHE = global.__BHM_CACHE || (global.__BHM_CACHE = { tick: -1 });
 
+var ECONOMIC_ROLE_MAP = Object.freeze({
+  baseharvest: true,
+  courier: true,
+  queen: true,
+  builder: true,
+  upgrader: true
+});
+
 function cloneCounts(source) {
   var result = Object.create(null);
   if (!source) return result;
@@ -70,6 +78,99 @@ function cloneCounts(source) {
     result[key] = source[key];
   }
   return result;
+}
+
+function ensureEconomyRoomRecord(target, roomName) {
+  if (!target || !roomName) {
+    return null;
+  }
+  var record = target[roomName];
+  if (!record) {
+    record = {
+      baseharvest: 0,
+      courier: 0,
+      queen: 0,
+      builder: 0,
+      upgrader: 0
+    };
+    target[roomName] = record;
+  }
+  return record;
+}
+
+function deriveEconomyDecisionState(room, harvesterIntel, economyMap) {
+  var state = {
+    hasHarvester: false,
+    hasCourier: false,
+    hasQueen: false,
+    hasBuilder: false,
+    hasUpgrader: false,
+    storageHealthy: false,
+    allEssentialPresent: false,
+    recoveryMode: false,
+    allowCombat: false,
+    harvesterCount: 0,
+    courierCount: 0,
+    queenCount: 0,
+    builderCount: 0,
+    upgraderCount: 0,
+    storageEnergy: 0,
+    storageCapacity: 0
+  };
+
+  if (!room) {
+    return state;
+  }
+
+  var roomName = room.name;
+  var econCounts = economyMap && economyMap[roomName];
+  var activeHarvesters = 0;
+  var hatchingHarvesters = 0;
+  var harvesterCount = 0;
+  if (harvesterIntel) {
+    activeHarvesters = harvesterIntel.active | 0;
+    hatchingHarvesters = harvesterIntel.hatching | 0;
+    harvesterCount = (harvesterIntel.coverage | 0);
+  }
+  state.harvesterCount = harvesterCount;
+  state.harvesterActive = activeHarvesters;
+  state.harvesterHatching = hatchingHarvesters;
+  state.hasHarvester = harvesterCount > 0;
+
+  if (econCounts) {
+    state.courierCount = econCounts.courier | 0;
+    state.queenCount = econCounts.queen | 0;
+    state.builderCount = econCounts.builder | 0;
+    state.upgraderCount = econCounts.upgrader | 0;
+    state.hasCourier = state.courierCount > 0;
+    state.hasQueen = state.queenCount > 0;
+    state.hasBuilder = state.builderCount > 0;
+    state.hasUpgrader = state.upgraderCount > 0;
+  }
+
+  var storage = room.storage;
+  if (storage && storage.store) {
+    var capacity = 0;
+    var available = 0;
+    if (typeof storage.store.getCapacity === 'function') {
+      capacity = storage.store.getCapacity(RESOURCE_ENERGY) || 0;
+    } else if (storage.storeCapacity != null) {
+      capacity = storage.storeCapacity;
+    }
+    available = storage.store[RESOURCE_ENERGY] || 0;
+    state.storageCapacity = capacity;
+    state.storageEnergy = available;
+    if (capacity > 0 && available / capacity >= 0.7) {
+      state.storageHealthy = true;
+    }
+  }
+
+  state.allEssentialPresent = state.hasHarvester && state.hasCourier && state.hasQueen && state.hasBuilder && state.hasUpgrader;
+  state.recoveryMode = !state.hasHarvester || !state.hasCourier;
+  // Combat spawning is only permitted when the economy is healthy or buffered by storage.
+  state.allowCombat = !state.recoveryMode && (state.storageHealthy || state.allEssentialPresent);
+
+  return state;
 }
 
 function calculateBodyCost(body) {
@@ -290,17 +391,13 @@ function prepareTickCaches() {
   var creeps = [];
   var roleCounts = Object.create(null);
   var lunaCountsByHome = Object.create(null);
+  var economyByRoom = Object.create(null);
 
   for (var creepName in Game.creeps) {
     if (!BeeToolbox.hasOwn(Game.creeps, creepName)) continue;
     var creep = Game.creeps[creepName];
     if (!creep) continue;
     creeps.push(creep);
-
-    var ttl = creep.ticksToLive;
-    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) {
-      continue;
-    }
 
     if (!creep.memory) creep.memory = {};
     var creepMemory = creep.memory;
@@ -310,12 +407,34 @@ function prepareTickCaches() {
       creepMemory.task = 'luna';
     }
 
+    var ttl = creep.ticksToLive;
+    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) {
+      continue;
+    }
+
+    var homeName = creepMemory.home || creepMemory._home || (creep.room ? creep.room.name : null);
+    if (homeName && task) {
+      var econRecord = ensureEconomyRoomRecord(economyByRoom, homeName);
+      if (econRecord) {
+        if (task === 'baseharvest') {
+          econRecord.baseharvest += 1;
+        } else if (task === 'courier') {
+          econRecord.courier += 1;
+        } else if (task === 'queen') {
+          econRecord.queen += 1;
+        } else if (task === 'builder') {
+          econRecord.builder += 1;
+        } else if (task === 'upgrader') {
+          econRecord.upgrader += 1;
+        }
+      }
+    }
+
     if (!task) continue;
 
     roleCounts[task] = (roleCounts[task] || 0) + 1;
 
     if (task === 'luna') {
-      var homeName = creepMemory.home || creepMemory._home || (creep.room ? creep.room.name : null);
       if (homeName) {
         lunaCountsByHome[homeName] = (lunaCountsByHome[homeName] || 0) + 1;
       }
@@ -325,6 +444,7 @@ function prepareTickCaches() {
   cache.creeps = creeps;
   cache.roleCounts = roleCounts;
   cache.lunaCountsByHome = lunaCountsByHome;
+  cache.economyByRoom = economyByRoom;
 
   var roomSiteCounts = Object.create(null);
   var totalSites = 0;
@@ -881,6 +1001,15 @@ function trySpawnSquadMember(spawner, plan) {
     return 'failed';
   }
 
+  var economyStates = GLOBAL_CACHE.economyStateByRoom;
+  if (economyStates) {
+    var economyState = economyStates[room.name];
+    if (economyState && !economyState.allowCombat) {
+      // Spawn is intentionally idled until the economy is back online.
+      return 'waiting';
+    }
+  }
+
   var available = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
     ? spawnLogic.Calculate_Spawn_Resource(spawner)
     : (room.energyAvailable || 0);
@@ -1194,10 +1323,13 @@ var BeeHiveMind = {
     var squadPlansByRoom = buildSquadSpawnPlans(cache);
     var roomSpawned = Object.create(null);
     var harvesterIntelByRoom = Object.create(null);
+    var economyStates = GLOBAL_CACHE.economyStateByRoom || (GLOBAL_CACHE.economyStateByRoom = Object.create(null));
+    var economyCountsByRoom = cache.economyByRoom || Object.create(null);
+    // Spawn decision order prioritizes economic recovery before utility or combat units.
     var defaultTaskOrder = [
-      'queen',
       'baseharvest',
       'courier',
+      'queen',
       'builder',
       'upgrader',
       'repair',
@@ -1224,6 +1356,10 @@ var BeeHiveMind = {
         harvesterIntel = ensureHarvesterIntelForRoom(room);
         harvesterIntelByRoom[room.name] = harvesterIntel;
       }
+
+      // Derive per-room economic health so we can gate non-essential spawns.
+      var economyState = deriveEconomyDecisionState(room, harvesterIntel, economyCountsByRoom);
+      economyStates[room.name] = economyState;
 
       if (roomSpawned[room.name]) {
         continue;
@@ -1256,30 +1392,34 @@ var BeeHiveMind = {
       }
 
       if (!roomSpawned[room.name] && planQueue.length) {
-        var currentPlan = planQueue[0];
-        var planOutcome = trySpawnSquadMember(spawner, currentPlan);
-        if (planOutcome === 'spawned') {
-          planQueue.shift();
-          roomSpawned[room.name] = true;
-          continue;
-        }
-        if (planOutcome === 'waiting') {
-          roomSpawned[room.name] = true;
-          continue;
-        }
-        if (planOutcome === 'skip') {
-          // Drop impossible plans for a while so they stop hogging the spawn slot.
-          planQueue.shift();
-          var skipBucket = ensureSquadMemoryRecord(currentPlan.squadId);
-          skipBucket.spawnCooldownUntil = Game.time + 50;
-          continue;
-        }
-        if (planOutcome === 'failed') {
-          // Back off briefly after an unexpected failure so other roles can spawn.
-          planQueue.shift();
-          var planBucket = ensureSquadMemoryRecord(currentPlan.squadId);
-          planBucket.spawnCooldownUntil = Game.time + 10;
-          continue;
+        if (!economyState.allowCombat) {
+          // Economy triage pauses combat recruitment until base harvesters and couriers are online again.
+        } else {
+          var currentPlan = planQueue[0];
+          var planOutcome = trySpawnSquadMember(spawner, currentPlan);
+          if (planOutcome === 'spawned') {
+            planQueue.shift();
+            roomSpawned[room.name] = true;
+            continue;
+          }
+          if (planOutcome === 'waiting') {
+            roomSpawned[room.name] = true;
+            continue;
+          }
+          if (planOutcome === 'skip') {
+            // Drop impossible plans for a while so they stop hogging the spawn slot.
+            planQueue.shift();
+            var skipBucket = ensureSquadMemoryRecord(currentPlan.squadId);
+            skipBucket.spawnCooldownUntil = Game.time + 50;
+            continue;
+          }
+          if (planOutcome === 'failed') {
+            // Back off briefly after an unexpected failure so other roles can spawn.
+            planQueue.shift();
+            var planBucket = ensureSquadMemoryRecord(currentPlan.squadId);
+            planBucket.spawnCooldownUntil = Game.time + 10;
+            continue;
+          }
         }
       }
 
@@ -1324,6 +1464,26 @@ var BeeHiveMind = {
         Trucker: 0,
         Claimer: 0
       };
+
+      if (!economyState.hasQueen) {
+        workerTaskLimits.queen = Math.max(workerTaskLimits.queen || 0, 1);
+      }
+      if (!economyState.hasCourier) {
+        workerTaskLimits.courier = Math.max(workerTaskLimits.courier || 0, 1);
+      }
+      if (!economyState.hasHarvester) {
+        workerTaskLimits.baseharvest = Math.max(workerTaskLimits.baseharvest || 0, 1);
+      }
+
+      // Recovery mode clamps the spawn table to economic lifelines until energy flow stabilizes.
+      if (economyState.recoveryMode) {
+        for (var limitKey in workerTaskLimits) {
+          if (!BeeToolbox.hasOwn(workerTaskLimits, limitKey)) continue;
+          if (!ECONOMIC_ROLE_MAP[limitKey]) {
+            workerTaskLimits[limitKey] = 0;
+          }
+        }
+      }
 
       for (var orderPos = 0; orderPos < taskOrder.length; orderPos++) {
         var task = taskOrder[orderPos];
