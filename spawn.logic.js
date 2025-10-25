@@ -118,15 +118,15 @@ var CONFIGS = {
     // ≥850 energy → full miner (6 WORK cap via HARVESTER_CFG)
     B(6,0,5),
     // 800–849 energy → beefy workhorse, adds carry buffer for link/container handoff
-    B(5,1,5),
+    B(5,0,5),
     // 650–799 energy → mid-tier miner with carry assist
-    B(4,1,4),
+    B(4,0,4),
     // 500–649 energy → bridge tier while expanding extensions
-    B(3,1,3),
+    B(3,0,3),
     // 350–499 energy → starter miner once extensions unlock
-    B(2,1,2),
+    B(2,0,2),
     // <350 energy → emergency spawn (RCL1 bootstrap)
-    B(1,1,1)
+    B(1,0,1)
   ],
   courier: [
     CM(30,15),
