@@ -477,9 +477,7 @@ function _taskPriority(task) {
   if (task.type === STRUCTURE_STORAGE) return 120;
   if (task.type === STRUCTURE_SPAWN) return 118;
   if (task.category === 'road') {
-    if (task.rcl <= 2) return 117; // main arteries
-    if (task.key && task.key.indexOf('hub:ring') === 0) return 100;
-    return 90;
+    return 1;
   }
   if (task.category === 'extension') {
     if (task.group === 'extA') return 114;
