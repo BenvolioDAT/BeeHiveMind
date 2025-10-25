@@ -1,6 +1,11 @@
 'use strict';
 
-var Traveler = require('Traveler');
+var Traveler = null;
+try {
+  Traveler = require('Traveler');
+} catch (error) {
+  Traveler = null;
+}
 var Logger = require('core.logger');
 var AllianceManager = require('AllianceManager');
 var LOG_LEVEL = Logger.LOG_LEVEL;
@@ -39,6 +44,26 @@ var _cachedUsername = null;
 var DEFAULT_FOREIGN_AVOID_TTL = 500;
 var _cachedTaskSquadModule;
 
+var DEFAULT_TRAVEL_REUSE = 15;
+var DEFAULT_TRAVEL_RANGE = 1;
+var DEFAULT_TRAVEL_STUCK = 2;
+var DEFAULT_TRAVEL_REPATH = 0.1;
+var DEFAULT_TRAVEL_MAX_OPS = 4000;
+
+var _harvestSeatCache = global.__beeHarvestSeatCache || (global.__beeHarvestSeatCache = {
+  tick: -1,
+  rooms: {}
+});
+
+var _roomEnergyCache = global.__beeEnergyRoomCache || (global.__beeEnergyRoomCache = {
+  tick: -1,
+  rooms: {}
+});
+
+var SEAT_MEMORY_KEY = 'seat';
+var SEAT_ASSIGNMENT_LIMIT = 1;
+var DEFAULT_TOWER_REFILL_THRESHOLD = 0.7;
+
 function _getTaskSquadModule() {
   // Lazy require to avoid circular dependency cost when Task.Squad already imported BeeToolbox.
   if (_cachedTaskSquadModule === undefined) {
@@ -62,6 +87,363 @@ IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LAB] = true;
 IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LINK] = true;
 
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
+
+function _serializeSeatPosition(pos) {
+  if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number' || !pos.roomName) {
+    return null;
+  }
+  return pos.roomName + ':' + pos.x + ':' + pos.y;
+}
+
+function _deserializeSeatPosition(serialized) {
+  if (!serialized || typeof serialized !== 'string') {
+    return null;
+  }
+  var parts = serialized.split(':');
+  if (parts.length !== 3) {
+    return null;
+  }
+  var x = parseInt(parts[1], 10);
+  var y = parseInt(parts[2], 10);
+  if (isNaN(x) || isNaN(y)) {
+    return null;
+  }
+  return new RoomPosition(x, y, parts[0]);
+}
+
+function _clearSeatMemoryInternal(creep) {
+  if (!creep || !creep.memory) {
+    return;
+  }
+  delete creep.memory[SEAT_MEMORY_KEY];
+}
+
+function _writeSeatMemoryInternal(creep, pos) {
+  if (!creep || !creep.memory) {
+    return;
+  }
+  var value = _serializeSeatPosition(pos);
+  if (value) {
+    creep.memory[SEAT_MEMORY_KEY] = value;
+  } else {
+    delete creep.memory[SEAT_MEMORY_KEY];
+  }
+}
+
+function _readSeatMemoryInternal(creep) {
+  if (!creep || !creep.memory) {
+    return null;
+  }
+  return _deserializeSeatPosition(creep.memory[SEAT_MEMORY_KEY]);
+}
+
+function _countWalkableSeats(pos) {
+  if (!pos || !pos.roomName) {
+    return 0;
+  }
+  var terrain = new Room.Terrain(pos.roomName);
+  var total = 0;
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) {
+        continue;
+      }
+      var x = pos.x + dx;
+      var y = pos.y + dy;
+      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) {
+        continue;
+      }
+      if (terrain.get(x, y) !== TERRAIN_MASK_WALL) {
+        total++;
+      }
+    }
+  }
+  return total;
+}
+
+function _findAdjacentContainer(source) {
+  if (!source || !source.pos) {
+    return null;
+  }
+  var nearby = source.pos.findInRange(FIND_STRUCTURES, 1, {
+    filter: function (structure) {
+      return structure.structureType === STRUCTURE_CONTAINER;
+    }
+  });
+  if (!nearby || nearby.length === 0) {
+    return null;
+  }
+  return nearby[0];
+}
+
+function _findSeatPosition(source) {
+  if (!source || !source.pos) {
+    return null;
+  }
+  var container = _findAdjacentContainer(source);
+  if (container) {
+    return container.pos;
+  }
+  var terrain = new Room.Terrain(source.pos.roomName);
+  var best = null;
+  var dx;
+  var dy;
+  for (dx = -1; dx <= 1; dx++) {
+    for (dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) {
+        continue;
+      }
+      var x = source.pos.x + dx;
+      var y = source.pos.y + dy;
+      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) {
+        continue;
+      }
+      if (terrain.get(x, y) === TERRAIN_MASK_WALL) {
+        continue;
+      }
+      var candidate = new RoomPosition(x, y, source.pos.roomName);
+      if (!best) {
+        best = candidate;
+        continue;
+      }
+      if (candidate.y < best.y || (candidate.y === best.y && candidate.x < best.x)) {
+        best = candidate;
+      }
+    }
+  }
+  return best;
+}
+
+function _refreshHarvestAssignments() {
+  if (_harvestSeatCache.tick === Game.time) {
+    return;
+  }
+  _harvestSeatCache.tick = Game.time;
+  _harvestSeatCache.rooms = {};
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) {
+      continue;
+    }
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory || creep.memory.task !== 'baseharvest') {
+      continue;
+    }
+    var sourceId = creep.memory.assignedSource;
+    if (!sourceId) {
+      continue;
+    }
+    var seatPos = _readSeatMemoryInternal(creep);
+    var roomName = null;
+    if (seatPos) {
+      roomName = seatPos.roomName;
+    } else if (creep.room && creep.room.name) {
+      roomName = creep.room.name;
+    } else if (creep.memory && creep.memory.homeRoom) {
+      roomName = creep.memory.homeRoom;
+    }
+    if (!roomName) {
+      continue;
+    }
+    var bucket = _harvestSeatCache.rooms[roomName];
+    if (!bucket) {
+      bucket = {
+        sourceInfo: {},
+        assignmentCounts: {},
+        seats: {},
+        scannedSourcesAt: -1
+      };
+      _harvestSeatCache.rooms[roomName] = bucket;
+    }
+    if (!bucket.assignmentCounts[sourceId]) {
+      bucket.assignmentCounts[sourceId] = 0;
+    }
+    bucket.assignmentCounts[sourceId]++;
+  }
+}
+
+function _ensureHarvestRoomBucket(roomName) {
+  _refreshHarvestAssignments();
+  var bucket = _harvestSeatCache.rooms[roomName];
+  if (!bucket) {
+    bucket = {
+      sourceInfo: {},
+      assignmentCounts: {},
+      seats: {},
+      scannedSourcesAt: -1
+    };
+    _harvestSeatCache.rooms[roomName] = bucket;
+  }
+  if (bucket.scannedSourcesAt === Game.time) {
+    return bucket;
+  }
+  var room = Game.rooms[roomName];
+  if (!room) {
+    return bucket;
+  }
+  var sources = room.find(FIND_SOURCES);
+  var i;
+  for (i = 0; i < sources.length; i++) {
+    var source = sources[i];
+    var container = _findAdjacentContainer(source);
+    var seatPos = _findSeatPosition(source);
+    var seatCount = container ? 1 : _countWalkableSeats(source.pos);
+    if (seatCount > SEAT_ASSIGNMENT_LIMIT) {
+      seatCount = SEAT_ASSIGNMENT_LIMIT;
+    }
+    if (seatCount <= 0) {
+      seatCount = 1;
+    }
+    bucket.sourceInfo[source.id] = {
+      source: source,
+      container: container,
+      seatPos: seatPos,
+      seatCount: seatCount
+    };
+    if (!bucket.assignmentCounts[source.id]) {
+      bucket.assignmentCounts[source.id] = 0;
+    }
+    if (seatPos) {
+      bucket.seats[source.id] = seatPos;
+    }
+  }
+  bucket.scannedSourcesAt = Game.time;
+  return bucket;
+}
+
+function _recordHarvestAssignment(roomName, sourceId) {
+  if (!roomName || !sourceId) {
+    return;
+  }
+  var bucket = _ensureHarvestRoomBucket(roomName);
+  if (!bucket.assignmentCounts[sourceId]) {
+    bucket.assignmentCounts[sourceId] = 0;
+  }
+  bucket.assignmentCounts[sourceId]++;
+}
+
+function _buildEnergyProfile(room) {
+  var profile = {
+    room: room,
+    dropped: [],
+    droppedLarge: [],
+    tombstones: [],
+    ruins: [],
+    sourceContainers: [],
+    sideContainers: [],
+    sideContainersAvailable: [],
+    spawnsNeeding: [],
+    extensionsNeeding: [],
+    towersNeeding: [],
+    linksNeeding: [],
+    storage: room ? room.storage : null,
+    terminal: room ? room.terminal : null
+  };
+  if (!room) {
+    return profile;
+  }
+  var dropped = room.find(FIND_DROPPED_RESOURCES, {
+    filter: function (resource) {
+      return resource.resourceType === RESOURCE_ENERGY && resource.amount > 0;
+    }
+  });
+  var i;
+  for (i = 0; i < dropped.length; i++) {
+    var drop = dropped[i];
+    profile.dropped.push(drop);
+    if (drop.amount >= 150) {
+      profile.droppedLarge.push(drop);
+    }
+  }
+  profile.tombstones = room.find(FIND_TOMBSTONES, {
+    filter: function (stone) {
+      return stone.store && (stone.store[RESOURCE_ENERGY] | 0) > 0;
+    }
+  });
+  profile.ruins = room.find(FIND_RUINS, {
+    filter: function (ruin) {
+      return ruin.store && (ruin.store[RESOURCE_ENERGY] | 0) > 0;
+    }
+  });
+  var containers = room.find(FIND_STRUCTURES, {
+    filter: function (structure) {
+      return structure.structureType === STRUCTURE_CONTAINER;
+    }
+  });
+  for (i = 0; i < containers.length; i++) {
+    var container = containers[i];
+    var energy = container.store ? (container.store[RESOURCE_ENERGY] | 0) : 0;
+    if (container.pos.findInRange(FIND_SOURCES, 1).length > 0) {
+      if (energy > 0) {
+        profile.sourceContainers.push(container);
+      }
+    } else {
+      if (energy > 0) {
+        profile.sideContainers.push(container);
+      }
+      if (container.store && (container.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
+        profile.sideContainersAvailable.push(container);
+      }
+    }
+  }
+  var structures = room.find(FIND_MY_STRUCTURES);
+  for (i = 0; i < structures.length; i++) {
+    var structure = structures[i];
+    if (structure.structureType === STRUCTURE_SPAWN) {
+      if ((structure.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
+        profile.spawnsNeeding.push(structure);
+      }
+    } else if (structure.structureType === STRUCTURE_EXTENSION) {
+      if ((structure.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
+        profile.extensionsNeeding.push(structure);
+      }
+    } else if (structure.structureType === STRUCTURE_TOWER) {
+      var used = (structure.store.getUsedCapacity(RESOURCE_ENERGY) | 0);
+      var capacity = (structure.store.getCapacity(RESOURCE_ENERGY) | 0);
+      if (capacity > 0 && used <= capacity * DEFAULT_TOWER_REFILL_THRESHOLD) {
+        profile.towersNeeding.push(structure);
+      }
+    } else if (structure.structureType === STRUCTURE_LINK) {
+      if ((structure.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
+        profile.linksNeeding.push(structure);
+      }
+    }
+  }
+  return profile;
+}
+
+function _ensureRoomEnergyProfile(room) {
+  if (!room) {
+    return _buildEnergyProfile(null);
+  }
+  if (_roomEnergyCache.tick !== Game.time) {
+    _roomEnergyCache.tick = Game.time;
+    _roomEnergyCache.rooms = {};
+  }
+  var cached = _roomEnergyCache.rooms[room.name];
+  if (cached && cached.scannedAt === Game.time) {
+    return cached.profile;
+  }
+  var profile = _buildEnergyProfile(room);
+  _roomEnergyCache.rooms[room.name] = {
+    scannedAt: Game.time,
+    profile: profile
+  };
+  return profile;
+}
+
+function _sortByStoredEnergyDescending(list) {
+  list.sort(function (a, b) {
+    var aEnergy = a.store ? (a.store[RESOURCE_ENERGY] | 0) : 0;
+    var bEnergy = b.store ? (b.store[RESOURCE_ENERGY] | 0) : 0;
+    return bEnergy - aEnergy;
+  });
+}
+
+function _sortDroppedDescending(list) {
+  list.sort(function (a, b) {
+    return b.amount - a.amount;
+  });
+}
 
 function isAllyUsername(username) {
   if (!username) return false;
@@ -136,6 +518,409 @@ var BeeToolbox = {
       }
     }
     return true;
+  },
+
+  /**
+   * travelTo wraps Traveler.js (https://docs.screeps.com/api/#Creep.move) with ES5-safe defaults.
+   * Input: creep (Creep), destination (RoomPosition or object with pos), options (object).
+   * Output: Screeps return code from the chosen movement helper.
+   * Side-effects: issues movement intent on the creep.
+   * Reasoning: centralizes preferred navigation so all modules avoid direct moveTo usage.
+   */
+  travelTo: function (creep, destination, options) {
+    if (!creep || !destination) {
+      return ERR_INVALID_ARGS;
+    }
+    var targetPos = destination.pos || destination;
+    if (!targetPos || typeof targetPos.x !== 'number' || typeof targetPos.y !== 'number') {
+      return ERR_INVALID_ARGS;
+    }
+    var config = options || {};
+    var travelOptions = {
+      range: config.range != null ? config.range : DEFAULT_TRAVEL_RANGE,
+      reusePath: config.reusePath != null ? config.reusePath : DEFAULT_TRAVEL_REUSE,
+      ignoreCreeps: config.ignoreCreeps === true,
+      stuckValue: config.stuckValue != null ? config.stuckValue : DEFAULT_TRAVEL_STUCK,
+      repath: config.repath != null ? config.repath : DEFAULT_TRAVEL_REPATH,
+      maxOps: config.maxOps != null ? config.maxOps : DEFAULT_TRAVEL_MAX_OPS
+    };
+    if (!travelOptions.roomCallback && (config.roomCallback || BeeToolbox.roomCallback)) {
+      travelOptions.roomCallback = config.roomCallback || BeeToolbox.roomCallback;
+    }
+    if (typeof creep.travelTo === 'function') {
+      return creep.travelTo(targetPos, travelOptions);
+    }
+    if (Traveler && typeof Traveler.travelTo === 'function') {
+      return Traveler.travelTo(creep, targetPos, travelOptions);
+    }
+    if (typeof creep.moveTo === 'function') {
+      return creep.moveTo(targetPos, travelOptions);
+    }
+    return ERR_INVALID_ARGS;
+  },
+
+  /**
+   * rememberSeatPosition stores the harvester seat location on the creep for later reuse.
+   * Input: creep (Creep), seatPosition (RoomPosition).
+   * Output: none.
+   * Side-effects: writes creep.memory.seat (Screeps docs: https://docs.screeps.com/api/#Creep.memory).
+   * Reasoning: allows assignment caching between ticks to avoid recalculating seat geometry.
+   */
+  rememberSeatPosition: function (creep, seatPosition) {
+    _writeSeatMemoryInternal(creep, seatPosition);
+  },
+
+  /**
+   * readSeatPosition retrieves the cached seat position for a creep, if present.
+   * Input: creep (Creep).
+   * Output: RoomPosition or null when unset.
+   * Side-effects: none.
+   * Reasoning: simplifies seat reuse for harvesters and other positional tasks.
+   */
+  readSeatPosition: function (creep) {
+    return _readSeatMemoryInternal(creep);
+  },
+
+  /**
+   * clearSeatPosition removes cached seat state from creep memory.
+   * Input: creep (Creep).
+   * Output: none.
+   * Side-effects: deletes creep.memory.seat.
+   * Reasoning: prevents stale seat locks when the harvester retasks or dies.
+   */
+  clearSeatPosition: function (creep) {
+    _clearSeatMemoryInternal(creep);
+  },
+
+  /**
+   * assignHarvestSource chooses an available source seat for a creep.
+   * Input: creep (Creep).
+   * Output: object containing source, container, seatPos, seatCount; null when none available.
+   * Side-effects: updates caches and creep.memory.assignedSource/assignedContainer.
+   * Reasoning: consolidates per-room harvester scheduling with seat limits.
+   */
+  assignHarvestSource: function (creep) {
+    if (!creep) {
+      return null;
+    }
+    var targetRoomName = null;
+    var seat = _readSeatMemoryInternal(creep);
+    if (seat) {
+      targetRoomName = seat.roomName;
+    } else if (creep.memory && creep.memory.targetRoom) {
+      targetRoomName = creep.memory.targetRoom;
+    } else if (creep.memory && creep.memory.homeRoom) {
+      targetRoomName = creep.memory.homeRoom;
+    } else if (creep.room) {
+      targetRoomName = creep.room.name;
+    }
+    if (!targetRoomName) {
+      return null;
+    }
+    var room = Game.rooms[targetRoomName] || creep.room;
+    if (!room) {
+      return null;
+    }
+    var bucket = _ensureHarvestRoomBucket(room.name);
+    var bestInfo = null;
+    var bestLoad = Infinity;
+    var sourceId;
+    for (sourceId in bucket.sourceInfo) {
+      if (!Object.prototype.hasOwnProperty.call(bucket.sourceInfo, sourceId)) {
+        continue;
+      }
+      var info = bucket.sourceInfo[sourceId];
+      if (!info || !info.source) {
+        continue;
+      }
+      var assigned = bucket.assignmentCounts[sourceId] || 0;
+      if (assigned >= info.seatCount) {
+        continue;
+      }
+      if (!bestInfo || assigned < bestLoad) {
+        bestInfo = info;
+        bestLoad = assigned;
+      }
+    }
+    if (!bestInfo) {
+      return null;
+    }
+    _recordHarvestAssignment(room.name, bestInfo.source.id);
+    _writeSeatMemoryInternal(creep, bestInfo.seatPos);
+    if (creep.memory) {
+      creep.memory.assignedSource = bestInfo.source.id;
+      if (bestInfo.container) {
+        creep.memory.assignedContainer = bestInfo.container.id;
+      } else {
+        delete creep.memory.assignedContainer;
+      }
+    }
+    return bestInfo;
+  },
+
+  /**
+   * getHarvestAssignmentInfo resolves cached assignment details for the creep.
+   * Input: creep (Creep).
+   * Output: object containing source, container, seatPos, roomName, seatCount.
+   * Side-effects: none beyond cache refresh.
+   * Reasoning: supports task logic with consolidated lookup of seat geometry and container state.
+   */
+  getHarvestAssignmentInfo: function (creep) {
+    if (!creep || !creep.memory || !creep.memory.assignedSource) {
+      return null;
+    }
+    var seatPos = _readSeatMemoryInternal(creep);
+    var source = Game.getObjectById(creep.memory.assignedSource);
+    var roomName = null;
+    if (seatPos) {
+      roomName = seatPos.roomName;
+    } else if (source && source.pos && source.pos.roomName) {
+      roomName = source.pos.roomName;
+    } else if (creep.memory.homeRoom) {
+      roomName = creep.memory.homeRoom;
+    }
+    var info = null;
+    if (roomName) {
+      var bucket = _ensureHarvestRoomBucket(roomName);
+      info = bucket.sourceInfo[creep.memory.assignedSource] || null;
+    }
+    var container = null;
+    if (info && info.container) {
+      container = info.container;
+    } else if (creep.memory.assignedContainer) {
+      container = Game.getObjectById(creep.memory.assignedContainer);
+    }
+    var seatPosition = seatPos;
+    if (!seatPosition && info && info.seatPos) {
+      seatPosition = info.seatPos;
+    }
+    return {
+      source: source,
+      container: container,
+      seatPos: seatPosition,
+      roomName: roomName,
+      seatCount: info ? info.seatCount : SEAT_ASSIGNMENT_LIMIT
+    };
+  },
+
+  /**
+   * releaseHarvestAssignment clears memory bookkeeping for harvester tasks.
+   * Input: creep (Creep).
+   * Output: none.
+   * Side-effects: removes assignedSource/assignedContainer/seat from memory.
+   * Reasoning: ensures reassignment logic starts from a clean state on next tick.
+   */
+  releaseHarvestAssignment: function (creep) {
+    if (!creep || !creep.memory) {
+      return;
+    }
+    delete creep.memory.assignedSource;
+    delete creep.memory.assignedContainer;
+    _clearSeatMemoryInternal(creep);
+  },
+
+  /**
+   * ensureSourceContainer verifies a container exists at the source seat and builds one if needed.
+   * Input: creep (Creep), assignmentInfo (object from getHarvestAssignmentInfo/assignHarvestSource).
+   * Output: none.
+   * Side-effects: may create construction site (https://docs.screeps.com/api/#Room.createConstructionSite) or build it.
+   * Reasoning: keeps economy stable without duplicating container scaffolding logic in every task.
+   */
+  ensureSourceContainer: function (creep, assignmentInfo) {
+    if (!creep || !assignmentInfo || !assignmentInfo.seatPos) {
+      return;
+    }
+    var seatPos = assignmentInfo.seatPos;
+    var structures = seatPos.lookFor(LOOK_STRUCTURES);
+    var i;
+    for (i = 0; i < structures.length; i++) {
+      if (structures[i].structureType === STRUCTURE_CONTAINER) {
+        assignmentInfo.container = structures[i];
+        return;
+      }
+    }
+    var sites = seatPos.lookFor(LOOK_CONSTRUCTION_SITES);
+    var containerSite = null;
+    for (i = 0; i < sites.length; i++) {
+      if (sites[i].structureType === STRUCTURE_CONTAINER) {
+        containerSite = sites[i];
+        break;
+      }
+    }
+    if (containerSite) {
+      if (creep.pos.isEqualTo(seatPos) && creep.store && (creep.store[RESOURCE_ENERGY] | 0) > 0) {
+        creep.build(containerSite);
+      }
+      return;
+    }
+    if (assignmentInfo.container) {
+      return;
+    }
+    if (Game.time % SOURCE_CONTAINER_SCAN_INTERVAL !== 0) {
+      return;
+    }
+    if (!creep.room || creep.room.name !== seatPos.roomName) {
+      return;
+    }
+    creep.room.createConstructionSite(seatPos, STRUCTURE_CONTAINER);
+  },
+
+  /**
+   * getRoomEnergyProfile returns cached pickup/drop-off intelligence for the given room.
+   * Input: room (Room).
+   * Output: profile object describing structures and resources with energy.
+   * Side-effects: caches scan results per tick.
+   * Reasoning: reduces repeated pathfinding scans for courier/queen style roles.
+   */
+  getRoomEnergyProfile: function (room) {
+    return _ensureRoomEnergyProfile(room);
+  },
+
+  /**
+   * selectEnergyPickupTarget locates the best energy source for supply creeps.
+   * Input: creep (Creep), options (object: minAmount, allowStorage, allowDropped).
+   * Output: object { target, action } or null when nothing suitable.
+   * Side-effects: none.
+   * Reasoning: centralizes pickup heuristics for courier/queen to avoid duplicate filtering.
+   */
+  selectEnergyPickupTarget: function (creep, options) {
+    if (!creep || !creep.room) {
+      return null;
+    }
+    var config = options || {};
+    var minAmount = config.minAmount != null ? config.minAmount : 50;
+    var profile = _ensureRoomEnergyProfile(creep.room);
+    if (profile.tombstones.length > 0) {
+      _sortByStoredEnergyDescending(profile.tombstones);
+      return { target: profile.tombstones[0], action: 'withdraw' };
+    }
+    if (profile.ruins.length > 0) {
+      _sortByStoredEnergyDescending(profile.ruins);
+      return { target: profile.ruins[0], action: 'withdraw' };
+    }
+    if (config.allowDropped !== false) {
+      if (profile.droppedLarge.length > 0) {
+        _sortDroppedDescending(profile.droppedLarge);
+        return { target: profile.droppedLarge[0], action: 'pickup' };
+      }
+      if (profile.dropped.length > 0 && minAmount <= 0) {
+        _sortDroppedDescending(profile.dropped);
+        return { target: profile.dropped[0], action: 'pickup' };
+      }
+    }
+    if (profile.sourceContainers.length > 0) {
+      _sortByStoredEnergyDescending(profile.sourceContainers);
+      if ((profile.sourceContainers[0].store[RESOURCE_ENERGY] | 0) >= minAmount) {
+        return { target: profile.sourceContainers[0], action: 'withdraw' };
+      }
+    }
+    if (profile.sideContainers.length > 0) {
+      _sortByStoredEnergyDescending(profile.sideContainers);
+      if ((profile.sideContainers[0].store[RESOURCE_ENERGY] | 0) >= minAmount) {
+        return { target: profile.sideContainers[0], action: 'withdraw' };
+      }
+    }
+    if (config.allowStorage !== false) {
+      if (profile.storage && (profile.storage.store[RESOURCE_ENERGY] | 0) >= minAmount) {
+        return { target: profile.storage, action: 'withdraw' };
+      }
+      if (profile.terminal && (profile.terminal.store[RESOURCE_ENERGY] | 0) >= minAmount) {
+        return { target: profile.terminal, action: 'withdraw' };
+      }
+    }
+    if (profile.dropped.length > 0) {
+      _sortDroppedDescending(profile.dropped);
+      return { target: profile.dropped[0], action: 'pickup' };
+    }
+    return null;
+  },
+
+  /**
+   * selectEnergyDepositStructure picks a high-priority energy sink for logistics creeps.
+   * Input: creep (Creep), options (object: includeStorage, includeTowers, includeLinks).
+   * Output: structure or null.
+   * Side-effects: none.
+   * Reasoning: ensures spawns/extensions receive energy before bulk storage, matching economy priorities.
+   */
+  selectEnergyDepositStructure: function (creep, options) {
+    if (!creep || !creep.room) {
+      return null;
+    }
+    var config = options || {};
+    var profile = _ensureRoomEnergyProfile(creep.room);
+    var includeTowers = config.includeTowers !== false;
+    var includeLinks = config.includeLinks === true;
+    var includeStorage = config.includeStorage !== false;
+    var includeTerminal = config.includeTerminal === true;
+
+    function nearest(list) {
+      var best = null;
+      var bestRange = Infinity;
+      for (var i = 0; i < list.length; i++) {
+        var structure = list[i];
+        if (!structure) {
+          continue;
+        }
+        var free = structure.store ? (structure.store.getFreeCapacity(RESOURCE_ENERGY) | 0) : 0;
+        if (free <= 0) {
+          continue;
+        }
+        var range = creep.pos.getRangeTo(structure);
+        if (range < bestRange) {
+          bestRange = range;
+          best = structure;
+        }
+      }
+      return best;
+    }
+
+    var spawnTargets = [];
+    var i;
+    for (i = 0; i < profile.spawnsNeeding.length; i++) {
+      spawnTargets.push(profile.spawnsNeeding[i]);
+    }
+    for (i = 0; i < profile.extensionsNeeding.length; i++) {
+      spawnTargets.push(profile.extensionsNeeding[i]);
+    }
+    var closestPriority = nearest(spawnTargets);
+    if (closestPriority) {
+      return closestPriority;
+    }
+
+    if (includeTowers && profile.towersNeeding.length > 0) {
+      var tower = nearest(profile.towersNeeding);
+      if (tower) {
+        return tower;
+      }
+    }
+
+    if (includeLinks && profile.linksNeeding.length > 0) {
+      var link = nearest(profile.linksNeeding);
+      if (link) {
+        return link;
+      }
+    }
+
+    if (includeStorage && profile.storage) {
+      if ((profile.storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
+        return profile.storage;
+      }
+    }
+
+    if (includeTerminal && profile.terminal) {
+      if ((profile.terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
+        return profile.terminal;
+      }
+    }
+
+    if (profile.sideContainersAvailable.length > 0) {
+      var container = nearest(profile.sideContainersAvailable);
+      if (container) {
+        return container;
+      }
+    }
+
+    return null;
   },
 
   /**

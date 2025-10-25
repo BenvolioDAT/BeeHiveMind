@@ -1,5 +1,12 @@
 'use strict';
 
+/**
+ * TaskManager orchestrates creep task execution and reassignment.
+ * The Screeps runtime supports many ES6 features, yet this implementation
+ * deliberately adheres to ES5 syntax (no const/let, arrow functions, or
+ * destructuring) to keep the codebase consistent for the entire team.
+ */
+
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
@@ -20,7 +27,11 @@ var TaskDismantler = require('./Task.Dismantler');
 var TaskTrucker = require('Task.Trucker');
 var TaskClaimer = require('Task.Claimer');
 
-var DEFAULT_NEEDS = Object.freeze({
+/**
+ * Default per-role counts that prevent the colony from starving.
+ * Object.freeze is ES5-compliant (Screeps reference: https://docs.screeps.com/api/#Object.freeze).
+ */
+var DEFAULT_ROLE_REQUIREMENTS = Object.freeze({
   baseharvest: 2,
   builder: 2,
   repair: 1,
@@ -30,8 +41,10 @@ var DEFAULT_NEEDS = Object.freeze({
   scout: 1
 });
 
-// Economic priority ensures worker bees refill the income pipeline before utility duties.
-var DEFAULT_PRIORITY = Object.freeze([
+/**
+ * Economic priorities force energy income to be satisfied before utility roles.
+ */
+var DEFAULT_PRIORITY_QUEUE = Object.freeze([
   'baseharvest',
   'courier',
   'queen',
@@ -40,182 +53,312 @@ var DEFAULT_PRIORITY = Object.freeze([
   'repair'
 ]);
 
-var TASK_REGISTRY = Object.create(null);
+/**
+ * Registry containing all task modules keyed by commonly used name variants.
+ */
+var taskRegistry = Object.create(null);
 
-function registerTask(name, module) {
-  if (!name || !module || typeof module.run !== 'function') {
-    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-      taskLog.debug('Skipped registering invalid task module for', name);
-    }
-    return;
-  }
-  TASK_REGISTRY[name] = module;
-}
-
-registerTask('baseharvest', TaskBaseHarvest);
-registerTask('luna', TaskLuna);
-registerTask('builder', TaskBuilder);
-registerTask('courier', TaskCourier);
-registerTask('queen', TaskQueen);
-registerTask('scout', TaskScout);
-registerTask('repair', TaskRepair);
-registerTask('upgrader', TaskUpgrader);
-registerTask('CombatMedic', TaskCombatMedic);
-registerTask('CombatMelee', TaskCombatMelee);
-registerTask('CombatArcher', TaskCombatArcher);
-registerTask('Dismantler', TaskDismantler);
-registerTask('idle', TaskIdle);
-registerTask('Trucker', TaskTrucker);
-registerTask('Claimer', TaskClaimer);
-
-var cache = (global.__taskManagerCache = global.__taskManagerCache || {
+/**
+ * Per-tick cache avoids re-deriving creep counts and shortages during the same tick.
+ */
+var colonyCache = (global.__taskManagerCache = global.__taskManagerCache || {
   tick: -1,
-  counts: null,
+  activeCounts: null,
   needs: null,
   needsTick: -1
 });
 
-function getTaskCounts() {
-  if (cache.tick === Game.time && cache.counts) return cache.counts;
-  cache.tick = Game.time;
-  var counts = Object.create(null);
+/**
+ * registerTaskModule
+ * Input: taskIdentifier (string), taskModule (object with run function).
+ * Output: none.
+ * Side-effects: mutates the registry used to resolve task modules.
+ * Reasoning: enforces consistent validation before a module is exposed.
+ */
+function registerTaskModule(taskIdentifier, taskModule) {
+  if (!taskIdentifier || !taskModule || typeof taskModule.run !== 'function') {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      taskLog.debug('Skipped registering invalid task module for', taskIdentifier);
+    }
+    return;
+  }
+  taskRegistry[taskIdentifier] = taskModule;
+}
+
+registerTaskModule('baseharvest', TaskBaseHarvest);
+registerTaskModule('luna', TaskLuna);
+registerTaskModule('builder', TaskBuilder);
+registerTaskModule('courier', TaskCourier);
+registerTaskModule('queen', TaskQueen);
+registerTaskModule('scout', TaskScout);
+registerTaskModule('repair', TaskRepair);
+registerTaskModule('upgrader', TaskUpgrader);
+registerTaskModule('CombatMedic', TaskCombatMedic);
+registerTaskModule('CombatMelee', TaskCombatMelee);
+registerTaskModule('CombatArcher', TaskCombatArcher);
+registerTaskModule('Dismantler', TaskDismantler);
+registerTaskModule('idle', TaskIdle);
+registerTaskModule('Trucker', TaskTrucker);
+registerTaskModule('Claimer', TaskClaimer);
+
+/**
+ * deriveTaskCounts
+ * Input: none.
+ * Output: object keyed by task name containing live creep counts.
+ * Side-effects: reads Game.creeps (Screeps docs: https://docs.screeps.com/api/#Game.creeps).
+ * Reasoning: caches per tick to avoid repeatedly iterating the global creep list.
+ */
+function deriveTaskCounts() {
+  if (colonyCache.tick === Game.time && colonyCache.activeCounts) {
+    return colonyCache.activeCounts;
+  }
+
+  colonyCache.tick = Game.time;
+  var countsByTask = Object.create(null);
+
   for (var creepName in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) continue;
-    var creep = Game.creeps[creepName];
-    if (!creep || !creep.memory) {
-      counts.idle = (counts.idle || 0) + 1;
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) {
       continue;
     }
-    var task = creep.memory.task || 'idle';
-    counts[task] = (counts[task] || 0) + 1;
+    var creep = Game.creeps[creepName];
+    if (!creep || !creep.memory) {
+      countsByTask.idle = (countsByTask.idle || 0) + 1;
+      continue;
+    }
+    var taskKey = creep.memory.task || 'idle';
+    countsByTask[taskKey] = (countsByTask[taskKey] || 0) + 1;
   }
-  cache.counts = counts;
-  return cache.counts;
+
+  colonyCache.activeCounts = countsByTask;
+  return countsByTask;
 }
 
-function mergeNeeds(defaults, overrides) {
-  var result = Object.create(null);
-  var key;
-  for (key in defaults) {
-    if (Object.prototype.hasOwnProperty.call(defaults, key)) {
-      result[key] = defaults[key];
+/**
+ * mergeRoleRequirements
+ * Input: defaults (object), overrides (object).
+ * Output: merged object describing desired counts.
+ * Side-effects: none (creates a fresh object).
+ * Reasoning: ensures Memory overrides never mutate the frozen defaults.
+ */
+function mergeRoleRequirements(defaults, overrides) {
+  var merged = Object.create(null);
+  var propertyName;
+
+  for (propertyName in defaults) {
+    if (Object.prototype.hasOwnProperty.call(defaults, propertyName)) {
+      merged[propertyName] = defaults[propertyName];
     }
   }
-  for (key in overrides) {
-    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
-      result[key] = overrides[key];
+
+  for (propertyName in overrides) {
+    if (Object.prototype.hasOwnProperty.call(overrides, propertyName)) {
+      merged[propertyName] = overrides[propertyName];
     }
   }
-  return result;
+
+  return merged;
 }
 
-function colonyNeeds() {
-  if (cache.needsTick === Game.time && cache.needs) return cache.needs;
+/**
+ * evaluateColonyNeeds
+ * Input: none.
+ * Output: object describing role shortages this tick.
+ * Side-effects: reads Memory.colonyNeeds (https://docs.screeps.com/api/#Memory).
+ * Reasoning: caches derived shortages so TaskManager decisions stay consistent per tick.
+ */
+function evaluateColonyNeeds() {
+  if (colonyCache.needsTick === Game.time && colonyCache.needs) {
+    return colonyCache.needs;
+  }
 
   var overrides = (Memory.colonyNeeds && Memory.colonyNeeds.overrides) || {};
-  var needsConfig = mergeNeeds(DEFAULT_NEEDS, overrides);
-  var counts = getTaskCounts();
-  var shortage = Object.create(null);
+  var desiredCounts = mergeRoleRequirements(DEFAULT_ROLE_REQUIREMENTS, overrides);
+  var observedCounts = deriveTaskCounts();
+  var shortages = Object.create(null);
 
-  for (var key in needsConfig) {
-    if (!Object.prototype.hasOwnProperty.call(needsConfig, key)) continue;
-    var required = needsConfig[key] | 0;
-    var current = counts[key] | 0;
-    if (current < required) {
-      shortage[key] = required - current;
+  var requirementKey;
+  for (requirementKey in desiredCounts) {
+    if (!Object.prototype.hasOwnProperty.call(desiredCounts, requirementKey)) {
+      continue;
+    }
+    var requiredCount = desiredCounts[requirementKey] | 0;
+    var currentCount = observedCounts[requirementKey] | 0;
+    if (currentCount < requiredCount) {
+      shortages[requirementKey] = requiredCount - currentCount;
     }
   }
 
-  cache.needsTick = Game.time;
-  cache.needs = shortage;
-  return shortage;
+  colonyCache.needsTick = Game.time;
+  colonyCache.needs = shortages;
+  return shortages;
 }
 
-function getTaskModule(taskName) {
-  if (!taskName) return null;
-  if (TASK_REGISTRY[taskName]) return TASK_REGISTRY[taskName];
-  var lowered = String(taskName).toLowerCase();
-  if (TASK_REGISTRY[lowered]) return TASK_REGISTRY[lowered];
-  var capitalized = taskName.charAt(0).toUpperCase() + taskName.slice(1);
-  if (TASK_REGISTRY[capitalized]) return TASK_REGISTRY[capitalized];
+/**
+ * resolveTaskModule
+ * Input: taskName (string).
+ * Output: module or null when no registration exists.
+ * Side-effects: none.
+ * Reasoning: supports loose naming (lowercase, capitalized) without duplicating logic in callers.
+ */
+function resolveTaskModule(taskName) {
+  if (!taskName) {
+    return null;
+  }
+  if (taskRegistry[taskName]) {
+    return taskRegistry[taskName];
+  }
+  var loweredName = String(taskName).toLowerCase();
+  if (taskRegistry[loweredName]) {
+    return taskRegistry[loweredName];
+  }
+  var capitalizedName = taskName.charAt(0).toUpperCase() + taskName.slice(1);
+  if (taskRegistry[capitalizedName]) {
+    return taskRegistry[capitalizedName];
+  }
   return null;
 }
 
-function getPriorityList() {
+/**
+ * determinePriorityQueue
+ * Input: none.
+ * Output: array describing role priorities.
+ * Side-effects: reads Memory.colonyNeeds.priorityOrder when present.
+ * Reasoning: allows operators to override runtime priorities without touching code.
+ */
+function determinePriorityQueue() {
   if (Memory.colonyNeeds && Memory.colonyNeeds.priorityOrder && Memory.colonyNeeds.priorityOrder.length) {
     return Memory.colonyNeeds.priorityOrder;
   }
-  return DEFAULT_PRIORITY;
+  return DEFAULT_PRIORITY_QUEUE;
 }
 
-/* === FIX: Missing task handler recovery === */
-function selectFallbackTask(creep, previousTask) {
-  var needs = colonyNeeds();
-  var priorityList = getPriorityList();
-  for (var i = 0; i < priorityList.length; i++) {
-    var candidate = priorityList[i];
-    if (candidate === previousTask) continue;
-    if ((needs[candidate] | 0) > 0 && getTaskModule(candidate)) {
-      return candidate;
+/**
+ * chooseFallbackTask
+ * Input: creep (Creep), previousTaskName (string).
+ * Output: fallback task string or null when no alternative exists.
+ * Side-effects: reads current shortages to find a replacement assignment.
+ * Reasoning: prevents creeps from idling indefinitely when their recorded task is unknown.
+ */
+function chooseFallbackTask(creep, previousTaskName) {
+  var currentNeeds = evaluateColonyNeeds();
+  var priorityQueue = determinePriorityQueue();
+  for (var index = 0; index < priorityQueue.length; index++) {
+    var candidateName = priorityQueue[index];
+    if (candidateName === previousTaskName) {
+      continue;
+    }
+    if ((currentNeeds[candidateName] | 0) > 0 && resolveTaskModule(candidateName)) {
+      return candidateName;
     }
   }
-  if (getTaskModule('idle')) {
+  if (resolveTaskModule('idle')) {
     return 'idle';
   }
   return null;
 }
 
-module.exports = {
-  run: function (creep) {
-    if (!creep) return;
-    var taskName = creep.memory && creep.memory.task;
-    var taskModule = getTaskModule(taskName);
+/**
+ * executeTask
+ * Input: creep (Creep).
+ * Output: none.
+ * Side-effects: invokes the resolved task module's run method, which issues Screeps intents
+ *              such as creep.travelTo or resource actions (https://docs.screeps.com/api/#Creep).
+ * Reasoning: centralizes error handling and fallback selection for unknown tasks.
+ */
+function executeTask(creep) {
+  if (!creep) {
+    return;
+  }
 
-    if (taskModule) {
-      taskModule.run(creep);
-    } else {
-      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-        taskLog.debug('No task module registered for', taskName, 'requested by', creep.name);
-      }
-      creep.say('No task!');
-      if (creep.memory) {
-        var previousTask = creep.memory.task;
-        delete creep.memory.task;
-        var fallbackTask = selectFallbackTask(creep, previousTask);
-        if (fallbackTask) {
-          creep.memory.task = fallbackTask;
-          var fallbackModule = getTaskModule(fallbackTask);
-          if (fallbackModule && fallbackModule.run) {
-            fallbackModule.run(creep);
-          }
-        } else if (TaskIdle && typeof TaskIdle.run === 'function') {
-          creep.memory.task = 'idle';
-          TaskIdle.run(creep);
-        }
-      }
+  var memoryTaskName = creep.memory && creep.memory.task;
+  var activeTaskModule = resolveTaskModule(memoryTaskName);
+
+  if (activeTaskModule) {
+    activeTaskModule.run(creep);
+    return;
+  }
+
+  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+    taskLog.debug('No task module registered for', memoryTaskName, 'requested by', creep.name);
+  }
+
+  creep.say('No task!');
+  if (!creep.memory) {
+    return;
+  }
+
+  var previousTaskName = creep.memory.task;
+  delete creep.memory.task;
+
+  var fallbackTaskName = chooseFallbackTask(creep, previousTaskName);
+  if (fallbackTaskName) {
+    creep.memory.task = fallbackTaskName;
+    var fallbackModule = resolveTaskModule(fallbackTaskName);
+    if (fallbackModule && typeof fallbackModule.run === 'function') {
+      fallbackModule.run(creep);
     }
-  },
+    return;
+  }
 
+  if (TaskIdle && typeof TaskIdle.run === 'function') {
+    creep.memory.task = 'idle';
+    TaskIdle.run(creep);
+  }
+}
+
+/**
+ * markTaskMemory
+ * Input: creep (Creep).
+ * Output: none.
+ * Side-effects: clears common task-specific keys from creep memory.
+ * Reasoning: prevents stale assignments persisting after TaskManager retasks a creep.
+ */
+function markTaskMemory(creep) {
+  if (!creep || !creep.memory) {
+    return;
+  }
+  delete creep.memory.assignedSource;
+  delete creep.memory.targetRoom;
+  delete creep.memory.assignedContainer;
+  delete creep.memory.sourceId;
+  delete creep.memory.seat;
+  delete creep.memory.pickupId;
+  delete creep.memory.pickupAction;
+  delete creep.memory.dropoffId;
+  delete creep.memory.mode;
+}
+
+module.exports = {
+  /**
+   * run delegates to the active task and handles fallback logic when missing.
+   */
+  run: executeTask,
+
+  /**
+   * isTaskNeeded reports whether the colony currently lacks creeps for the role.
+   */
   isTaskNeeded: function (taskName) {
-    var needs = colonyNeeds();
-    return (needs[taskName] || 0) > 0;
+    var shortages = evaluateColonyNeeds();
+    return (shortages[taskName] || 0) > 0;
   },
 
+  /**
+   * getHighestPriorityTask returns the most urgent role name based on shortages and priorities.
+   */
   getHighestPriorityTask: function (creep) {
-    var needs = colonyNeeds();
-    var priorityList = getPriorityList();
-    for (var i = 0; i < priorityList.length; i++) {
-      var task = priorityList[i];
-      if ((needs[task] | 0) > 0) return task;
+    var shortages = evaluateColonyNeeds();
+    var priorityQueue = determinePriorityQueue();
+    for (var index = 0; index < priorityQueue.length; index++) {
+      var taskName = priorityQueue[index];
+      if ((shortages[taskName] | 0) > 0) {
+        return taskName;
+      }
     }
     return 'idle';
   },
 
-  clearTaskMemory: function (creep) {
-    if (!creep || !creep.memory) return;
-    delete creep.memory.assignedSource;
-    delete creep.memory.targetRoom;
-    delete creep.memory.assignedContainer;
-    delete creep.memory.sourceId;
-  }
+  /**
+   * clearTaskMemory exposes markTaskMemory for other modules (e.g., spawn logic) to reuse.
+   */
+  clearTaskMemory: markTaskMemory
 };
