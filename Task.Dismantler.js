@@ -96,7 +96,9 @@ var TaskDismantler = {
 
     if (target && target.owner && BeeToolbox && typeof BeeToolbox.isEnemyUsername === 'function') {
       if (!BeeToolbox.isEnemyUsername(target.owner.username)) {
-        AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-memoryTarget');
+        if (AllianceManager && typeof AllianceManager.noteFriendlyFireAvoid === 'function') {
+          AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-memoryTarget');
+        }
         delete creep.memory.tid;
         target = null;
       }
@@ -163,7 +165,9 @@ var TaskDismantler = {
 
     if (target && target.owner && BeeToolbox && typeof BeeToolbox.isEnemyUsername === 'function') {
       if (!BeeToolbox.isEnemyUsername(target.owner.username)) {
-        AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-active');
+        if (AllianceManager && typeof AllianceManager.noteFriendlyFireAvoid === 'function') {
+          AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-active');
+        }
         delete creep.memory.tid;
         target = null;
       }
