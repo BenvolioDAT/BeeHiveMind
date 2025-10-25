@@ -11,6 +11,29 @@ if (!global.__BUILDER_CACHE) {
   global.__BUILDER_CACHE = { tick: -1, sitesByRoom: {}, siteArray: [] };
 }
 
+// Cache plan indexes per room per tick to reduce repeated computation.
+if (!global.__PLAN_INDEX_CACHE) {
+  global.__PLAN_INDEX_CACHE = {};
+}
+
+// Cache energy search results briefly to avoid repeated scans.
+if (!global.__BUILDER_ENERGY_CACHE) {
+  global.__BUILDER_ENERGY_CACHE = {};
+}
+
+// Cache hub positions per room per tick for idle movement.
+if (!global.__BUILDER_HUB_CACHE) {
+  global.__BUILDER_HUB_CACHE = {};
+}
+
+// Ensure the shared soft lock memory container exists before use.
+function _ensureLockMemory() {
+  if (!Memory._buildLocks) {
+    Memory._buildLocks = {};
+  }
+  return Memory._buildLocks;
+}
+
 function _getHomeName(creep) {
   if (creep.memory.home) return creep.memory.home;
   var nearest = null;
@@ -77,6 +100,19 @@ function _planIndex(plan) {
   return index;
 }
 
+// Retrieve a cached plan index for the room if available this tick.
+function _getPlanIndexCached(roomName, plan) {
+  if (!roomName) return {};
+  var cache = global.__PLAN_INDEX_CACHE;
+  var entry = cache[roomName];
+  if (entry && entry.tick === Game.time) {
+    return entry.index;
+  }
+  var index = _planIndex(plan);
+  cache[roomName] = { tick: Game.time, index: index };
+  return index;
+}
+
 function _isRoadTask(item) {
   if (!item) return false;
   if (item.structureType && item.structureType === STRUCTURE_ROAD) return true;
@@ -111,7 +147,20 @@ function _priorityForSite(site, planIndex) {
   return 10;
 }
 
-function _getEnergySource(creep, homeRoom) {
+// Cache hub lookups for the room each tick to avoid recomputation while idle.
+function _getCachedHub(homeRoom) {
+  if (!homeRoom) return null;
+  var roomName = homeRoom.name;
+  var entry = global.__BUILDER_HUB_CACHE[roomName];
+  if (entry && entry.tick === Game.time) {
+    return entry.hub;
+  }
+  var hub = RoadPlanner.computeHub(homeRoom);
+  global.__BUILDER_HUB_CACHE[roomName] = { tick: Game.time, hub: hub };
+  return hub;
+}
+
+function _getEnergySource(creep, homeRoom, forceRefresh) {
   // Resolve home room safely
   if (!homeRoom) {
     var homeName = _getHomeName(creep);
@@ -121,79 +170,132 @@ function _getEnergySource(creep, homeRoom) {
   // If no visible room, bail (can't scan drops/ruins without vision)
   if (!homeRoom) return null;
 
+  var roomName = homeRoom.name;
+  var roomCache = global.__BUILDER_ENERGY_CACHE;
+  var entry = roomCache[roomName];
+  var needsRefresh = forceRefresh || !entry || (Game.time - entry.tick >= 3);
+
+  // Refresh the cached energy targets if stale or forced.
+  if (needsRefresh) {
+    entry = {
+      tick: Game.time,
+      drops: homeRoom.find(FIND_DROPPED_RESOURCES, {
+        filter: function (r) {
+          return r.resourceType === RESOURCE_ENERGY;
+        }
+      }),
+      tombs: homeRoom.find(FIND_TOMBSTONES),
+      ruins: homeRoom.find(FIND_RUINS),
+      conts: homeRoom.find(FIND_STRUCTURES, {
+        filter: function (s) {
+          return s.structureType === STRUCTURE_CONTAINER || s.structureType === STRUCTURE_LINK;
+        }
+      }),
+      storage: homeRoom.storage || null,
+      terminal: homeRoom.terminal || null,
+      spawns: homeRoom.find(FIND_MY_SPAWNS)
+    };
+    roomCache[roomName] = entry;
+  }
+
   // 1️⃣ Dropped energy first (closest first)
-  var dropped = homeRoom.find(FIND_DROPPED_RESOURCES, {
-    filter: function (r) {
-      return r.resourceType === RESOURCE_ENERGY && r.amount >= 50;
+  var validDrops = [];
+  for (var i = 0; i < entry.drops.length; i++) {
+    var drop = entry.drops[i];
+    if (drop && drop.amount >= 50 && drop.resourceType === RESOURCE_ENERGY) {
+      validDrops.push(drop);
     }
-  });
-  if (dropped && dropped.length) {
-    var nearestDrop = creep.pos.findClosestByRange(dropped);
+  }
+  if (validDrops.length) {
+    var nearestDrop = creep.pos.findClosestByRange(validDrops);
     if (nearestDrop) return nearestDrop;
   }
 
   // 2️⃣ Tombstones with energy
-  var tombs = homeRoom.find(FIND_TOMBSTONES, {
-    filter: function (t) {
-      return t.store && (t.store[RESOURCE_ENERGY] | 0) > 0;
+  var validTombs = [];
+  for (var j = 0; j < entry.tombs.length; j++) {
+    var tomb = entry.tombs[j];
+    if (tomb && tomb.store && (tomb.store[RESOURCE_ENERGY] | 0) > 0) {
+      validTombs.push(tomb);
     }
-  });
-  if (tombs && tombs.length) {
-    var nearestTomb = creep.pos.findClosestByRange(tombs);
+  }
+  if (validTombs.length) {
+    var nearestTomb = creep.pos.findClosestByRange(validTombs);
     if (nearestTomb) return nearestTomb;
   }
 
   // 3️⃣ Ruins with energy
-  var ruins = homeRoom.find(FIND_RUINS, {
-    filter: function (r) {
-      return r.store && (r.store[RESOURCE_ENERGY] | 0) > 0;
+  var validRuins = [];
+  for (var k = 0; k < entry.ruins.length; k++) {
+    var ruin = entry.ruins[k];
+    if (ruin && ruin.store && (ruin.store[RESOURCE_ENERGY] | 0) > 0) {
+      validRuins.push(ruin);
     }
-  });
-  if (ruins && ruins.length) {
-    var nearestRuin = creep.pos.findClosestByRange(ruins);
+  }
+  if (validRuins.length) {
+    var nearestRuin = creep.pos.findClosestByRange(validRuins);
     if (nearestRuin) return nearestRuin;
   }
 
   // 4️⃣ Containers or links with energy
-  var conts = homeRoom.find(FIND_STRUCTURES, {
-    filter: function (s) {
-      return (s.structureType === STRUCTURE_CONTAINER || s.structureType === STRUCTURE_LINK) &&
-             s.store && (s.store[RESOURCE_ENERGY] | 0) > 0;
+  var validContainers = [];
+  for (var m = 0; m < entry.conts.length; m++) {
+    var cont = entry.conts[m];
+    if (!cont) continue;
+    var stored = 0;
+    if (cont.store) {
+      stored = cont.store[RESOURCE_ENERGY] | 0;
+    } else if (cont.energy) {
+      stored = cont.energy;
     }
-  });
-  if (conts && conts.length) {
-    var nearestCont = creep.pos.findClosestByRange(conts);
+    if (stored > 0) {
+      validContainers.push(cont);
+    }
+  }
+  if (validContainers.length) {
+    var nearestCont = creep.pos.findClosestByRange(validContainers);
     if (nearestCont) return nearestCont;
   }
 
   // 5️⃣ Storage, then terminal
-  if (homeRoom.storage && (homeRoom.storage.store[RESOURCE_ENERGY] | 0) > 0) {
-    return homeRoom.storage;
+  if (entry.storage && entry.storage.store && (entry.storage.store[RESOURCE_ENERGY] | 0) > 0) {
+    return entry.storage;
   }
-  if (homeRoom.terminal && (homeRoom.terminal.store[RESOURCE_ENERGY] | 0) > 5000) {
-    return homeRoom.terminal;
+  if (entry.terminal && entry.terminal.store && (entry.terminal.store[RESOURCE_ENERGY] | 0) > 5000) {
+    return entry.terminal;
   }
 
   // 6️⃣ Fallback: spawn with energy
-  var spawns = homeRoom.find(FIND_MY_SPAWNS, {
-    filter: function (sp) {
-      return (sp.store && (sp.store[RESOURCE_ENERGY] | 0) > 0);
+  for (var n = 0; n < entry.spawns.length; n++) {
+    var spawn = entry.spawns[n];
+    if (spawn && spawn.store && (spawn.store[RESOURCE_ENERGY] | 0) > 0) {
+      return spawn;
     }
-  });
-  if (spawns && spawns.length) return spawns[0];
+  }
 
   return null;
 }
 
 
 
-function _withdraw(creep, target) {
+// Withdraw energy with a quick retry if the target is unexpectedly empty.
+function _withdraw(creep, target, retried) {
   if (!target) return false;
 
   // Handle dropped energy first
   if (target.resourceType === RESOURCE_ENERGY) {
     if (creep.pos.isNearTo(target)) {
-      return creep.pickup(target) === OK;
+      if (target.amount > 0) {
+        return creep.pickup(target) === OK;
+      }
+      if (!retried) {
+        var refreshRoom = Game.rooms[_getHomeName(creep)];
+        var newSrc = _getEnergySource(creep, refreshRoom, true);
+        if (newSrc && newSrc.id !== target.id) {
+          return _withdraw(creep, newSrc, true);
+        }
+      }
+      return false;
     } else {
       creep.travelTo(target, { range: 1, maxRooms: 1 });
       return false;
@@ -202,11 +304,21 @@ function _withdraw(creep, target) {
 
   // Handle structures and ruins/tombstones
   if (creep.pos.isNearTo(target)) {
-    if (target.store && target.store[RESOURCE_ENERGY] > 0) {
+    var available = 0;
+    if (target.store) {
+      available = target.store[RESOURCE_ENERGY] | 0;
+    } else if (target.energy) {
+      available = target.energy;
+    }
+    if (available > 0) {
       return creep.withdraw(target, RESOURCE_ENERGY) === OK;
     }
-    if (target.energy && target.energy > 0) {
-      return creep.withdraw(target, RESOURCE_ENERGY) === OK;
+    if (!retried) {
+      var refreshRoom2 = Game.rooms[_getHomeName(creep)];
+      var retrySource = _getEnergySource(creep, refreshRoom2, true);
+      if (retrySource && retrySource.id !== target.id) {
+        return _withdraw(creep, retrySource, true);
+      }
     }
   } else {
     creep.travelTo(target, { range: 1, maxRooms: 1 });
@@ -216,12 +328,62 @@ function _withdraw(creep, target) {
 }
 
 
+// Drop expired locks and orphan entries to keep the shared table clean.
+function _cleanupBuildLocks() {
+  var locks = _ensureLockMemory();
+  for (var id in locks) {
+    if (!BeeToolbox.hasOwn(locks, id)) continue;
+    var lock = locks[id];
+    if (!lock || lock.until < Game.time) {
+      delete locks[id];
+    }
+  }
+}
+
+// Remove a lock association for the creep and optionally from global memory.
+function _releaseLock(creep, siteId, keepGlobal) {
+  var id = siteId;
+  if (siteId && siteId.id) {
+    id = siteId.id;
+  }
+  if (id && !keepGlobal) {
+    var locks = _ensureLockMemory();
+    if (locks[id]) {
+      delete locks[id];
+    }
+  }
+  delete creep.memory.buildSiteId;
+  delete creep.memory.lockTime;
+  delete creep.memory.lastProgress;
+}
+
+// Refresh the lock timer so teammates know this creep is still active.
+function _refreshBuildLock(creep, site) {
+  if (!site) return;
+  var locks = _ensureLockMemory();
+  var lock = locks[site.id];
+  if (lock && lock.name === creep.name) {
+    lock.until = Game.time + 20;
+  }
+}
+
 function _getLockedSite(creep) {
   var id = creep.memory.buildSiteId;
   if (!id) return null;
+  var locks = Memory._buildLocks;
+  if (locks && locks[id]) {
+    var lock = locks[id];
+    if (lock.name && lock.name !== creep.name && lock.until >= Game.time) {
+      _releaseLock(creep, id, true);
+      return null;
+    }
+    if (lock.until < Game.time) {
+      delete locks[id];
+    }
+  }
   var site = Game.getObjectById(id);
   if (!site || !site.my) {
-    delete creep.memory.buildSiteId;
+    _releaseLock(creep, id, false);
     return null;
   }
   return site;
@@ -229,8 +391,11 @@ function _getLockedSite(creep) {
 
 function _lockSite(creep, site) {
   if (!site) return;
+  var locks = _ensureLockMemory();
+  locks[site.id] = { name: creep.name, until: Game.time + 20 };
   creep.memory.buildSiteId = site.id;
   creep.memory.lockTime = Game.time;
+  creep.memory.lastProgress = site.progress || 0;
 }
 
 function _shouldAbandon(creep, site) {
@@ -261,6 +426,8 @@ function _chooseSite(creep, planIndex) {
   for (var i = 0; i < sites.length; i++) {
     var site = sites[i];
     if (!site || !site.my) continue;
+    var lock = Memory._buildLocks && Memory._buildLocks[site.id];
+    if (lock && lock.name && lock.name !== creep.name && lock.until >= Game.time) continue;
     var key = site.structureType + ':' + site.pos.x + ':' + site.pos.y;
     var task = planIndex[key];
     var isRoad = _isRoadTask(task) || _isRoadTask(site);
@@ -269,6 +436,7 @@ function _chooseSite(creep, planIndex) {
     if (_wouldStrand(creep, site)) continue;
     var dist = creep.pos.getRangeTo(site.pos);
     var far = site.pos.roomName !== creep.pos.roomName || dist > 25;
+    var progress = site.progress || 0;
     if (lowTTL && far) {
       if (score > fallbackScore || (score === fallbackScore && dist < fallbackDist)) {
         fallback = site;
@@ -282,10 +450,16 @@ function _chooseSite(creep, planIndex) {
         bestRoad = site;
         bestRoadScore = score;
       } else if (score === bestRoadScore) {
-        var curRoadDist = bestRoad ? creep.pos.getRangeTo(bestRoad.pos) : 999;
-        if (dist < curRoadDist) {
+        var bestRoadProgress = bestRoad ? (bestRoad.progress || 0) : -1;
+        if (progress > bestRoadProgress) {
           bestRoad = site;
           bestRoadScore = score;
+        } else if (progress === bestRoadProgress) {
+          var curRoadDist = bestRoad ? creep.pos.getRangeTo(bestRoad.pos) : 999;
+          if (dist < curRoadDist) {
+            bestRoad = site;
+            bestRoadScore = score;
+          }
         }
       }
       continue;
@@ -294,10 +468,16 @@ function _chooseSite(creep, planIndex) {
       bestNonRoad = site;
       bestNonRoadScore = score;
     } else if (score === bestNonRoadScore) {
-      var curDist = bestNonRoad ? creep.pos.getRangeTo(bestNonRoad.pos) : 999;
-      if (dist < curDist) {
+      var bestProgress = bestNonRoad ? (bestNonRoad.progress || 0) : -1;
+      if (progress > bestProgress) {
         bestNonRoad = site;
         bestNonRoadScore = score;
+      } else if (progress === bestProgress) {
+        var curDist = bestNonRoad ? creep.pos.getRangeTo(bestNonRoad.pos) : 999;
+        if (dist < curDist) {
+          bestNonRoad = site;
+          bestNonRoadScore = score;
+        }
       }
     }
   }
@@ -311,8 +491,73 @@ function _chooseSite(creep, planIndex) {
 
 function _wouldStrand(creep, site) {
   if (!site || !creep.ticksToLive) return false;
+  if (site.pos.roomName !== creep.pos.roomName && creep.ticksToLive < 300) return true;
   var dist = creep.pos.getRangeTo(site.pos);
-  return creep.ticksToLive < (dist * 2 + TTL_STRAND_BUFFER);
+  var base = dist * 2 + TTL_STRAND_BUFFER;
+  var room = Game.rooms[site.pos.roomName];
+  if (room) {
+    var terrain = room.getTerrain();
+    var hasRough = false;
+    var dx = site.pos.x - creep.pos.x;
+    var dy = site.pos.y - creep.pos.y;
+    var steps = Math.max(Math.abs(dx), Math.abs(dy));
+    if (steps > 0) {
+      var sample = Math.min(steps, 10);
+      for (var i = 1; i <= sample; i++) {
+        var ix = creep.pos.x + Math.round(dx * i / sample);
+        var iy = creep.pos.y + Math.round(dy * i / sample);
+        if (ix < 0 || ix > 49 || iy < 0 || iy > 49) {
+          continue;
+        }
+        if (terrain.get(ix, iy) === TERRAIN_MASK_SWAMP) {
+          hasRough = true;
+          break;
+        }
+      }
+    }
+    if (!hasRough) {
+      var sx = site.pos.x;
+      var sy = site.pos.y;
+      for (var ox = -1; ox <= 1 && !hasRough; ox++) {
+        for (var oy = -1; oy <= 1; oy++) {
+          var tx = sx + ox;
+          var ty = sy + oy;
+          if (tx < 0 || tx > 49 || ty < 0 || ty > 49) {
+            continue;
+          }
+          if (terrain.get(tx, ty) === TERRAIN_MASK_SWAMP) {
+            hasRough = true;
+            break;
+          }
+        }
+      }
+    }
+    var lowRoads = false;
+    if (room.lookForAtArea) {
+      var top = Math.max(0, site.pos.y - 2);
+      var left = Math.max(0, site.pos.x - 2);
+      var bottom = Math.min(49, site.pos.y + 2);
+      var right = Math.min(49, site.pos.x + 2);
+      var area = room.lookForAtArea(LOOK_STRUCTURES, top, left, bottom, right, true);
+      var roadCount = 0;
+      for (var a = 0; a < area.length; a++) {
+        var struct = area[a].structure;
+        if (struct && struct.structureType === STRUCTURE_ROAD) {
+          roadCount++;
+          if (roadCount >= 3) {
+            break;
+          }
+        }
+      }
+      if (roadCount < 3) {
+        lowRoads = true;
+      }
+    }
+    if (hasRough || lowRoads) {
+      base = Math.ceil(base * 1.5);
+    }
+  }
+  return creep.ticksToLive < base;
 }
 
 function _build(creep, site) {
@@ -322,15 +567,22 @@ function _build(creep, site) {
   } else {
     creep.travelTo(site, { range: 3, maxRooms: 1, reusePath: 10 });
   }
+  _refreshBuildLock(creep, site);
+  var progress = site.progress || 0;
+  if (creep.memory.lastProgress === undefined || progress > creep.memory.lastProgress) {
+    creep.memory.lastProgress = progress;
+    creep.memory.lockTime = Game.time;
+  }
 }
 
 var TaskBuilder = {
   run: function (creep) {
     if (!creep || !creep.my) return;
+    _cleanupBuildLocks();
     var homeName = _getHomeName(creep);
     var homeRoom = Game.rooms[homeName];
     var plan = homeRoom ? RoomPlanner.plan(homeRoom) : null;
-    var planIndex = _planIndex(plan);
+    var planIndex = _getPlanIndexCached(homeName, plan);
 
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) < ENERGY_MIN_BUILD) {
       var src = _getEnergySource(creep, homeRoom);
@@ -341,9 +593,20 @@ var TaskBuilder = {
     }
 
     var current = _getLockedSite(creep);
-    if (current && _shouldAbandon(creep, current)) {
-      delete creep.memory.buildSiteId;
-      current = null;
+    if (current) {
+      if (_shouldAbandon(creep, current)) {
+        _releaseLock(creep, current, false);
+        current = null;
+      } else if (creep.memory.lockTime && Game.time - creep.memory.lockTime > 50) {
+        var stuckProgress = current.progress || 0;
+        if (creep.memory.lastProgress !== undefined && stuckProgress <= creep.memory.lastProgress) {
+          _releaseLock(creep, current, false);
+          current = null;
+        }
+      }
+      if (current && creep.memory.lastProgress === undefined) {
+        creep.memory.lastProgress = current.progress || 0;
+      }
     }
 
     if (!current) {
@@ -355,7 +618,7 @@ var TaskBuilder = {
 
     if (!current) {
       if (homeRoom) {
-        var hub = RoadPlanner.computeHub(homeRoom);
+        var hub = _getCachedHub(homeRoom);
         if (hub) creep.travelTo(hub, { range: 2, maxRooms: 1 });
       }
       return;
