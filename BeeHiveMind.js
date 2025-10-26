@@ -4,8 +4,7 @@
 var CoreLogger = require('core.logger');
 var spawnLogic = require('spawn.logic');
 var roleWorkerBee = require('role.Worker_Bee');
-var RoomPlanner = require('Planner.Room');
-var RoadPlanner = require('Planner.Road');
+var BuilderPlanner = require('Task.Builder.Planner');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
 var BeeToolbox = require('BeeToolbox');
@@ -454,8 +453,8 @@ function prepareTickCaches() {
   for (var idx = 0; idx < ownedRooms.length; idx++) {
     var ownedRoom = ownedRooms[idx];
     var baseRemotes = null;
-    if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-      baseRemotes = BeeToolbox.normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
+    if (BuilderPlanner && typeof BuilderPlanner.getActiveRemoteRooms === 'function') {
+      baseRemotes = BeeToolbox.normalizeRemoteRooms(BuilderPlanner.getActiveRemoteRooms(ownedRoom));
     }
     remotesByHome[ownedRoom.name] = BeeToolbox.collectHomeRemotes(ownedRoom.name, baseRemotes);
   }
@@ -479,8 +478,8 @@ function needBuilder(room, cache) {
   var totalSites = roomSiteCounts[room.name] || 0;
 
   var remoteNames;
-  if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-    remoteNames = BeeToolbox.normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(room));
+  if (BuilderPlanner && typeof BuilderPlanner.getActiveRemoteRooms === 'function') {
+    remoteNames = BeeToolbox.normalizeRemoteRooms(BuilderPlanner.getActiveRemoteRooms(room));
   } else {
     remoteNames = cache.remotesByHome[room.name] || [];
   }
@@ -984,11 +983,11 @@ var BeeHiveMind = {
 
   manageRoom: function (room, cache) {
     if (!room) return;
-    if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
-      RoomPlanner.ensureSites(room, cache);
+    if (BuilderPlanner && typeof BuilderPlanner.ensureSites === 'function') {
+      BuilderPlanner.ensureSites(room, cache);
     }
-    if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
-      RoadPlanner.ensureRemoteRoads(room, cache);
+    if (BuilderPlanner && typeof BuilderPlanner.ensureRemoteRoads === 'function') {
+      BuilderPlanner.ensureRemoteRoads(room, cache);
     }
   },
 

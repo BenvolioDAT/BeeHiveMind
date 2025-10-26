@@ -1,7 +1,6 @@
 
 var BeeToolbox = require('BeeToolbox');
-var RoomPlanner = require('Planner.Room');
-var RoadPlanner = require('Planner.Road');
+var BuilderPlanner = require('Task.Builder.Planner');
 try { require('Traveler'); } catch (e) {}
 
 var ENERGY_MIN_BUILD = 10;
@@ -155,7 +154,7 @@ function _getCachedHub(homeRoom) {
   if (entry && entry.tick === Game.time) {
     return entry.hub;
   }
-  var hub = RoadPlanner.computeHub(homeRoom);
+  var hub = BuilderPlanner.computeHub(homeRoom);
   global.__BUILDER_HUB_CACHE[roomName] = { tick: Game.time, hub: hub };
   return hub;
 }
@@ -581,7 +580,7 @@ var TaskBuilder = {
     _cleanupBuildLocks();
     var homeName = _getHomeName(creep);
     var homeRoom = Game.rooms[homeName];
-    var plan = homeRoom ? RoomPlanner.plan(homeRoom) : null;
+    var plan = homeRoom ? BuilderPlanner.plan(homeRoom) : null;
     var planIndex = _getPlanIndexCached(homeName, plan);
 
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) < ENERGY_MIN_BUILD) {
