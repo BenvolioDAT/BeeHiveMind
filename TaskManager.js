@@ -26,7 +26,70 @@ var TaskCombatMelee = require('./Task.CombatMelee');
 var TaskDismantler = require('./Task.Dismantler');
 var TaskTrucker = require('Task.Trucker');
 var TaskClaimer = require('Task.Claimer');
-var BeeToolbox = require('BeeToolbox');
+
+function tallyCreeps(options) {
+  var opts = options || {};
+  var includeMemory = opts.includeMemory === true;
+  var field = typeof opts.field === 'string' ? opts.field : null;
+  var filter = typeof opts.filter === 'function' ? opts.filter : null;
+  var selector = typeof opts.valueSelector === 'function' ? opts.valueSelector : null;
+  var defaultValue = opts.defaultValue;
+  var counts = Object.create(null);
+  var total = 0;
+
+  function record(memory, creep, isLive) {
+    var mem = memory || {};
+    if (filter && !filter(mem, creep, isLive)) {
+      return;
+    }
+    var value = null;
+    if (selector) {
+      value = selector(mem, creep, isLive);
+    } else if (field && mem) {
+      value = mem[field];
+    }
+    if ((value === undefined || value === null) && defaultValue !== undefined) {
+      if (typeof defaultValue === 'function') {
+        value = defaultValue(mem, creep, isLive);
+      } else {
+        value = defaultValue;
+      }
+    }
+    if (value === undefined || value === null) {
+      return;
+    }
+    counts[value] = (counts[value] || 0) + 1;
+    total += 1;
+  }
+
+  for (var creepName in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) {
+      continue;
+    }
+    var creep = Game.creeps[creepName];
+    if (!creep) {
+      continue;
+    }
+    record(creep.memory, creep, true);
+  }
+
+  if (includeMemory && Memory && Memory.creeps) {
+    for (var memoryName in Memory.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Memory.creeps, memoryName)) {
+        continue;
+      }
+      if (Game.creeps[memoryName]) {
+        continue;
+      }
+      record(Memory.creeps[memoryName], null, false);
+    }
+  }
+
+  return {
+    counts: counts,
+    total: total
+  };
+}
 
 /**
  * Default per-role counts that prevent the colony from starving.
@@ -115,31 +178,14 @@ function deriveTaskCounts() {
   }
 
   colonyCache.tick = Game.time;
-  var countsByTask;
-  if (BeeToolbox && typeof BeeToolbox.tallyCreeps === 'function') {
-    var tally = BeeToolbox.tallyCreeps({
-      valueSelector: function (memory) {
-        if (!memory) return null;
-        return memory.task || null;
-      },
-      defaultValue: 'idle'
-    });
-    countsByTask = (tally && tally.counts) ? tally.counts : Object.create(null);
-  } else {
-    countsByTask = Object.create(null);
-    for (var creepName in Game.creeps) {
-      if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) {
-        continue;
-      }
-      var creep = Game.creeps[creepName];
-      if (!creep || !creep.memory) {
-        countsByTask.idle = (countsByTask.idle || 0) + 1;
-        continue;
-      }
-      var taskKey = creep.memory.task || 'idle';
-      countsByTask[taskKey] = (countsByTask[taskKey] || 0) + 1;
-    }
-  }
+  var tally = tallyCreeps({
+    valueSelector: function (memory) {
+      if (!memory) return null;
+      return memory.task || null;
+    },
+    defaultValue: 'idle'
+  });
+  var countsByTask = (tally && tally.counts) ? tally.counts : Object.create(null);
 
   colonyCache.activeCounts = countsByTask;
   return countsByTask;
