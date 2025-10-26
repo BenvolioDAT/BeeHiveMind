@@ -21,25 +21,6 @@ var HARVESTER_CFG = BeeToolbox && BeeToolbox.HARVESTER_CFG
   ? BeeToolbox.HARVESTER_CFG
   : { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
 
-function calculateBodyCost(body) {
-  if (!body || !body.length) return 0;
-  var cost = 0;
-  for (var i = 0; i < body.length; i++) {
-    var part = body[i];
-    cost += BODYPART_COST[part] || 0;
-  }
-  return cost;
-}
-
-function countBodyParts(body, partType) {
-  if (!body || !body.length) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    if (body[i] === partType) total++;
-  }
-  return total;
-}
-
 function repeatPart(target, part, count) {
   for (var i = 0; i < count; i++) {
     target.push(part);
@@ -306,11 +287,11 @@ function buildHarvesterTiers() {
   for (var i = 0; i < configs.length; i++) {
     var body = configs[i];
     if (!body || !body.length) continue;
-    var workCount = countBodyParts(body, WORK);
+    var workCount = BeeToolbox.countBodyParts(body, WORK);
     if (HARVESTER_CFG && typeof HARVESTER_CFG.MAX_WORK === 'number' && workCount > HARVESTER_CFG.MAX_WORK) {
       continue;
     }
-    tiers.push({ body: cloneBodyArray(body), cost: calculateBodyCost(body), work: workCount });
+    tiers.push({ body: cloneBodyArray(body), cost: BeeToolbox.costOfBody(body), work: workCount });
   }
   tiers.sort(function (a, b) { return a.cost - b.cost; });
   return tiers;

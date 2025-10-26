@@ -1238,19 +1238,6 @@ function getVisualLedgersForHome(homeName) {
   return bucket.slice();
 }
 
-function calculateBodyCost(body) {
-  if (!Array.isArray(body) || body.length === 0) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    total += BODYPART_COST[body[i]] || 0;
-  }
-  return total;
-}
-
-function cloneBody(body) {
-  return Array.isArray(body) ? body.slice() : [];
-}
-
 var remoteConfigCache = null;
 function getRemoteConfigTiers(taskKey) {
   if (!taskKey) return [];
@@ -1266,7 +1253,7 @@ function getRemoteConfigTiers(taskKey) {
           for (var j = 0; j < entry.body.length; j++) {
             var candidate = entry.body[j];
             if (!candidate || !candidate.length) continue;
-            tiers.push({ body: cloneBody(candidate), cost: calculateBodyCost(candidate) });
+            tiers.push({ body: BeeToolbox.cloneBody(candidate), cost: BeeToolbox.costOfBody(candidate) });
           }
         }
         remoteConfigCache[entry.task] = tiers;
@@ -1279,16 +1266,16 @@ function getRemoteConfigTiers(taskKey) {
 function generateRemoteBody(taskKey, energy) {
   if (!taskKey || !spawnLogic) return [];
   if (taskKey === 'remoteMiner' && typeof spawnLogic.Generate_RemoteMiner_Body === 'function') {
-    return cloneBody(spawnLogic.Generate_RemoteMiner_Body(energy));
+    return BeeToolbox.cloneBody(spawnLogic.Generate_RemoteMiner_Body(energy));
   }
   if (taskKey === 'remoteHauler' && typeof spawnLogic.Generate_RemoteHauler_Body === 'function') {
-    return cloneBody(spawnLogic.Generate_RemoteHauler_Body(energy));
+    return BeeToolbox.cloneBody(spawnLogic.Generate_RemoteHauler_Body(energy));
   }
   if (taskKey === 'reserver' && typeof spawnLogic.Generate_Reserver_Body === 'function') {
-    return cloneBody(spawnLogic.Generate_Reserver_Body(energy));
+    return BeeToolbox.cloneBody(spawnLogic.Generate_Reserver_Body(energy));
   }
   if (typeof spawnLogic.Generate_Body_From_Config === 'function') {
-    return cloneBody(spawnLogic.Generate_Body_From_Config(taskKey, energy));
+    return BeeToolbox.cloneBody(spawnLogic.Generate_Body_From_Config(taskKey, energy));
   }
   return [];
 }
@@ -1318,38 +1305,35 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity) {
   }
 
   var tiers = getRemoteConfigTiers(taskKey);
-  if (tiers.length) {
+  var tierInfo = BeeToolbox.evaluateBodyTiers(tiers, available, capacity);
+  if (tierInfo.minCost) {
+    result.minCost = tierInfo.minCost;
+  } else if (tiers.length) {
     result.minCost = tiers[tiers.length - 1].cost || 0;
   }
 
   var idealBody = generateRemoteBody(taskKey, capacity);
-  var idealCost = calculateBodyCost(idealBody);
-  if ((!idealBody.length || idealCost > capacity) && tiers.length) {
-    for (var i = 0; i < tiers.length; i++) {
-      if (tiers[i].cost <= capacity) {
-        idealBody = cloneBody(tiers[i].body);
-        idealCost = tiers[i].cost;
-        break;
-      }
-    }
+  var idealCost = BeeToolbox.costOfBody(idealBody);
+  if ((!idealBody.length || idealCost > capacity) && tierInfo.capacityBody.length) {
+    idealBody = BeeToolbox.cloneBody(tierInfo.capacityBody);
+    idealCost = tierInfo.capacityCost;
   }
   if (!idealBody.length && tiers.length) {
-    idealBody = cloneBody(tiers[tiers.length - 1].body);
+    idealBody = BeeToolbox.cloneBody(tiers[tiers.length - 1].body);
     idealCost = tiers[tiers.length - 1].cost;
   }
   result.idealBody = idealBody;
   result.idealCost = idealCost;
 
   var workingBody = generateRemoteBody(taskKey, available);
-  var workingCost = calculateBodyCost(workingBody);
+  var workingCost = BeeToolbox.costOfBody(workingBody);
+  if ((!workingBody.length || workingCost > available) && tierInfo.availableBody.length) {
+    workingBody = BeeToolbox.cloneBody(tierInfo.availableBody);
+    workingCost = tierInfo.availableCost;
+  }
   if ((!workingBody.length || workingCost > available) && tiers.length) {
-    for (var j = 0; j < tiers.length; j++) {
-      if (tiers[j].cost <= available) {
-        workingBody = cloneBody(tiers[j].body);
-        workingCost = tiers[j].cost;
-        break;
-      }
-    }
+    workingBody = BeeToolbox.cloneBody(tiers[tiers.length - 1].body);
+    workingCost = tiers[tiers.length - 1].cost;
   }
   result.body = workingBody;
   result.cost = workingCost;
@@ -1461,7 +1445,7 @@ function spawnFromPlan(spawn, plan) {
   var name = spawnLogic.Generate_Creep_Name('Luna');
   if (!name) return ERR_FULL;
   var body = plan.body.slice();
-  var cost = plan.bodyCost != null ? plan.bodyCost : calculateBodyCost(body);
+  var cost = plan.bodyCost != null ? plan.bodyCost : BeeToolbox.costOfBody(body);
   if (cost > available) {
     var fallback = evaluateRemoteBodyPlan(plan.remoteRole, available, capacity);
     if (fallback.body.length && fallback.cost > 0 && fallback.cost <= available) {

@@ -20,6 +20,8 @@ var TaskCombatMedic = require('Task.CombatMedic');
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
+var ECON_CFG = BeeToolbox && BeeToolbox.ECON_CFG ? BeeToolbox.ECON_CFG : null;
+
 var HARVESTER_CFG = BeeToolbox && BeeToolbox.HARVESTER_CFG
   ? BeeToolbox.HARVESTER_CFG
   : { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
@@ -55,16 +57,6 @@ var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE =
   : 1;
 
 var GLOBAL_CACHE = global.__BHM_CACHE || (global.__BHM_CACHE = { tick: -1 });
-
-function costOfBody(body) {
-  if (!body || !body.length) return 0;
-  var sum = 0;
-  var i;
-  for (i = 0; i < body.length; i++) {
-    sum += BODYPART_COST[body[i]] || 0;
-  }
-  return sum;
-}
 
 var ECONOMIC_ROLE_MAP = Object.freeze({
   baseharvest: true,
@@ -152,21 +144,14 @@ function deriveEconomyDecisionState(room, harvesterIntel, economyMap) {
     state.hasUpgrader = state.upgraderCount > 0;
   }
 
-  var storage = room.storage;
-  if (storage && storage.store) {
-    var capacity = 0;
-    var available = 0;
-    if (typeof storage.store.getCapacity === 'function') {
-      capacity = storage.store.getCapacity(RESOURCE_ENERGY) || 0;
-    } else if (storage.storeCapacity != null) {
-      capacity = storage.storeCapacity;
-    }
-    available = storage.store[RESOURCE_ENERGY] || 0;
-    state.storageCapacity = capacity;
-    state.storageEnergy = available;
-    if (capacity > 0 && available / capacity >= 0.7) {
-      state.storageHealthy = true;
-    }
+  var storageState = BeeToolbox.storageEnergyState(room);
+  state.storageCapacity = storageState.capacity;
+  state.storageEnergy = storageState.energy;
+  var healthyRatio = (ECON_CFG && typeof ECON_CFG.STORAGE_HEALTHY_RATIO === 'number')
+    ? ECON_CFG.STORAGE_HEALTHY_RATIO
+    : 0.7;
+  if (BeeToolbox.isStorageHealthy(room, healthyRatio)) {
+    state.storageHealthy = true;
   }
 
   state.allEssentialPresent = state.hasHarvester && state.hasCourier && state.hasQueen && state.hasBuilder && state.hasUpgrader;
@@ -227,11 +212,11 @@ function planHarvesterSpawn(room, spawnEnergy, spawnCapacity, intel) {
   var targetBody = (typeof spawnLogic.getBestHarvesterBody === 'function')
     ? spawnLogic.getBestHarvesterBody(room)
     : spawnLogic.Generate_BaseHarvest_Body(spawnCapacity);
-  var targetCost = costOfBody(targetBody);
+  var targetCost = BeeToolbox.costOfBody(targetBody);
   var fallbackBody = (typeof spawnLogic.Generate_BaseHarvest_Body === 'function')
     ? spawnLogic.Generate_BaseHarvest_Body(spawnEnergy)
     : [];
-  var fallbackCost = costOfBody(fallbackBody);
+  var fallbackCost = BeeToolbox.costOfBody(fallbackBody);
 
   var desired = intel && typeof intel.desiredCount === 'number' ? intel.desiredCount : 1;
   var coverage = intel && typeof intel.coverage === 'number' ? intel.coverage : 0;
@@ -368,7 +353,7 @@ function prepareTickCaches() {
             }
           }
           var birthBody = determineBirthBody(creepMemory, creep);
-          var birthCost = costOfBody(birthBody);
+        var birthCost = BeeToolbox.costOfBody(birthBody);
           if (birthCost > intelBucket.highestCost) {
             intelBucket.highestCost = birthCost;
           }
@@ -421,7 +406,7 @@ function prepareTickCaches() {
       if (!memIntel) continue;
       memIntel.hatching += 1;
       var memBirthBody = determineBirthBody(mem, null);
-      var memCost = costOfBody(memBirthBody);
+      var memCost = BeeToolbox.costOfBody(memBirthBody);
       if (memCost > memIntel.highestCost) {
         memIntel.highestCost = memCost;
       }
@@ -446,7 +431,7 @@ function prepareTickCaches() {
     } else {
       var roomMemory = (Memory.rooms && Memory.rooms[intelRoomName]) ? Memory.rooms[intelRoomName] : null;
       if (roomMemory) {
-        sourceCount = countSourcesInMemory(roomMemory);
+        sourceCount = BeeToolbox.countSourcesInMemory(roomMemory);
         if (!sourceCount && roomMemory.sources && roomMemory.sources.length) {
           sourceCount = roomMemory.sources.length;
         }
@@ -463,184 +448,22 @@ function prepareTickCaches() {
   cache.economyByRoom = economyByRoom;
   cache.harvesterIntelByRoom = harvesterIntelByRoom;
 
-  var roomSiteCounts = Object.create(null);
-  var totalSites = 0;
-  for (var siteId in Game.constructionSites) {
-    if (!BeeToolbox.hasOwn(Game.constructionSites, siteId)) continue;
-    var site = Game.constructionSites[siteId];
-    if (!site || !site.my) continue;
-    totalSites += 1;
-    var siteRoomName = site.pos && site.pos.roomName;
-    if (siteRoomName) {
-      roomSiteCounts[siteRoomName] = (roomSiteCounts[siteRoomName] || 0) + 1;
-    }
-  }
-  cache.roomSiteCounts = roomSiteCounts;
-  cache.totalSites = totalSites;
+  var siteCache = BeeToolbox.constructionSiteCache();
+  cache.roomSiteCounts = siteCache.counts || Object.create(null);
+  cache.totalSites = siteCache.list ? siteCache.list.length : 0;
 
   var remotesByHome = Object.create(null);
   for (var idx = 0; idx < ownedRooms.length; idx++) {
     var ownedRoom = ownedRooms[idx];
-    var remoteNames = [];
-    var remoteSeen = Object.create(null);
+    var baseRemotes = null;
     if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-      var activeRemotes = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
-      for (var ar = 0; ar < activeRemotes.length; ar++) {
-        addRemoteCandidate(remoteNames, remoteSeen, activeRemotes[ar]);
-      }
+      baseRemotes = BeeToolbox.normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(ownedRoom));
     }
-    gatherRemotesFromAssignments(ownedRoom.name, remoteNames, remoteSeen);
-    gatherRemotesFromLedger(ownedRoom.name, remoteNames, remoteSeen);
-    remotesByHome[ownedRoom.name] = remoteNames;
+    remotesByHome[ownedRoom.name] = BeeToolbox.collectHomeRemotes(ownedRoom.name, baseRemotes);
   }
   cache.remotesByHome = remotesByHome;
 
   return cache;
-}
-
-function normalizeRemoteRooms(input) {
-  var result = [];
-  var seen = Object.create(null);
-
-  function addName(value) {
-    if (!value) return;
-    var name = null;
-    if (typeof value === 'string') {
-      name = value;
-    } else if (typeof value.roomName === 'string') {
-      name = value.roomName;
-    } else if (typeof value.name === 'string') {
-      name = value.name;
-    }
-    if (!name) return;
-    if (seen[name]) return;
-    seen[name] = true;
-    result.push(name);
-  }
-
-  if (!input) {
-    return result;
-  }
-
-  if (typeof input === 'string') {
-    addName(input);
-    return result;
-  }
-
-  if (Array.isArray(input)) {
-    for (var i = 0; i < input.length; i++) {
-      addName(input[i]);
-    }
-    return result;
-  }
-
-  if (typeof input === 'object') {
-    if (typeof input.roomName === 'string' || typeof input.name === 'string') {
-      addName(input);
-      return result;
-    }
-    for (var key in input) {
-      if (!BeeToolbox.hasOwn(input, key)) continue;
-      addName(input[key]);
-      if (looksLikeRoomName(key)) {
-        addName(key);
-      }
-    }
-  }
-
-  return result;
-}
-
-function looksLikeRoomName(name) {
-  if (typeof name !== 'string') return false;
-  if (name.length < 4) return false;
-  var first = name.charAt(0);
-  if (first !== 'W' && first !== 'E') return false;
-  if (name.indexOf('N') === -1 && name.indexOf('S') === -1) return false;
-  return true;
-}
-
-function addRemoteCandidate(target, seen, remoteName) {
-  if (!remoteName || typeof remoteName !== 'string') return;
-  if (!looksLikeRoomName(remoteName)) return;
-  if (seen[remoteName]) return;
-  seen[remoteName] = true;
-  target.push(remoteName);
-}
-
-function processAssignmentRecord(homeName, key, record, target, seen) {
-  if (!homeName || !record) return;
-  if (typeof record === 'string') {
-    if (key === homeName && looksLikeRoomName(record)) {
-      addRemoteCandidate(target, seen, record);
-    } else if (looksLikeRoomName(key) && record === homeName) {
-      addRemoteCandidate(target, seen, key);
-    }
-    return;
-  }
-  if (Array.isArray(record)) {
-    for (var i = 0; i < record.length; i++) {
-      processAssignmentRecord(homeName, key, record[i], target, seen);
-    }
-    return;
-  }
-  if (typeof record !== 'object') return;
-
-  var remoteName = null;
-  if (typeof record.roomName === 'string') remoteName = record.roomName;
-  else if (typeof record.remote === 'string') remoteName = record.remote;
-  else if (typeof record.targetRoom === 'string') remoteName = record.targetRoom;
-  else if (typeof record.room === 'string') remoteName = record.room;
-  else if (looksLikeRoomName(key)) remoteName = key;
-
-  var assignedHome = null;
-  if (typeof record.home === 'string') assignedHome = record.home;
-  else if (typeof record.homeRoom === 'string') assignedHome = record.homeRoom;
-  else if (typeof record.spawn === 'string') assignedHome = record.spawn;
-  else if (typeof record.origin === 'string') assignedHome = record.origin;
-  else if (typeof record.base === 'string') assignedHome = record.base;
-  else if (!looksLikeRoomName(key)) assignedHome = key;
-
-  if (assignedHome === homeName && typeof remoteName === 'string') {
-    addRemoteCandidate(target, seen, remoteName);
-  }
-
-  for (var nestedKey in record) {
-    if (!BeeToolbox.hasOwn(record, nestedKey)) continue;
-    if (nestedKey === 'roomName' || nestedKey === 'remote' || nestedKey === 'targetRoom' || nestedKey === 'room' ||
-        nestedKey === 'home' || nestedKey === 'homeRoom' || nestedKey === 'spawn' || nestedKey === 'origin' || nestedKey === 'base') {
-      continue;
-    }
-    processAssignmentRecord(homeName, nestedKey, record[nestedKey], target, seen);
-  }
-}
-
-function gatherRemotesFromAssignments(homeName, target, seen) {
-  if (!homeName || !Memory.remoteAssignments) return;
-  var assignments = Memory.remoteAssignments;
-  for (var key in assignments) {
-    if (!BeeToolbox.hasOwn(assignments, key)) continue;
-    processAssignmentRecord(homeName, key, assignments[key], target, seen);
-  }
-}
-
-function gatherRemotesFromLedger(homeName, target, seen) {
-  if (!homeName || !Memory.remotes) return;
-  for (var remoteName in Memory.remotes) {
-    if (!BeeToolbox.hasOwn(Memory.remotes, remoteName)) continue;
-    if (remoteName === 'version') continue;
-    var entry = Memory.remotes[remoteName];
-    if (!entry || typeof entry !== 'object') continue;
-    var ledgerHome = null;
-    if (typeof entry.home === 'string') ledgerHome = entry.home;
-    else if (typeof entry.homeRoom === 'string') ledgerHome = entry.homeRoom;
-    else if (typeof entry.origin === 'string') ledgerHome = entry.origin;
-    if (ledgerHome !== homeName) continue;
-    var finalRemote = null;
-    if (typeof entry.roomName === 'string') finalRemote = entry.roomName;
-    else finalRemote = remoteName;
-    addRemoteCandidate(target, seen, finalRemote);
-  }
 }
 
 function defaultTaskForRole(role) {
@@ -659,7 +482,7 @@ function needBuilder(room, cache) {
 
   var remoteNames;
   if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function') {
-    remoteNames = normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(room));
+    remoteNames = BeeToolbox.normalizeRemoteRooms(RoadPlanner.getActiveRemoteRooms(room));
   } else {
     remoteNames = cache.remotesByHome[room.name] || [];
   }
@@ -699,30 +522,14 @@ function determineBuilderFailureReason(available, capacity) {
   if (!configs.length) {
     return 'BODY_INVALID';
   }
-  var minCost = null;
-  var capacityFits = false;
-  var availableFits = false;
-  for (var i = 0; i < configs.length; i++) {
-    var body = configs[i];
-    var cost = costOfBody(body);
-    if (!cost) continue;
-    if (minCost === null || cost < minCost) {
-      minCost = cost;
-    }
-    if (cost <= capacity) {
-      capacityFits = true;
-    }
-    if (cost <= available) {
-      availableFits = true;
-    }
-  }
-  if (minCost === null) {
+  var tierInfo = BeeToolbox.evaluateBodyTiers(configs, available, capacity);
+  if (!tierInfo.tiers || !tierInfo.tiers.length) {
     return 'BODY_INVALID';
   }
-  if (!capacityFits) {
+  if (!tierInfo.capacityBody.length || tierInfo.capacityCost > capacity) {
     return 'ENERGY_OVER_CAPACITY';
   }
-  if (!availableFits) {
+  if (!tierInfo.availableBody.length || tierInfo.availableCost > available) {
     return 'ENERGY_LOW_AVAILABLE';
   }
   return 'OTHER_FAIL';
@@ -1026,14 +833,14 @@ function trySpawnSquadMember(spawner, plan) {
   var body = (spawnLogic && typeof spawnLogic.getBodyForTask === 'function')
     ? spawnLogic.getBodyForTask(plan.role, available)
     : [];
-  var cost = costOfBody(body);
+  var cost = BeeToolbox.costOfBody(body);
 
   if (!body.length || cost <= 0) {
     // Check the best possible body at full capacity to decide if the plan is ever viable.
     var bestBody = (spawnLogic && typeof spawnLogic.getBodyForTask === 'function')
       ? spawnLogic.getBodyForTask(plan.role, capacity)
       : [];
-    var bestCost = costOfBody(bestBody);
+    var bestCost = BeeToolbox.costOfBody(bestBody);
     if (!bestBody.length || bestCost <= 0 || bestCost > capacity) {
       return 'skip';
     }
@@ -1050,7 +857,10 @@ function trySpawnSquadMember(spawner, plan) {
     return 'waiting';
   }
 
-  if (Game.cpu && Game.cpu.bucket != null && Game.cpu.bucket < 500) {
+  var cpuThreshold = (ECON_CFG && typeof ECON_CFG.CPU_MIN_BUCKET === 'number')
+    ? ECON_CFG.CPU_MIN_BUCKET
+    : 500;
+  if (!BeeToolbox.isCpuBucketHealthy(cpuThreshold)) {
     return 'waiting';
   }
 
@@ -1106,37 +916,12 @@ function logBuilderSpawnBlock(spawner, room, builderSites, reason, available, ca
   if (!roomName) {
     return;
   }
-  var lastLogTick = builderFailLog[roomName] || 0;
-  if ((Game.time - lastLogTick) < 50) {
+  if (!BeeToolbox.shouldLogThrottled(builderFailLog, roomName, 50)) {
     return;
   }
-  builderFailLog[roomName] = Game.time;
   var spawnName = (spawner && spawner.name) ? spawner.name : 'spawn';
   var message = '[' + spawnName + '] builder wanted: sites=' + builderSites + ' reason=' + reason + ' (avail/cap ' + available + '/' + capacity + ')';
   hiveLog.info(message);
-}
-
-/**
- * Count known sources for a remote room from memory intel.
- * @param {object} mem Memory blob for the remote room.
- * @returns {number} Number of sources recorded.
- * @sideeffects None.
- * @cpu O(keys) when enumerating stored sources.
- * @memory None.
- */
-function countSourcesInMemory(mem) {
-  if (!mem) return 0;
-  if (mem.sources && typeof mem.sources === 'object') {
-    var count = 0;
-    for (var key in mem.sources) {
-      if (BeeToolbox.hasOwn(mem.sources, key)) count += 1;
-    }
-    return count;
-  }
-  if (mem.intel && typeof mem.intel.sources === 'number') {
-    return mem.intel.sources | 0;
-  }
-  return 0;
 }
 
 function determineLunaQuota(room, cache) {
@@ -1207,7 +992,7 @@ function determineLunaQuota(room, cache) {
     }
 
     if (sourceCount === 0) {
-      sourceCount = countSourcesInMemory(mem);
+      sourceCount = BeeToolbox.countSourcesInMemory(mem);
     }
 
     if (sourceCount === 0 && Array.isArray(mem.sources)) {

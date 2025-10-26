@@ -59,14 +59,14 @@ function _gatherSitesOnce() {
   cache.tick = Game.time;
   cache.sitesByRoom = {};
   cache.siteArray = [];
-  for (var id in Game.constructionSites) {
-    if (!BeeToolbox.hasOwn(Game.constructionSites, id)) continue;
-    var site = Game.constructionSites[id];
-    if (!site || !site.my) continue;
-    var roomName = site.pos.roomName;
-    if (!cache.sitesByRoom[roomName]) cache.sitesByRoom[roomName] = [];
-    cache.sitesByRoom[roomName].push(site);
-    cache.siteArray.push(site);
+  var siteCache = BeeToolbox.constructionSiteCache();
+  var byRoom = siteCache.byRoom || {};
+  var list = siteCache.list || [];
+  cache.siteArray = list.slice();
+  for (var roomName in byRoom) {
+    if (!BeeToolbox.hasOwn(byRoom, roomName)) continue;
+    var roomSites = byRoom[roomName];
+    cache.sitesByRoom[roomName] = Array.isArray(roomSites) ? roomSites.slice() : [];
   }
   return cache;
 }

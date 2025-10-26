@@ -8,7 +8,7 @@ var CFG = {
 };
 
 function _logExtensionPlanning(room, info) {
-  if (!Memory || !Memory.__traceExtensions) return;
+  if (!BeeToolbox.isTraceEnabled('__traceExtensions')) return;
   if (!room || !info) return;
   var gates = info.gates || {};
   var text = 'EXT-PLAN ' + room.name;
@@ -514,7 +514,7 @@ function ensureSites(room) {
   if (!room || !room.controller || !room.controller.my) return;
   var plan = planRoom(room);
   if (!plan) {
-    if (Memory && Memory.__traceExtensions) {
+    if (BeeToolbox.isTraceEnabled('__traceExtensions')) {
       var currentLevel = room.controller.level || 1;
       var allowedIfAny = 0;
       if (typeof CONTROLLER_STRUCTURES === 'object' && CONTROLLER_STRUCTURES && CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION]) {
@@ -572,7 +572,7 @@ function ensureSites(room) {
   for (var i = 0; i < tasks.length && placed < CFG.MAX_SITES_PER_TICK; i++) {
     var task = tasks[i];
     var alreadyPresent = _hasStructureOrSite(state, task.type, task.pos);
-    if (task.type === STRUCTURE_EXTENSION && Memory && Memory.__traceExtensions) {
+    if (task.type === STRUCTURE_EXTENSION && BeeToolbox.isTraceEnabled('__traceExtensions')) {
       var gates = {
         hasPlan: true,
         hasAnchor: !!(plan && plan.anchor),
@@ -618,7 +618,7 @@ function ensureSites(room) {
         extSites++;
       }
     }
-    if (task.type === STRUCTURE_EXTENSION && Memory && Memory.__traceExtensions) {
+    if (task.type === STRUCTURE_EXTENSION && BeeToolbox.isTraceEnabled('__traceExtensions')) {
       var gatesAfter = {
         hasPlan: true,
         hasAnchor: !!(plan && plan.anchor),
@@ -640,7 +640,7 @@ function ensureSites(room) {
     }
   }
 
-  if (Memory && Memory.__traceExtensions) {
+if (BeeToolbox.isTraceEnabled('__traceExtensions')) {
     if (extensionTaskCount === 0 && extAllowed > 0) {
       _logExtensionPlanning(room, {
         rcl: currentRCL,
