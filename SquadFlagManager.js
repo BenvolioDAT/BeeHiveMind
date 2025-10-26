@@ -5,7 +5,82 @@
 
 'use strict';
 
-var BeeToolbox = require('BeeToolbox');
+var AllianceManager = require('AllianceManager');
+
+var _objectHasOwn = Object.prototype.hasOwnProperty;
+var _cachedUsername = null;
+
+function hasOwn(obj, key) {
+  return !!obj && _objectHasOwn.call(obj, key);
+}
+
+function isValidRoomName(name) {
+  if (typeof name !== 'string') return false;
+  return /^[WE]\d+[NS]\d+$/.test(name);
+}
+
+function getMyUsername() {
+  if (_cachedUsername) return _cachedUsername;
+  var name = null;
+  var k;
+  for (k in Game.spawns) {
+    if (!hasOwn(Game.spawns, k)) continue;
+    var spawn = Game.spawns[k];
+    if (spawn && spawn.owner && spawn.owner.username) {
+      name = spawn.owner.username;
+      break;
+    }
+  }
+  if (!name) {
+    for (k in Game.creeps) {
+      if (!hasOwn(Game.creeps, k)) continue;
+      var creep = Game.creeps[k];
+      if (creep && creep.owner && creep.owner.username) {
+        name = creep.owner.username;
+        break;
+      }
+    }
+  }
+  _cachedUsername = name || 'me';
+  return _cachedUsername;
+}
+
+function isAllyUsername(username) {
+  if (!username) return false;
+  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
+    return AllianceManager.isAlly(username);
+  }
+  return false;
+}
+
+function isEnemyUsername(username) {
+  if (!username) return false;
+  if (isAllyUsername(username)) return false;
+  var mine = getMyUsername();
+  if (mine && username === mine) return false;
+  return true;
+}
+
+function safeLinearDistance(a, b, allowInexact) {
+  if (!isValidRoomName(a) || !isValidRoomName(b)) return 9999;
+  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') return 9999;
+  return Game.map.getRoomLinearDistance(a, b, allowInexact);
+}
+
+function _roomHashMod(roomName, mod) {
+  if (mod <= 1) return 0;
+  var h = 0;
+  var i;
+  for (i = 0; i < roomName.length; i++) {
+    h = ((h * 31) + roomName.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h) % mod;
+}
+
+function passesModuloThrottle(roomName, tick, modulo, salt) {
+  if (!modulo || modulo <= 1) return true;
+  return ((tick + _roomHashMod(roomName, salt || 0)) % modulo) === 0;
+}
 
 var SquadFlagManager = (function () {
 
@@ -69,6 +144,7 @@ var SquadFlagManager = (function () {
   function _roomsWithNonScoutCreeps() {
     var set = {};
     for (var cname in Game.creeps) {
+      if (!hasOwn(Game.creeps, cname)) continue;
       var c = Game.creeps[cname];
       if (!c || !c.my || !c.memory) continue;
       var tag = (c.memory.task || c.memory.role || '').toString().toLowerCase();
@@ -78,33 +154,27 @@ var SquadFlagManager = (function () {
     // integrates scout attack intel into squad flag system
     if (Memory.attackTargets) {
       for (var tn in Memory.attackTargets) {
-        if (!Memory.attackTargets.hasOwnProperty(tn)) continue;
+        if (!hasOwn(Memory.attackTargets, tn)) continue;
         var target = Memory.attackTargets[tn];
         if (!target) continue;
         var roomName = target.roomName || tn;
-        if (!roomName) continue;
-        if (BeeToolbox && typeof BeeToolbox.isValidRoomName === 'function') {
-          if (!BeeToolbox.isValidRoomName(roomName)) continue;
-        }
-        if (target.owner && BeeToolbox && typeof BeeToolbox.isEnemyUsername === 'function') {
-          if (!BeeToolbox.isEnemyUsername(target.owner)) continue;
-        }
+        if (!isValidRoomName(roomName)) continue;
+        var ownerName = null;
+        if (typeof target.owner === 'string') ownerName = target.owner;
+        else if (target.owner && typeof target.owner.username === 'string') ownerName = target.owner.username;
+        if (ownerName && !isEnemyUsername(ownerName)) continue;
         set[roomName] = true;
       }
     }
     var out = [];
-    for (var rn in set) out.push(rn);
+    for (var rn in set) {
+      if (!hasOwn(set, rn)) continue;
+      out.push(rn);
+    }
     return out;
   }
 
   // Hash mod to spread scans
-  function _roomHashMod(roomName, mod) {
-    if (mod <= 1) return 0;
-    var h = 0, i;
-    for (i = 0; i < roomName.length; i++) h = ((h * 31) + roomName.charCodeAt(i)) | 0;
-    return Math.abs(h) % mod;
-  }
-
   // Compute threat score + a representative position (anchor)
   function _scoreRoom(room) {
     if (!room) return { score: 0, pos: null, details: null };
@@ -223,7 +293,7 @@ var SquadFlagManager = (function () {
       var room = Game.rooms[rn];
       if (!room) continue; // no vision; do not change any state
 
-      if ((tick + _roomHashMod(rn, 4)) % (CFG.scanModulo || 1)) continue; // stagger
+      if (!passesModuloThrottle(rn, tick, CFG.scanModulo || 1, 4)) continue; // stagger
 
       var info = _scoreRoom(room);
       var rec = mem.rooms[rn] || (mem.rooms[rn] = { lastSeen: 0, lastThreatAt: 0, lastPos: null, lastScore: 0, lastDetails: null });
@@ -283,13 +353,14 @@ var SquadFlagManager = (function () {
     var candidates = [];
     var now = tick;
     for (var rn in mem.rooms) {
-      if (!mem.rooms.hasOwnProperty(rn)) continue;
+      if (!hasOwn(mem.rooms, rn)) continue;
       var rec2 = mem.rooms[rn];
       if (!rec2 || typeof rec2.lastThreatAt !== 'number') continue;
       if ((now - rec2.lastThreatAt) <= CFG.assignRecentWindow) {
         // Avoid double-binding: if already bound by any flag, skip
         var already = false;
         for (var n2 in mem.bindings) {
+          if (!hasOwn(mem.bindings, n2)) continue;
           if (mem.bindings[n2] === rn) { already = true; break; }
         }
         if (!already) {
@@ -329,7 +400,7 @@ var SquadFlagManager = (function () {
     // 4) Cleanup: remove flags beyond managed list or unconfigured names
     // (Not strictly required if you only use these names.)
     for (var fName in Game.flags) {
-      if (!Game.flags.hasOwnProperty(fName)) continue;
+      if (!hasOwn(Game.flags, fName)) continue;
       if (CFG.names.indexOf(fName) === -1) continue; // not ours
       // If we somehow ended with a flag present without a binding, keep it only if we rebind it now.
       if (!mem.bindings[fName]) {
@@ -340,7 +411,7 @@ var SquadFlagManager = (function () {
 
     // Optional: prune ancient room records (keeps Memory tidy)
     for (var k in mem.rooms) {
-      if (!mem.rooms.hasOwnProperty(k)) continue;
+      if (!hasOwn(mem.rooms, k)) continue;
       if ((tick - (mem.rooms[k].lastSeen | 0)) > 20000) delete mem.rooms[k];
     }
   }
@@ -355,10 +426,10 @@ var SquadFlagManager = (function () {
   }
 
   function _positionFromRecord(rec, roomName) {
-    if (rec && rec.lastPos && BeeToolbox && BeeToolbox.isValidRoomName(rec.lastPos.roomName)) {
+    if (rec && rec.lastPos && isValidRoomName(rec.lastPos.roomName)) {
       return new RoomPosition(rec.lastPos.x, rec.lastPos.y, rec.lastPos.roomName);
     }
-    if (BeeToolbox && BeeToolbox.isValidRoomName(roomName)) {
+    if (isValidRoomName(roomName)) {
       return new RoomPosition(25, 25, roomName);
     }
     return null;
@@ -374,7 +445,7 @@ var SquadFlagManager = (function () {
     for (var i = 0; i < ownedRooms.length; i++) {
       var room = ownedRooms[i];
       if (!room || !room.controller || !room.controller.my) continue;
-      var dist = BeeToolbox.safeLinearDistance(room.name, targetRoom, true);
+      var dist = safeLinearDistance(room.name, targetRoom, true);
       if (dist < bestDist) {
         bestDist = dist;
         best = room.name;
