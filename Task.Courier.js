@@ -4,17 +4,12 @@
  * Task.Courier shuttles energy between harvest infrastructure and consumers.
  * The logic favors clarity over micro-optimizations and is written in ES5 syntax
  * (no const/let, arrow functions, or template strings) per project standards.
- * Movement relies on the inlined BeeToolbox.travelTo helper so that creeps
- * consistently use Traveler.js instead of raw moveTo calls.
+ * Movement relies on the local travelTo helper so that creeps consistently use
+ * Traveler.js instead of raw moveTo calls.
  */
 
 var Logger = require('core.logger');
-var Traveler = null;
-try {
-  Traveler = require('Traveler');
-} catch (error) {
-  Traveler = null;
-}
+var Traveler = require('Traveler');
 
 var DEFAULT_TRAVEL_REUSE = 15;
 var DEFAULT_TRAVEL_RANGE = 1;
@@ -285,8 +280,8 @@ function travelTo(creep, destination, options) {
   if (!travelOptions.roomCallback) {
     if (config.roomCallback) {
       travelOptions.roomCallback = config.roomCallback;
-    } else if (typeof global !== 'undefined' && global.BeeToolbox && global.BeeToolbox.roomCallback) {
-      travelOptions.roomCallback = global.BeeToolbox.roomCallback;
+    } else if (typeof global !== 'undefined' && typeof global.__beeRoomCallback === 'function') {
+      travelOptions.roomCallback = global.__beeRoomCallback;
     }
   }
   if (typeof creep.travelTo === 'function') {
