@@ -572,32 +572,27 @@ function chooseHomeRoom(targetRoom, roomsOwned, preferred) {
 }
 
 function gatherSquadCensus(squadId) {
-  var counts = Object.create(null);
-  var total = 0;
-  var name;
-
-  for (name in Game.creeps) {
-    if (!BeeToolbox.hasOwn(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.memory || creep.memory.squadId !== squadId) continue;
-    var role = creep.memory.squadRole || creep.memory.task || creep.memory.role;
-    if (!role) continue;
-    counts[role] = (counts[role] || 0) + 1;
-    total += 1;
+  var result = { counts: Object.create(null), total: 0 };
+  if (!squadId || !BeeToolbox || typeof BeeToolbox.tallyCreeps !== 'function') {
+    return result;
   }
-
-  for (name in Memory.creeps) {
-    if (!BeeToolbox.hasOwn(Memory.creeps, name)) continue;
-    if (Game.creeps[name]) continue;
-    var mem = Memory.creeps[name];
-    if (!mem || mem.squadId !== squadId) continue;
-    var mrole = mem.squadRole || mem.task || mem.role;
-    if (!mrole) continue;
-    counts[mrole] = (counts[mrole] || 0) + 1;
-    total += 1;
+  var tally = BeeToolbox.tallyCreeps({
+    includeMemory: true,
+    filter: function (memory) {
+      return memory && memory.squadId === squadId;
+    },
+    valueSelector: function (memory) {
+      if (!memory) return null;
+      return memory.squadRole || memory.task || memory.role || null;
+    }
+  });
+  if (tally && tally.counts) {
+    result.counts = tally.counts;
   }
-
-  return { counts: counts, total: total };
+  if (tally && typeof tally.total === 'number') {
+    result.total = tally.total;
+  }
+  return result;
 }
 
 function deriveSquadDesiredRoles(intel, bucket) {
@@ -934,93 +929,20 @@ function determineLunaQuota(room, cache) {
 
   var remotes = cache.remotesByHome[room.name] || [];
   if (remotes.length === 0) return 0;
-
-  var remoteSet = Object.create(null);
-  for (var i = 0; i < remotes.length; i++) {
-    remoteSet[remotes[i]] = true;
+  var summary = null;
+  if (BeeToolbox && typeof BeeToolbox.summarizeRemotes === 'function') {
+    summary = BeeToolbox.summarizeRemotes(remotes);
   }
-
-  var roomsMem = Memory.rooms || {};
-  var remoteLedgers = (Memory.remotes && typeof Memory.remotes === 'object') ? Memory.remotes : null;
-  var totalSources = 0;
-
-  for (i = 0; i < remotes.length; i++) {
-    var remoteName = remotes[i];
-    var mem = roomsMem[remoteName] || {};
-
-    var ledger = remoteLedgers && remoteLedgers[remoteName];
-    var status = ledger && ledger.status;
-    var blockedUntil = ledger && typeof ledger.blockedUntil === 'number' ? ledger.blockedUntil : 0;
-    var isBlocked = false;
-    if (status === 'BLOCKED') {
-      if (blockedUntil > Game.time) {
-        isBlocked = true;
-      } else if (blockedUntil && (Game.time - blockedUntil) > 1500) {
-        status = 'DEGRADED';
-      } else if (!blockedUntil) {
-        var auditAge = ledger && typeof ledger.lastAudit === 'number' ? (Game.time - ledger.lastAudit) : 0;
-        if (auditAge <= 1500) {
-          isBlocked = true;
-        }
-      }
-    }
-
-    var hostileFlag = !!mem.hostile;
-    var hostileTick = mem.hostileTick || mem.hostileSince || mem.hostileLastSeen || mem.lastHostile || mem.hostileSeen || 0;
-    if (hostileFlag && hostileTick && (Game.time - hostileTick) > 1500) {
-      hostileFlag = false;
-    }
-    if (hostileFlag && status !== 'BLOCKED') {
-      hostileFlag = false;
-    }
-
-    if (hostileFlag) continue;
-    if (isBlocked) continue;
-
-    if (mem._invaderLock && mem._invaderLock.locked) {
-      var lockTick = typeof mem._invaderLock.t === 'number' ? mem._invaderLock.t : null;
-      if (lockTick === null || (Game.time - lockTick) <= 1500) {
-        continue;
-      }
-    }
-
-    var sourceCount = 0;
-    var visibleRoom = Game.rooms[remoteName];
-    if (visibleRoom) {
-      var sources = visibleRoom.find(FIND_SOURCES);
-      sourceCount = Array.isArray(sources) ? sources.length : 0;
-    }
-
-    if (sourceCount === 0) {
-      sourceCount = BeeToolbox.countSourcesInMemory(mem);
-    }
-
-    if (sourceCount === 0 && Array.isArray(mem.sources)) {
-      sourceCount = mem.sources.length;
-    }
-
-    totalSources += sourceCount;
-  }
-
+  var totalSources = summary && typeof summary.totalSources === 'number'
+    ? summary.totalSources
+    : remotes.length;
   if (totalSources <= 0) {
     totalSources = remotes.length;
   }
-
-  var assignments = Memory.remoteAssignments || {};
-  var active = 0;
-  for (var assignKey in assignments) {
-    if (!BeeToolbox.hasOwn(assignments, assignKey)) continue;
-    var entry = assignments[assignKey];
-    if (!entry) continue;
-    var remoteRoomName = entry.roomName || entry.room;
-    if (!remoteRoomName || !remoteSet[remoteRoomName]) continue;
-    var count = entry.count | 0;
-    if (!count && entry.owner) count = 1;
-    if (count > 0) active += count;
-  }
-
-  var desired = Math.max(totalSources * DEFAULT_LUNA_PER_SOURCE, active);
-  return desired;
+  var active = summary && typeof summary.activeAssignments === 'number'
+    ? summary.activeAssignments
+    : 0;
+  return Math.max(totalSources * DEFAULT_LUNA_PER_SOURCE, active);
 }
 
 var BeeHiveMind = {
