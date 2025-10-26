@@ -2,13 +2,156 @@
 
 // ---------- Logging ----------
 var Logger = require('core.logger');
-var BeeToolbox = require('BeeToolbox');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 
-var HARVESTER_CFG = BeeToolbox && BeeToolbox.HARVESTER_CFG
-  ? BeeToolbox.HARVESTER_CFG
-  : { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
+// ---------- Local Helpers (detached from BeeToolbox) ----------
+var HARVESTER_DEFAULTS = { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
+var GLOBAL_REF = (typeof global !== 'undefined') ? global : null;
+var HARVESTER_CFG = (GLOBAL_REF && GLOBAL_REF.__beeHarvesterConfig && typeof GLOBAL_REF.__beeHarvesterConfig === 'object')
+  ? GLOBAL_REF.__beeHarvesterConfig
+  : HARVESTER_DEFAULTS;
+
+function costOfBody(body) {
+  if (!Array.isArray(body) || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    total += BODYPART_COST[part] || 0;
+  }
+  return total;
+}
+
+function cloneBody(body) {
+  if (!Array.isArray(body)) return [];
+  return body.slice();
+}
+
+function normalizeBodyTier(entry) {
+  if (!entry) return null;
+  var body = null;
+  var cost = null;
+
+  if (Array.isArray(entry)) {
+    body = entry;
+  } else if (entry && Array.isArray(entry.body)) {
+    body = entry.body;
+    if (typeof entry.cost === 'number') cost = entry.cost;
+  } else if (entry && Array.isArray(entry.parts)) {
+    body = entry.parts;
+    if (typeof entry.cost === 'number') cost = entry.cost;
+  }
+
+  if (!body || !body.length) return null;
+
+  var normalized = { body: body.slice() };
+  normalized.cost = (cost != null) ? cost : costOfBody(body);
+  if (normalized.cost <= 0) return null;
+  return normalized;
+}
+
+function evaluateBodyTiers(tiers, available, capacity) {
+  var normalized = [];
+  if (Array.isArray(tiers)) {
+    for (var i = 0; i < tiers.length; i++) {
+      var norm = normalizeBodyTier(tiers[i]);
+      if (norm) normalized.push(norm);
+    }
+  }
+
+  var result = {
+    tiers: normalized,
+    availableBody: [],
+    availableCost: 0,
+    capacityBody: [],
+    capacityCost: 0,
+    idealBody: [],
+    idealCost: 0,
+    minCost: 0
+  };
+
+  if (!normalized.length) {
+    return result;
+  }
+
+  var first = normalized[0];
+  var last = normalized[normalized.length - 1];
+  result.idealBody = first.body.slice();
+  result.idealCost = first.cost;
+  result.minCost = last.cost;
+
+  var foundCapacity = false;
+  for (var j = 0; j < normalized.length; j++) {
+    var tier = normalized[j];
+    if (!foundCapacity && tier.cost <= capacity) {
+      result.capacityBody = tier.body.slice();
+      result.capacityCost = tier.cost;
+      foundCapacity = true;
+    }
+    if (!result.availableBody.length && tier.cost <= available) {
+      result.availableBody = tier.body.slice();
+      result.availableCost = tier.cost;
+    }
+  }
+
+  if (!foundCapacity) {
+    result.capacityBody = last.body.slice();
+    result.capacityCost = last.cost;
+  }
+
+  if (!result.availableBody.length && result.capacityBody.length && result.capacityCost <= available) {
+    result.availableBody = result.capacityBody.slice();
+    result.availableCost = result.capacityCost;
+  }
+
+  return result;
+}
+
+function selectAffordableBody(configs, available, capacity) {
+  var list = Array.isArray(configs) ? configs : [];
+  var targetCapacity = (capacity != null) ? capacity : available;
+  var info = evaluateBodyTiers(list, available || 0, targetCapacity || 0);
+  var body = [];
+  if (info && info.availableBody && info.availableBody.length) {
+    body = info.availableBody.slice();
+  }
+  var cost = 0;
+  if (info && typeof info.availableCost === 'number' && info.availableCost > 0) {
+    cost = info.availableCost;
+  } else if (body.length) {
+    cost = costOfBody(body);
+  }
+  return {
+    body: body,
+    cost: cost,
+    minCost: info ? info.minCost : 0,
+    info: info
+  };
+}
+
+function countBodyParts(body, part) {
+  if (!Array.isArray(body) || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    if (body[i] === part) total++;
+  }
+  return total;
+}
+
+function isValidRoomName(name) {
+  if (typeof name !== 'string') return false;
+  return /^[WE]\d+[NS]\d+$/.test(name);
+}
+
+function safeLinearDistance(a, b, allowInexact) {
+  if (!isValidRoomName(a) || !isValidRoomName(b)) {
+    return 9999;
+  }
+  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') {
+    return 9999;
+  }
+  return Game.map.getRoomLinearDistance(a, b, allowInexact);
+}
 
 function repeatPart(target, part, count) {
   for (var i = 0; i < count; i++) {
@@ -275,7 +418,7 @@ function resolveHarvesterConfigs() {
     if (!body || !body.length) {
       continue;
     }
-    var workCount = BeeToolbox.countBodyParts(body, WORK);
+    var workCount = countBodyParts(body, WORK);
     if (workCount > HARVESTER_CFG.MAX_WORK) {
       continue;
     }
@@ -292,7 +435,7 @@ function generateBodyFromConfig(taskKey, availableEnergy, capacityEnergy) {
     }
     return [];
   }
-  var selection = BeeToolbox.selectAffordableBody(list, availableEnergy, capacityEnergy != null ? capacityEnergy : availableEnergy);
+  var selection = selectAffordableBody(list, availableEnergy, capacityEnergy != null ? capacityEnergy : availableEnergy);
   if (selection.body.length) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       spawnLog.debug('Picked', taskKey, 'body:', '[' + selection.body + ']', 'cost', selection.cost, '(avail', availableEnergy + ')');
@@ -312,7 +455,7 @@ function generateBodyFromConfig(taskKey, availableEnergy, capacityEnergy) {
 
 function getHarvesterBodyForEnergy(energyAvailable) {
   var configs = resolveHarvesterConfigs();
-  var info = BeeToolbox.evaluateBodyTiers(configs, energyAvailable || 0, energyAvailable || 0);
+  var info = evaluateBodyTiers(configs, energyAvailable || 0, energyAvailable || 0);
   if (info && info.availableBody && info.availableBody.length) {
     return info.availableBody;
   }
@@ -327,7 +470,7 @@ function getBestHarvesterBody(roomOrCapacity) {
     capacity = roomOrCapacity;
   }
   var configs = resolveHarvesterConfigs();
-  var info = BeeToolbox.evaluateBodyTiers(configs, capacity || 0, capacity || 0);
+  var info = evaluateBodyTiers(configs, capacity || 0, capacity || 0);
   if (info && info.capacityBody && info.capacityBody.length) {
     return info.capacityBody;
   }
@@ -341,7 +484,7 @@ function selectBuilderBody(capacityEnergy, availableEnergy) {
   var configs = CONFIGS.builder || [];
   if (!configs.length) return [];
   var cap = (capacityEnergy != null) ? capacityEnergy : availableEnergy;
-  var info = BeeToolbox.evaluateBodyTiers(configs, availableEnergy || 0, cap || 0);
+  var info = evaluateBodyTiers(configs, availableEnergy || 0, cap || 0);
   if (info && info.availableBody && info.availableBody.length) {
     return info.availableBody;
   }
@@ -462,7 +605,7 @@ function Generate_Creep_Name(role, max) {
 function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory) {
   var mem = memory || {};
   var body = generateBodyFn(availableEnergy);
-  var bodyCost = BeeToolbox.costOfBody(body);
+  var bodyCost = costOfBody(body);
 
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('Attempt', roleName, 'body=[' + body + ']', 'cost=' + bodyCost, 'avail=' + availableEnergy);
@@ -506,7 +649,7 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   var overrideBody = (extraMemory && extraMemory._harvesterBodyOverride) ? extraMemory._harvesterBodyOverride : null;
 
   if (overrideBody && overrideBody.length) {
-    body = BeeToolbox.cloneBody(overrideBody);
+    body = cloneBody(overrideBody);
   } else if (normalizedLower === 'builder') {
     var capacity = 0;
     if (spawn && spawn.room) {
@@ -596,7 +739,7 @@ function Spawn_Squad(spawn, squadId) {
   if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
   if (!targetRoom) return false;
 
-  var dist = BeeToolbox.safeLinearDistance(spawn.room.name, targetRoom, true);
+  var dist = safeLinearDistance(spawn.room.name, targetRoom, true);
   if (dist > 3) return false; // too far to be considered "nearby"
 
   var roomInfo = (squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom]) || null;
