@@ -12,10 +12,14 @@
 
 'use strict';
 
-var BeeToolbox = require('BeeToolbox');
 var Logger = require('core.logger');
 var spawnLogic = require('spawn.logic');
-try { require('Traveler'); } catch (e) {}
+var Traveler = null;
+try {
+  Traveler = require('Traveler');
+} catch (e) {
+  Traveler = null;
+}
 
 var CONFIG = {
   maxHarvestersPerSource: 1,
@@ -33,6 +37,248 @@ var CONFIG = {
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var LUNA_LOG_LEVEL = LOG_LEVEL[String(CONFIG.logLevel).toUpperCase()] || LOG_LEVEL.BASIC;
 var lunaLog = Logger.createLogger('Luna', LUNA_LOG_LEVEL);
+
+var _cachedUsername = null;
+
+function isValidRoomName(name) {
+  if (typeof name !== 'string') return false;
+  return /^[WE]\d+[NS]\d+$/.test(name);
+}
+
+function safeLinearDistance(a, b, allowInexact) {
+  if (!isValidRoomName(a) || !isValidRoomName(b)) {
+    return 9999;
+  }
+  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') {
+    return 9999;
+  }
+  return Game.map.getRoomLinearDistance(a, b, allowInexact);
+}
+
+function energyPerTickFromCapacity(capacity) {
+  if (!capacity || capacity <= 0) return 0;
+  return capacity / ENERGY_REGEN_TIME;
+}
+
+function estimateRemoteSourceCapacity(isReserved, isKeeperRoom) {
+  if (isKeeperRoom) return 4000;
+  return isReserved ? 3000 : 1500;
+}
+
+function estimateRoundTripTicks(pathLength, opts) {
+  var length = pathLength || 0;
+  if (length <= 0) return 0;
+  var speed = (opts && opts.speedMultiplier) ? opts.speedMultiplier : 1;
+  var buffer = (opts && opts.buffer != null) ? opts.buffer : 4;
+  var travelTicks = Math.ceil((length * 2) / speed);
+  return travelTicks + buffer;
+}
+
+function estimateHaulerRequirement(pathLength, energyPerTick, haulerCapacity, tripTimeMax) {
+  var capacity = haulerCapacity || 0;
+  if (capacity <= 0) {
+    return { count: 0, roundTrip: 0, energyPerTrip: 0 };
+  }
+  var roundTrip = estimateRoundTripTicks(pathLength, { buffer: 6 });
+  if (tripTimeMax && roundTrip > tripTimeMax) {
+    roundTrip = tripTimeMax;
+  }
+  var energyPerTrip = energyPerTick * roundTrip;
+  var count = 0;
+  if (energyPerTrip > 0) {
+    count = Math.ceil(energyPerTrip / capacity);
+  }
+  if (count < 1 && energyPerTick > 0) count = 1;
+  return {
+    count: count,
+    roundTrip: roundTrip,
+    energyPerTrip: energyPerTrip
+  };
+}
+
+function estimateSpawnLeadTime(travelTicks, bodyLength) {
+  var spawnTicks = (bodyLength || 0) * CREEP_SPAWN_TIME;
+  if (spawnTicks < 0) spawnTicks = 0;
+  var travel = travelTicks || 0;
+  var buffer = 20;
+  return spawnTicks + travel + buffer;
+}
+
+function isHighwayRoom(roomName) {
+  if (!isValidRoomName(roomName)) return false;
+  var parsed = /([WE])(\d+)([NS])(\d+)/.exec(roomName);
+  if (!parsed) return false;
+  var x = parseInt(parsed[2], 10);
+  var y = parseInt(parsed[4], 10);
+  return (x % 10 === 0) || (y % 10 === 0);
+}
+
+function costOfBody(body) {
+  if (!Array.isArray(body) || body.length === 0) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    var partType = part && part.type ? part.type : part;
+    total += BODYPART_COST[partType] || 0;
+  }
+  return total;
+}
+
+function cloneBody(body) {
+  if (!Array.isArray(body)) return [];
+  return body.slice();
+}
+
+function _normalizeBodyTier(entry) {
+  if (!entry) return null;
+  var body;
+  var cost = null;
+  if (Array.isArray(entry)) {
+    body = entry;
+  } else if (Array.isArray(entry.body)) {
+    body = entry.body;
+    if (typeof entry.cost === 'number') cost = entry.cost;
+  } else if (Array.isArray(entry.parts)) {
+    body = entry.parts;
+    if (typeof entry.cost === 'number') cost = entry.cost;
+  }
+  if (!body || !body.length) return null;
+  var normalized = { body: body.slice() };
+  normalized.cost = (cost != null) ? cost : costOfBody(body);
+  if (normalized.cost <= 0) return null;
+  return normalized;
+}
+
+function evaluateBodyTiers(tiers, available, capacity) {
+  var normalized = [];
+  if (Array.isArray(tiers)) {
+    for (var i = 0; i < tiers.length; i++) {
+      var norm = _normalizeBodyTier(tiers[i]);
+      if (norm) normalized.push(norm);
+    }
+  }
+
+  var result = {
+    tiers: normalized,
+    availableBody: [],
+    availableCost: 0,
+    capacityBody: [],
+    capacityCost: 0,
+    idealBody: [],
+    idealCost: 0,
+    minCost: 0
+  };
+
+  if (!normalized.length) {
+    return result;
+  }
+
+  var first = normalized[0];
+  var last = normalized[normalized.length - 1];
+  result.idealBody = first.body.slice();
+  result.idealCost = first.cost;
+  result.minCost = last.cost;
+
+  var foundCapacity = false;
+  for (var j = 0; j < normalized.length; j++) {
+    var tier = normalized[j];
+    if (!foundCapacity && tier.cost <= capacity) {
+      result.capacityBody = tier.body.slice();
+      result.capacityCost = tier.cost;
+      foundCapacity = true;
+    }
+    if (!result.availableBody.length && tier.cost <= available) {
+      result.availableBody = tier.body.slice();
+      result.availableCost = tier.cost;
+    }
+  }
+
+  if (!foundCapacity) {
+    result.capacityBody = last.body.slice();
+    result.capacityCost = last.cost;
+  }
+
+  if (!result.availableBody.length && result.capacityBody.length && result.capacityCost <= available) {
+    result.availableBody = result.capacityBody.slice();
+    result.availableCost = result.capacityCost;
+  }
+
+  return result;
+}
+
+function bodyCarryCapacity(body) {
+  if (!body || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    var partType = part && part.type ? part.type : part;
+    if (partType === CARRY) total += CARRY_CAPACITY;
+  }
+  return total;
+}
+
+function getMyUsername() {
+  if (_cachedUsername) return _cachedUsername;
+  var name = null;
+  var k;
+  for (k in Game.spawns) {
+    if (!Game.spawns.hasOwnProperty(k)) continue;
+    var sp = Game.spawns[k];
+    if (sp && sp.owner && sp.owner.username) { name = sp.owner.username; break; }
+  }
+  if (!name) {
+    for (k in Game.creeps) {
+      if (!Game.creeps.hasOwnProperty(k)) continue;
+      var c = Game.creeps[k];
+      if (c && c.owner && c.owner.username) { name = c.owner.username; break; }
+    }
+  }
+  _cachedUsername = name || 'me';
+  return _cachedUsername;
+}
+
+function beeTravel(creep, target, range) {
+  if (!creep || !target) return ERR_INVALID_TARGET;
+
+  var destination = (target && target.pos) ? target.pos : target;
+  var opts = {};
+  if (typeof range === 'object') {
+    opts = range || {};
+  } else if (range != null) {
+    opts.range = range;
+  }
+
+  var options = {
+    range: (opts.range != null) ? opts.range : 1,
+    ignoreCreeps: (opts.ignoreCreeps != null) ? opts.ignoreCreeps : true,
+    useFindRoute: (opts.useFindRoute != null) ? opts.useFindRoute : true,
+    stuckValue: (opts.stuckValue != null) ? opts.stuckValue : 2,
+    repath: (opts.repath != null) ? opts.repath : 0.05,
+    returnData: {}
+  };
+
+  for (var k in opts) {
+    if (Object.prototype.hasOwnProperty.call(opts, k)) {
+      options[k] = opts[k];
+    }
+  }
+
+  try {
+    if (Traveler && typeof Traveler.travelTo === 'function') {
+      return Traveler.travelTo(creep, destination, options);
+    }
+  } catch (err) {}
+
+  if (typeof creep.travelTo === 'function') {
+    return creep.travelTo(destination, options);
+  }
+
+  if (destination && destination.x != null && destination.y != null) {
+    return creep.moveTo(destination, { reusePath: 20, maxOps: 2000 });
+  }
+
+  return ERR_INVALID_TARGET;
+}
 
 var REMOTE_LEDGER_VERSION = 2;
 var REMOTE_STATUS = { OK: 'OK', DEGRADED: 'DEGRADED', BLOCKED: 'BLOCKED' };
@@ -197,7 +443,7 @@ function estimateRouteLength(homeName, remoteName, entry) {
     }
   }
   if (best === null) {
-    var dist = BeeToolbox.safeLinearDistance(homeName, remoteName, true);
+    var dist = safeLinearDistance(homeName, remoteName, true);
     if (dist && dist < 9000) best = Math.max(10, dist * 45);
   }
   if (entry) {
@@ -210,18 +456,18 @@ function estimateRouteLength(homeName, remoteName, entry) {
 function energyPerTick(entry, remoteRoom, reservedTicks) {
   var keeperRoom = remoteRoom && !remoteRoom.controller;
   var isReserved = reservedTicks && reservedTicks > 0;
-  var capacity = BeeToolbox.estimateRemoteSourceCapacity(isReserved, keeperRoom);
+  var capacity = estimateRemoteSourceCapacity(isReserved, keeperRoom);
   if (entry && entry.id) {
     var source = Game.getObjectById(entry.id);
     if (source && source.energyCapacity) capacity = source.energyCapacity;
   }
-  return BeeToolbox.energyPerTickFromCapacity(capacity);
+  return energyPerTickFromCapacity(capacity);
 }
 
 function minerHandoffThreshold(entry, ledger) {
   var route = entry && entry.routeLength ? entry.routeLength : 0;
   var bodyLength = ledger && ledger.miners && ledger.miners.lastBodyLength ? ledger.miners.lastBodyLength : 8;
-  var lead = BeeToolbox.estimateSpawnLeadTime(route || 0, bodyLength || 0);
+  var lead = estimateSpawnLeadTime(route || 0, bodyLength || 0);
   return lead + CONFIG.minerHandoffBuffer;
 }
 
@@ -248,7 +494,7 @@ function detectThreat(remoteRoom, ledger) {
     return { status: REMOTE_STATUS.DEGRADED, reason: 'NO_VISION' };
   }
   var hostiles = remoteRoom.find(FIND_HOSTILE_CREEPS, {
-    filter: function (c) { return c && c.owner && c.owner.username !== BeeToolbox.getMyUsername(); }
+    filter: function (c) { return c && c.owner && c.owner.username !== getMyUsername(); }
   });
   if (hostiles && hostiles.length) {
     ledger.blockedUntil = Game.time + 50;
@@ -265,13 +511,13 @@ function detectThreat(remoteRoom, ledger) {
     ledger.blockedUntil = Game.time + 400;
     return { status: REMOTE_STATUS.BLOCKED, reason: 'OWNER:' + remoteRoom.controller.owner.username };
   }
-  if (remoteRoom.controller && remoteRoom.controller.reservation && remoteRoom.controller.reservation.username !== BeeToolbox.getMyUsername()) {
+  if (remoteRoom.controller && remoteRoom.controller.reservation && remoteRoom.controller.reservation.username !== getMyUsername()) {
     return { status: REMOTE_STATUS.DEGRADED, reason: 'RESERVED:' + remoteRoom.controller.reservation.username };
   }
   if (ledger.blockedUntil && ledger.blockedUntil > Game.time) {
     return { status: REMOTE_STATUS.BLOCKED, reason: 'COOLDOWN' };
   }
-  if (BeeToolbox.isHighwayRoom(remoteRoom.name)) {
+  if (isHighwayRoom(remoteRoom.name)) {
     return { status: REMOTE_STATUS.DEGRADED, reason: 'HIGHWAY' };
   }
   return { status: REMOTE_STATUS.OK, reason: null };
@@ -281,7 +527,7 @@ function computeHaulerPlan(totalEnergyPerTick, avgRoute, ledger) {
   var capacity = ledger && ledger.haulers && ledger.haulers.lastBodyCapacity
     ? ledger.haulers.lastBodyCapacity
     : 400;
-  var plan = BeeToolbox.estimateHaulerRequirement(avgRoute || 0, totalEnergyPerTick || 0, capacity, CONFIG.haulerTripTimeMax);
+  var plan = estimateHaulerRequirement(avgRoute || 0, totalEnergyPerTick || 0, capacity, CONFIG.haulerTripTimeMax);
   if (plan.count < 0) plan.count = 0;
   return plan;
 }
@@ -332,7 +578,7 @@ function planPhase(state) {
 
       if (remoteRoom && remoteRoom.controller) {
         ledger.reserver.targetId = remoteRoom.controller.id;
-        if (remoteRoom.controller.reservation && remoteRoom.controller.reservation.username === BeeToolbox.getMyUsername()) {
+        if (remoteRoom.controller.reservation && remoteRoom.controller.reservation.username === getMyUsername()) {
           summary.reserverTicks = remoteRoom.controller.reservation.ticksToEnd || 0;
           ledger.reserver.lastTicks = summary.reserverTicks;
         } else {
@@ -626,7 +872,7 @@ function assignPhase(state) {
         var ttl = sum.haulers.live[h].ticksToLive;
         if (ttl != null && (minTtl === null || ttl < minTtl)) minTtl = ttl;
       }
-      var threshold = BeeToolbox.estimateSpawnLeadTime(sum.routeLength || 0, sum.ledger.haulers.lastBodyLength || 10);
+      var threshold = estimateSpawnLeadTime(sum.routeLength || 0, sum.ledger.haulers.lastBodyLength || 10);
       if (minTtl != null && minTtl <= threshold) {
         sum.deficits.haulers += 1;
         if (sum.status !== REMOTE_STATUS.BLOCKED) {
@@ -670,14 +916,7 @@ function recordCreepNote(state, creep, summary, seat) {
 function travel(creep, target, range) {
   if (!creep || !target) return ERR_INVALID_TARGET;
   var opts = { range: range != null ? range : 1 };
-  if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function') {
-    return BeeToolbox.BeeTravel(creep, target, opts.range);
-  }
-  if (typeof creep.travelTo === 'function') {
-    return creep.travelTo(target, { range: opts.range, reusePath: 15 });
-  }
-  var pos = target.x != null ? target : target.pos;
-  return creep.moveTo(pos, { reusePath: 15, range: opts.range });
+  return beeTravel(creep, target, opts);
 }
 
 function logInvalidRemote(creep, remote, reason) {
@@ -1067,7 +1306,7 @@ function getRemoteConfigTiers(taskKey) {
           for (var j = 0; j < entry.body.length; j++) {
             var candidate = entry.body[j];
             if (!candidate || !candidate.length) continue;
-            tiers.push({ body: BeeToolbox.cloneBody(candidate), cost: BeeToolbox.costOfBody(candidate) });
+            tiers.push({ body: cloneBody(candidate), cost: costOfBody(candidate) });
           }
         }
         remoteConfigCache[entry.task] = tiers;
@@ -1080,16 +1319,16 @@ function getRemoteConfigTiers(taskKey) {
 function generateRemoteBody(taskKey, energy) {
   if (!taskKey || !spawnLogic) return [];
   if (taskKey === 'remoteMiner' && typeof spawnLogic.Generate_RemoteMiner_Body === 'function') {
-    return BeeToolbox.cloneBody(spawnLogic.Generate_RemoteMiner_Body(energy));
+    return cloneBody(spawnLogic.Generate_RemoteMiner_Body(energy));
   }
   if (taskKey === 'remoteHauler' && typeof spawnLogic.Generate_RemoteHauler_Body === 'function') {
-    return BeeToolbox.cloneBody(spawnLogic.Generate_RemoteHauler_Body(energy));
+    return cloneBody(spawnLogic.Generate_RemoteHauler_Body(energy));
   }
   if (taskKey === 'reserver' && typeof spawnLogic.Generate_Reserver_Body === 'function') {
-    return BeeToolbox.cloneBody(spawnLogic.Generate_Reserver_Body(energy));
+    return cloneBody(spawnLogic.Generate_Reserver_Body(energy));
   }
   if (typeof spawnLogic.Generate_Body_From_Config === 'function') {
-    return BeeToolbox.cloneBody(spawnLogic.Generate_Body_From_Config(taskKey, energy));
+    return cloneBody(spawnLogic.Generate_Body_From_Config(taskKey, energy));
   }
   return [];
 }
@@ -1119,7 +1358,7 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity) {
   }
 
   var tiers = getRemoteConfigTiers(taskKey);
-  var tierInfo = BeeToolbox.evaluateBodyTiers(tiers, available, capacity);
+  var tierInfo = evaluateBodyTiers(tiers, available, capacity);
   if (tierInfo.minCost) {
     result.minCost = tierInfo.minCost;
   } else if (tiers.length) {
@@ -1127,26 +1366,26 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity) {
   }
 
   var idealBody = generateRemoteBody(taskKey, capacity);
-  var idealCost = BeeToolbox.costOfBody(idealBody);
+  var idealCost = costOfBody(idealBody);
   if ((!idealBody.length || idealCost > capacity) && tierInfo.capacityBody.length) {
-    idealBody = BeeToolbox.cloneBody(tierInfo.capacityBody);
+    idealBody = cloneBody(tierInfo.capacityBody);
     idealCost = tierInfo.capacityCost;
   }
   if (!idealBody.length && tiers.length) {
-    idealBody = BeeToolbox.cloneBody(tiers[tiers.length - 1].body);
+    idealBody = cloneBody(tiers[tiers.length - 1].body);
     idealCost = tiers[tiers.length - 1].cost;
   }
   result.idealBody = idealBody;
   result.idealCost = idealCost;
 
   var workingBody = generateRemoteBody(taskKey, available);
-  var workingCost = BeeToolbox.costOfBody(workingBody);
+  var workingCost = costOfBody(workingBody);
   if ((!workingBody.length || workingCost > available) && tierInfo.availableBody.length) {
-    workingBody = BeeToolbox.cloneBody(tierInfo.availableBody);
+    workingBody = cloneBody(tierInfo.availableBody);
     workingCost = tierInfo.availableCost;
   }
   if ((!workingBody.length || workingCost > available) && tiers.length) {
-    workingBody = BeeToolbox.cloneBody(tiers[tiers.length - 1].body);
+    workingBody = cloneBody(tiers[tiers.length - 1].body);
     workingCost = tiers[tiers.length - 1].cost;
   }
   result.body = workingBody;
@@ -1329,7 +1568,7 @@ function spawnFromPlan(spawn, plan) {
   var name = spawnLogic.Generate_Creep_Name(prefix);
   if (!name) return ERR_FULL;
   var body = plan.body.slice();
-  var cost = plan.bodyCost != null ? plan.bodyCost : BeeToolbox.costOfBody(body);
+  var cost = plan.bodyCost != null ? plan.bodyCost : costOfBody(body);
   if (cost > available) {
     var fallback = evaluateRemoteBodyPlan(plan.remoteRole, available, capacity);
     if (fallback.body.length && fallback.cost > 0 && fallback.cost <= available) {
@@ -1360,7 +1599,7 @@ function spawnFromPlan(spawn, plan) {
   if (result === OK) {
     var ledger = getRemoteLedger(plan.remote);
     if (plan.remoteRole === ROLE_HAULER) {
-      ledger.haulers.lastBodyCapacity = BeeToolbox.bodyCarryCapacity(body);
+      ledger.haulers.lastBodyCapacity = bodyCarryCapacity(body);
       ledger.haulers.lastBodyLength = body.length;
     } else if (plan.remoteRole === ROLE_MINER) {
       ledger.miners.lastBodyLength = body.length;
