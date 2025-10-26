@@ -4,7 +4,6 @@ var CoreConfig = require('core.config');
 var Logger = require('core.logger');
 
 var BeeMaintenance = require('BeeMaintenance');
-var BeeVisuals = require('BeeVisuals');
 var BeeHiveMind = require('BeeHiveMind');
 var towerLogic = require('tower.logic');
 var roleLinkManager = require('role.LinkManager');
@@ -100,9 +99,7 @@ module.exports.loop = function () {
     towerLogic.run();
     roleLinkManager.run();
 
-    BeeVisuals.drawVisuals();
-    BeeVisuals.drawEnergyBar();
-    BeeVisuals.drawWorkerBeeTaskTable();
+    // Visuals removed: legacy visuals module deleted (see PR #XXXX).
 
     maintainRepairTargets();
     ensureFirstSpawnMemory();

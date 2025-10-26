@@ -8,8 +8,6 @@ var RoomPlanner = require('Planner.Room');
 var RoadPlanner = require('Planner.Road');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
-var TaskBaseHarvest = require('Task.BaseHarvest');
-var BeeVisuals = require('BeeVisuals');
 var BeeToolbox = require('BeeToolbox');
 var SquadFlagManager = require('SquadFlagManager');
 var TaskSquad = require('./Task.Squad');
@@ -982,8 +980,6 @@ var BeeHiveMind = {
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
       TradeEnergy.runAll();
     }
-
-    this.runVisuals(cache);
   },
 
   manageRoom: function (room, cache) {
@@ -1016,48 +1012,8 @@ var BeeHiveMind = {
     }
   },
 
-  runVisuals: function (cache) {
-    if (!BeeVisuals) return;
-    var rooms = (cache && cache.roomsOwned) || [];
-    var remoteUi = (TaskLuna && TaskLuna.LUNA_UI) ? TaskLuna.LUNA_UI : null;
-    var baseUi = (TaskBaseHarvest && TaskBaseHarvest.BASE_UI) ? TaskBaseHarvest.BASE_UI : null;
-    for (var i = 0; i < rooms.length; i++) {
-      var room = rooms[i];
-      if (!room || !room.name) continue;
-      if (typeof BeeVisuals.clearRoomHUD === 'function') {
-        BeeVisuals.clearRoomHUD(room.name);
-      }
-      if (remoteUi && remoteUi.enabled && typeof BeeVisuals.drawRemoteHUD === 'function' && TaskLuna && typeof TaskLuna.getVisualLedgersForHome === 'function') {
-        var ledgers = TaskLuna.getVisualLedgersForHome(room.name) || [];
-        for (var r = 0; r < ledgers.length; r++) {
-          var ledger = ledgers[r];
-          if (!ledger) continue;
-          var anchorX = (remoteUi.anchor && remoteUi.anchor.x != null) ? remoteUi.anchor.x : 1;
-          var anchorYBase = (remoteUi.anchor && remoteUi.anchor.y != null) ? remoteUi.anchor.y : 1;
-          var anchorY = anchorYBase + (r * 1.1);
-          var options = {
-            drawBudget: remoteUi.drawBudget,
-            showPaths: remoteUi.showPaths,
-            showLegend: remoteUi.showLegend,
-            palette: remoteUi.palette,
-            scale: remoteUi.scale,
-            anchor: { x: anchorX, y: anchorY },
-            ownerRoomName: room.name
-          };
-          BeeVisuals.drawRemoteHUD(ledger.roomName || ledger.remote || ledger.name, ledger, options);
-        }
-      }
-      if (baseUi && baseUi.enabled && typeof BeeVisuals.drawBaseHarvestHUD === 'function' && TaskBaseHarvest && typeof TaskBaseHarvest.getBaseSeatsForVisual === 'function') {
-        var seats = TaskBaseHarvest.getBaseSeatsForVisual(room.name) || [];
-        var baseOptions = {
-          drawBudget: baseUi.drawBudget,
-          showPaths: baseUi.showPaths,
-          palette: baseUi.palette,
-          scale: baseUi.scale
-        };
-        BeeVisuals.drawBaseHarvestHUD(room.name, seats, baseOptions);
-      }
-    }
+  runVisuals: function () {
+    // Visuals removed: legacy visuals module deleted (see PR #XXXX).
   },
 
   assignTask: function (creep) {
