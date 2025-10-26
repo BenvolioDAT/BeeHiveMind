@@ -4,13 +4,37 @@
 /**
  * Dependencies:
  *   - Traveler.js (attaches creep.travelTo)
- *   - (Optional) BeeToolbox.roomCallback for custom cost matrices
  */
-var BeeToolbox; try { BeeToolbox = require('BeeToolbox'); } catch (e) { BeeToolbox = null; }
+var AllianceManager = null;
+try {
+  AllianceManager = require('AllianceManager');
+} catch (allianceError) {
+  if (typeof global !== 'undefined' && global.AllianceManager) {
+    AllianceManager = global.AllianceManager;
+  }
+}
 try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
 
 var TaskSquad = (function () {
   var API = {};
+
+  var HAS = Object.prototype.hasOwnProperty;
+
+  function _hasOwn(obj, key) {
+    return !!obj && HAS.call(obj, key);
+  }
+
+  function _getRoomCallback() {
+    if (typeof global !== 'undefined') {
+      if (typeof global.SQUAD_ROOM_CALLBACK === 'function') {
+        return global.SQUAD_ROOM_CALLBACK;
+      }
+      if (typeof global.TRAVELER_ROOM_CALLBACK === 'function') {
+        return global.TRAVELER_ROOM_CALLBACK;
+      }
+    }
+    return undefined;
+  }
 
   // -----------------------------
   // Tunables
@@ -191,7 +215,7 @@ var TaskSquad = (function () {
   function _cleanupMembers(bucket, id) {
     if (!bucket || !bucket.members) return;
     for (var name in bucket.members) {
-      if (!BeeToolbox || !BeeToolbox.hasOwn(bucket.members, name)) continue;
+      if (!_hasOwn(bucket.members, name)) continue;
       var rec = bucket.members[name];
       if (!rec) {
         delete bucket.members[name];
@@ -292,10 +316,7 @@ var TaskSquad = (function () {
   // FIX: Reuse the alliance helper so we only ignore creeps and structures owned by trusted players.
   function _isAllyUsername(name) {
     if (!name) return false;
-    if (BeeToolbox && typeof BeeToolbox.isAllyUsername === 'function') {
-      return BeeToolbox.isAllyUsername(name);
-    }
-    if (typeof AllianceManager !== 'undefined' && AllianceManager && typeof AllianceManager.isAlly === 'function') {
+    if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
       return AllianceManager.isAlly(name);
     }
     if (typeof global !== 'undefined' && global.AllianceManager && typeof global.AllianceManager.isAlly === 'function') {
@@ -475,7 +496,7 @@ var TaskSquad = (function () {
       repath: TRAVELER_DEFAULTS.repath,
       maxOps: TRAVELER_DEFAULTS.maxOps,
       allowHostile: TRAVELER_DEFAULTS.allowHostile,
-      roomCallback: (BeeToolbox && BeeToolbox.roomCallback) ? BeeToolbox.roomCallback : undefined,
+      roomCallback: _getRoomCallback(),
       returnData: retData
     };
 
@@ -589,7 +610,7 @@ var TaskSquad = (function () {
     var totalRallied = 0;
 
     for (var name in bucket.members) {
-      if (!BeeToolbox || !BeeToolbox.hasOwn(bucket.members, name)) continue;
+      if (!_hasOwn(bucket.members, name)) continue;
       var rec = bucket.members[name];
       if (!rec) continue;
       var live = Game.creeps[name];
@@ -604,7 +625,7 @@ var TaskSquad = (function () {
     var totalNeeded = 0;
     var allMet = true;
     for (var key in desired) {
-      if (!BeeToolbox || !BeeToolbox.hasOwn(desired, key)) continue;
+      if (!_hasOwn(desired, key)) continue;
       var need = desired[key] | 0;
       if (need <= 0) continue;
       totalNeeded += need;
