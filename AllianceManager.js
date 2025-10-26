@@ -20,15 +20,15 @@ var FRIENDLY_USERNAMES = [
 // Cache for per-tick alliance log spam suppression.
 var allianceLogCache = global.__allianceLogCache || {
   tick: -1,
-  entries: {}
+  entries: Object.create(null)
 };
 if (global.__allianceLogCache !== allianceLogCache) {
   global.__allianceLogCache = allianceLogCache;
 }
 
 function normalizeUsername(username) {
-  if (typeof username !== 'string') return '';
-  return username.trim();
+  if (username === null || username === undefined) return '';
+  return String(username).trim();
 }
 
 function sameUser(a, b) {
@@ -44,7 +44,7 @@ function shouldLogOncePerTick(key) {
   var tick = Game.time | 0;
   if (allianceLogCache.tick !== tick) {
     allianceLogCache.tick = tick;
-    allianceLogCache.entries = {};
+    allianceLogCache.entries = Object.create(null);
   }
   if (allianceLogCache.entries[key]) return false;
   allianceLogCache.entries[key] = true;
