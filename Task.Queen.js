@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * Task.Queen distributes energy to spawns, extensions, and towers while keeping
- * the controller upgraded when surplus exists. The behaviour mirrors a classic
+ * Task.Queen distributes energy to spawns, extensions, and towers while
+ * maintaining a smooth harvest/delivery cycle. The behaviour mirrors a classic
  * "queen" role: gather energy when empty, then deliver it in priority order.
  * ES5 syntax is used throughout and movement leverages BeeToolbox.travelTo to
  * stay consistent with Traveler.js across the codebase.
@@ -10,13 +10,14 @@
 
 var Logger = require('core.logger');
 var BeeToolbox = require('BeeToolbox');
+var TaskCourier = require('Task.Courier');
 
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var queenLog = Logger.createLogger('Task.Queen', LOG_LEVEL.DEBUG);
 
 var MODE_COLLECT = 'collect';
 var MODE_FEED = 'feed';
-var CONTROLLER_UPGRADE_BUFFER = 100;
+var ENABLE_COURIER_FALLBACK = true;
 
 /**
  * ensureMode maintains the collect/feed state machine for the queen.
@@ -134,10 +135,11 @@ function pickFeedTarget(creep) {
 }
 
 /**
- * feedStructures deposits energy and upgrades the controller when nothing else needs energy.
+ * feedStructures deposits energy and, when no direct targets exist, optionally
+ * falls back to courier-style helper actions.
  * Input: creep (Creep).
  * Output: boolean indicating whether an action occurred.
- * Side-effects: transfers energy or upgrades controller (https://docs.screeps.com/api/#Creep.upgradeController).
+ * Side-effects: transfers energy or performs courier helper actions.
  */
 function feedStructures(creep) {
   var targetId = creep.memory && creep.memory.dropoffId;
@@ -161,15 +163,16 @@ function feedStructures(creep) {
     return true;
   }
 
-  if (creep.room && creep.room.controller && creep.room.controller.my) {
-    if (creep.pos.getRangeTo(creep.room.controller) > 3) {
-      BeeToolbox.travelTo(creep, creep.room.controller.pos, { range: 3, reusePath: 15 });
+  if (ENABLE_COURIER_FALLBACK && TaskCourier && typeof TaskCourier.runAsHelpers === 'function') {
+    var courierResult = TaskCourier.runAsHelpers(creep, { preferDeliverFirst: true });
+    if (courierResult) {
       return true;
     }
-    if ((creep.store[RESOURCE_ENERGY] | 0) > CONTROLLER_UPGRADE_BUFFER) {
-      creep.upgradeController(creep.room.controller);
-      return true;
-    }
+  }
+
+  if (creep.room && creep.room.storage) {
+    BeeToolbox.travelTo(creep, creep.room.storage, { range: 2, maxRooms: 1, reusePath: 20 });
+    return true;
   }
 
   return false;
@@ -179,7 +182,7 @@ function feedStructures(creep) {
  * run executes the queen behaviour each tick.
  * Input: creep (Creep).
  * Output: none.
- * Side-effects: movement, withdraw, transfer, and controller upgrade intents.
+ * Side-effects: movement, withdraw, transfer, and optional courier helper intents.
  */
 function runQueen(creep) {
   if (!creep) {

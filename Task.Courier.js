@@ -197,6 +197,53 @@ function runCourier(creep) {
   }
 }
 
+function runAsHelpers(creep, options) {
+  if (!creep) {
+    return false;
+  }
+
+  var preferDeliverFirst = true;
+  if (options && typeof options.preferDeliverFirst !== 'undefined') {
+    preferDeliverFirst = options.preferDeliverFirst ? true : false;
+  }
+
+  var hadMode = false;
+  var originalMode;
+  if (creep.memory) {
+    hadMode = Object.prototype.hasOwnProperty.call(creep.memory, 'mode');
+    originalMode = creep.memory.mode;
+  }
+
+  var actionResult = false;
+
+  if (preferDeliverFirst) {
+    actionResult = deliverEnergy(creep);
+    if (!actionResult) {
+      actionResult = gatherEnergy(creep);
+    }
+  } else {
+    actionResult = gatherEnergy(creep);
+    if (!actionResult) {
+      actionResult = deliverEnergy(creep);
+    }
+  }
+
+  if (creep.memory) {
+    if (hadMode) {
+      creep.memory.mode = originalMode;
+    } else if (Object.prototype.hasOwnProperty.call(creep.memory, 'mode')) {
+      delete creep.memory.mode;
+    }
+  }
+
+  return actionResult ? true : false;
+}
+
 module.exports = {
-  run: runCourier
+  run: runCourier,
+  runAsHelpers: runAsHelpers,
+  resolvePickupTarget: resolvePickupTarget,
+  resolveDropoffTarget: resolveDropoffTarget,
+  gatherEnergy: gatherEnergy,
+  deliverEnergy: deliverEnergy
 };
