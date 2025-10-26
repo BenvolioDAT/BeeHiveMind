@@ -596,6 +596,9 @@ function ensureSites(room) {
     }
     if (alreadyPresent) continue;
     if (task.type === STRUCTURE_ROAD) {
+      if (!BeeToolbox.shouldPlaceRoads(room)) {
+        continue;
+      }
       var stubPath = [];
       if (task.pos) {
         stubPath.push({ x: task.pos.x, y: task.pos.y, roomName: task.pos.roomName });
