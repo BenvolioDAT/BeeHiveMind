@@ -6,7 +6,15 @@
 
 'use strict';
 
-var BeeToolbox = require('BeeToolbox');
+var Traveler = require('Traveler');
+
+function travel(creep, target, options) {
+  var opts = options || {};
+  if (Traveler && typeof Traveler.travelTo === 'function') {
+    return Traveler.travelTo(creep, target, opts);
+  }
+  return creep.moveTo(target, opts);
+}
 
 var CONFIG = {
   defaultMode: 'reserve',
@@ -239,11 +247,7 @@ function resolveTargetRoom(creep) {
 function moveToRoom(creep, roomName) {
   if (creep.pos.roomName !== roomName) {
     var dest = new RoomPosition(25, 25, roomName);
-    if (BeeToolbox && BeeToolbox.BeeTravel) {
-      BeeToolbox.BeeTravel(creep, dest, { range: 20, reusePath: CONFIG.reusePath });
-    } else {
-      creep.moveTo(dest, { reusePath: CONFIG.reusePath, range: 20 });
-    }
+    travel(creep, dest, { range: 20, reusePath: CONFIG.reusePath });
     return false;
   }
   return true;
@@ -270,8 +274,7 @@ function signIfWanted(creep, controller) {
     }
     var res = creep.signController(controller, creep.memory.signText);
     if (res === ERR_NOT_IN_RANGE) {
-      if (BeeToolbox && BeeToolbox.BeeTravel) BeeToolbox.BeeTravel(creep, controller);
-      else creep.moveTo(controller);
+      travel(creep, controller);
     } else if (res === OK) {
       delete creep.memory.signText; // clear so next time it picks fresh
     }
@@ -308,13 +311,13 @@ function doClaim(creep, controller) {
   }
   if (controller.owner && !controller.my) {
     var r = creep.attackController(controller);
-    if (r === ERR_NOT_IN_RANGE) return BeeToolbox.BeeTravel(creep, controller);
+    if (r === ERR_NOT_IN_RANGE) return travel(creep, controller);
     creep.say('⚔ atkCtl');
     return;
   }
   var res = creep.claimController(controller);
   if (res === ERR_NOT_IN_RANGE) {
-    BeeToolbox.BeeTravel(creep, controller);
+    travel(creep, controller);
   } else if (res === OK) {
     creep.say('👑 mine');
     signIfWanted(creep, controller);
@@ -331,13 +334,13 @@ function doReserve(creep, controller) {
   if (!controller) { creep.say('❓no ctl'); return; }
   if (controller.reservation && controller.reservation.username !== creep.owner.username) {
     var r = creep.attackController(controller);
-    if (r === ERR_NOT_IN_RANGE) return BeeToolbox.BeeTravel(creep, controller);
+    if (r === ERR_NOT_IN_RANGE) return travel(creep, controller);
     creep.say('🪓 deres');
     return;
   }
   var res = creep.reserveController(controller);
   if (res === ERR_NOT_IN_RANGE) {
-    BeeToolbox.BeeTravel(creep, controller);
+    travel(creep, controller);
   } else if (res === OK) {
     creep.say('📌 +res');
   } else {
@@ -350,7 +353,7 @@ function doAttack(creep, controller) {
   if (!controller) { creep.say('❓no ctl'); return; }
   var r = creep.attackController(controller);
   if (r === ERR_NOT_IN_RANGE) {
-    BeeToolbox.BeeTravel(creep, controller);
+    travel(creep, controller);
   } else if (r === OK) {
     creep.say('🪓 atkCtl');
   } else {
