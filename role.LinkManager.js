@@ -7,6 +7,10 @@
 
 'use strict';
 
+var hasOwn = function (obj, prop) {
+  return Object.prototype.hasOwnProperty.call(obj, prop);
+};
+
 var roleLinkManager = {
   run: function () {
     var RESCAN_INTERVAL = 500;   // how often to re-identify links per room
@@ -16,7 +20,7 @@ var roleLinkManager = {
 
     // Iterate owned rooms
     for (var rn in Game.rooms) {
-      if (!Game.rooms.hasOwnProperty(rn)) continue;
+      if (!hasOwn(Game.rooms, rn)) continue;
       var room = Game.rooms[rn];
       if (!room.controller || !room.controller.my) continue;
 
