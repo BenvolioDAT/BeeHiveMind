@@ -7,6 +7,17 @@ var CFG = {
   MAX_SITES_PER_TICK: 5
 };
 
+var _roomCacheTrace = global.__roomPlannerCacheTrace || (global.__roomPlannerCacheTrace = {});
+
+function _traceRoomCache(roomName, info) {
+  if (!Memory || Memory.__tracePlannerCache !== true) return;
+  var key = roomName || 'unknown';
+  var last = _roomCacheTrace[key] || 0;
+  if (Game.time && (Game.time - last) < 100) return;
+  _roomCacheTrace[key] = Game.time || 0;
+  console.log('[PlannerCache] room=' + key + ' info=' + info);
+}
+
 function _logExtensionPlanning(room, info) {
   if (!BeeToolbox.isTraceEnabled('__traceExtensions')) return;
   if (!room || !info) return;
@@ -510,8 +521,9 @@ function _taskPriority(task) {
   return 10;
 }
 
-function ensureSites(room) {
+function ensureSites(room, cache) {
   if (!room || !room.controller || !room.controller.my) return;
+  if (!cache) cache = null;
   var plan = planRoom(room);
   if (!plan) {
     if (BeeToolbox.isTraceEnabled('__traceExtensions')) {
@@ -538,7 +550,15 @@ function ensureSites(room) {
   var state = _structureState(room);
   var currentRCL = room.controller.level || 1;
   var extExisting = (state.built[STRUCTURE_EXTENSION] || []).length;
+  var cachedExtSites = null;
+  if (cache && cache.roomSiteCounts && typeof cache.roomSiteCounts[room.name] === 'number') {
+    cachedExtSites = cache.roomSiteCounts[room.name] | 0;
+    _traceRoomCache(room.name, 'extSitesHint=' + cachedExtSites);
+  }
   var extSites = (state.sites[STRUCTURE_EXTENSION] || []).length;
+  if (cachedExtSites != null && cachedExtSites > extSites) {
+    extSites = cachedExtSites;
+  }
   var extAllowed = 0;
   if (typeof CONTROLLER_STRUCTURES === 'object' && CONTROLLER_STRUCTURES && CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION]) {
     extAllowed = CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION][currentRCL] || 0;

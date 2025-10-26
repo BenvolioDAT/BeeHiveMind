@@ -195,6 +195,22 @@ function addRemoteCandidate(target, seen, remoteName) {
   target.push(remoteName);
 }
 
+var _remoteAssignmentsTrace = global.__beeRemoteAssignmentsTrace || (global.__beeRemoteAssignmentsTrace = { logged: false });
+
+function _readRemoteAssignments(source) {
+  if (source && typeof source === 'object') {
+    return source;
+  }
+  if (!Memory || !Memory.remoteAssignments || typeof Memory.remoteAssignments !== 'object') {
+    if (Memory && Memory.__traceRemotes === true && !_remoteAssignmentsTrace.logged) {
+      console.log('[REMOTES] remoteAssignments missing or invalid - skipping optional integration');
+      _remoteAssignmentsTrace.logged = true;
+    }
+    return null;
+  }
+  return Memory.remoteAssignments;
+}
+
 function processAssignmentRecord(homeName, key, record, target, seen) {
   if (!homeName || !record) return;
   if (typeof record === 'string') {
@@ -243,8 +259,9 @@ function processAssignmentRecord(homeName, key, record, target, seen) {
 }
 
 function gatherRemotesFromAssignments(homeName, target, seen) {
-  if (!homeName || !Memory || !Memory.remoteAssignments) return;
-  var assignments = Memory.remoteAssignments;
+  if (!homeName) return;
+  var assignments = _readRemoteAssignments();
+  if (!assignments) return;
   for (var key in assignments) {
     if (!Object.prototype.hasOwnProperty.call(assignments, key)) continue;
     processAssignmentRecord(homeName, key, assignments[key], target, seen);
@@ -383,7 +400,13 @@ function summarizeRemotes(remoteNames, options) {
     totalSources = list.length;
   }
 
-  var assignments = (options && options.assignments) || (Memory && Memory.remoteAssignments) || {};
+  var assignments = null;
+  if (options && options.assignments && typeof options.assignments === 'object') {
+    assignments = options.assignments;
+  } else {
+    assignments = _readRemoteAssignments();
+  }
+  if (!assignments) assignments = {};
   var active = 0;
   if (assignments && typeof assignments === 'object') {
     for (var key in assignments) {
@@ -609,13 +632,18 @@ var ROAD_GATE_DEFAULTS = {
   disableGate: false
 };
 
+// ECON_CFG baseline (extended by Fixes 4 & 9):
+//   remoteRoads.minStorageEnergy defaults to 40000.
+//   queen.allowCourierFallback defaults to true to preserve legacy behaviour.
 var ECON_DEFAULTS = {
   STORAGE_ENERGY_MIN_BEFORE_REMOTES: 80000,
   MAX_ACTIVE_REMOTES: 2,
   ROAD_REPAIR_THRESHOLD: 0.45,
   STORAGE_HEALTHY_RATIO: 0.7,
   CPU_MIN_BUCKET: 500,
-  roads: ROAD_GATE_DEFAULTS
+  roads: ROAD_GATE_DEFAULTS,
+  remoteRoads: { minStorageEnergy: 40000 },
+  queen: { allowCourierFallback: true }
 };
 
 var HARVESTER_CFG = {
@@ -634,6 +662,12 @@ if (!global.__beeEconomyConfig) {
     roads: {
       minRCL: ROAD_GATE_DEFAULTS.minRCL,
       disableGate: ROAD_GATE_DEFAULTS.disableGate
+    },
+    remoteRoads: {
+      minStorageEnergy: ECON_DEFAULTS.remoteRoads.minStorageEnergy
+    },
+    queen: {
+      allowCourierFallback: ECON_DEFAULTS.queen.allowCourierFallback
     }
   };
 } else {
@@ -642,6 +676,20 @@ if (!global.__beeEconomyConfig) {
       minRCL: ROAD_GATE_DEFAULTS.minRCL,
       disableGate: ROAD_GATE_DEFAULTS.disableGate
     };
+  }
+  if (!global.__beeEconomyConfig.remoteRoads) {
+    global.__beeEconomyConfig.remoteRoads = {
+      minStorageEnergy: ECON_DEFAULTS.remoteRoads.minStorageEnergy
+    };
+  } else if (typeof global.__beeEconomyConfig.remoteRoads.minStorageEnergy !== 'number') {
+    global.__beeEconomyConfig.remoteRoads.minStorageEnergy = ECON_DEFAULTS.remoteRoads.minStorageEnergy;
+  }
+  if (!global.__beeEconomyConfig.queen) {
+    global.__beeEconomyConfig.queen = {
+      allowCourierFallback: ECON_DEFAULTS.queen.allowCourierFallback
+    };
+  } else if (typeof global.__beeEconomyConfig.queen.allowCourierFallback !== 'boolean') {
+    global.__beeEconomyConfig.queen.allowCourierFallback = ECON_DEFAULTS.queen.allowCourierFallback;
   }
   if (typeof global.__beeEconomyConfig.STORAGE_HEALTHY_RATIO !== 'number') {
     global.__beeEconomyConfig.STORAGE_HEALTHY_RATIO = ECON_DEFAULTS.STORAGE_HEALTHY_RATIO;

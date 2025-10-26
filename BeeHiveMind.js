@@ -495,6 +495,17 @@ function needBuilder(room, cache) {
   return totalSites;
 }
 
+function computeBuilderLimit(totalSites, rcl) {
+  var sites = totalSites | 0;
+  var level = rcl | 0;
+  if (sites <= 0) return 0;
+  if (level <= 2) return 1;
+  if (sites <= 5) return 1;
+  if (sites <= 20) return 2;
+  if (sites <= 50) return 3;
+  return 4;
+}
+
 function getBuilderBodyConfigs() {
   if (GLOBAL_CACHE.builderBodyConfigs) {
     return GLOBAL_CACHE.builderBodyConfigs;
@@ -1114,7 +1125,8 @@ var BeeHiveMind = {
       }
 
       var builderSites = needBuilder(room, cache);
-      var builderLimit = builderSites > 0 ? 1 : 0;
+      var controllerLevel = room.controller && room.controller.level ? room.controller.level : 1;
+      var builderLimit = computeBuilderLimit(builderSites, controllerLevel);
 
       var spawnResource = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
         ? spawnLogic.Calculate_Spawn_Resource(spawner)
