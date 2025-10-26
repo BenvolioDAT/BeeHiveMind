@@ -1,16 +1,5 @@
 "use strict";
 
-/*
- * Design Notes: Adaptive BaseHarvester Scaling
- * ------------------------------------------------------------
- * Base harvesters are now scaled using the room's energy capacity.
- * Rooms step through predefined body tiers (small → medium → max)
- * as extensions are added. Replacement creeps respect the target
- * tier, preferring upgrades when the energy economy allows it and
- * falling back to emergency spawns only when necessary to preserve
- * uptime.
- */
-
 // ---------- Logging ----------
 var Logger = require('core.logger');
 var BeeToolbox = require('BeeToolbox');
@@ -146,7 +135,9 @@ var CONFIGS = {
     // Emergency mini — drops a container + token road
     B(2, 2, 4),    // 500 energy, 8 parts, 100 carry
     // Starter body for RCL2+ rooms to guarantee at least one builder
-    B(1, 2, 2)     // 300 energy, 5 parts, 100 carry
+    B(1, 2, 3),
+    B(1, 1, 2),
+    B(1, 1, 1),     // 300 energy, 5 parts, 100 carry
   ],
   upgrader: [
     // Larger bodies listed first so higher RCLs still prefer beefier creeps
