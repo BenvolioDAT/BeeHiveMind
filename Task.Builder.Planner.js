@@ -1,15 +1,245 @@
 "use strict";
 
-var BeeToolbox = require('BeeToolbox');
 var CoreLogger = require('core.logger');
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var planLog = CoreLogger.createLogger('BuilderPlanner', LOG_LEVEL.BASIC);
 
+var ECON_DEFAULTS = {
+  STORAGE_ENERGY_MIN_BEFORE_REMOTES: 80000,
+  MAX_ACTIVE_REMOTES: 2,
+  ROAD_REPAIR_THRESHOLD: 0.45,
+  STORAGE_HEALTHY_RATIO: 0.7,
+  CPU_MIN_BUCKET: 500,
+  remoteRoads: { minStorageEnergy: 40000 },
+  roads: { minRCL: 3, disableGate: false }
+};
+
+function _ensureEconomyConfig() {
+  var cfg = null;
+  if (typeof global !== 'undefined' && global && typeof global.__beeEconomyConfig === 'object') {
+    cfg = global.__beeEconomyConfig;
+  }
+  if (!cfg) {
+    cfg = {
+      STORAGE_ENERGY_MIN_BEFORE_REMOTES: ECON_DEFAULTS.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
+      MAX_ACTIVE_REMOTES: ECON_DEFAULTS.MAX_ACTIVE_REMOTES,
+      ROAD_REPAIR_THRESHOLD: ECON_DEFAULTS.ROAD_REPAIR_THRESHOLD,
+      STORAGE_HEALTHY_RATIO: ECON_DEFAULTS.STORAGE_HEALTHY_RATIO,
+      CPU_MIN_BUCKET: ECON_DEFAULTS.CPU_MIN_BUCKET,
+      remoteRoads: { minStorageEnergy: ECON_DEFAULTS.remoteRoads.minStorageEnergy },
+      roads: {
+        minRCL: ECON_DEFAULTS.roads.minRCL,
+        disableGate: ECON_DEFAULTS.roads.disableGate
+      }
+    };
+    if (typeof global !== 'undefined' && global) {
+      global.__beeEconomyConfig = cfg;
+    }
+  } else {
+    if (typeof cfg.STORAGE_ENERGY_MIN_BEFORE_REMOTES !== 'number') {
+      cfg.STORAGE_ENERGY_MIN_BEFORE_REMOTES = ECON_DEFAULTS.STORAGE_ENERGY_MIN_BEFORE_REMOTES;
+    }
+    if (typeof cfg.MAX_ACTIVE_REMOTES !== 'number') {
+      cfg.MAX_ACTIVE_REMOTES = ECON_DEFAULTS.MAX_ACTIVE_REMOTES;
+    }
+    if (typeof cfg.ROAD_REPAIR_THRESHOLD !== 'number') {
+      cfg.ROAD_REPAIR_THRESHOLD = ECON_DEFAULTS.ROAD_REPAIR_THRESHOLD;
+    }
+    if (typeof cfg.STORAGE_HEALTHY_RATIO !== 'number') {
+      cfg.STORAGE_HEALTHY_RATIO = ECON_DEFAULTS.STORAGE_HEALTHY_RATIO;
+    }
+    if (typeof cfg.CPU_MIN_BUCKET !== 'number') {
+      cfg.CPU_MIN_BUCKET = ECON_DEFAULTS.CPU_MIN_BUCKET;
+    }
+    if (!cfg.remoteRoads || typeof cfg.remoteRoads !== 'object') {
+      cfg.remoteRoads = { minStorageEnergy: ECON_DEFAULTS.remoteRoads.minStorageEnergy };
+    } else if (typeof cfg.remoteRoads.minStorageEnergy !== 'number') {
+      cfg.remoteRoads.minStorageEnergy = ECON_DEFAULTS.remoteRoads.minStorageEnergy;
+    }
+    if (!cfg.roads || typeof cfg.roads !== 'object') {
+      cfg.roads = { minRCL: ECON_DEFAULTS.roads.minRCL, disableGate: ECON_DEFAULTS.roads.disableGate };
+    } else {
+      if (typeof cfg.roads.minRCL !== 'number') {
+        cfg.roads.minRCL = ECON_DEFAULTS.roads.minRCL;
+      }
+      if (cfg.roads.disableGate !== true && cfg.roads.disableGate !== false) {
+        cfg.roads.disableGate = ECON_DEFAULTS.roads.disableGate;
+      }
+    }
+  }
+  return cfg;
+}
+
+var ECON_CFG = _ensureEconomyConfig();
+
+function _refreshEconomyConfig() {
+  ECON_CFG = _ensureEconomyConfig();
+  return ECON_CFG;
+}
+
+function hasOwn(obj, key) {
+  return !!(obj && Object.prototype.hasOwnProperty.call(obj, key));
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object';
+}
+
+function looksLikeRoomName(name) {
+  if (typeof name !== 'string') return false;
+  if (name.length < 4) return false;
+  var first = name.charAt(0);
+  if (first !== 'W' && first !== 'E') return false;
+  if (name.indexOf('N') === -1 && name.indexOf('S') === -1) return false;
+  return true;
+}
+
+function isValidRoomName(name) {
+  if (typeof name !== 'string') return false;
+  return /^[WE]\d+[NS]\d+$/.test(name);
+}
+
+function safeLinearDistance(a, b, allowInexact) {
+  if (!isValidRoomName(a) || !isValidRoomName(b)) {
+    return 9999;
+  }
+  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') {
+    return 9999;
+  }
+  return Game.map.getRoomLinearDistance(a, b, allowInexact);
+}
+
+function normalizeRemoteRooms(input) {
+  var result = [];
+  var seen = Object.create(null);
+
+  function addName(value) {
+    if (!value) return;
+    var name = null;
+    if (typeof value === 'string') {
+      name = value;
+    } else if (typeof value.roomName === 'string') {
+      name = value.roomName;
+    } else if (typeof value.name === 'string') {
+      name = value.name;
+    }
+    if (!name) return;
+    if (seen[name]) return;
+    seen[name] = true;
+    result.push(name);
+  }
+
+  if (!input) {
+    return result;
+  }
+
+  if (typeof input === 'string') {
+    addName(input);
+    return result;
+  }
+
+  if (Array.isArray(input)) {
+    for (var i = 0; i < input.length; i++) {
+      addName(input[i]);
+    }
+    return result;
+  }
+
+  if (typeof input === 'object') {
+    if (typeof input.roomName === 'string' || typeof input.name === 'string') {
+      addName(input);
+      return result;
+    }
+    for (var key in input) {
+      if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
+      addName(input[key]);
+      if (looksLikeRoomName(key)) {
+        addName(key);
+      }
+    }
+  }
+
+  return result;
+}
+
+function shouldLogThrottled(store, key, interval) {
+  if (!store) return true;
+  var tick = Game.time | 0;
+  var last = store[key] || 0;
+  if (tick - last < interval) {
+    return false;
+  }
+  store[key] = tick;
+  return true;
+}
+
+function isTraceEnabled(memoryKey) {
+  if (!Memory || !memoryKey) return false;
+  if (Object.prototype.hasOwnProperty.call(Memory, memoryKey)) {
+    return !!Memory[memoryKey];
+  }
+  return false;
+}
+
+function _roadGateLog(room, rcl, minRCL) {
+  if (!Memory || !Memory.__traceRoads) return;
+  if (!room || !room.name) return;
+  if (!Memory.__roadGateLog) Memory.__roadGateLog = {};
+  var record = Memory.__roadGateLog;
+  if (record[room.name] === Game.time) return;
+  record[room.name] = Game.time;
+  console.log('[ROAD-GATE]', room.name, rcl, minRCL, 'blocked');
+}
+
+function shouldPlaceRoads(room) {
+  var econ = _refreshEconomyConfig();
+  var targetRoom = null;
+  if (room && room.name) {
+    targetRoom = room;
+  } else if (typeof room === 'string' && Game && Game.rooms) {
+    targetRoom = Game.rooms[room] || null;
+  }
+
+  var cfg = econ && econ.roads ? econ.roads : null;
+  var minRCL = (cfg && typeof cfg.minRCL === 'number') ? cfg.minRCL : 3;
+  var disableGate = !!(cfg && cfg.disableGate);
+
+  var econMem = null;
+  if (targetRoom && targetRoom.memory && targetRoom.memory.econ) {
+    econMem = targetRoom.memory.econ;
+  } else if (!targetRoom && typeof room === 'string' && Memory && Memory.rooms && Memory.rooms[room] && Memory.rooms[room].econ) {
+    econMem = Memory.rooms[room].econ;
+  }
+  if (econMem && econMem.roads) {
+    var override = econMem.roads;
+    if (override && typeof override.minRCL === 'number') {
+      minRCL = override.minRCL;
+    }
+    if (override && override.disableGate === true) {
+      disableGate = true;
+    } else if (override && override.disableGate === false) {
+      disableGate = false;
+    }
+  }
+
+  if (disableGate) return true;
+  if (!targetRoom || !targetRoom.controller) return false;
+
+  var rcl = targetRoom.controller.level || 0;
+  if (targetRoom.controller && targetRoom.controller.my) {
+    rcl = targetRoom.controller.level || 0;
+  }
+
+  if (rcl >= minRCL) return true;
+  _roadGateLog(targetRoom, rcl, minRCL);
+  return false;
+}
+
 var CONFIG = {
   road: {
-    MAX_ACTIVE_REMOTES: BeeToolbox.ECON_CFG.MAX_ACTIVE_REMOTES,
-    STORAGE_ENERGY_MIN_BEFORE_REMOTES: BeeToolbox.ECON_CFG.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
-    ROAD_REPAIR_THRESHOLD: BeeToolbox.ECON_CFG.ROAD_REPAIR_THRESHOLD,
+    MAX_ACTIVE_REMOTES: ECON_CFG.MAX_ACTIVE_REMOTES,
+    STORAGE_ENERGY_MIN_BEFORE_REMOTES: ECON_CFG.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
+    ROAD_REPAIR_THRESHOLD: ECON_CFG.ROAD_REPAIR_THRESHOLD,
     REMOTE_ROI_WEIGHTING: {
       pathLength: 1,
       swampTiles: 3,
@@ -33,7 +263,7 @@ var CONFIG = {
 var BuilderPlanner = { CONFIG: CONFIG };
 
 function _syncEconomyConfig() {
-  var cfg = BeeToolbox.ECON_CFG;
+  var cfg = _refreshEconomyConfig();
   var roadCfg = CONFIG.road;
   roadCfg.MAX_ACTIVE_REMOTES = cfg.MAX_ACTIVE_REMOTES;
   var remoteCfg = cfg.remoteRoads || {};
@@ -148,7 +378,7 @@ function _logRemoteThrottle(roomName, storage, threshold, active, max, reason) {
   if (!roomName) return;
   Memory._remoteThrottleLog = Memory._remoteThrottleLog || {};
   var key = roomName + '|' + (reason || 'generic');
-  if (!BeeToolbox.shouldLogThrottled(Memory._remoteThrottleLog, key, CONFIG.road.THROTTLE_LOG_INTERVAL)) return;
+  if (!shouldLogThrottled(Memory._remoteThrottleLog, key, CONFIG.road.THROTTLE_LOG_INTERVAL)) return;
   var text = '[Remotes] Skipped planning: storage=' + storage + '/threshold=' + threshold;
   text += ', active=' + active + '/max=' + max;
   text += ', reason=' + reason + ', room=' + roomName;
@@ -165,7 +395,7 @@ function _isReservedTile(room, x, y) {
   var key = x + ':' + y;
   if (mem.noBuild && mem.noBuild[key]) return true;
   if (mem.reservedTiles) {
-    if (BeeToolbox.isObject(mem.reservedTiles) && mem.reservedTiles[key]) return true;
+    if (isObject(mem.reservedTiles) && mem.reservedTiles[key]) return true;
     if (_isArray(mem.reservedTiles)) {
       for (var i = 0; i < mem.reservedTiles.length; i++) {
         var entry = mem.reservedTiles[i];
@@ -214,7 +444,7 @@ function getOrCreatePath(fromPos, toPos, opts) {
   } else if (fromPos.roomName && Game.rooms && Game.rooms[fromPos.roomName]) {
     gateRoom = Game.rooms[fromPos.roomName];
   }
-  if (gateRoom && !BeeToolbox.shouldPlaceRoads(gateRoom)) {
+  if (gateRoom && !shouldPlaceRoads(gateRoom)) {
     return null;
   }
   var roomName = fromPos.roomName;
@@ -312,7 +542,7 @@ function materializePath(path, opts) {
   } else if (opts && opts.room && opts.room.name && Game.rooms && Game.rooms[opts.room.name]) {
     anchorRoom = Game.rooms[opts.room.name];
   }
-  if (anchorRoom && !BeeToolbox.shouldPlaceRoads(anchorRoom)) {
+  if (anchorRoom && !shouldPlaceRoads(anchorRoom)) {
     return 0;
   }
   var placed = 0;
@@ -327,7 +557,7 @@ function materializePath(path, opts) {
     var gateRoom = anchorRoom || room;
     var allowPlacement = true;
     if (gateRoom) {
-      allowPlacement = BeeToolbox.shouldPlaceRoads(gateRoom);
+      allowPlacement = shouldPlaceRoads(gateRoom);
     }
     if (!allowPlacement) {
       continue;
@@ -381,7 +611,7 @@ function _scoreRemote(rec) {
 
 function ensureRemoteRoads(homeRoom, cache) {
   if (!homeRoom || !homeRoom.controller || !homeRoom.controller.my) return;
-  if (!BeeToolbox.shouldPlaceRoads(homeRoom)) return;
+  if (!shouldPlaceRoads(homeRoom)) return;
   _syncEconomyConfig();
 
   var mem = _roomMem(homeRoom.name);
@@ -390,7 +620,7 @@ function ensureRemoteRoads(homeRoom, cache) {
   if (homeRoom.controller.level < 4) return;
   var active = null;
   if (cache && cache.remotesByHome && cache.remotesByHome[homeRoom.name]) {
-    active = BeeToolbox.normalizeRemoteRooms(cache.remotesByHome[homeRoom.name]);
+    active = normalizeRemoteRooms(cache.remotesByHome[homeRoom.name]);
     _traceRoadCache(homeRoom.name, 'hintRemotes=' + active.length);
   } else {
     active = getActiveRemoteRooms(homeRoom);
@@ -419,10 +649,10 @@ function ensureRemoteRoads(homeRoom, cache) {
   var flags = Game.flags;
   var candidates = [];
   for (var name in flags) {
-    if (!BeeToolbox.hasOwn(flags, name)) continue;
+    if (!hasOwn(flags, name)) continue;
     var flag = flags[name];
     if (!flag || flag.color !== COLOR_YELLOW || flag.secondaryColor !== COLOR_YELLOW) continue;
-    if (BeeToolbox.safeLinearDistance(homeRoom.name, flag.pos.roomName) > CONFIG.road.MAX_ROOMS) continue;
+    if (safeLinearDistance(homeRoom.name, flag.pos.roomName) > CONFIG.road.MAX_ROOMS) continue;
 
     var key = homeRoom.name + ':remote:' + flag.pos.roomName + ':' + flag.pos.x + ',' + flag.pos.y;
     var cached = mem.paths[key];
@@ -560,7 +790,7 @@ function getActiveRemoteRooms(homeRoom) {
   }
   var list = [];
   for (var rn in rooms) {
-    if (BeeToolbox.hasOwn(rooms, rn)) list.push(rn);
+    if (hasOwn(rooms, rn)) list.push(rn);
   }
   return list;
 }
@@ -577,7 +807,7 @@ function _traceRoomCache(roomName, info) {
 }
 
 function _logExtensionPlanning(room, info) {
-  if (!BeeToolbox.isTraceEnabled('__traceExtensions')) return;
+  if (!isTraceEnabled('__traceExtensions')) return;
   if (!room || !info) return;
   var gates = info.gates || {};
   var text = 'EXT-PLAN ' + room.name;
@@ -956,7 +1186,7 @@ function _collectNeeds(structPlan, roadGraph, state, rcl) {
     needs.push(task);
   }
   for (var key in roadGraph) {
-    if (!BeeToolbox.hasOwn(roadGraph, key)) continue;
+    if (!hasOwn(roadGraph, key)) continue;
     var edge = roadGraph[key];
     if (edge.category === 'critical' && rcl >= 2) {
       for (var j = 0; j < edge.missing.length; j++) {
@@ -1074,7 +1304,7 @@ function ensureSites(room, cache) {
   if (!cache) cache = null;
   var roomPlan = plan(room);
   if (!roomPlan) {
-    if (BeeToolbox.isTraceEnabled('__traceExtensions')) {
+    if (isTraceEnabled('__traceExtensions')) {
       var currentLevel = room.controller.level || 1;
       var allowedIfAny = 0;
       if (typeof CONTROLLER_STRUCTURES === 'object' && CONTROLLER_STRUCTURES && CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION]) {
@@ -1140,7 +1370,7 @@ function ensureSites(room, cache) {
   for (var i = 0; i < tasks.length && placed < CONFIG.room.MAX_SITES_PER_TICK; i++) {
     var task = tasks[i];
     var alreadyPresent = _hasStructureOrSite(state, task.type, task.pos);
-    if (task.type === STRUCTURE_EXTENSION && BeeToolbox.isTraceEnabled('__traceExtensions')) {
+    if (task.type === STRUCTURE_EXTENSION && isTraceEnabled('__traceExtensions')) {
       var gates = {
         hasPlan: true,
         hasAnchor: !!(roomPlan && roomPlan.anchor),
@@ -1164,7 +1394,7 @@ function ensureSites(room, cache) {
     }
     if (alreadyPresent) continue;
     if (task.type === STRUCTURE_ROAD) {
-      if (!BeeToolbox.shouldPlaceRoads(room)) {
+      if (!shouldPlaceRoads(room)) {
         continue;
       }
       var stubPath = [];
@@ -1186,7 +1416,7 @@ function ensureSites(room, cache) {
         extSites++;
       }
     }
-    if (task.type === STRUCTURE_EXTENSION && BeeToolbox.isTraceEnabled('__traceExtensions')) {
+    if (task.type === STRUCTURE_EXTENSION && isTraceEnabled('__traceExtensions')) {
       var gatesAfter = {
         hasPlan: true,
         hasAnchor: !!(roomPlan && roomPlan.anchor),
@@ -1208,7 +1438,7 @@ function ensureSites(room, cache) {
     }
   }
 
-  if (BeeToolbox.isTraceEnabled('__traceExtensions')) {
+  if (isTraceEnabled('__traceExtensions')) {
     if (extensionTaskCount === 0 && extAllowed > 0) {
       _logExtensionPlanning(room, {
         rcl: currentRCL,
