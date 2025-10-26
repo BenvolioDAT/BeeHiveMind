@@ -5,7 +5,7 @@
 'use strict';
 
 var AllianceManager = require('AllianceManager');
-try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
+var Traveler = require('Traveler');
 
 // ---------- Tunables ----------
 var EXPLORE_RADIUS     = 5;      // max linear distance (rooms) from home
@@ -163,9 +163,6 @@ function detectForeignPresence(roomName, roomObj, roomMem) {
 
 function getTravelRoomCallback() {
   if (typeof global !== 'undefined') {
-    if (global.BeeToolbox && typeof global.BeeToolbox.roomCallback === 'function') {
-      return global.BeeToolbox.roomCallback;
-    }
     if (typeof global.__beeRoomCallback === 'function') {
       return global.__beeRoomCallback;
     }
@@ -559,7 +556,17 @@ function go(creep, dest, opts) {
   var travelCallback = getTravelRoomCallback();
   if (travelCallback) tOpts.roomCallback = travelCallback;
 
-  return creep.travelTo((dest.pos || dest), tOpts);
+  var target = dest.pos || dest;
+  if (typeof creep.travelTo === 'function') {
+    return creep.travelTo(target, tOpts);
+  }
+  if (Traveler && typeof Traveler.travelTo === 'function') {
+    return Traveler.travelTo(creep, target, tOpts);
+  }
+  if (typeof creep.moveTo === 'function') {
+    return creep.moveTo(target, { reusePath: reuse, maxOps: tOpts.maxOps });
+  }
+  return ERR_INVALID_ARGS;
 }
 
 // ---------- Exit-block cache ----------
