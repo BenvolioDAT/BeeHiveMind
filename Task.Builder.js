@@ -1,7 +1,56 @@
-
-var BeeToolbox = require('BeeToolbox');
 var BuilderPlanner = require('Task.Builder.Planner');
 try { require('Traveler'); } catch (e) {}
+
+var HAS_OWN = Object.prototype.hasOwnProperty;
+
+function hasOwn(obj, key) {
+  return !!(obj && HAS_OWN.call(obj, key));
+}
+
+function isValidRoomName(name) {
+  if (typeof name !== 'string') return false;
+  return /^[WE]\d+[NS]\d+$/.test(name);
+}
+
+function safeLinearDistance(a, b, allowInexact) {
+  if (!isValidRoomName(a) || !isValidRoomName(b)) {
+    return 9999;
+  }
+  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') {
+    return 9999;
+  }
+  return Game.map.getRoomLinearDistance(a, b, allowInexact);
+}
+
+var _constructionCache = global.__taskBuilderConstructionCache ||
+  (global.__taskBuilderConstructionCache = { tick: -1, list: [], byRoom: {}, counts: {} });
+
+function constructionSiteCache() {
+  var tick = Game.time | 0;
+  if (_constructionCache.tick === tick) {
+    return _constructionCache;
+  }
+  _constructionCache.tick = tick;
+  _constructionCache.list = [];
+  _constructionCache.byRoom = {};
+  _constructionCache.counts = {};
+  for (var id in Game.constructionSites) {
+    if (!hasOwn(Game.constructionSites, id)) continue;
+    var site = Game.constructionSites[id];
+    if (!site || !site.my) continue;
+    _constructionCache.list.push(site);
+    if (site.pos && site.pos.roomName) {
+      var roomName = site.pos.roomName;
+      if (!_constructionCache.byRoom[roomName]) {
+        _constructionCache.byRoom[roomName] = [];
+        _constructionCache.counts[roomName] = 0;
+      }
+      _constructionCache.byRoom[roomName].push(site);
+      _constructionCache.counts[roomName] += 1;
+    }
+  }
+  return _constructionCache;
+}
 
 var ENERGY_MIN_BUILD = 10;
 var TTL_STRAND_BUFFER = 15;
@@ -38,10 +87,10 @@ function _getHomeName(creep) {
   var nearest = null;
   var best = 9999;
   for (var name in Game.spawns) {
-    if (!BeeToolbox.hasOwn(Game.spawns, name)) continue;
+    if (!hasOwn(Game.spawns, name)) continue;
     var sp = Game.spawns[name];
     if (!sp) continue;
-    var dist = BeeToolbox.safeLinearDistance(creep.pos.roomName, sp.pos.roomName);
+    var dist = safeLinearDistance(creep.pos.roomName, sp.pos.roomName);
     if (dist < best) {
       best = dist;
       nearest = sp.pos.roomName;
@@ -58,12 +107,12 @@ function _gatherSitesOnce() {
   cache.tick = Game.time;
   cache.sitesByRoom = {};
   cache.siteArray = [];
-  var siteCache = BeeToolbox.constructionSiteCache();
+  var siteCache = constructionSiteCache();
   var byRoom = siteCache.byRoom || {};
   var list = siteCache.list || [];
   cache.siteArray = list.slice();
   for (var roomName in byRoom) {
-    if (!BeeToolbox.hasOwn(byRoom, roomName)) continue;
+    if (!hasOwn(byRoom, roomName)) continue;
     var roomSites = byRoom[roomName];
     cache.sitesByRoom[roomName] = Array.isArray(roomSites) ? roomSites.slice() : [];
   }
@@ -79,7 +128,7 @@ function _planIndex(plan) {
     index[key] = task;
   }
   for (var roadKey in plan.roads) {
-    if (!BeeToolbox.hasOwn(plan.roads, roadKey)) continue;
+    if (!hasOwn(plan.roads, roadKey)) continue;
     var edge = plan.roads[roadKey];
     if (!edge || !edge.path) continue;
     for (var p = 0; p < edge.path.length; p++) {
@@ -331,7 +380,7 @@ function _withdraw(creep, target, retried) {
 function _cleanupBuildLocks() {
   var locks = _ensureLockMemory();
   for (var id in locks) {
-    if (!BeeToolbox.hasOwn(locks, id)) continue;
+    if (!hasOwn(locks, id)) continue;
     var lock = locks[id];
     if (!lock || lock.until < Game.time) {
       delete locks[id];
