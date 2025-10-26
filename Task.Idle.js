@@ -1,6 +1,72 @@
 'use strict';
 
+var Traveler = null;
+try {
+  Traveler = require('Traveler');
+} catch (error) {
+  Traveler = null;
+}
+
 var TaskSquad = require('./Task.Squad');
+
+function _ensureThrottleStore(creep) {
+  if (!creep || !creep.memory) return null;
+  var cache = creep.memory._idleThrottle;
+  if (!cache) {
+    cache = {};
+    creep.memory._idleThrottle = cache;
+  }
+  return cache;
+}
+
+function throttled(creep, key, interval, fn) {
+  if (!creep || typeof fn !== 'function') return;
+  var store = _ensureThrottleStore(creep);
+  if (!store) return;
+  var safeKey = key;
+  if (safeKey == null) {
+    safeKey = 'default';
+  } else if (typeof safeKey !== 'string') {
+    safeKey = safeKey.toString ? safeKey.toString() : String(safeKey);
+  }
+  var now = Game.time;
+  var last = store[safeKey] || 0;
+  var wait = (typeof interval === 'number' && interval > 0) ? interval : 0;
+  if (now - last < wait) return;
+  store[safeKey] = now;
+  fn();
+}
+
+function sayThrottled(creep, message, interval, key) {
+  if (!creep || typeof creep.say !== 'function') return;
+  var throttleKey = key || message;
+  var wait = (typeof interval === 'number' && interval > 0) ? interval : 10;
+  throttled(creep, throttleKey, wait, function () {
+    creep.say(message);
+  });
+}
+
+function travel(creep, destination, options) {
+  if (!creep || !destination) return ERR_INVALID_TARGET;
+  var opts = options || {};
+  if (Traveler && typeof Traveler.travelTo === 'function') {
+    return Traveler.travelTo(creep, destination, opts);
+  }
+
+  var pos = destination;
+  if (destination.pos && destination.pos instanceof RoomPosition) {
+    pos = destination.pos;
+  } else if (!(destination instanceof RoomPosition) && destination.x != null && destination.y != null) {
+    var roomName = destination.roomName || (creep.room ? creep.room.name : undefined);
+    pos = new RoomPosition(destination.x, destination.y, roomName);
+  }
+
+  if (pos instanceof RoomPosition) {
+    return creep.moveTo(pos, opts);
+  }
+
+  return creep.moveTo(destination, opts);
+}
 
 var Taskidle = {
   run: function (creep) {
@@ -8,8 +74,9 @@ var Taskidle = {
 
     if (this._isCombatRole(creep)) {
       this._parkCombatCreep(creep);
+      sayThrottled(creep, '🛡️ Hold', 15, 'combatHold');
     } else {
-      if (Game.time % 15 === 0) creep.say('😴 Idle');
+      sayThrottled(creep, '😴 Idle', 15, 'idle');
     }
   },
 
@@ -28,11 +95,9 @@ var Taskidle = {
       if (TaskSquad && typeof TaskSquad.stepToward === 'function') {
         TaskSquad.stepToward(creep, spot, 0);
       } else {
-        creep.moveTo(spot, { range: 0, reusePath: 5 });
+        travel(creep, spot, { range: 0, reusePath: 5 });
       }
     }
-
-    if (Game.time % 15 === 0) creep.say('🛡️ Hold');
   },
 
   _combatIdleSpot: function (creep) {
