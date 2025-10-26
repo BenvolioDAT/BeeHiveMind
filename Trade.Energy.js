@@ -2,8 +2,6 @@
 // Purpose: Sell excess ENERGY via the Market from a room's Terminal.
 // Tone: novice-friendly (verbose comments, clear steps).
 
-var BeeToolbox = require('BeeToolbox');
-
 var CFG = {
   KEEP_ENERGY_STORAGE: 600000,   // don't touch storage below this
   KEEP_ENERGY_TERMINAL: 50000,   // keep this buffer in the terminal
@@ -16,6 +14,21 @@ var CFG = {
   MAX_DISTANCE: Infinity,        // optional hard cap (e.g. 18). Infinity = off.
   HISTORY_REFRESH: 5000          // how often to refresh 14d history (ticks)
 };
+
+function isValidRoomName(name) {
+  if (typeof name !== 'string') return false;
+  return /^[WE]\d+[NS]\d+$/.test(name);
+}
+
+function safeLinearDistance(a, b, allowInexact) {
+  if (!isValidRoomName(a) || !isValidRoomName(b)) {
+    return 9999;
+  }
+  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') {
+    return 9999;
+  }
+  return Game.map.getRoomLinearDistance(a, b, allowInexact);
+}
 
 // ---------- tiny globals (safe, reset each tick) ----------
 var TradeState = {
@@ -148,7 +161,7 @@ var TradeEnergy = {
       if (!o.roomName) continue;
 
       if (isFinite(CFG.MAX_DISTANCE)) {
-        var d = BeeToolbox.safeLinearDistance(room.name, o.roomName, true);
+        var d = safeLinearDistance(room.name, o.roomName, true);
         if (d > CFG.MAX_DISTANCE) continue;
       }
 
