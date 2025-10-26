@@ -1,6 +1,7 @@
 
 "use strict";
 
+var BeeToolbox = require('BeeToolbox');
 var CoreLogger = require('core.logger');
 var spawnLogic = require('spawn.logic');
 var roleWorkerBee = require('role.Worker_Bee');
@@ -26,6 +27,33 @@ var ECON_DEFAULTS = {
   queen: { allowCourierFallback: true }
 };
 var HARVESTER_DEFAULTS = { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
+
+function ensureHarvesterConfig(sharedConfig) {
+  var cfg = sharedConfig;
+  if (!cfg || typeof cfg !== 'object') {
+    cfg = global.__beeHarvesterConfig;
+  }
+  if (!cfg || typeof cfg !== 'object') {
+    cfg = {
+      MAX_WORK: HARVESTER_DEFAULTS.MAX_WORK,
+      RENEWAL_TTL: HARVESTER_DEFAULTS.RENEWAL_TTL,
+      EMERGENCY_TTL: HARVESTER_DEFAULTS.EMERGENCY_TTL
+    };
+  }
+
+  if (typeof cfg.MAX_WORK !== 'number') {
+    cfg.MAX_WORK = HARVESTER_DEFAULTS.MAX_WORK;
+  }
+  if (typeof cfg.RENEWAL_TTL !== 'number') {
+    cfg.RENEWAL_TTL = HARVESTER_DEFAULTS.RENEWAL_TTL;
+  }
+  if (typeof cfg.EMERGENCY_TTL !== 'number') {
+    cfg.EMERGENCY_TTL = HARVESTER_DEFAULTS.EMERGENCY_TTL;
+  }
+
+  global.__beeHarvesterConfig = cfg;
+  return cfg;
+}
 
 function ensureEconomyConfig() {
   if (!global.__beeEconomyConfig) {
@@ -762,7 +790,10 @@ function consumeAttackTargets(options) {
 
 var ECON_CFG = ensureEconomyConfig();
 
-var HARVESTER_CFG = HARVESTER_DEFAULTS;
+var HARVESTER_CFG = ensureHarvesterConfig(BeeToolbox && BeeToolbox.HARVESTER_CFG);
+if (BeeToolbox && BeeToolbox.HARVESTER_CFG !== HARVESTER_CFG) {
+  BeeToolbox.HARVESTER_CFG = HARVESTER_CFG;
+}
 
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
