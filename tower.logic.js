@@ -4,6 +4,33 @@
 // - Short per-tower lock so they don't ping-pong targets every tick
 // - If only one repair target, only one tower repairs it
 
+var AllianceManager = null;
+try {
+  AllianceManager = require('AllianceManager');
+} catch (error) {
+  AllianceManager = null;
+}
+
+function isAllyUsername(username) {
+  if (!username) return false;
+  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
+    return AllianceManager.isAlly(username);
+  }
+  return false;
+}
+
+function isEnemyUsername(username, myUsername) {
+  if (!username) return false;
+  if (isAllyUsername(username)) return false;
+  if (myUsername && username === myUsername) return false;
+  return true;
+}
+
+function isEnemyCreep(creep, myUsername) {
+  if (!creep || !creep.owner) return false;
+  return isEnemyUsername(creep.owner.username, myUsername);
+}
+
 module.exports = {
   run: function () {
     // Find the first spawn (keeps your existing assumption)
@@ -14,6 +41,7 @@ module.exports = {
 
     var room = spawn.room;
     var roomName = room.name;
+    var myUsername = (spawn.owner && spawn.owner.username) || null;
 
     // Ensure room memory
     if (!Memory.rooms) Memory.rooms = {};
@@ -35,18 +63,15 @@ module.exports = {
     if (!towers || !towers.length) return;
 
     // ========== 1) Hostile handling (always first) ==========
-    var hostilePresent = false;
-    for (var h = 0; h < towers.length; h++) {
-      var tChk = towers[h];
-      var nearestHostile = tChk.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
-      if (nearestHostile) { hostilePresent = true; break; }
-    }
+    var hostiles = room.find(FIND_HOSTILE_CREEPS, {
+      filter: function (creep) { return isEnemyCreep(creep, myUsername); }
+    });
 
-    if (hostilePresent) {
+    if (hostiles.length) {
       // Everyone shoots their nearest baddie
       for (var a = 0; a < towers.length; a++) {
         var at = towers[a];
-        var foe = at.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+        var foe = at.pos.findClosestByRange(hostiles);
         if (foe) at.attack(foe);
       }
       return; // done this tick
