@@ -7,11 +7,12 @@ var BeeMaintenance = require('BeeMaintenance');
 var BeeHiveMind = require('BeeHiveMind');
 var towerLogic = require('tower.logic');
 var roleLinkManager = require('role.LinkManager');
-var BeeToolbox = require('BeeToolbox');
 require('Traveler');
 var SquadFlagManager = require('SquadFlagManager');
 
 var LOG_LEVEL = CoreConfig.LOG_LEVEL;
+var TOOLBOX_LOG_LEVEL = Logger.LOG_LEVEL;
+var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
 
 // Maintain backwards compatibility: expose log level helpers on global.
 global.LOG_LEVEL = LOG_LEVEL;
@@ -26,6 +27,57 @@ Object.defineProperty(global, 'currentLogLevel', {
 });
 
 var mainLog = Logger.createLogger('Main', LOG_LEVEL.BASIC);
+var toolboxLog = Logger.createLogger('Toolbox', TOOLBOX_LOG_LEVEL ? TOOLBOX_LOG_LEVEL.BASIC : LOG_LEVEL.BASIC);
+
+function logSourceContainersInRoom(room) {
+    if (!room) return;
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+    if (!Memory.rooms[room.name].sourceContainers) Memory.rooms[room.name].sourceContainers = {};
+
+    var roomMem = Memory.rooms[room.name];
+    if (!roomMem._toolbox) roomMem._toolbox = {};
+    if (!roomMem._toolbox.sourceContainerScan) roomMem._toolbox.sourceContainerScan = {};
+
+    var scanState = roomMem._toolbox.sourceContainerScan;
+    var now = Game.time | 0;
+    var nextScan = scanState.nextScan | 0;
+
+    if (nextScan && now < nextScan) {
+        return;
+    }
+
+    var containers = room.find(FIND_STRUCTURES, {
+        filter: function (s) {
+            if (s.structureType !== STRUCTURE_CONTAINER) return false;
+            var near = s.pos.findInRange(FIND_SOURCES, 1);
+            return near && near.length > 0;
+        }
+    });
+
+    var found = {};
+    for (var i = 0; i < containers.length; i++) {
+        var c = containers[i];
+        found[c.id] = true;
+        if (!Object.prototype.hasOwnProperty.call(roomMem.sourceContainers, c.id)) {
+            roomMem.sourceContainers[c.id] = null;
+            if (Logger.shouldLog((TOOLBOX_LOG_LEVEL || LOG_LEVEL).BASIC)) {
+                toolboxLog.info('Registered container', c.id, 'near source in', room.name);
+            }
+        }
+    }
+
+    for (var cid in roomMem.sourceContainers) {
+        if (!Object.prototype.hasOwnProperty.call(roomMem.sourceContainers, cid)) continue;
+        if (!found[cid]) {
+            delete roomMem.sourceContainers[cid];
+        }
+    }
+
+    scanState.lastScanTick = now;
+    scanState.nextScan = now + SOURCE_CONTAINER_SCAN_INTERVAL;
+    scanState.lastKnownCount = containers.length;
+}
 
 function ensureFirstSpawnMemory() {
     if (Memory.GameTickCounter === undefined) Memory.GameTickCounter = 0;
@@ -76,7 +128,7 @@ function refreshSourceIntel() {
     for (var roomName in Game.rooms) {
         if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
         var room = Game.rooms[roomName];
-        BeeToolbox.logSourceContainersInRoom(room);
+        logSourceContainersInRoom(room);
     }
 }
 
