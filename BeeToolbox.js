@@ -11,6 +11,376 @@ var AllianceManager = require('AllianceManager');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+function costOfBody(body) {
+  if (!Array.isArray(body) || body.length === 0) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    total += BODYPART_COST[part] || 0;
+  }
+  return total;
+}
+
+function cloneBody(body) {
+  if (!Array.isArray(body)) return [];
+  return body.slice();
+}
+
+function _normalizeBodyTier(entry) {
+  if (!entry) return null;
+  var body;
+  var cost = null;
+  if (Array.isArray(entry)) {
+    body = entry;
+  } else if (Array.isArray(entry.body)) {
+    body = entry.body;
+    if (typeof entry.cost === 'number') cost = entry.cost;
+  } else if (Array.isArray(entry.parts)) {
+    body = entry.parts;
+    if (typeof entry.cost === 'number') cost = entry.cost;
+  }
+  if (!body || !body.length) return null;
+  var normalized = { body: body.slice() };
+  normalized.cost = (cost != null) ? cost : costOfBody(body);
+  if (normalized.cost <= 0) return null;
+  return normalized;
+}
+
+function evaluateBodyTiers(tiers, available, capacity) {
+  var normalized = [];
+  if (Array.isArray(tiers)) {
+    for (var i = 0; i < tiers.length; i++) {
+      var norm = _normalizeBodyTier(tiers[i]);
+      if (norm) normalized.push(norm);
+    }
+  }
+
+  var result = {
+    tiers: normalized,
+    availableBody: [],
+    availableCost: 0,
+    capacityBody: [],
+    capacityCost: 0,
+    idealBody: [],
+    idealCost: 0,
+    minCost: 0
+  };
+
+  if (!normalized.length) {
+    return result;
+  }
+
+  var first = normalized[0];
+  var last = normalized[normalized.length - 1];
+  result.idealBody = first.body.slice();
+  result.idealCost = first.cost;
+  result.minCost = last.cost;
+
+  var foundCapacity = false;
+  for (var j = 0; j < normalized.length; j++) {
+    var tier = normalized[j];
+    if (!foundCapacity && tier.cost <= capacity) {
+      result.capacityBody = tier.body.slice();
+      result.capacityCost = tier.cost;
+      foundCapacity = true;
+    }
+    if (!result.availableBody.length && tier.cost <= available) {
+      result.availableBody = tier.body.slice();
+      result.availableCost = tier.cost;
+    }
+  }
+
+  if (!foundCapacity) {
+    result.capacityBody = last.body.slice();
+    result.capacityCost = last.cost;
+  }
+
+  if (!result.availableBody.length && result.capacityBody.length && result.capacityCost <= available) {
+    result.availableBody = result.capacityBody.slice();
+    result.availableCost = result.capacityCost;
+  }
+
+  return result;
+}
+
+function looksLikeRoomName(name) {
+  if (typeof name !== 'string') return false;
+  if (name.length < 4) return false;
+  var first = name.charAt(0);
+  if (first !== 'W' && first !== 'E') return false;
+  if (name.indexOf('N') === -1 && name.indexOf('S') === -1) return false;
+  return true;
+}
+
+function normalizeRemoteRooms(input) {
+  var result = [];
+  var seen = Object.create(null);
+
+  function addName(value) {
+    if (!value) return;
+    var name = null;
+    if (typeof value === 'string') {
+      name = value;
+    } else if (typeof value.roomName === 'string') {
+      name = value.roomName;
+    } else if (typeof value.name === 'string') {
+      name = value.name;
+    }
+    if (!name) return;
+    if (seen[name]) return;
+    seen[name] = true;
+    result.push(name);
+  }
+
+  if (!input) {
+    return result;
+  }
+
+  if (typeof input === 'string') {
+    addName(input);
+    return result;
+  }
+
+  if (Array.isArray(input)) {
+    for (var i = 0; i < input.length; i++) {
+      addName(input[i]);
+    }
+    return result;
+  }
+
+  if (typeof input === 'object') {
+    if (typeof input.roomName === 'string' || typeof input.name === 'string') {
+      addName(input);
+      return result;
+    }
+    for (var key in input) {
+      if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
+      addName(input[key]);
+      if (looksLikeRoomName(key)) {
+        addName(key);
+      }
+    }
+  }
+
+  return result;
+}
+
+function addRemoteCandidate(target, seen, remoteName) {
+  if (!remoteName || typeof remoteName !== 'string') return;
+  if (!looksLikeRoomName(remoteName)) return;
+  if (seen[remoteName]) return;
+  seen[remoteName] = true;
+  target.push(remoteName);
+}
+
+function processAssignmentRecord(homeName, key, record, target, seen) {
+  if (!homeName || !record) return;
+  if (typeof record === 'string') {
+    if (key === homeName && looksLikeRoomName(record)) {
+      addRemoteCandidate(target, seen, record);
+    } else if (looksLikeRoomName(key) && record === homeName) {
+      addRemoteCandidate(target, seen, key);
+    }
+    return;
+  }
+  if (Array.isArray(record)) {
+    for (var i = 0; i < record.length; i++) {
+      processAssignmentRecord(homeName, key, record[i], target, seen);
+    }
+    return;
+  }
+  if (typeof record !== 'object') return;
+
+  var remoteName = null;
+  if (typeof record.roomName === 'string') remoteName = record.roomName;
+  else if (typeof record.remote === 'string') remoteName = record.remote;
+  else if (typeof record.targetRoom === 'string') remoteName = record.targetRoom;
+  else if (typeof record.room === 'string') remoteName = record.room;
+  else if (looksLikeRoomName(key)) remoteName = key;
+
+  var assignedHome = null;
+  if (typeof record.home === 'string') assignedHome = record.home;
+  else if (typeof record.homeRoom === 'string') assignedHome = record.homeRoom;
+  else if (typeof record.spawn === 'string') assignedHome = record.spawn;
+  else if (typeof record.origin === 'string') assignedHome = record.origin;
+  else if (typeof record.base === 'string') assignedHome = record.base;
+  else if (!looksLikeRoomName(key)) assignedHome = key;
+
+  if (assignedHome === homeName && typeof remoteName === 'string') {
+    addRemoteCandidate(target, seen, remoteName);
+  }
+
+  for (var nestedKey in record) {
+    if (!Object.prototype.hasOwnProperty.call(record, nestedKey)) continue;
+    if (nestedKey === 'roomName' || nestedKey === 'remote' || nestedKey === 'targetRoom' || nestedKey === 'room' ||
+        nestedKey === 'home' || nestedKey === 'homeRoom' || nestedKey === 'spawn' || nestedKey === 'origin' || nestedKey === 'base') {
+      continue;
+    }
+    processAssignmentRecord(homeName, nestedKey, record[nestedKey], target, seen);
+  }
+}
+
+function gatherRemotesFromAssignments(homeName, target, seen) {
+  if (!homeName || !Memory || !Memory.remoteAssignments) return;
+  var assignments = Memory.remoteAssignments;
+  for (var key in assignments) {
+    if (!Object.prototype.hasOwnProperty.call(assignments, key)) continue;
+    processAssignmentRecord(homeName, key, assignments[key], target, seen);
+  }
+}
+
+function gatherRemotesFromLedger(homeName, target, seen) {
+  if (!homeName || !Memory || !Memory.remotes) return;
+  for (var remoteName in Memory.remotes) {
+    if (!Object.prototype.hasOwnProperty.call(Memory.remotes, remoteName)) continue;
+    if (remoteName === 'version') continue;
+    var entry = Memory.remotes[remoteName];
+    if (!entry || typeof entry !== 'object') continue;
+    var ledgerHome = null;
+    if (typeof entry.home === 'string') ledgerHome = entry.home;
+    else if (typeof entry.homeRoom === 'string') ledgerHome = entry.homeRoom;
+    else if (typeof entry.origin === 'string') ledgerHome = entry.origin;
+    if (ledgerHome !== homeName) continue;
+    var finalRemote = null;
+    if (typeof entry.roomName === 'string') finalRemote = entry.roomName;
+    else finalRemote = remoteName;
+    addRemoteCandidate(target, seen, finalRemote);
+  }
+}
+
+function collectHomeRemotes(homeName, baseList) {
+  var target = [];
+  var seen = Object.create(null);
+  var base = normalizeRemoteRooms(baseList);
+  for (var i = 0; i < base.length; i++) {
+    addRemoteCandidate(target, seen, base[i]);
+  }
+  gatherRemotesFromAssignments(homeName, target, seen);
+  gatherRemotesFromLedger(homeName, target, seen);
+  return target;
+}
+
+function countSourcesInMemory(mem) {
+  if (!mem) return 0;
+  if (mem.sources && typeof mem.sources === 'object') {
+    var count = 0;
+    for (var key in mem.sources) {
+      if (Object.prototype.hasOwnProperty.call(mem.sources, key)) count += 1;
+    }
+    return count;
+  }
+  if (mem.intel && typeof mem.intel.sources === 'number') {
+    return mem.intel.sources | 0;
+  }
+  return 0;
+}
+
+var _constructionCache = global.__beeConstructionCache || (global.__beeConstructionCache = {
+  tick: -1,
+  list: [],
+  byRoom: {},
+  counts: {}
+});
+
+function _refreshConstructionCache() {
+  var tick = Game.time | 0;
+  if (_constructionCache.tick === tick) {
+    return _constructionCache;
+  }
+  _constructionCache.tick = tick;
+  _constructionCache.list = [];
+  _constructionCache.byRoom = {};
+  _constructionCache.counts = {};
+  for (var id in Game.constructionSites) {
+    if (!Object.prototype.hasOwnProperty.call(Game.constructionSites, id)) continue;
+    var site = Game.constructionSites[id];
+    if (!site || !site.my) continue;
+    _constructionCache.list.push(site);
+    if (site.pos && site.pos.roomName) {
+      var roomName = site.pos.roomName;
+      if (!_constructionCache.byRoom[roomName]) {
+        _constructionCache.byRoom[roomName] = [];
+        _constructionCache.counts[roomName] = 0;
+      }
+      _constructionCache.byRoom[roomName].push(site);
+      _constructionCache.counts[roomName] += 1;
+    }
+  }
+  return _constructionCache;
+}
+
+function countCreepsBy(filterFn) {
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep) continue;
+    if (filterFn(creep)) count += 1;
+  }
+  return count;
+}
+
+function isCpuBucketHealthy(minBucket) {
+  if (!Game.cpu || Game.cpu.bucket == null) return true;
+  var threshold = (minBucket != null) ? minBucket : 0;
+  return Game.cpu.bucket >= threshold;
+}
+
+function getStructureStoreState(structure, resourceType) {
+  var state = { energy: 0, capacity: 0, ratio: 0 };
+  if (!structure) return state;
+  var store = structure.store;
+  if (store && typeof store.getCapacity === 'function') {
+    state.capacity = store.getCapacity(resourceType) || 0;
+    state.energy = store[resourceType] || 0;
+  } else if (store && store[resourceType] != null && structure.storeCapacity != null) {
+    state.capacity = structure.storeCapacity;
+    state.energy = store[resourceType] || 0;
+  } else if (structure.storeCapacity != null && structure.energy != null) {
+    state.capacity = structure.storeCapacity;
+    state.energy = structure.energy;
+  }
+  if (state.capacity > 0) {
+    state.ratio = state.energy / state.capacity;
+  }
+  return state;
+}
+
+function storageEnergyState(room) {
+  var state = { energy: 0, capacity: 0, ratio: 0 };
+  if (!room) return state;
+  var storage = room.storage;
+  if (storage) {
+    state = getStructureStoreState(storage, RESOURCE_ENERGY);
+  }
+  return state;
+}
+
+function isStorageHealthy(room, ratioThreshold) {
+  var state = storageEnergyState(room);
+  var threshold = (ratioThreshold != null) ? ratioThreshold : 0;
+  return state.capacity > 0 && state.ratio >= threshold;
+}
+
+function shouldLogThrottled(store, key, interval) {
+  if (!store) return true;
+  var tick = Game.time | 0;
+  var last = store[key] || 0;
+  if (tick - last < interval) {
+    return false;
+  }
+  store[key] = tick;
+  return true;
+}
+
+function isTraceEnabled(memoryKey) {
+  if (!Memory || !memoryKey) return false;
+  if (Object.prototype.hasOwnProperty.call(Memory, memoryKey)) {
+    return !!Memory[memoryKey];
+  }
+  return false;
+}
+
 var ROAD_GATE_DEFAULTS = {
   minRCL: 3,
   disableGate: false
@@ -20,6 +390,8 @@ var ECON_DEFAULTS = {
   STORAGE_ENERGY_MIN_BEFORE_REMOTES: 80000,
   MAX_ACTIVE_REMOTES: 2,
   ROAD_REPAIR_THRESHOLD: 0.45,
+  STORAGE_HEALTHY_RATIO: 0.7,
+  CPU_MIN_BUCKET: 500,
   roads: ROAD_GATE_DEFAULTS
 };
 
@@ -34,6 +406,8 @@ if (!global.__beeEconomyConfig) {
     STORAGE_ENERGY_MIN_BEFORE_REMOTES: ECON_DEFAULTS.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
     MAX_ACTIVE_REMOTES: ECON_DEFAULTS.MAX_ACTIVE_REMOTES,
     ROAD_REPAIR_THRESHOLD: ECON_DEFAULTS.ROAD_REPAIR_THRESHOLD,
+    STORAGE_HEALTHY_RATIO: ECON_DEFAULTS.STORAGE_HEALTHY_RATIO,
+    CPU_MIN_BUCKET: ECON_DEFAULTS.CPU_MIN_BUCKET,
     roads: {
       minRCL: ROAD_GATE_DEFAULTS.minRCL,
       disableGate: ROAD_GATE_DEFAULTS.disableGate
@@ -45,6 +419,12 @@ if (!global.__beeEconomyConfig) {
       minRCL: ROAD_GATE_DEFAULTS.minRCL,
       disableGate: ROAD_GATE_DEFAULTS.disableGate
     };
+  }
+  if (typeof global.__beeEconomyConfig.STORAGE_HEALTHY_RATIO !== 'number') {
+    global.__beeEconomyConfig.STORAGE_HEALTHY_RATIO = ECON_DEFAULTS.STORAGE_HEALTHY_RATIO;
+  }
+  if (typeof global.__beeEconomyConfig.CPU_MIN_BUCKET !== 'number') {
+    global.__beeEconomyConfig.CPU_MIN_BUCKET = ECON_DEFAULTS.CPU_MIN_BUCKET;
   }
 }
 
@@ -516,6 +896,71 @@ var BeeToolbox = {
 
   hasOwn: function (obj, key) {
     return !!(obj && Object.prototype.hasOwnProperty.call(obj, key));
+  },
+
+  costOfBody: costOfBody,
+
+  cloneBody: cloneBody,
+
+  canAffordBody: function (body, availableEnergy) {
+    var cost = costOfBody(body);
+    return cost > 0 && availableEnergy >= cost;
+  },
+
+  evaluateBodyTiers: function (tiers, available, capacity) {
+    return evaluateBodyTiers(tiers, available || 0, capacity || 0);
+  },
+
+  looksLikeRoomName: looksLikeRoomName,
+
+  normalizeRemoteRooms: normalizeRemoteRooms,
+
+  collectHomeRemotes: function (homeName, baseList) {
+    return collectHomeRemotes(homeName, baseList);
+  },
+
+  countSourcesInMemory: countSourcesInMemory,
+
+  constructionSiteCache: function () {
+    return _refreshConstructionCache();
+  },
+
+  listConstructionSites: function () {
+    return _refreshConstructionCache().list.slice();
+  },
+
+  constructionSitesByRoom: function () {
+    return _refreshConstructionCache().byRoom;
+  },
+
+  countConstructionSites: function (roomName) {
+    var cache = _refreshConstructionCache();
+    if (!roomName) return cache.list.length;
+    return cache.counts[roomName] || 0;
+  },
+
+  countCreepsBy: function (filterFn) {
+    if (typeof filterFn !== 'function') return 0;
+    return countCreepsBy(filterFn);
+  },
+
+  isCpuBucketHealthy: function (minBucket) {
+    return isCpuBucketHealthy(minBucket != null ? minBucket : ECON_DEFAULTS.CPU_MIN_BUCKET);
+  },
+
+  storageEnergyState: storageEnergyState,
+
+  isStorageHealthy: function (room, ratioThreshold) {
+    var threshold = (ratioThreshold != null) ? ratioThreshold : ECON_DEFAULTS.STORAGE_HEALTHY_RATIO;
+    return isStorageHealthy(room, threshold);
+  },
+
+  shouldLogThrottled: function (store, key, interval) {
+    return shouldLogThrottled(store, key, interval || 0);
+  },
+
+  isTraceEnabled: function (memoryKey) {
+    return isTraceEnabled(memoryKey);
   },
 
   isValidRoomName: function (name) {
