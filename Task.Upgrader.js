@@ -4,7 +4,62 @@
 
 'use strict';
 
-var BeeToolbox = require('BeeToolbox');
+var Traveler = null;
+try {
+  Traveler = require('Traveler');
+} catch (error) {
+  Traveler = null;
+}
+
+function beeExtend(target, source) {
+  if (!target || !source) return target;
+  for (var key in source) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) {
+      target[key] = source[key];
+    }
+  }
+  return target;
+}
+
+function beeTravel(creep, target, a3, a4, a5) {
+  if (!creep || !target) return ERR_INVALID_TARGET;
+
+  var destination = (target && target.pos) ? target.pos : target;
+  var opts = {};
+
+  if (a3 && typeof a3 === 'object') {
+    opts = a3;
+  } else {
+    if (typeof a3 === 'number') opts.range = a3;
+    if (a5 && typeof a5 === 'object') beeExtend(opts, a5);
+  }
+
+  var options = {
+    range: (opts.range != null) ? opts.range : 1,
+    ignoreCreeps: (opts.ignoreCreeps != null) ? opts.ignoreCreeps : true,
+    useFindRoute: (opts.useFindRoute != null) ? opts.useFindRoute : true,
+    stuckValue: (opts.stuckValue != null) ? opts.stuckValue : 2,
+    repath: (opts.repath != null) ? opts.repath : 0.05,
+    returnData: {}
+  };
+
+  beeExtend(options, opts);
+
+  if (Traveler && typeof Traveler.travelTo === 'function') {
+    try {
+      return Traveler.travelTo(creep, destination, options);
+    } catch (err) {
+      // fall back to moveTo below
+    }
+  }
+
+  var destPos = destination;
+  if (destPos && destPos.pos) destPos = destPos.pos;
+  if (!destPos || destPos.x == null || destPos.y == null || !destPos.roomName) {
+    return ERR_INVALID_TARGET;
+  }
+  return creep.moveTo(destPos, { reusePath: 20, maxOps: 2000 });
+}
 
 /* =========================
    Tunables
@@ -42,7 +97,7 @@ function pibAct(creep) {
   }
 
   if (creep.pos.getRangeTo(tgt) > 3) {
-    BeeToolbox.BeeTravel(creep, tgt);
+    beeTravel(creep, tgt);
     return false;
   }
 
@@ -54,7 +109,7 @@ function pibAct(creep) {
 
   if (rc === OK && pib.next) {
     var nxt = Game.getObjectById(pib.next);
-    if (nxt) BeeToolbox.BeeTravel(creep, nxt);
+    if (nxt) beeTravel(creep, nxt);
   }
 
   pibClear(creep);
@@ -131,7 +186,7 @@ function updateControllerSign(creep, controller) {
     if (creep.pos.inRangeTo(controller, 1))
       creep.signController(controller, UPGRADER_SIGN_TEXT);
     else
-      BeeToolbox.BeeTravel(creep, controller);
+      beeTravel(creep, controller);
   }
 }
 
@@ -170,14 +225,14 @@ var TaskUpgrader = {
 
         // If too far, move in until within range 3
         if (d > MAX_UPGRADE_RANGE) {
-          BeeToolbox.BeeTravel(creep, controller);
+          beeTravel(creep, controller);
           return;
         }
 
         // Within upgrade range, attempt action
         var rc = creep.upgradeController(controller);
         if (rc === ERR_NOT_IN_RANGE) {
-          BeeToolbox.BeeTravel(creep, controller);
+          beeTravel(creep, controller);
           return;
         }
 
@@ -199,7 +254,7 @@ var TaskUpgrader = {
     var src = chooseEnergySource(creep, room);
     if (!src) {
       // Nothing found, idle near controller
-      if (controller) BeeToolbox.BeeTravel(creep, controller);
+      if (controller) beeTravel(creep, controller);
       return;
     }
 
@@ -210,17 +265,17 @@ var TaskUpgrader = {
     if (dist > 1) {
       if (dist === 2)
         pibSet(creep, isDrop ? 'pickup' : 'withdraw', src.id, nextTarget);
-      BeeToolbox.BeeTravel(creep, src);
+      beeTravel(creep, src);
       return;
     }
 
     var rc2 = isDrop ? creep.pickup(src) : creep.withdraw(src, RESOURCE_ENERGY);
     if (rc2 === ERR_NOT_IN_RANGE) {
-      BeeToolbox.BeeTravel(creep, src);
+      beeTravel(creep, src);
       return;
     }
     if (rc2 === OK && controller)
-      BeeToolbox.BeeTravel(creep, controller);
+      beeTravel(creep, controller);
   }
 
 };
