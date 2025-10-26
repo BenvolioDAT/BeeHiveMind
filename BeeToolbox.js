@@ -11,10 +11,16 @@ var AllianceManager = require('AllianceManager');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+var ROAD_GATE_DEFAULTS = {
+  minRCL: 3,
+  disableGate: false
+};
+
 var ECON_DEFAULTS = {
   STORAGE_ENERGY_MIN_BEFORE_REMOTES: 80000,
   MAX_ACTIVE_REMOTES: 2,
-  ROAD_REPAIR_THRESHOLD: 0.45
+  ROAD_REPAIR_THRESHOLD: 0.45,
+  roads: ROAD_GATE_DEFAULTS
 };
 
 var HARVESTER_CFG = {
@@ -27,8 +33,19 @@ if (!global.__beeEconomyConfig) {
   global.__beeEconomyConfig = {
     STORAGE_ENERGY_MIN_BEFORE_REMOTES: ECON_DEFAULTS.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
     MAX_ACTIVE_REMOTES: ECON_DEFAULTS.MAX_ACTIVE_REMOTES,
-    ROAD_REPAIR_THRESHOLD: ECON_DEFAULTS.ROAD_REPAIR_THRESHOLD
+    ROAD_REPAIR_THRESHOLD: ECON_DEFAULTS.ROAD_REPAIR_THRESHOLD,
+    roads: {
+      minRCL: ROAD_GATE_DEFAULTS.minRCL,
+      disableGate: ROAD_GATE_DEFAULTS.disableGate
+    }
   };
+} else {
+  if (!global.__beeEconomyConfig.roads) {
+    global.__beeEconomyConfig.roads = {
+      minRCL: ROAD_GATE_DEFAULTS.minRCL,
+      disableGate: ROAD_GATE_DEFAULTS.disableGate
+    };
+  }
 }
 
 var _econOverrideLog = {};
@@ -59,6 +76,16 @@ var _roomEnergyCache = global.__beeEnergyRoomCache || (global.__beeEnergyRoomCac
   tick: -1,
   rooms: {}
 });
+
+function _roadGateLog(room, rcl, minRCL) {
+  if (!Memory || !Memory.__traceRoads) return;
+  if (!room || !room.name) return;
+  if (!Memory.__roadGateLog) Memory.__roadGateLog = {};
+  var record = Memory.__roadGateLog;
+  if (record[room.name] === Game.time) return;
+  record[room.name] = Game.time;
+  console.log('[ROAD-GATE]', room.name, rcl, minRCL, 'blocked');
+}
 
 var SEAT_MEMORY_KEY = 'seat';
 var SEAT_ASSIGNMENT_LIMIT = 1;
@@ -518,6 +545,49 @@ var BeeToolbox = {
       }
     }
     return true;
+  },
+
+  shouldPlaceRoads: function (room) {
+    var targetRoom = null;
+    if (room && room.name) {
+      targetRoom = room;
+    } else if (typeof room === 'string' && Game && Game.rooms) {
+      targetRoom = Game.rooms[room] || null;
+    }
+
+    var cfg = BeeToolbox.ECON_CFG && BeeToolbox.ECON_CFG.roads ? BeeToolbox.ECON_CFG.roads : ROAD_GATE_DEFAULTS;
+    var minRCL = (cfg && typeof cfg.minRCL === 'number') ? cfg.minRCL : ROAD_GATE_DEFAULTS.minRCL;
+    var disableGate = !!(cfg && cfg.disableGate);
+
+    var econMem = null;
+    if (targetRoom && targetRoom.memory && targetRoom.memory.econ) {
+      econMem = targetRoom.memory.econ;
+    } else if (!targetRoom && typeof room === 'string' && Memory && Memory.rooms && Memory.rooms[room] && Memory.rooms[room].econ) {
+      econMem = Memory.rooms[room].econ;
+    }
+    if (econMem && econMem.roads) {
+      var override = econMem.roads;
+      if (override && typeof override.minRCL === 'number') {
+        minRCL = override.minRCL;
+      }
+      if (override && override.disableGate === true) {
+        disableGate = true;
+      } else if (override && override.disableGate === false) {
+        disableGate = false;
+      }
+    }
+
+    if (disableGate) return true;
+    if (!targetRoom || !targetRoom.controller) return false;
+
+    var rcl = targetRoom.controller.level || 0;
+    if (targetRoom.controller && targetRoom.controller.my) {
+      rcl = targetRoom.controller.level || 0;
+    }
+
+    if (rcl >= minRCL) return true;
+    _roadGateLog(targetRoom, rcl, minRCL);
+    return false;
   },
 
   /**

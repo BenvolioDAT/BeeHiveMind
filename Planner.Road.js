@@ -206,6 +206,15 @@ RoadPlanner.computeHub = function (room) {
 
 RoadPlanner.getOrCreatePath = function (fromPos, toPos, opts) {
   if (!fromPos || !toPos) return null;
+  var gateRoom = null;
+  if (opts && opts.roomName && Game.rooms && Game.rooms[opts.roomName]) {
+    gateRoom = Game.rooms[opts.roomName];
+  } else if (fromPos.roomName && Game.rooms && Game.rooms[fromPos.roomName]) {
+    gateRoom = Game.rooms[fromPos.roomName];
+  }
+  if (gateRoom && !BeeToolbox.shouldPlaceRoads(gateRoom)) {
+    return null;
+  }
   var roomName = fromPos.roomName;
   var key = _cacheKey(fromPos, toPos, opts || {});
   var mem = _roomMem(roomName);
@@ -295,6 +304,15 @@ RoadPlanner.getOrCreatePath = function (fromPos, toPos, opts) {
 
 RoadPlanner.materializePath = function (path, opts) {
   if (!path || !path.length) return 0;
+  var anchorRoom = null;
+  if (opts && opts.roomName && Game.rooms && Game.rooms[opts.roomName]) {
+    anchorRoom = Game.rooms[opts.roomName];
+  } else if (opts && opts.room && opts.room.name && Game.rooms && Game.rooms[opts.room.name]) {
+    anchorRoom = Game.rooms[opts.room.name];
+  }
+  if (anchorRoom && !BeeToolbox.shouldPlaceRoads(anchorRoom)) {
+    return 0;
+  }
   var placed = 0;
   var throttle = opts && opts.maxSites ? opts.maxSites : 3;
   var dirtyKey = opts && opts.dirtyKey ? opts.dirtyKey : null;
@@ -304,6 +322,14 @@ RoadPlanner.materializePath = function (path, opts) {
     var step = path[i];
     var room = Game.rooms[step.roomName];
     if (!room) continue;
+    var gateRoom = anchorRoom || room;
+    var allowPlacement = true;
+    if (gateRoom) {
+      allowPlacement = BeeToolbox.shouldPlaceRoads(gateRoom);
+    }
+    if (!allowPlacement) {
+      continue;
+    }
     if (step.x <= 0 || step.x >= 49 || step.y <= 0 || step.y >= 49) continue;
 
     var terrain = room.getTerrain().get(step.x, step.y);
@@ -329,7 +355,7 @@ RoadPlanner.materializePath = function (path, opts) {
     }
     if (siteExists) continue;
 
-    if (room.createConstructionSite(step.x, step.y, STRUCTURE_ROAD) === OK) {
+    if (allowPlacement && room.createConstructionSite(step.x, step.y, STRUCTURE_ROAD) === OK) {
       placed++;
     }
   }
@@ -353,6 +379,7 @@ RoadPlanner._scoreRemote = function (rec) {
 
 RoadPlanner.ensureRemoteRoads = function (homeRoom) {
   if (!homeRoom || !homeRoom.controller || !homeRoom.controller.my) return;
+  if (!BeeToolbox.shouldPlaceRoads(homeRoom)) return;
   _syncEconomyConfig();
 
   var mem = _roomMem(homeRoom.name);
