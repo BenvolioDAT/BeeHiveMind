@@ -5,6 +5,12 @@ var CoreLogger = require('core.logger');
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var planLog = CoreLogger.createLogger('BuilderPlanner', LOG_LEVEL.BASIC);
 
+BeeToolbox.registerEconomyOverrides('BuilderPlanner', {
+  STORAGE_ENERGY_MIN_BEFORE_REMOTES: 40000,
+  MAX_ACTIVE_REMOTES: 2,
+  ROAD_REPAIR_THRESHOLD: 0.4
+});
+
 var CONFIG = {
   road: {
     MAX_ACTIVE_REMOTES: BeeToolbox.ECON_CFG.MAX_ACTIVE_REMOTES,
