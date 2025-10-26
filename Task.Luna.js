@@ -74,13 +74,17 @@ function ensurePhaseState(cache) {
       spawnQueueByHome: {},
       creepNotes: Object.create(null),
       auditLog: [],
-      spawnLogFlags: Object.create(null)
+      spawnLogFlags: Object.create(null),
+      traceFlags: Object.create(null)
     };
     global.__lunaPhaseState = _phaseState;
   } else if (cache && !_phaseState.cache) {
     _phaseState.cache = cache;
   } else if (_phaseState.spawnLogFlags == null) {
     _phaseState.spawnLogFlags = Object.create(null);
+  }
+  if (_phaseState.traceFlags == null) {
+    _phaseState.traceFlags = Object.create(null);
   }
   return _phaseState;
 }
@@ -254,6 +258,18 @@ function ensureRoomMemory(roomName) {
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
   return Memory.rooms[roomName];
+}
+
+function traceFixLog(homeName, remoteName, action, extra) {
+  if (!Memory || Memory.__traceFixes !== true) return;
+  var state = ensurePhaseState(null);
+  var flags = state.traceFlags || (state.traceFlags = Object.create(null));
+  var key = action + ':' + (homeName || '-') + ':' + (remoteName || '-');
+  if (flags[key] === Game.time) return;
+  flags[key] = Game.time;
+  var msg = '[LUNA_FIX] ' + action + ' home=' + (homeName || '-') + ' remote=' + (remoteName || '-');
+  if (extra) msg += ' ' + extra;
+  console.log(msg);
 }
 
 function detectThreat(remoteRoom, ledger) {
@@ -485,6 +501,7 @@ function pushSpawnNeed(state, summary, type, amount, reason, seatId) {
     statusReason: summary.reason,
     spawnState: 'pending',
     waitingTick: 0,
+    blockedUntil: summary.ledger && summary.ledger.blockedUntil ? summary.ledger.blockedUntil : 0,
     lastLogReason: null,
     lastLogTick: 0
   });
@@ -1382,11 +1399,72 @@ function planSpawnForRoom(spawn, context) {
     logSpawnSkip(spawn, null, 'QUEUE_EMPTY', null);
     return { shouldSpawn: false };
   }
+  var homeMem = ensureRoomMemory(home);
+  var block = homeMem.__lunaSpawnBlock;
+  if (block && typeof block.until === 'number') {
+    if (block.until <= Game.time) {
+      delete homeMem.__lunaSpawnBlock;
+    } else {
+      if (queue[0]) {
+        queue[0].spawnState = 'waiting';
+        queue[0].waitingTick = Game.time;
+      }
+      if (Memory && Memory.__traceLuna === true) {
+        console.log('[LUNA] spawn gated by cooldown home=' + home + ' until=' + block.until);
+      }
+      traceFixLog(home, null, 'spawn-cooldown', 'until=' + block.until);
+      return { shouldSpawn: false, reason: 'SPAWN_BLOCK', until: block.until };
+    }
+  }
   queue.sort(function (a, b) {
     if (a.priority !== b.priority) return a.priority - b.priority;
     return a.plannedAt - b.plannedAt;
   });
-  var plan = queue[0];
+  var maxRotations = 3;
+  var rotations = 0;
+  var plan;
+  while (queue.length) {
+    if (queue.length <= 1) {
+      plan = queue[0];
+      break;
+    }
+    plan = queue[0];
+    if (!plan) break;
+    var ledger = plan.remote ? getRemoteLedger(plan.remote) : null;
+    var blockedUntil = 0;
+    if (plan.blockedUntil && plan.blockedUntil > blockedUntil) blockedUntil = plan.blockedUntil;
+    if (ledger && ledger.blockedUntil && ledger.blockedUntil > blockedUntil) blockedUntil = ledger.blockedUntil;
+    var status = plan.status || (ledger ? ledger.status : null);
+    var ledgerBlocked = ledger && ledger.status === REMOTE_STATUS.BLOCKED && ledger.blockedUntil && ledger.blockedUntil > Game.time;
+    var isBlocked = false;
+    if (status === REMOTE_STATUS.BLOCKED) isBlocked = true;
+    if (!isBlocked && blockedUntil > Game.time) isBlocked = true;
+    if (!isBlocked && ledgerBlocked) isBlocked = true;
+    if (!isBlocked) break;
+
+    var rotated = queue.shift();
+    if (!rotated) break;
+    rotated.spawnState = 'waiting';
+    rotated.waitingTick = Game.time;
+    rotated.blockedUntil = blockedUntil;
+    queue.push(rotated);
+    rotations++;
+    traceFixLog(home, rotated.remote, 'rotate-blocked', 'until=' + blockedUntil);
+    if (Memory && Memory.__traceLuna === true && rotated.remote) {
+      console.log('[LUNA] rotated blocked remote home=' + home + ' remote=' + rotated.remote + ' until=' + blockedUntil);
+    }
+    if (rotations >= maxRotations) break;
+  }
+  plan = queue[0];
+  if (!plan) {
+    return { shouldSpawn: false };
+  }
+  if (plan.remote) {
+    var activeLedger = getRemoteLedger(plan.remote);
+    if (activeLedger && activeLedger.blockedUntil && (!plan.blockedUntil || plan.blockedUntil < activeLedger.blockedUntil)) {
+      plan.blockedUntil = activeLedger.blockedUntil;
+    }
+  }
   if (plan.spawnState === 'waiting' && plan.waitingTick !== Game.time) {
     plan.spawnState = 'pending';
   }
@@ -1442,7 +1520,16 @@ function spawnFromPlan(spawn, plan) {
   var room = spawn.room;
   var available = room && room.energyAvailable != null ? room.energyAvailable : 0;
   var capacity = room && room.energyCapacityAvailable != null ? room.energyCapacityAvailable : available;
-  var name = spawnLogic.Generate_Creep_Name('Luna');
+  var roleKey = plan.remoteRole || plan.type || 'worker';
+  roleKey = (roleKey != null) ? String(roleKey) : 'worker';
+  roleKey = roleKey.replace(/[^A-Za-z0-9]/g, '');
+  if (!roleKey) roleKey = 'Role';
+  var roomKey = plan.remote || (room && room.name) || (spawn && spawn.room && spawn.room.name) || 'home';
+  roomKey = String(roomKey).replace(/[^A-Za-z0-9]/g, '');
+  if (!roomKey) roomKey = 'Home';
+  var prefix = 'Luna_' + roleKey + '_' + roomKey;
+  prefix = prefix.replace(/__+/g, '_');
+  var name = spawnLogic.Generate_Creep_Name(prefix);
   if (!name) return ERR_FULL;
   var body = plan.body.slice();
   var cost = plan.bodyCost != null ? plan.bodyCost : BeeToolbox.costOfBody(body);
@@ -1488,6 +1575,13 @@ function spawnFromPlan(spawn, plan) {
       queue.shift();
     }
     lunaLog.info('[LUNA] spawn ' + plan.remoteRole + ' ' + name + ' → ' + plan.remote + ' (cost=' + cost + ')');
+    if (room) {
+      var homeMem = ensureRoomMemory(room.name);
+      if (homeMem && homeMem.__lunaSpawnBlock) {
+        delete homeMem.__lunaSpawnBlock;
+        traceFixLog(room.name, null, 'spawn-unblock', 'name=' + name);
+      }
+    }
     return OK;
   }
   if (result === ERR_NOT_ENOUGH_ENERGY) {
@@ -1497,14 +1591,30 @@ function spawnFromPlan(spawn, plan) {
   return result;
 }
 
-function noteSpawnBlocked(homeName, reason) {
+function noteSpawnBlocked(homeName, reason, until, available, capacity) {
   if (!homeName) return;
   var state = ensurePhaseState(null);
   var queue = state.spawnQueueByHome[homeName];
-  if (!queue || !queue.length) return;
-  queue[0].statusReason = reason;
-  queue[0].spawnState = 'waiting';
-  queue[0].waitingTick = Game.time;
+  if (queue && queue.length) {
+    queue[0].statusReason = reason;
+    queue[0].spawnState = 'waiting';
+    queue[0].waitingTick = Game.time;
+  }
+
+  var mem = ensureRoomMemory(homeName);
+  var targetUntil = (typeof until === 'number') ? until : (Game.time + 1);
+  mem.__lunaSpawnBlock = {
+    reason: reason || 'BLOCKED',
+    until: targetUntil,
+    available: (available != null) ? available : null,
+    capacity: (capacity != null) ? capacity : null,
+    t: Game.time
+  };
+
+  if (Memory && Memory.__traceLuna === true) {
+    console.log('[LUNA] spawn block noted home=' + homeName + ' reason=' + (reason || 'BLOCKED') + ' until=' + targetUntil);
+  }
+  traceFixLog(homeName, null, 'spawn-block', 'until=' + targetUntil);
 }
 
 function tick(cache) {

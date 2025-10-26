@@ -163,7 +163,12 @@ function feedStructures(creep) {
     return true;
   }
 
-  if (ENABLE_COURIER_FALLBACK && TaskCourier && typeof TaskCourier.runAsHelpers === 'function') {
+  var queenCfg = BeeToolbox.ECON_CFG && BeeToolbox.ECON_CFG.queen ? BeeToolbox.ECON_CFG.queen : null;
+  var allowFallback = ENABLE_COURIER_FALLBACK;
+  if (queenCfg && typeof queenCfg.allowCourierFallback === 'boolean') {
+    allowFallback = queenCfg.allowCourierFallback;
+  }
+  if (allowFallback && TaskCourier && typeof TaskCourier.runAsHelpers === 'function') {
     var courierResult = TaskCourier.runAsHelpers(creep, { preferDeliverFirst: true });
     if (courierResult) {
       return true;

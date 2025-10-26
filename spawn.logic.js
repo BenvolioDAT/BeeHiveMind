@@ -661,6 +661,60 @@ function Spawn_Squad(spawn, squadId) {
   return false;
 }
 
+function _isKnownSquadId(name) {
+  if (typeof name !== 'string') return false;
+  if (Memory && Memory.squads && Memory.squads[name]) return true;
+  var flags = Game && Game.flags ? Game.flags : {};
+  if (flags['Squad' + name]) return true;
+  if (flags['Squad_' + name]) return true;
+  if (flags[name]) return true;
+  return false;
+}
+
+function Spawn_Squad_Compat(spawn, arg1, arg2) {
+  if (!spawn) return false;
+  // Legacy callers may pass (spawn, squadId)
+  if (_isKnownSquadId(arg1)) {
+    return Spawn_Squad(spawn, arg1);
+  }
+
+  var plan = null;
+  if (arg1 && typeof arg1 === 'object') {
+    plan = arg1;
+  } else if (arg2 && typeof arg2 === 'object') {
+    plan = arg2;
+  }
+
+  var squadId = 'Alpha';
+  if (plan && typeof plan.squadId === 'string') {
+    squadId = plan.squadId;
+  } else if (typeof arg1 === 'string' && !_isKnownSquadId(arg1)) {
+    squadId = 'Alpha';
+  } else if (typeof arg1 === 'string') {
+    squadId = arg1;
+  }
+
+  // If caller provided a role, spawn a single member using worker helper.
+  var role = null;
+  if (typeof arg1 === 'string' && !_isKnownSquadId(arg1)) {
+    role = arg1;
+  }
+  if (plan && typeof plan.role === 'string') {
+    role = plan.role;
+  }
+
+  if (!role) {
+    return Spawn_Squad(spawn, squadId);
+  }
+
+  var energy = Calculate_Spawn_Resource(spawn);
+  var extraMemory = { squadId: squadId, role: role };
+  if (plan && plan.targetRoom) {
+    extraMemory.targetRoom = plan.targetRoom;
+  }
+  return Spawn_Worker_Bee(spawn, role, energy, extraMemory);
+}
+
 function buildConfigurationsExport() {
   var list = [];
   for (var task in CONFIGS) {
@@ -701,5 +755,6 @@ module.exports = {
   // existing helpers
   getBodyForTask: getBodyForTask,
   getBestHarvesterBody: getBestHarvesterBody,
-  Spawn_Worker_Bee: Spawn_Worker_Bee
+  Spawn_Worker_Bee: Spawn_Worker_Bee,
+  Spawn_Squad_Compat: Spawn_Squad_Compat
 };

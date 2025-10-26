@@ -36,10 +36,25 @@ RoadPlanner.CONFIG = {
 function _syncEconomyConfig() {
   var cfg = BeeToolbox.ECON_CFG;
   RoadPlanner.CONFIG.MAX_ACTIVE_REMOTES = cfg.MAX_ACTIVE_REMOTES;
-  RoadPlanner.CONFIG.STORAGE_ENERGY_MIN_BEFORE_REMOTES = cfg.STORAGE_ENERGY_MIN_BEFORE_REMOTES;
+  var remoteCfg = cfg.remoteRoads || {};
+  var minStorage = (remoteCfg && typeof remoteCfg.minStorageEnergy === 'number')
+    ? remoteCfg.minStorageEnergy
+    : cfg.STORAGE_ENERGY_MIN_BEFORE_REMOTES;
+  RoadPlanner.CONFIG.STORAGE_ENERGY_MIN_BEFORE_REMOTES = minStorage;
   RoadPlanner.CONFIG.ROAD_REPAIR_THRESHOLD = cfg.ROAD_REPAIR_THRESHOLD;
 }
 _syncEconomyConfig();
+
+var _roadCacheTrace = global.__roadPlannerCacheTrace || (global.__roadPlannerCacheTrace = {});
+
+function _traceRoadCache(roomName, info) {
+  if (!Memory || Memory.__tracePlannerCache !== true) return;
+  var key = roomName || 'unknown';
+  var last = _roadCacheTrace[key] || 0;
+  if (Game.time && (Game.time - last) < 100) return;
+  _roadCacheTrace[key] = Game.time || 0;
+  console.log('[PlannerCache] road home=' + key + ' info=' + info);
+}
 
 function _roomMem(roomName) {
   if (!Memory.rooms) Memory.rooms = {};
@@ -364,7 +379,7 @@ RoadPlanner._scoreRemote = function (rec) {
   return score;
 };
 
-RoadPlanner.ensureRemoteRoads = function (homeRoom) {
+RoadPlanner.ensureRemoteRoads = function (homeRoom, cache) {
   if (!homeRoom || !homeRoom.controller || !homeRoom.controller.my) return;
   if (!BeeToolbox.shouldPlaceRoads(homeRoom)) return;
   _syncEconomyConfig();
@@ -373,15 +388,28 @@ RoadPlanner.ensureRemoteRoads = function (homeRoom) {
   if (!mem.remoteInfo) mem.remoteInfo = {};
 
   if (homeRoom.controller.level < 4) return;
-  var active = RoadPlanner.getActiveRemoteRooms(homeRoom);
+  var active = null;
+  if (cache && cache.remotesByHome && cache.remotesByHome[homeRoom.name]) {
+    active = BeeToolbox.normalizeRemoteRooms(cache.remotesByHome[homeRoom.name]);
+    _traceRoadCache(homeRoom.name, 'hintRemotes=' + active.length);
+  } else {
+    active = RoadPlanner.getActiveRemoteRooms(homeRoom);
+  }
+  if (!Array.isArray(active)) active = [];
+  var minStorageEnergy = RoadPlanner.CONFIG.STORAGE_ENERGY_MIN_BEFORE_REMOTES;
+  var roomMem = Memory.rooms && Memory.rooms[homeRoom.name];
+  if (roomMem && roomMem.econ && roomMem.econ.remoteRoads && typeof roomMem.econ.remoteRoads.minStorageEnergy === 'number') {
+    minStorageEnergy = roomMem.econ.remoteRoads.minStorageEnergy;
+    _traceRoadCache(homeRoom.name, 'override=' + minStorageEnergy);
+  }
   var storageEnergy = homeRoom.storage ? (homeRoom.storage.store[RESOURCE_ENERGY] | 0) : 0;
-  if (!homeRoom.storage || storageEnergy < RoadPlanner.CONFIG.STORAGE_ENERGY_MIN_BEFORE_REMOTES) {
-    _logRemoteThrottle(homeRoom.name, storageEnergy, RoadPlanner.CONFIG.STORAGE_ENERGY_MIN_BEFORE_REMOTES, active.length, RoadPlanner.CONFIG.MAX_ACTIVE_REMOTES, 'storage');
+  if (!homeRoom.storage || storageEnergy < minStorageEnergy) {
+    _logRemoteThrottle(homeRoom.name, storageEnergy, minStorageEnergy, active.length, RoadPlanner.CONFIG.MAX_ACTIVE_REMOTES, 'storage');
     return;
   }
 
   if (active.length >= RoadPlanner.CONFIG.MAX_ACTIVE_REMOTES) {
-    _logRemoteThrottle(homeRoom.name, storageEnergy, RoadPlanner.CONFIG.STORAGE_ENERGY_MIN_BEFORE_REMOTES, active.length, RoadPlanner.CONFIG.MAX_ACTIVE_REMOTES, 'limit');
+    _logRemoteThrottle(homeRoom.name, storageEnergy, minStorageEnergy, active.length, RoadPlanner.CONFIG.MAX_ACTIVE_REMOTES, 'limit');
     return;
   }
 
