@@ -264,32 +264,93 @@ var CONFIGS = {
   ]
 };
 
-function cloneBodyArray(body) {
-  if (!body || !body.length) return [];
-  var out = [];
-  for (var i = 0; i < body.length; i++) {
-    out.push(body[i]);
-  }
-  return out;
-}
-
-function buildHarvesterTiers() {
-  var tiers = [];
+function resolveHarvesterConfigs() {
   var configs = CONFIGS.baseharvest || [];
+  if (!HARVESTER_CFG || typeof HARVESTER_CFG.MAX_WORK !== 'number') {
+    return configs;
+  }
+  var filtered = [];
   for (var i = 0; i < configs.length; i++) {
     var body = configs[i];
-    if (!body || !body.length) continue;
-    var workCount = BeeToolbox.countBodyParts(body, WORK);
-    if (HARVESTER_CFG && typeof HARVESTER_CFG.MAX_WORK === 'number' && workCount > HARVESTER_CFG.MAX_WORK) {
+    if (!body || !body.length) {
       continue;
     }
-    tiers.push({ body: cloneBodyArray(body), cost: BeeToolbox.costOfBody(body), work: workCount });
+    var workCount = BeeToolbox.countBodyParts(body, WORK);
+    if (workCount > HARVESTER_CFG.MAX_WORK) {
+      continue;
+    }
+    filtered.push(body);
   }
-  tiers.sort(function (a, b) { return a.cost - b.cost; });
-  return tiers;
+  return filtered.length ? filtered : configs;
 }
 
-var HARVESTER_BODY_TIERS = buildHarvesterTiers();
+function generateBodyFromConfig(taskKey, availableEnergy, capacityEnergy) {
+  var list = CONFIGS[taskKey];
+  if (!list) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('No config for task:', taskKey);
+    }
+    return [];
+  }
+  var selection = BeeToolbox.selectAffordableBody(list, availableEnergy, capacityEnergy != null ? capacityEnergy : availableEnergy);
+  if (selection.body.length) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('Picked', taskKey, 'body:', '[' + selection.body + ']', 'cost', selection.cost, '(avail', availableEnergy + ')');
+    }
+    return selection.body;
+  }
+  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+    var minCost = selection.minCost || 0;
+    if (minCost > 0) {
+      spawnLog.debug('Insufficient energy for', taskKey, '(need at least', minCost, ')');
+    } else {
+      spawnLog.debug('Insufficient energy for', taskKey, '(no valid tiers)');
+    }
+  }
+  return [];
+}
+
+function getHarvesterBodyForEnergy(energyAvailable) {
+  var configs = resolveHarvesterConfigs();
+  var info = BeeToolbox.evaluateBodyTiers(configs, energyAvailable || 0, energyAvailable || 0);
+  if (info && info.availableBody && info.availableBody.length) {
+    return info.availableBody;
+  }
+  return [];
+}
+
+function getBestHarvesterBody(roomOrCapacity) {
+  var capacity = 0;
+  if (roomOrCapacity && typeof roomOrCapacity.energyCapacityAvailable === 'number') {
+    capacity = roomOrCapacity.energyCapacityAvailable;
+  } else if (typeof roomOrCapacity === 'number') {
+    capacity = roomOrCapacity;
+  }
+  var configs = resolveHarvesterConfigs();
+  var info = BeeToolbox.evaluateBodyTiers(configs, capacity || 0, capacity || 0);
+  if (info && info.capacityBody && info.capacityBody.length) {
+    return info.capacityBody;
+  }
+  if (info && info.idealBody && info.idealBody.length) {
+    return info.idealBody;
+  }
+  return [];
+}
+
+function selectBuilderBody(capacityEnergy, availableEnergy) {
+  var configs = CONFIGS.builder || [];
+  if (!configs.length) return [];
+  var cap = (capacityEnergy != null) ? capacityEnergy : availableEnergy;
+  var info = BeeToolbox.evaluateBodyTiers(configs, availableEnergy || 0, cap || 0);
+  if (info && info.availableBody && info.availableBody.length) {
+    return info.availableBody;
+  }
+  return [];
+}
+
+function Generate_Body_From_Config(taskKey, energyAvailable, capacityEnergy) {
+  return generateBodyFromConfig(taskKey, energyAvailable, capacityEnergy);
+}
 
 // ---------- Task Aliases (normalize user-facing names) ----------
 // This lets getBodyForTask('Trucker') resolve to courier configs, etc.
@@ -332,99 +393,6 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 }
 
 // ---------- Body Selection ----------
-// Returns the largest body from CONFIGS[taskKey] that fits energyAvailable.
-function Generate_Body_From_Config(taskKey, energyAvailable) {
-  var list = CONFIGS[taskKey];
-  if (!list) {
-    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-      spawnLog.debug('No config for task:', taskKey);
-    }
-    return [];
-  }
-  for (var i = 0; i < list.length; i++) {
-    var body = list[i];
-    var cost = _.sum(body, function (part) { return BODYPART_COST[part]; }); // Screeps global
-    if (cost <= energyAvailable) {
-      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-        spawnLog.debug('Picked', taskKey, 'body:', '[' + body + ']', 'cost', cost, '(avail', energyAvailable + ')');
-      }
-      return body;
-    }
-  }
-  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-    var last = list[list.length - 1];
-    var minCost = _.sum(last, function (p) { return BODYPART_COST[p]; });
-    spawnLog.debug('Insufficient energy for', taskKey, '(need at least', minCost, ')');
-  }
-  return [];
-}
-
-function getHarvesterBodyForEnergy(energyAvailable) {
-  if (!HARVESTER_BODY_TIERS.length) return [];
-  var best = null;
-  for (var i = 0; i < HARVESTER_BODY_TIERS.length; i++) {
-    var tier = HARVESTER_BODY_TIERS[i];
-    if (tier.cost <= energyAvailable) {
-      best = tier;
-    } else {
-      break;
-    }
-  }
-  return best ? cloneBodyArray(best.body) : [];
-}
-
-function getBestHarvesterBody(room) {
-  if (!HARVESTER_BODY_TIERS.length) return [];
-  var capacity = 0;
-  if (room && typeof room.energyCapacityAvailable === 'number') {
-    capacity = room.energyCapacityAvailable;
-  } else if (typeof room === 'number') {
-    capacity = room;
-  }
-  var best = null;
-  for (var i = 0; i < HARVESTER_BODY_TIERS.length; i++) {
-    var tier = HARVESTER_BODY_TIERS[i];
-    if (tier.cost <= capacity) {
-      best = tier;
-    } else {
-      break;
-    }
-  }
-  if (best) return cloneBodyArray(best.body);
-  return cloneBodyArray(HARVESTER_BODY_TIERS[0].body);
-}
-
-function Select_Builder_Body(capacityEnergy, availableEnergy) {
-  var configs = CONFIGS.builder;
-  if (!configs || !configs.length) return [];
-
-  var filtered = [];
-  for (var i = 0; i < configs.length; i++) {
-    var body = configs[i];
-    if (!body || !body.length) continue;
-    var cost = _.sum(body, function (part) { return BODYPART_COST[part]; }) || 0;
-    if (!cost || cost > capacityEnergy) continue;
-
-    var insertAt = filtered.length;
-    for (var j = 0; j < filtered.length; j++) {
-      if (cost > filtered[j].cost) {
-        insertAt = j;
-        break;
-      }
-    }
-    filtered.splice(insertAt, 0, { index: i, cost: cost });
-  }
-
-  if (!filtered.length) return [];
-
-  for (var k = 0; k < filtered.length; k++) {
-    if (availableEnergy >= filtered[k].cost) {
-      return configs[filtered[k].index];
-    }
-  }
-
-  return [];
-}
 
 // Helper to normalize a requested task into a CONFIGS key.
 function normalizeTask(task) {
@@ -494,7 +462,7 @@ function Generate_Creep_Name(role, max) {
 function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory) {
   var mem = memory || {};
   var body = generateBodyFn(availableEnergy);
-  var bodyCost = _.sum(body, function (p) { return BODYPART_COST[p]; }) || 0;
+  var bodyCost = BeeToolbox.costOfBody(body);
 
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('Attempt', roleName, 'body=[' + body + ']', 'cost=' + bodyCost, 'avail=' + availableEnergy);
@@ -538,7 +506,7 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   var overrideBody = (extraMemory && extraMemory._harvesterBodyOverride) ? extraMemory._harvesterBodyOverride : null;
 
   if (overrideBody && overrideBody.length) {
-    body = cloneBodyArray(overrideBody);
+    body = BeeToolbox.cloneBody(overrideBody);
   } else if (normalizedLower === 'builder') {
     var capacity = 0;
     if (spawn && spawn.room) {
@@ -547,7 +515,7 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
     if (capacity < energy) {
       capacity = energy;
     }
-    body = Select_Builder_Body(capacity, energy);
+    body = selectBuilderBody(capacity, energy);
   } else if (normalizedLower === 'baseharvest' && spawn && spawn.room) {
     body = getBestHarvesterBody(spawn.room);
   } else {

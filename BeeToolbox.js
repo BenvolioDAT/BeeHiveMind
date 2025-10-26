@@ -103,6 +103,28 @@ function evaluateBodyTiers(tiers, available, capacity) {
   return result;
 }
 
+function selectAffordableBody(configs, available, capacity) {
+  var list = Array.isArray(configs) ? configs : [];
+  var targetCapacity = (capacity != null) ? capacity : available;
+  var info = evaluateBodyTiers(list, available || 0, targetCapacity || 0);
+  var body = [];
+  if (info && info.availableBody && info.availableBody.length) {
+    body = info.availableBody.slice();
+  }
+  var cost = 0;
+  if (info && typeof info.availableCost === 'number' && info.availableCost > 0) {
+    cost = info.availableCost;
+  } else if (body.length) {
+    cost = costOfBody(body);
+  }
+  return {
+    body: body,
+    cost: cost,
+    minCost: info ? info.minCost : 0,
+    info: info
+  };
+}
+
 function looksLikeRoomName(name) {
   if (typeof name !== 'string') return false;
   if (name.length < 4) return false;
@@ -260,6 +282,143 @@ function collectHomeRemotes(homeName, baseList) {
   return target;
 }
 
+function summarizeRemotes(remoteNames, options) {
+  var summary = {
+    list: [],
+    set: Object.create(null),
+    totalSources: 0,
+    remoteCount: 0,
+    activeAssignments: 0
+  };
+
+  if (!remoteNames) {
+    return summary;
+  }
+
+  var list = [];
+  if (Array.isArray(remoteNames)) {
+    for (var i = 0; i < remoteNames.length; i++) {
+      if (typeof remoteNames[i] === 'string') {
+        list.push(remoteNames[i]);
+      }
+    }
+  } else if (typeof remoteNames === 'string') {
+    list.push(remoteNames);
+  }
+
+  if (!list.length) {
+    return summary;
+  }
+
+  summary.list = list.slice();
+  summary.remoteCount = list.length;
+
+  var remoteSet = summary.set;
+  var roomsMem = (options && options.roomsMemory) || (Memory && Memory.rooms) || {};
+  var remoteLedger = (options && options.remoteLedger) || (Memory && Memory.remotes) || null;
+  var totalSources = 0;
+
+  for (var j = 0; j < list.length; j++) {
+    var remoteName = list[j];
+    remoteSet[remoteName] = true;
+
+    var mem = roomsMem && roomsMem[remoteName] ? roomsMem[remoteName] : {};
+    var ledger = (remoteLedger && typeof remoteLedger === 'object') ? remoteLedger[remoteName] : null;
+    var status = ledger && ledger.status;
+    var blockedUntil = (ledger && typeof ledger.blockedUntil === 'number') ? ledger.blockedUntil : 0;
+    var isBlocked = false;
+
+    if (status === 'BLOCKED') {
+      if (blockedUntil > (Game.time || 0)) {
+        isBlocked = true;
+      } else if (blockedUntil && ((Game.time || 0) - blockedUntil) > 1500) {
+        status = 'DEGRADED';
+      } else if (!blockedUntil) {
+        var auditAge = (ledger && typeof ledger.lastAudit === 'number') ? ((Game.time || 0) - ledger.lastAudit) : 0;
+        if (auditAge <= 1500) {
+          isBlocked = true;
+        }
+      }
+    }
+
+    var hostileFlag = !!(mem && mem.hostile);
+    var hostileTick = mem ? (mem.hostileTick || mem.hostileSince || mem.hostileLastSeen || mem.lastHostile || mem.hostileSeen || 0) : 0;
+    if (hostileFlag && hostileTick && ((Game.time || 0) - hostileTick) > 1500) {
+      hostileFlag = false;
+    }
+    if (hostileFlag && status !== 'BLOCKED') {
+      hostileFlag = false;
+    }
+
+    if (hostileFlag || isBlocked) {
+      continue;
+    }
+
+    if (mem && mem._invaderLock && mem._invaderLock.locked) {
+      var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+      if (lockTick === null || ((Game.time || 0) - lockTick) <= 1500) {
+        continue;
+      }
+    }
+
+    var sourceCount = 0;
+    if (Game && Game.rooms && Game.rooms[remoteName]) {
+      var visibleRoom = Game.rooms[remoteName];
+      var sources = visibleRoom && typeof visibleRoom.find === 'function' ? visibleRoom.find(FIND_SOURCES) : [];
+      sourceCount = Array.isArray(sources) ? sources.length : 0;
+    }
+
+    if (sourceCount === 0) {
+      sourceCount = countSourcesInMemory(mem);
+    }
+
+    if (sourceCount === 0 && mem && Array.isArray(mem.sources)) {
+      sourceCount = mem.sources.length;
+    }
+
+    totalSources += sourceCount;
+  }
+
+  if (totalSources <= 0) {
+    totalSources = list.length;
+  }
+
+  var assignments = (options && options.assignments) || (Memory && Memory.remoteAssignments) || {};
+  var active = 0;
+  if (assignments && typeof assignments === 'object') {
+    for (var key in assignments) {
+      if (!Object.prototype.hasOwnProperty.call(assignments, key)) {
+        continue;
+      }
+      var entry = assignments[key];
+      if (!entry) {
+        continue;
+      }
+      var remoteRoomName = null;
+      if (typeof entry.roomName === 'string') {
+        remoteRoomName = entry.roomName;
+      } else if (typeof entry.room === 'string') {
+        remoteRoomName = entry.room;
+      }
+      if (!remoteRoomName || !remoteSet[remoteRoomName]) {
+        continue;
+      }
+      var count = entry.count | 0;
+      if (!count && entry.owner) {
+        count = 1;
+      }
+      if (count > 0) {
+        active += count;
+      }
+    }
+  }
+
+  summary.totalSources = totalSources;
+  summary.activeAssignments = active;
+
+  return summary;
+}
+
 function countSourcesInMemory(mem) {
   if (!mem) return 0;
   if (mem.sources && typeof mem.sources === 'object') {
@@ -318,6 +477,70 @@ function countCreepsBy(filterFn) {
     if (filterFn(creep)) count += 1;
   }
   return count;
+}
+
+function tallyCreeps(options) {
+  var opts = options || {};
+  var includeMemory = opts.includeMemory === true;
+  var field = typeof opts.field === 'string' ? opts.field : null;
+  var filter = (typeof opts.filter === 'function') ? opts.filter : null;
+  var selector = (typeof opts.valueSelector === 'function') ? opts.valueSelector : null;
+  var defaultValue = opts.defaultValue;
+  var counts = Object.create(null);
+  var total = 0;
+
+  function tallyOne(memory, creep, isLive) {
+    var mem = memory || {};
+    if (filter && !filter(mem, creep, isLive)) {
+      return;
+    }
+    var value = null;
+    if (selector) {
+      value = selector(mem, creep, isLive);
+    } else if (field && mem) {
+      value = mem[field];
+    }
+    if ((value === undefined || value === null) && defaultValue !== undefined) {
+      if (typeof defaultValue === 'function') {
+        value = defaultValue(mem, creep, isLive);
+      } else {
+        value = defaultValue;
+      }
+    }
+    if (value === undefined || value === null) {
+      return;
+    }
+    counts[value] = (counts[value] || 0) + 1;
+    total += 1;
+  }
+
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) {
+      continue;
+    }
+    var creep = Game.creeps[name];
+    if (!creep) {
+      continue;
+    }
+    tallyOne(creep.memory, creep, true);
+  }
+
+  if (includeMemory && Memory && Memory.creeps) {
+    for (var memName in Memory.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Memory.creeps, memName)) {
+        continue;
+      }
+      if (Game.creeps[memName]) {
+        continue;
+      }
+      tallyOne(Memory.creeps[memName], null, false);
+    }
+  }
+
+  return {
+    counts: counts,
+    total: total
+  };
 }
 
 function isCpuBucketHealthy(minBucket) {
@@ -902,6 +1125,10 @@ var BeeToolbox = {
 
   cloneBody: cloneBody,
 
+  selectAffordableBody: function (configs, available, capacity) {
+    return selectAffordableBody(configs, available, capacity);
+  },
+
   canAffordBody: function (body, availableEnergy) {
     var cost = costOfBody(body);
     return cost > 0 && availableEnergy >= cost;
@@ -917,6 +1144,10 @@ var BeeToolbox = {
 
   collectHomeRemotes: function (homeName, baseList) {
     return collectHomeRemotes(homeName, baseList);
+  },
+
+  summarizeRemotes: function (remoteNames, options) {
+    return summarizeRemotes(remoteNames, options || null);
   },
 
   countSourcesInMemory: countSourcesInMemory,
@@ -942,6 +1173,10 @@ var BeeToolbox = {
   countCreepsBy: function (filterFn) {
     if (typeof filterFn !== 'function') return 0;
     return countCreepsBy(filterFn);
+  },
+
+  tallyCreeps: function (options) {
+    return tallyCreeps(options || null);
   },
 
   isCpuBucketHealthy: function (minBucket) {

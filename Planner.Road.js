@@ -129,24 +129,11 @@ function _touchVision(roomName) {
   return mem.vision[roomName] || null;
 }
 
-function _shouldLogThrottle(roomName, reason) {
-  if (!roomName) return false;
-  Memory._remoteThrottleLog = Memory._remoteThrottleLog || {};
-  var rec = Memory._remoteThrottleLog[roomName];
-  if (!rec) {
-    rec = {};
-    Memory._remoteThrottleLog[roomName] = rec;
-  }
-  var key = reason || 'generic';
-  var last = rec[key] || 0;
-  if ((Game.time || 0) - last < RoadPlanner.CONFIG.THROTTLE_LOG_INTERVAL) return false;
-  rec[key] = Game.time || 0;
-  Memory._remoteThrottleLog[roomName] = rec;
-  return true;
-}
-
 function _logRemoteThrottle(roomName, storage, threshold, active, max, reason) {
-  if (!_shouldLogThrottle(roomName, reason)) return;
+  if (!roomName) return;
+  Memory._remoteThrottleLog = Memory._remoteThrottleLog || {};
+  var key = roomName + '|' + (reason || 'generic');
+  if (!BeeToolbox.shouldLogThrottled(Memory._remoteThrottleLog, key, RoadPlanner.CONFIG.THROTTLE_LOG_INTERVAL)) return;
   var text = '[Remotes] Skipped planning: storage=' + storage + '/threshold=' + threshold;
   text += ', active=' + active + '/max=' + max;
   text += ', reason=' + reason + ', room=' + roomName;

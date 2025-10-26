@@ -26,6 +26,7 @@ var TaskCombatMelee = require('./Task.CombatMelee');
 var TaskDismantler = require('./Task.Dismantler');
 var TaskTrucker = require('Task.Trucker');
 var TaskClaimer = require('Task.Claimer');
+var BeeToolbox = require('BeeToolbox');
 
 /**
  * Default per-role counts that prevent the colony from starving.
@@ -114,19 +115,30 @@ function deriveTaskCounts() {
   }
 
   colonyCache.tick = Game.time;
-  var countsByTask = Object.create(null);
-
-  for (var creepName in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) {
-      continue;
+  var countsByTask;
+  if (BeeToolbox && typeof BeeToolbox.tallyCreeps === 'function') {
+    var tally = BeeToolbox.tallyCreeps({
+      valueSelector: function (memory) {
+        if (!memory) return null;
+        return memory.task || null;
+      },
+      defaultValue: 'idle'
+    });
+    countsByTask = (tally && tally.counts) ? tally.counts : Object.create(null);
+  } else {
+    countsByTask = Object.create(null);
+    for (var creepName in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) {
+        continue;
+      }
+      var creep = Game.creeps[creepName];
+      if (!creep || !creep.memory) {
+        countsByTask.idle = (countsByTask.idle || 0) + 1;
+        continue;
+      }
+      var taskKey = creep.memory.task || 'idle';
+      countsByTask[taskKey] = (countsByTask[taskKey] || 0) + 1;
     }
-    var creep = Game.creeps[creepName];
-    if (!creep || !creep.memory) {
-      countsByTask.idle = (countsByTask.idle || 0) + 1;
-      continue;
-    }
-    var taskKey = creep.memory.task || 'idle';
-    countsByTask[taskKey] = (countsByTask[taskKey] || 0) + 1;
   }
 
   colonyCache.activeCounts = countsByTask;
