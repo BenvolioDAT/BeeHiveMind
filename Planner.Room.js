@@ -7,6 +7,23 @@ var CFG = {
   MAX_SITES_PER_TICK: 5
 };
 
+function _logExtensionPlanning(room, info) {
+  if (!Memory || !Memory.__traceExtensions) return;
+  if (!room || !info) return;
+  var gates = info.gates || {};
+  var text = 'EXT-PLAN ' + room.name;
+  text += ' rcl=' + info.rcl;
+  text += ' allowed=' + info.allowed;
+  text += ' existing=' + info.existing;
+  text += ' sites=' + info.sites;
+  text += ' action=' + info.action;
+  if (info.rc != null) {
+    text += ' rc=' + info.rc;
+  }
+  text += ' gates=' + JSON.stringify(gates);
+  console.log(text);
+}
+
 // RCL Milestone Checklist (consumed by Task.Builder and remote throttles):
 // RCL1: online spawn with hub↔source and hub↔controller roads so harvesters never slog.
 // RCL2: finish the first extension block to unlock bigger worker bodies and stable economy.
@@ -496,10 +513,36 @@ function _taskPriority(task) {
 function ensureSites(room) {
   if (!room || !room.controller || !room.controller.my) return;
   var plan = planRoom(room);
-  if (!plan) return;
+  if (!plan) {
+    if (Memory && Memory.__traceExtensions) {
+      var currentLevel = room.controller.level || 1;
+      var allowedIfAny = 0;
+      if (typeof CONTROLLER_STRUCTURES === 'object' && CONTROLLER_STRUCTURES && CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION]) {
+        allowedIfAny = CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION][currentLevel] || 0;
+      }
+      var builtCount = (room.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_EXTENSION } }) || []).length;
+      var siteCount = (room.find(FIND_CONSTRUCTION_SITES, { filter: { structureType: STRUCTURE_EXTENSION } }) || []).length;
+      _logExtensionPlanning(room, {
+        rcl: currentLevel,
+        allowed: allowedIfAny,
+        existing: builtCount,
+        sites: siteCount,
+        action: 'skip-no-plan',
+        rc: null,
+        gates: { hasPlan: false }
+      });
+    }
+    return;
+  }
 
   var state = _structureState(room);
   var currentRCL = room.controller.level || 1;
+  var extExisting = (state.built[STRUCTURE_EXTENSION] || []).length;
+  var extSites = (state.sites[STRUCTURE_EXTENSION] || []).length;
+  var extAllowed = 0;
+  if (typeof CONTROLLER_STRUCTURES === 'object' && CONTROLLER_STRUCTURES && CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION]) {
+    extAllowed = CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION][currentRCL] || 0;
+  }
   var tasks = [];
   for (var r = 1; r <= currentRCL; r++) {
     var needList = plan.needsByRCL[r] || [];
@@ -517,10 +560,41 @@ function ensureSites(room) {
     return a.key < b.key ? -1 : 1;
   });
 
+  var extensionTaskCount = 0;
+  for (var pre = 0; pre < tasks.length; pre++) {
+    if (tasks[pre].type === STRUCTURE_EXTENSION) {
+      extensionTaskCount++;
+    }
+  }
+
   var placed = 0;
+  var extensionLogs = 0;
   for (var i = 0; i < tasks.length && placed < CFG.MAX_SITES_PER_TICK; i++) {
     var task = tasks[i];
-    if (_hasStructureOrSite(state, task.type, task.pos)) continue;
+    var alreadyPresent = _hasStructureOrSite(state, task.type, task.pos);
+    if (task.type === STRUCTURE_EXTENSION && Memory && Memory.__traceExtensions) {
+      var gates = {
+        hasPlan: true,
+        hasAnchor: !!(plan && plan.anchor),
+        tasksAvailable: extensionTaskCount > 0,
+        underCap: (extExisting + extSites) < extAllowed,
+        maxSitesAvailable: placed < CFG.MAX_SITES_PER_TICK,
+        alreadyPresent: alreadyPresent
+      };
+      if (alreadyPresent) {
+        _logExtensionPlanning(room, {
+          rcl: currentRCL,
+          allowed: extAllowed,
+          existing: extExisting,
+          sites: extSites,
+          action: 'skip-existing',
+          rc: null,
+          gates: gates
+        });
+        extensionLogs++;
+      }
+    }
+    if (alreadyPresent) continue;
     if (task.type === STRUCTURE_ROAD) {
       var stubPath = [];
       if (task.pos) {
@@ -537,6 +611,65 @@ function ensureSites(room) {
     var rc = room.createConstructionSite(task.pos.x, task.pos.y, task.type);
     if (rc === OK) {
       placed++;
+      if (task.type === STRUCTURE_EXTENSION) {
+        extSites++;
+      }
+    }
+    if (task.type === STRUCTURE_EXTENSION && Memory && Memory.__traceExtensions) {
+      var gatesAfter = {
+        hasPlan: true,
+        hasAnchor: !!(plan && plan.anchor),
+        tasksAvailable: extensionTaskCount > 0,
+        underCap: (extExisting + extSites) < extAllowed,
+        maxSitesAvailable: placed < CFG.MAX_SITES_PER_TICK,
+        alreadyPresent: false
+      };
+      _logExtensionPlanning(room, {
+        rcl: currentRCL,
+        allowed: extAllowed,
+        existing: extExisting,
+        sites: extSites,
+        action: 'attempt',
+        rc: rc,
+        gates: gatesAfter
+      });
+      extensionLogs++;
+    }
+  }
+
+  if (Memory && Memory.__traceExtensions) {
+    if (extensionTaskCount === 0 && extAllowed > 0) {
+      _logExtensionPlanning(room, {
+        rcl: currentRCL,
+        allowed: extAllowed,
+        existing: extExisting,
+        sites: extSites,
+        action: 'skip-no-extension-tasks',
+        rc: null,
+        gates: {
+          hasPlan: true,
+          hasAnchor: !!(plan && plan.anchor),
+          tasksAvailable: false,
+          underCap: (extExisting + extSites) < extAllowed,
+          maxSitesAvailable: placed < CFG.MAX_SITES_PER_TICK
+        }
+      });
+    } else if (extensionTaskCount > 0 && extensionLogs === 0) {
+      _logExtensionPlanning(room, {
+        rcl: currentRCL,
+        allowed: extAllowed,
+        existing: extExisting,
+        sites: extSites,
+        action: 'skip-max-sites-preempted',
+        rc: null,
+        gates: {
+          hasPlan: true,
+          hasAnchor: !!(plan && plan.anchor),
+          tasksAvailable: true,
+          underCap: (extExisting + extSites) < extAllowed,
+          maxSitesAvailable: false
+        }
+      });
     }
   }
 
