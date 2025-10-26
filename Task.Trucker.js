@@ -1,7 +1,12 @@
 'use strict';
 
 // Task.Trucker.js
-var BeeToolbox = require('BeeToolbox');
+var Traveler = null;
+try {
+  Traveler = require('Traveler');
+} catch (error) {
+  Traveler = null;
+}
 
 var PICKUP_FLAG_DEFAULT = 'E-Pickup';     // rename if you like
 var MIN_DROPPED = 50;                     // ignore tiny crumbs
@@ -11,6 +16,46 @@ var WIDE_SEARCH_COOLDOWN = 25;
 var PARK_POS = new RoomPosition(25, 25, 'W0N0'); // only used if no flag & no home; harmless
 
 var GLOBAL_TRUCKER_CACHE = global.__TRUCKER_CACHE || (global.__TRUCKER_CACHE = { rooms: {} });
+
+function updateReturnState(creep) {
+  if (!creep) return;
+  if (creep.memory.returning) {
+    if (creep.store[RESOURCE_ENERGY] === 0) {
+      creep.memory.returning = false;
+    }
+  } else if (creep.store.getFreeCapacity() === 0) {
+    creep.memory.returning = true;
+  }
+}
+
+function travelTo(creep, target, range, reuse) {
+  if (!creep || !target) {
+    return ERR_INVALID_TARGET;
+  }
+
+  var destination = (target && target.pos) ? target.pos : target;
+  var options = { range: (typeof range === 'number') ? range : 1 };
+
+  if (Traveler && typeof Traveler.travelTo === 'function') {
+    try {
+      return Traveler.travelTo(creep, destination, options);
+    } catch (error) {
+      // fall through to vanilla move
+    }
+  }
+
+  var pos = destination;
+  if (!pos || pos.x == null || pos.y == null) {
+    return ERR_INVALID_TARGET;
+  }
+
+  if (!(pos instanceof RoomPosition)) {
+    pos = new RoomPosition(pos.x, pos.y, pos.roomName || creep.room.name);
+  }
+
+  var moveOpts = { reusePath: (typeof reuse === 'number') ? reuse : 10, maxOps: 2000 };
+  return creep.moveTo(pos, moveOpts);
+}
 
 /* === FIX: Trucker wide scan throttling === */
 function getWideScanCache(roomName) {
@@ -79,7 +124,7 @@ var TaskTrucker = {
     }
 
     // mode switch (fill → return)
-    BeeToolbox.updateReturnState(creep);
+    updateReturnState(creep);
 
     if (creep.memory.returning) {
       return this.returnToStorage(creep);
@@ -96,14 +141,14 @@ var TaskTrucker = {
       var fallbackRoom = creep.memory.homeRoom || PARK_POS.roomName;
       var fallback = new RoomPosition(25, 25, fallbackRoom);
       if (!creep.pos.inRangeTo(fallback, 1)) {
-        BeeToolbox.BeeTravel(creep, fallback);
+        travelTo(creep, fallback);
       }
       return;
     }
 
     // travel cross-room to the flag
     if (creep.room.name !== flag.pos.roomName) {
-      BeeToolbox.BeeTravel(creep, flag.pos);
+      travelTo(creep, flag.pos);
       creep.say('🚛➡️📍');
       return;
     }
@@ -151,7 +196,7 @@ var TaskTrucker = {
     if (dropped.length === 0) {
       // Nothing visible—poke around the flag a bit
       if (!creep.pos.inRangeTo(flagPos, 2)) {
-        BeeToolbox.BeeTravel(creep, flagPos, 1, 10);
+        travelTo(creep, flagPos, 1, 10);
       } else {
         creep.say('🧐 no loot');
       }
@@ -163,7 +208,7 @@ var TaskTrucker = {
     if (!target) return;
 
     if (creep.pickup(target) === ERR_NOT_IN_RANGE) {
-      BeeToolbox.BeeTravel(creep, target, 1, 10);
+      travelTo(creep, target, 1, 10);
     }
   },
 
@@ -171,7 +216,7 @@ var TaskTrucker = {
     // if not in home room, head there first
     var home = creep.memory.homeRoom || Memory.firstSpawnRoom || creep.room.name;
     if (creep.room.name !== home) {
-      BeeToolbox.BeeTravel(creep, new RoomPosition(25, 25, home), 1, 10);
+      travelTo(creep, new RoomPosition(25, 25, home), 1, 10);
       creep.say('🏠↩️');
       return;
     }
@@ -190,7 +235,7 @@ var TaskTrucker = {
     if (targets.length) {
       var depositTarget = creep.pos.findClosestByPath(targets) || targets[0];
       if (creep.transfer(depositTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-        BeeToolbox.BeeTravel(creep, depositTarget, 1, 10);
+        travelTo(creep, depositTarget, 1, 10);
       } else {
         creep.say('📦➡️🏦');
       }
@@ -202,7 +247,7 @@ var TaskTrucker = {
         storage = spawns.length ? spawns[0] : null;
       }
       if (storage) {
-        BeeToolbox.BeeTravel(creep, storage.pos, 2, 10);
+        travelTo(creep, storage.pos, 2, 10);
       }
       creep.say('🤷 full');
     }
