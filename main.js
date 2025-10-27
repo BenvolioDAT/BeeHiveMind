@@ -150,9 +150,6 @@ module.exports.loop = function () {
     BeeHiveMind.run();
     towerLogic.run();
     roleLinkManager.run();
-
-    // Visuals removed: legacy visuals module deleted (see PR #XXXX).
-
     maintainRepairTargets();
     ensureFirstSpawnMemory();
     TaskSquad.ensureSquadFlags();
