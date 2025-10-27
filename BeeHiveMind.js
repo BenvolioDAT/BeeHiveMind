@@ -8,9 +8,7 @@ var roleWorkerBee = require('role.Worker_Bee');
 var BuilderPlanner = require('Task.Builder.Planner');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
-var AllianceManager = require('AllianceManager');
-var SquadFlagManager = require('SquadFlagManager');
-var TaskSquad = require('./Task.Squad');
+var TaskSquad = require('Task.Squad');
 var TaskCombatArcher = require('Task.CombatArcher');
 var TaskCombatMelee = require('Task.CombatMelee');
 var TaskCombatMedic = require('Task.CombatMedic');
@@ -764,8 +762,8 @@ function getMyUsername() {
 
 function isAllyUsername(username) {
   if (!username) return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
-    return AllianceManager.isAlly(username);
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function') {
+    return TaskSquad.isAlly(username);
   }
   return false;
 }
@@ -1470,12 +1468,12 @@ function selectNextSquadRole(bucket, desired, counts) {
 /* === FIX: Squad spawn blocking === */
 function buildSquadSpawnPlans(cache) {
   var plansByHome = Object.create(null);
-  if (!SquadFlagManager || typeof SquadFlagManager.getActiveSquads !== 'function') {
+  if (!TaskSquad || typeof TaskSquad.getActiveSquads !== 'function') {
     return plansByHome;
   }
 
   var roomsOwned = (cache && cache.roomsOwned) || [];
-  var active = SquadFlagManager.getActiveSquads({ ownedRooms: roomsOwned }) || [];
+  var active = TaskSquad.getActiveSquads({ ownedRooms: roomsOwned }) || [];
   var intelQueue = [];
   var seenTargets = Object.create(null);
 

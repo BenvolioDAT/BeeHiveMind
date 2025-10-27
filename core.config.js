@@ -6,7 +6,7 @@ var LOG_LEVEL = Object.freeze({
   DEBUG: 2
 });
 
-var settings = {};
+var settings = module.exports.settings || (module.exports.settings = {});
 
 settings.logging = settings.logging || Object.freeze({
   /** Default log level applied on boot. */
@@ -185,6 +185,25 @@ if (typeof upgraderSettings.MAX_UPGRADE_RANGE !== 'number') {
 //   Task.Upgrader.js:76
 //   Task.Upgrader.js:231
 //   Task.Upgrader.js:244
+
+var squadSettings = settings['Task.Squad'] || (settings['Task.Squad'] = {});
+// @used_in:
+//   Task.CombatMelee.js:54
+//   Task.CombatArcher.js:43
+//   Task.Dismantler.js:40
+//   Task.Scout.js:92
+//   BeeHiveMind.js:765
+//   tower.logic.js:16
+squadSettings.FRIENDLY_USERNAMES = [
+  'haha233jpg',
+  'Court_of_Silver',
+  'xianda1314',
+  'Lumen',
+  'ControlNet',
+  'xel',
+  'bg8kiw',
+  'Kazkel'
+];
 
 module.exports.LOG_LEVEL = LOG_LEVEL;
 module.exports.settings = settings;

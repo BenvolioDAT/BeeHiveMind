@@ -5,15 +5,477 @@
  * Dependencies:
  *   - Traveler.js (attaches creep.travelTo)
  */
-var AllianceManager = null;
-try {
-  AllianceManager = require('AllianceManager');
-} catch (allianceError) {
-  if (typeof global !== 'undefined' && global.AllianceManager) {
-    AllianceManager = global.AllianceManager;
+var CoreConfig = require('core.config');
+var CoreLogger = require('core.logger');
+try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
+
+var squadLog = (CoreLogger && CoreLogger.createLogger)
+  ? CoreLogger.createLogger('Task.Squad', (CoreLogger.LOG_LEVEL && CoreLogger.LOG_LEVEL.BASIC) || 1)
+  : {
+      info: function () {},
+      debug: function () {},
+      warn: function () {},
+      error: function () {}
+    };
+
+function _friendlyList() {
+  var settings = CoreConfig && CoreConfig.settings && CoreConfig.settings['Task.Squad'];
+  var list = settings && settings.FRIENDLY_USERNAMES;
+  return Array.isArray(list) ? list : [];
+}
+
+function isAlly(username) {
+  if (!username) return false;
+  var list = _friendlyList();
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] === username) return true;
+  }
+  return false;
+}
+
+function friendlyUsernames() {
+  var list = _friendlyList();
+  return list.slice();
+}
+
+function noteFriendlyFireAvoid(creepName, username, context) {
+  try {
+    if (isAlly(username)) {
+      if (squadLog && squadLog.info) {
+        squadLog.info('Friendly-fire avoided: ' + username + ' ctx=' + context);
+      }
+      return true;
+    }
+  } catch (friendlyError) {}
+  return false;
+}
+
+var _flagObjectHasOwn = Object.prototype.hasOwnProperty;
+var _flagCachedUsername = null;
+
+function _flagHasOwn(obj, key) {
+  return !!obj && _flagObjectHasOwn.call(obj, key);
+}
+
+function _flagIsValidRoomName(name) {
+  if (typeof name !== 'string') return false;
+  return /^[WE]\d+[NS]\d+$/.test(name);
+}
+
+function _flagGetMyUsername() {
+  if (_flagCachedUsername) return _flagCachedUsername;
+  var name = null;
+  var k;
+  for (k in Game.spawns) {
+    if (!_flagHasOwn(Game.spawns, k)) continue;
+    var spawn = Game.spawns[k];
+    if (spawn && spawn.owner && spawn.owner.username) {
+      name = spawn.owner.username;
+      break;
+    }
+  }
+  if (!name) {
+    for (k in Game.creeps) {
+      if (!_flagHasOwn(Game.creeps, k)) continue;
+      var creep = Game.creeps[k];
+      if (creep && creep.owner && creep.owner.username) {
+        name = creep.owner.username;
+        break;
+      }
+    }
+  }
+  _flagCachedUsername = name || 'me';
+  return _flagCachedUsername;
+}
+
+function _flagIsEnemyUsername(username) {
+  if (!username) return false;
+  if (isAlly(username)) return false;
+  var mine = _flagGetMyUsername();
+  if (mine && username === mine) return false;
+  return true;
+}
+
+function _flagSafeLinearDistance(a, b, allowInexact) {
+  if (!_flagIsValidRoomName(a) || !_flagIsValidRoomName(b)) return 9999;
+  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') return 9999;
+  return Game.map.getRoomLinearDistance(a, b, allowInexact);
+}
+
+function _flagRoomHashMod(roomName, mod) {
+  if (mod <= 1) return 0;
+  var h = 0;
+  var i;
+  for (i = 0; i < roomName.length; i++) {
+    h = ((h * 31) + roomName.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h) % mod;
+}
+
+function _flagPassesModuloThrottle(roomName, tick, modulo, salt) {
+  if (!modulo || modulo <= 1) return true;
+  return ((tick + _flagRoomHashMod(roomName, salt || 0)) % modulo) === 0;
+}
+
+var SQUAD_FLAG_CFG = {
+  scanModulo: 3,
+  minThreatScore: 5,
+  includeNonInvaderHostiles: false,
+  score: {
+    invaderCreep: 5,
+    otherHostileCreep: 2,
+    invaderCore: 15,
+    hostileTower: 10,
+    hostileSpawn: 6
+  },
+  dropGrace: 50,
+  assignRecentWindow: 20,
+  names: ['SquadAlpha', 'SquadBravo', 'SquadCharlie', 'SquadDelta'],
+  maxFlags: 4
+};
+
+function _flagMem() {
+  if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
+  if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
+  if (!Memory.squadFlags.bindings) Memory.squadFlags.bindings = {};
+  return Memory.squadFlags;
+}
+
+function _flagRoomsWithNonScoutCreeps() {
+  var set = {};
+  for (var cname in Game.creeps) {
+    if (!_flagHasOwn(Game.creeps, cname)) continue;
+    var c = Game.creeps[cname];
+    if (!c || !c.my || !c.memory) continue;
+    var tag = (c.memory.task || c.memory.role || '').toString().toLowerCase();
+    if (tag === 'scout' || tag.indexOf('scout') === 0) continue;
+    set[c.pos.roomName] = true;
+  }
+  if (Memory.attackTargets) {
+    for (var tn in Memory.attackTargets) {
+      if (!_flagHasOwn(Memory.attackTargets, tn)) continue;
+      var target = Memory.attackTargets[tn];
+      if (!target) continue;
+      var roomName = target.roomName || tn;
+      if (!_flagIsValidRoomName(roomName)) continue;
+      var ownerName = null;
+      if (typeof target.owner === 'string') ownerName = target.owner;
+      else if (target.owner && typeof target.owner.username === 'string') ownerName = target.owner.username;
+      if (ownerName && !_flagIsEnemyUsername(ownerName)) continue;
+      set[roomName] = true;
+    }
+  }
+  var out = [];
+  for (var rn in set) {
+    if (!_flagHasOwn(set, rn)) continue;
+    out.push(rn);
+  }
+  return out;
+}
+
+function _flagScoreRoom(room) {
+  if (!room) return { score: 0, pos: null, details: null };
+
+  var cfg = SQUAD_FLAG_CFG;
+  var s = 0;
+  var pos = null;
+
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+  var i, invCount = 0, otherCount = 0;
+  var hasRanged = false;
+  var hasAttack = false;
+  var hasHeal = false;
+
+  for (i = 0; i < hostiles.length; i++) {
+    var h = hostiles[i];
+    var inv = (h.owner && h.owner.username === 'Invader');
+    if (inv) invCount++;
+    else if (cfg.includeNonInvaderHostiles) otherCount++;
+
+    if (h.getActiveBodyparts) {
+      if (h.getActiveBodyparts(RANGED_ATTACK) > 0) hasRanged = true;
+      if (h.getActiveBodyparts(ATTACK) > 0 || h.getActiveBodyparts(WORK) > 0) hasAttack = true;
+      if (h.getActiveBodyparts(HEAL) > 0) hasHeal = true;
+    }
+  }
+
+  if (invCount > 0) {
+    s += invCount * cfg.score.invaderCreep;
+    if (!pos) {
+      for (i = 0; i < hostiles.length; i++) {
+        if (hostiles[i].owner && hostiles[i].owner.username === 'Invader') { pos = hostiles[i].pos; break; }
+      }
+    }
+  }
+  if (otherCount > 0) {
+    s += otherCount * cfg.score.otherHostileCreep;
+    if (!pos && hostiles.length) pos = hostiles[0].pos;
+  }
+
+  var structures = room.find(FIND_HOSTILE_STRUCTURES) || [];
+  var hasHostileTower = false;
+  var hasHostileSpawn = false;
+  for (i = 0; i < structures.length; i++) {
+    var st = structures[i];
+    if (st.structureType === STRUCTURE_INVADER_CORE) {
+      s += cfg.score.invaderCore;
+      if (!pos) pos = st.pos;
+      continue;
+    }
+    if (st.structureType === STRUCTURE_TOWER) {
+      hasHostileTower = true;
+      s += cfg.score.hostileTower;
+      if (!pos) pos = st.pos;
+    } else if (st.structureType === STRUCTURE_SPAWN) {
+      hasHostileSpawn = true;
+      s += cfg.score.hostileSpawn;
+      if (!pos) pos = st.pos;
+    }
+  }
+
+  if (!pos) pos = new RoomPosition(25, 25, room.name);
+  return {
+    score: s,
+    pos: pos,
+    details: {
+      hasRanged: hasRanged,
+      hasAttack: hasAttack,
+      hasHeal: hasHeal,
+      hasHostileTower: hasHostileTower,
+      hasHostileSpawn: hasHostileSpawn,
+      hostileCount: hostiles.length
+    }
+  };
+}
+
+function _flagEnsureFlagAt(name, pos) {
+  var f = Game.flags[name];
+  if (f) {
+    if (f.pos.roomName === pos.roomName && f.pos.x === pos.x && f.pos.y === pos.y) return;
+    try { f.remove(); } catch (flagRemoveError) {}
+  }
+  var rc = pos.roomName && Game.rooms[pos.roomName]
+    ? Game.rooms[pos.roomName].createFlag(pos, name)
+    : ERR_INVALID_TARGET;
+
+  if (rc !== OK && Game.rooms[pos.roomName]) {
+    var i, dx, dy, x, y;
+    for (i = 1; i <= 2; i++) {
+      for (dx = -i; dx <= i; dx++) {
+        for (dy = -i; dy <= i; dy++) {
+          if (Math.abs(dx) !== i && Math.abs(dy) !== i) continue;
+          x = pos.x + dx; y = pos.y + dy;
+          if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+          if (Game.rooms[pos.roomName].createFlag(x, y, name) === OK) return;
+        }
+      }
+    }
   }
 }
-try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
+
+function _flagRemoveFlag(name) {
+  var f = Game.flags[name];
+  if (f) { try { f.remove(); } catch (flagDeleteError) {} }
+}
+
+function _flagDeriveSquadId(flagName) {
+  if (!flagName) return 'Alpha';
+  var base = flagName;
+  if (base.indexOf('Squad_') === 0) base = base.substr(6);
+  else if (base.indexOf('Squad') === 0) base = base.substr(5);
+  if (!base) base = flagName;
+  return base;
+}
+
+function _flagPositionFromRecord(rec, roomName) {
+  if (rec && rec.lastPos && _flagIsValidRoomName(rec.lastPos.roomName)) {
+    return new RoomPosition(rec.lastPos.x, rec.lastPos.y, rec.lastPos.roomName);
+  }
+  if (_flagIsValidRoomName(roomName)) {
+    return new RoomPosition(25, 25, roomName);
+  }
+  return null;
+}
+
+function _flagPickHomeRoom(targetRoom, ownedRooms, currentHome) {
+  if (currentHome && Game.rooms[currentHome] && Game.rooms[currentHome].controller && Game.rooms[currentHome].controller.my) {
+    return currentHome;
+  }
+  if (!ownedRooms || !ownedRooms.length) return currentHome || null;
+  var best = null;
+  var bestDist = Infinity;
+  for (var i = 0; i < ownedRooms.length; i++) {
+    var room = ownedRooms[i];
+    if (!room || !room.controller || !room.controller.my) continue;
+    var dist = _flagSafeLinearDistance(room.name, targetRoom, true);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = room.name;
+    }
+  }
+  return best || currentHome || null;
+}
+
+function ensureSquadFlags(options) {
+  var mem = _flagMem();
+  var tick = Game.time | 0;
+  var cfg = SQUAD_FLAG_CFG;
+
+  var rooms = _flagRoomsWithNonScoutCreeps();
+  for (var r = 0; r < rooms.length; r++) {
+    var rn = rooms[r];
+    var room = Game.rooms[rn];
+    if (!room) continue;
+
+    if (!_flagPassesModuloThrottle(rn, tick, cfg.scanModulo || 1, 4)) continue;
+
+    var info = _flagScoreRoom(room);
+    var rec = mem.rooms[rn] || (mem.rooms[rn] = { lastSeen: 0, lastThreatAt: 0, lastPos: null, lastScore: 0, lastDetails: null });
+
+    rec.lastSeen = tick;
+    rec.lastScore = info.score | 0;
+    if (info.details) {
+      rec.lastDetails = info.details;
+    }
+    if (info.score >= cfg.minThreatScore) {
+      rec.lastThreatAt = tick;
+      rec.lastPos = { x: info.pos.x, y: info.pos.y, roomName: info.pos.roomName };
+    } else {
+      if (!rec.lastPos) rec.lastPos = { x: 25, y: 25, roomName: rn };
+    }
+    mem.rooms[rn] = rec;
+  }
+
+  var boundNames = {};
+  var nameIdx, fname, boundRoom;
+
+  for (nameIdx = 0; nameIdx < cfg.names.length; nameIdx++) {
+    fname = cfg.names[nameIdx];
+    boundRoom = mem.bindings[fname];
+
+    if (!boundRoom) continue;
+
+    boundNames[fname] = true;
+
+    var rrec = mem.rooms[boundRoom];
+    var keep = true;
+
+    if (Game.rooms[boundRoom]) {
+      var lastAt = rrec && rrec.lastThreatAt || 0;
+      if ((tick - lastAt) > cfg.dropGrace) {
+        _flagRemoveFlag(fname);
+        delete mem.bindings[fname];
+        keep = false;
+      }
+    }
+    if (keep) {
+      var pos = (rrec && rrec.lastPos)
+        ? new RoomPosition(rrec.lastPos.x, rrec.lastPos.y, rrec.lastPos.roomName)
+        : new RoomPosition(25, 25, boundRoom);
+      _flagEnsureFlagAt(fname, pos);
+    }
+  }
+
+  var candidates = [];
+  var now = tick;
+  for (var rn in mem.rooms) {
+    if (!_flagHasOwn(mem.rooms, rn)) continue;
+    var rec2 = mem.rooms[rn];
+    if (!rec2 || typeof rec2.lastThreatAt !== 'number') continue;
+    if ((now - rec2.lastThreatAt) <= cfg.assignRecentWindow) {
+      var already = false;
+      for (var n2 in mem.bindings) {
+        if (!_flagHasOwn(mem.bindings, n2)) continue;
+        if (mem.bindings[n2] === rn) { already = true; break; }
+      }
+      if (!already) {
+        candidates.push({ rn: rn, lastSeen: rec2.lastSeen | 0, lastThreatAt: rec2.lastThreatAt | 0 });
+      }
+    }
+  }
+
+  candidates.sort(function (a, b) {
+    if (b.lastThreatAt !== a.lastThreatAt) return b.lastThreatAt - a.lastThreatAt;
+    return b.lastSeen - a.lastSeen;
+  });
+
+  var maxN = Math.min(cfg.maxFlags, cfg.names.length);
+  for (nameIdx = 0; nameIdx < maxN; nameIdx++) {
+    fname = cfg.names[nameIdx];
+    if (mem.bindings[fname]) {
+      continue;
+    }
+
+    var pick = candidates.shift();
+    if (!pick) break;
+
+    mem.bindings[fname] = pick.rn;
+
+    var rec3 = mem.rooms[pick.rn];
+    var placePos = (rec3 && rec3.lastPos)
+      ? new RoomPosition(rec3.lastPos.x, rec3.lastPos.y, rec3.lastPos.roomName)
+      : new RoomPosition(25, 25, pick.rn);
+    _flagEnsureFlagAt(fname, placePos);
+  }
+
+  for (var fName in Game.flags) {
+    if (!_flagHasOwn(Game.flags, fName)) continue;
+    if (SQUAD_FLAG_CFG.names.indexOf(fName) === -1) continue;
+    if (!mem.bindings[fName]) {
+      _flagRemoveFlag(fName);
+    }
+  }
+
+  for (var k in mem.rooms) {
+    if (!_flagHasOwn(mem.rooms, k)) continue;
+    if ((tick - (mem.rooms[k].lastSeen | 0)) > 20000) delete mem.rooms[k];
+  }
+}
+
+function getActiveSquads(options) {
+  var mem = _flagMem();
+  var ownedRooms = (options && options.ownedRooms) || [];
+  var out = [];
+
+  if (!Memory.squads) Memory.squads = {};
+
+  for (var nameIdx = 0; nameIdx < SQUAD_FLAG_CFG.names.length; nameIdx++) {
+    var fname = SQUAD_FLAG_CFG.names[nameIdx];
+    var boundRoom = mem.bindings[fname];
+    if (!boundRoom) continue;
+
+    var squadId = _flagDeriveSquadId(fname);
+    var bucket = Memory.squads[squadId];
+    if (!bucket) {
+      bucket = Memory.squads[squadId] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
+    }
+
+    var rec = mem.rooms[boundRoom];
+    var flag = Game.flags[fname];
+    var rallyPos = flag ? flag.pos : _flagPositionFromRecord(rec, boundRoom);
+    if (rallyPos) {
+      bucket.rally = { x: rallyPos.x, y: rallyPos.y, roomName: rallyPos.roomName };
+    }
+    bucket.targetRoom = boundRoom;
+    bucket.home = _flagPickHomeRoom(boundRoom, ownedRooms, bucket.home);
+    bucket.lastIntelTick = Game.time;
+    bucket.lastIntelScore = rec && typeof rec.lastScore === 'number' ? rec.lastScore : 0;
+    bucket.lastIntelDetails = rec && rec.lastDetails ? rec.lastDetails : null;
+
+    out.push({
+      squadId: squadId,
+      flagName: fname,
+      targetRoom: boundRoom,
+      rallyPos: rallyPos,
+      threatScore: bucket.lastIntelScore || 0,
+      details: bucket.lastIntelDetails || null,
+      homeRoom: bucket.home,
+      flag: flag
+    });
+  }
+
+  return out;
+}
 
 var TaskSquad = (function () {
   var API = {};
@@ -315,14 +777,7 @@ var TaskSquad = (function () {
 
   // FIX: Reuse the alliance helper so we only ignore creeps and structures owned by trusted players.
   function _isAllyUsername(name) {
-    if (!name) return false;
-    if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
-      return AllianceManager.isAlly(name);
-    }
-    if (typeof global !== 'undefined' && global.AllianceManager && typeof global.AllianceManager.isAlly === 'function') {
-      return global.AllianceManager.isAlly(name);
-    }
-    return false;
+    return isAlly(name);
   }
 
   function _chooseRoomTarget(me) {
@@ -657,8 +1112,18 @@ var TaskSquad = (function () {
   API.getCachedMembers = getCachedMembers;
   API.getFollowLoad    = getFollowLoad;
   API.getRoleFollowMap = getRoleFollowMap;
+  API.isAlly = isAlly;
+  API.friendlyUsernames = friendlyUsernames;
+  API.noteFriendlyFireAvoid = noteFriendlyFireAvoid;
+  API.ensureSquadFlags = ensureSquadFlags;
+  API.getActiveSquads = getActiveSquads;
 
   return API;
 })();
 
 module.exports = TaskSquad;
+module.exports.isAlly = isAlly;
+module.exports.friendlyUsernames = friendlyUsernames;
+module.exports.noteFriendlyFireAvoid = noteFriendlyFireAvoid;
+module.exports.ensureSquadFlags = ensureSquadFlags;
+module.exports.getActiveSquads = getActiveSquads;
