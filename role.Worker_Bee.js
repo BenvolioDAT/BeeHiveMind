@@ -2,9 +2,8 @@
 
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
-var taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
+var taskLog = Logger.createLogger('Worker_Bee', LOG_LEVEL.BASIC);
 
-var TaskIdle = require('./Task.Idle');
 var TaskBaseHarvest = require('./Task.BaseHarvest');
 var TaskLuna = require('./Task.Luna');
 var TaskBuilder = require('./Task.Builder');
@@ -69,9 +68,37 @@ registerTaskModule('CombatMedic', TaskCombatMedic);
 registerTaskModule('CombatMelee', TaskCombatMelee);
 registerTaskModule('CombatArcher', TaskCombatArcher);
 registerTaskModule('Dismantler', TaskDismantler);
-registerTaskModule('idle', TaskIdle);
 registerTaskModule('Trucker', TaskTrucker);
 registerTaskModule('Claimer', TaskClaimer);
+
+function _cap(s) {
+  var str = String(s || '');
+  if (!str) {
+    return str;
+  }
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function _taskModuleName(taskName) {
+  return 'Task.' + _cap(taskName);
+}
+
+function _runTaskByName(creep, taskName) {
+  var registeredModule = resolveTaskModule(taskName);
+  if (registeredModule && typeof registeredModule.run === 'function') {
+    registeredModule.run(creep);
+    return true;
+  }
+  try {
+    var moduleName = _taskModuleName(taskName);
+    var taskModule = require(moduleName);
+    if (taskModule && typeof taskModule.run === 'function') {
+      taskModule.run(creep);
+      return true;
+    }
+  } catch (error) {}
+  return false;
+}
 
 function resolveTaskModule(taskName) {
   if (!taskName) {
@@ -208,10 +235,8 @@ function executeTask(creep) {
   }
 
   var memoryTaskName = creep.memory && creep.memory.task;
-  var activeTaskModule = resolveTaskModule(memoryTaskName);
 
-  if (activeTaskModule) {
-    activeTaskModule.run(creep);
+  if (_runTaskByName(creep, memoryTaskName)) {
     return;
   }
 
@@ -230,20 +255,19 @@ function executeTask(creep) {
   var fallbackTaskName = chooseFallbackTask(creep, previousTaskName);
   if (fallbackTaskName) {
     creep.memory.task = fallbackTaskName;
-    var fallbackModule = resolveTaskModule(fallbackTaskName);
-    if (fallbackModule && typeof fallbackModule.run === 'function') {
-      fallbackModule.run(creep);
+    if (_runTaskByName(creep, fallbackTaskName)) {
+      return;
     }
     return;
   }
 
-  if (TaskIdle && typeof TaskIdle.run === 'function') {
-    creep.memory.task = 'idle';
-    TaskIdle.run(creep);
+  if (creep && typeof creep.say === 'function' && creep.memory && !creep.memory._idleSaid) {
+    creep.say('⏸');
+    creep.memory._idleSaid = 1;
   }
 }
 
-var WorkerTaskManager = {
+var WorkerTaskController = {
   run: executeTask,
   isTaskNeeded: function (taskName) {
     var shortages = evaluateColonyNeeds();
@@ -270,10 +294,10 @@ var roleWorker_Bee = {
     }
 
     if (!creep.memory.task) {
-      creep.memory.task = WorkerTaskManager.getHighestPriorityTask(creep);
+      creep.memory.task = WorkerTaskController.getHighestPriorityTask(creep);
     }
 
-    WorkerTaskManager.run(creep);
+    WorkerTaskController.run(creep);
   }
 };
 
