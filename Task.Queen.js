@@ -276,6 +276,15 @@ function selectEnergyPickupTarget(creep, options) {
     }
   }
 
+  if (config.allowStorage !== false) {
+    if (profile.storage && (profile.storage.store[RESOURCE_ENERGY] | 0) >= minAmount) {
+      return { target: profile.storage, action: 'withdraw' };
+    }
+    if (profile.terminal && (profile.terminal.store[RESOURCE_ENERGY] | 0) >= minAmount) {
+      return { target: profile.terminal, action: 'withdraw' };
+    }
+  } 
+   
   if (profile.sourceContainers.length > 0) {
     sortByStoredEnergyDescending(profile.sourceContainers);
     if ((profile.sourceContainers[0].store[RESOURCE_ENERGY] | 0) >= minAmount) {
@@ -287,15 +296,6 @@ function selectEnergyPickupTarget(creep, options) {
     sortByStoredEnergyDescending(profile.sideContainers);
     if ((profile.sideContainers[0].store[RESOURCE_ENERGY] | 0) >= minAmount) {
       return { target: profile.sideContainers[0], action: 'withdraw' };
-    }
-  }
-
-  if (config.allowStorage !== false) {
-    if (profile.storage && (profile.storage.store[RESOURCE_ENERGY] | 0) >= minAmount) {
-      return { target: profile.storage, action: 'withdraw' };
-    }
-    if (profile.terminal && (profile.terminal.store[RESOURCE_ENERGY] | 0) >= minAmount) {
-      return { target: profile.terminal, action: 'withdraw' };
     }
   }
 
