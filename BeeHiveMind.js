@@ -4,7 +4,6 @@
 var CoreConfig = require('core.config');
 var CoreLogger = require('core.logger');
 var CoreSpawn = require('core.spawn');
-var roleWorkerBee = require('role.Worker_Bee');
 var BuilderPlanner = require('Task.Builder.Planner');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
@@ -854,7 +853,7 @@ function runSquadRole(creep) {
 }
 
 var ROLE_DISPATCH = Object.freeze({
-  Worker_Bee: roleWorkerBee.run,
+  Worker_Bee: CoreSpawn.run,
   squad: runSquadRole,
   CombatArcher: SQUAD_ROLE_RUNNERS.CombatArcher,
   CombatMelee: SQUAD_ROLE_RUNNERS.CombatMelee,
