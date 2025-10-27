@@ -1,6 +1,6 @@
 'use strict';
 
-var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
+var CoreSpawn = require('core.spawn');
 
 function repairBody(workCount, carryCount, moveCount) {
   var body = [];
@@ -17,27 +17,8 @@ var REPAIR_BODY_TIERS = [
   repairBody(2, 1, 3)
 ];
 
-function costOfBody(body) {
-  var total = 0;
-  if (!Array.isArray(body)) return total;
-  for (var i = 0; i < body.length; i++) {
-    var part = body[i];
-    total += BODY_COSTS[part] || 0;
-  }
-  return total;
-}
-
 function pickLargestAffordable(tiers, energyAvailable) {
-  if (!Array.isArray(tiers) || !tiers.length) return [];
-  var available = typeof energyAvailable === 'number' ? energyAvailable : 0;
-  for (var i = 0; i < tiers.length; i++) {
-    var candidate = tiers[i];
-    if (!Array.isArray(candidate)) continue;
-    if (costOfBody(candidate) <= available) {
-      return candidate.slice();
-    }
-  }
-  return [];
+  return CoreSpawn.pickLargestAffordable(tiers, energyAvailable);
 }
 
 // Logging Levels
@@ -477,7 +458,7 @@ module.exports = TaskRepair;
 module.exports.BODY_TIERS = REPAIR_BODY_TIERS.map(function (tier) { return tier.slice(); });
 module.exports.pickLargestAffordable = pickLargestAffordable;
 module.exports.getSpawnBody = function (energy) {
-  return pickLargestAffordable(REPAIR_BODY_TIERS, energy);
+  return CoreSpawn.pickLargestAffordable(REPAIR_BODY_TIERS, energy);
 };
 module.exports.getSpawnSpec = function (room, ctx) {
   var context = ctx || {};

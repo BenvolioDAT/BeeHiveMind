@@ -14,6 +14,7 @@
 
 var Logger = require('core.logger');
 var CoreSpawn = require('core.spawn');
+var CoreConfig = require('core.config');
 var Traveler = null;
 try {
   Traveler = require('Traveler');
@@ -42,17 +43,18 @@ try {
   TaskClaimer = null;
 }
 
+var TaskLunaSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.TaskLuna) || {};
 var CONFIG = {
-  maxHarvestersPerSource: 1,
-  reserverRefreshAt: 1200,
-  haulerTripTimeMax: 150,
-  containerFullDropPolicy: 'avoid',
-  containerFullDropThreshold: 0.85,
-  logLevel: 'BASIC',
-  healthLogInterval: 150,
-  memoryAuditInterval: 150,
-  minerHandoffBuffer: 40,
-  selfTestKey: 'lunaSelfTest'
+  maxHarvestersPerSource: (typeof TaskLunaSettings.maxHarvestersPerSource === 'number') ? TaskLunaSettings.maxHarvestersPerSource : 1,
+  reserverRefreshAt: (typeof TaskLunaSettings.reserverRefreshAt === 'number') ? TaskLunaSettings.reserverRefreshAt : 1200,
+  haulerTripTimeMax: (typeof TaskLunaSettings.haulerTripTimeMax === 'number') ? TaskLunaSettings.haulerTripTimeMax : 150,
+  containerFullDropPolicy: (typeof TaskLunaSettings.containerFullDropPolicy === 'string') ? TaskLunaSettings.containerFullDropPolicy : 'avoid',
+  containerFullDropThreshold: (typeof TaskLunaSettings.containerFullDropThreshold === 'number') ? TaskLunaSettings.containerFullDropThreshold : 0.85,
+  logLevel: (TaskLunaSettings.logLevel != null) ? TaskLunaSettings.logLevel : 'BASIC',
+  healthLogInterval: (typeof TaskLunaSettings.healthLogInterval === 'number') ? TaskLunaSettings.healthLogInterval : 150,
+  memoryAuditInterval: (typeof TaskLunaSettings.memoryAuditInterval === 'number') ? TaskLunaSettings.memoryAuditInterval : 150,
+  minerHandoffBuffer: (typeof TaskLunaSettings.minerHandoffBuffer === 'number') ? TaskLunaSettings.minerHandoffBuffer : 40,
+  selfTestKey: (typeof TaskLunaSettings.selfTestKey === 'string') ? TaskLunaSettings.selfTestKey : 'lunaSelfTest'
 };
 
 var LOG_LEVEL = Logger.LOG_LEVEL;
@@ -134,17 +136,6 @@ function isHighwayRoom(roomName) {
   return (x % 10 === 0) || (y % 10 === 0);
 }
 
-function costOfBody(body) {
-  if (!Array.isArray(body) || body.length === 0) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    var part = body[i];
-    var partType = part && part.type ? part.type : part;
-    total += BODYPART_COST[partType] || 0;
-  }
-  return total;
-}
-
 function cloneBody(body) {
   if (!Array.isArray(body)) return [];
   return body.slice();
@@ -165,7 +156,7 @@ function _normalizeBodyTier(entry) {
   }
   if (!body || !body.length) return null;
   var normalized = { body: body.slice() };
-  normalized.cost = (cost != null) ? cost : costOfBody(body);
+  normalized.cost = (cost != null) ? cost : CoreSpawn.costOfBody(body);
   if (normalized.cost <= 0) return null;
   return normalized;
 }
@@ -310,7 +301,11 @@ var MINER_ROLE_KEY = 'remoteMiner';
 var HAULER_ROLE_KEY = 'remoteHauler';
 var RESERVER_ROLE_KEY = 'reserver';
 
-var _phaseState = global.__lunaPhaseState || (global.__lunaPhaseState = { tick: -1 });
+var _phaseState = global.__lunaPhaseState;
+if (!_phaseState || _phaseState.__ver !== 'LUNA_PHASE_v1') {
+  _phaseState = { __ver: 'LUNA_PHASE_v1', tick: -1 };
+}
+global.__lunaPhaseState = _phaseState;
 function ensurePhaseState(cache) {
   var tick = Game.time | 0;
   if (_phaseState.tick !== tick) {
@@ -1394,7 +1389,7 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity, context) {
     result.minCost = tierInfo.minCost;
   } else if (tiers.length) {
     var lastEntry = tiers[tiers.length - 1];
-    result.minCost = costOfBody(Array.isArray(lastEntry.body) ? lastEntry.body : lastEntry) || 0;
+    result.minCost = CoreSpawn.costOfBody(Array.isArray(lastEntry.body) ? lastEntry.body : lastEntry) || 0;
   }
 
   var evalContext = context || {};
@@ -1402,7 +1397,7 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity, context) {
   evalContext.available = available;
   evalContext.remote = evalContext.remote || (context && context.remote);
   var idealBody = selectRemoteBody(taskKey || remoteType, capacity, evalContext);
-  var idealCost = costOfBody(idealBody);
+  var idealCost = CoreSpawn.costOfBody(idealBody);
   if ((!idealBody.length || idealCost > capacity) && tierInfo.capacityBody.length) {
     idealBody = cloneBody(tierInfo.capacityBody);
     idealCost = tierInfo.capacityCost;
@@ -1410,13 +1405,13 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity, context) {
   if (!idealBody.length && tiers.length) {
     var lastTier = tiers[tiers.length - 1];
     idealBody = cloneBody(Array.isArray(lastTier.body) ? lastTier.body : lastTier);
-    idealCost = costOfBody(idealBody);
+    idealCost = CoreSpawn.costOfBody(idealBody);
   }
   result.idealBody = idealBody;
   result.idealCost = idealCost;
 
   var workingBody = selectRemoteBody(taskKey || remoteType, available, evalContext);
-  var workingCost = costOfBody(workingBody);
+  var workingCost = CoreSpawn.costOfBody(workingBody);
   if ((!workingBody.length || workingCost > available) && tierInfo.availableBody.length) {
     workingBody = cloneBody(tierInfo.availableBody);
     workingCost = tierInfo.availableCost;
@@ -1424,14 +1419,14 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity, context) {
   if ((!workingBody.length || workingCost > available) && tiers.length) {
     var fallbackTier = tiers[tiers.length - 1];
     workingBody = cloneBody(Array.isArray(fallbackTier.body) ? fallbackTier.body : fallbackTier);
-    workingCost = costOfBody(workingBody);
+    workingCost = CoreSpawn.costOfBody(workingBody);
   }
   result.body = workingBody;
   result.cost = workingCost;
 
   if (!result.minCost && tiers.length) {
     var tail = tiers[tiers.length - 1];
-    result.minCost = costOfBody(Array.isArray(tail.body) ? tail.body : tail) || 0;
+    result.minCost = CoreSpawn.costOfBody(Array.isArray(tail.body) ? tail.body : tail) || 0;
   }
 
   return result;
@@ -1612,7 +1607,7 @@ function spawnFromPlan(spawn, plan) {
   var prefix = 'Luna_' + sanitizedRole + '_' + roomKey;
   prefix = prefix.replace(/__+/g, '_');
   var body = plan.body.slice();
-  var cost = plan.bodyCost != null ? plan.bodyCost : costOfBody(body);
+  var cost = plan.bodyCost != null ? plan.bodyCost : CoreSpawn.costOfBody(body);
   if (cost > available) {
     var fallbackContext = {
       room: room,

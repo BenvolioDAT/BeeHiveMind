@@ -12,7 +12,10 @@ var TaskSquad = require('Task.Squad');
 
 var LOG_LEVEL = CoreConfig.LOG_LEVEL;
 var TOOLBOX_LOG_LEVEL = Logger.LOG_LEVEL;
-var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
+var MainSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Main) || {};
+var SOURCE_CONTAINER_SCAN_INTERVAL = (typeof MainSettings.SOURCE_CONTAINER_SCAN_INTERVAL === 'number')
+  ? MainSettings.SOURCE_CONTAINER_SCAN_INTERVAL
+  : 50;
 
 // Maintain backwards compatibility: expose log level helpers on global.
 global.LOG_LEVEL = LOG_LEVEL;

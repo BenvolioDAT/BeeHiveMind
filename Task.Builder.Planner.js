@@ -1,35 +1,36 @@
 "use strict";
 
 var CoreLogger = require('core.logger');
+var CoreConfig = require('core.config');
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var planLog = CoreLogger.createLogger('BuilderPlanner', LOG_LEVEL.BASIC);
 
-var ECON_DEFAULTS = {
-  STORAGE_ENERGY_MIN_BEFORE_REMOTES: 80000,
-  MAX_ACTIVE_REMOTES: 2,
-  ROAD_REPAIR_THRESHOLD: 0.45,
-  STORAGE_HEALTHY_RATIO: 0.7,
-  CPU_MIN_BUCKET: 500,
-  remoteRoads: { minStorageEnergy: 40000 },
-  roads: { minRCL: 3, disableGate: false }
-};
+var getEconomySettings = (typeof CoreConfig.getEconomySettings === 'function')
+  ? CoreConfig.getEconomySettings
+  : function () {
+    var hive = CoreConfig.settings && CoreConfig.settings['BeeHiveMind'];
+    return hive && hive.ECON_DEFAULTS ? hive.ECON_DEFAULTS : {};
+  };
 
 function _ensureEconomyConfig() {
+  var defaults = getEconomySettings();
   var cfg = null;
   if (typeof global !== 'undefined' && global && typeof global.__beeEconomyConfig === 'object') {
     cfg = global.__beeEconomyConfig;
   }
+  var roadDefaults = defaults.roads || { minRCL: 3, disableGate: false };
+  var remoteRoadDefaults = defaults.remoteRoads || { minStorageEnergy: 40000 };
   if (!cfg) {
     cfg = {
-      STORAGE_ENERGY_MIN_BEFORE_REMOTES: ECON_DEFAULTS.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
-      MAX_ACTIVE_REMOTES: ECON_DEFAULTS.MAX_ACTIVE_REMOTES,
-      ROAD_REPAIR_THRESHOLD: ECON_DEFAULTS.ROAD_REPAIR_THRESHOLD,
-      STORAGE_HEALTHY_RATIO: ECON_DEFAULTS.STORAGE_HEALTHY_RATIO,
-      CPU_MIN_BUCKET: ECON_DEFAULTS.CPU_MIN_BUCKET,
-      remoteRoads: { minStorageEnergy: ECON_DEFAULTS.remoteRoads.minStorageEnergy },
+      STORAGE_ENERGY_MIN_BEFORE_REMOTES: defaults.STORAGE_ENERGY_MIN_BEFORE_REMOTES,
+      MAX_ACTIVE_REMOTES: defaults.MAX_ACTIVE_REMOTES,
+      ROAD_REPAIR_THRESHOLD: defaults.ROAD_REPAIR_THRESHOLD,
+      STORAGE_HEALTHY_RATIO: defaults.STORAGE_HEALTHY_RATIO,
+      CPU_MIN_BUCKET: defaults.CPU_MIN_BUCKET,
+      remoteRoads: { minStorageEnergy: remoteRoadDefaults.minStorageEnergy },
       roads: {
-        minRCL: ECON_DEFAULTS.roads.minRCL,
-        disableGate: ECON_DEFAULTS.roads.disableGate
+        minRCL: roadDefaults.minRCL,
+        disableGate: roadDefaults.disableGate
       }
     };
     if (typeof global !== 'undefined' && global) {
@@ -37,33 +38,33 @@ function _ensureEconomyConfig() {
     }
   } else {
     if (typeof cfg.STORAGE_ENERGY_MIN_BEFORE_REMOTES !== 'number') {
-      cfg.STORAGE_ENERGY_MIN_BEFORE_REMOTES = ECON_DEFAULTS.STORAGE_ENERGY_MIN_BEFORE_REMOTES;
+      cfg.STORAGE_ENERGY_MIN_BEFORE_REMOTES = defaults.STORAGE_ENERGY_MIN_BEFORE_REMOTES;
     }
     if (typeof cfg.MAX_ACTIVE_REMOTES !== 'number') {
-      cfg.MAX_ACTIVE_REMOTES = ECON_DEFAULTS.MAX_ACTIVE_REMOTES;
+      cfg.MAX_ACTIVE_REMOTES = defaults.MAX_ACTIVE_REMOTES;
     }
     if (typeof cfg.ROAD_REPAIR_THRESHOLD !== 'number') {
-      cfg.ROAD_REPAIR_THRESHOLD = ECON_DEFAULTS.ROAD_REPAIR_THRESHOLD;
+      cfg.ROAD_REPAIR_THRESHOLD = defaults.ROAD_REPAIR_THRESHOLD;
     }
     if (typeof cfg.STORAGE_HEALTHY_RATIO !== 'number') {
-      cfg.STORAGE_HEALTHY_RATIO = ECON_DEFAULTS.STORAGE_HEALTHY_RATIO;
+      cfg.STORAGE_HEALTHY_RATIO = defaults.STORAGE_HEALTHY_RATIO;
     }
     if (typeof cfg.CPU_MIN_BUCKET !== 'number') {
-      cfg.CPU_MIN_BUCKET = ECON_DEFAULTS.CPU_MIN_BUCKET;
+      cfg.CPU_MIN_BUCKET = defaults.CPU_MIN_BUCKET;
     }
     if (!cfg.remoteRoads || typeof cfg.remoteRoads !== 'object') {
-      cfg.remoteRoads = { minStorageEnergy: ECON_DEFAULTS.remoteRoads.minStorageEnergy };
+      cfg.remoteRoads = { minStorageEnergy: remoteRoadDefaults.minStorageEnergy };
     } else if (typeof cfg.remoteRoads.minStorageEnergy !== 'number') {
-      cfg.remoteRoads.minStorageEnergy = ECON_DEFAULTS.remoteRoads.minStorageEnergy;
+      cfg.remoteRoads.minStorageEnergy = remoteRoadDefaults.minStorageEnergy;
     }
     if (!cfg.roads || typeof cfg.roads !== 'object') {
-      cfg.roads = { minRCL: ECON_DEFAULTS.roads.minRCL, disableGate: ECON_DEFAULTS.roads.disableGate };
+      cfg.roads = { minRCL: roadDefaults.minRCL, disableGate: roadDefaults.disableGate };
     } else {
       if (typeof cfg.roads.minRCL !== 'number') {
-        cfg.roads.minRCL = ECON_DEFAULTS.roads.minRCL;
+        cfg.roads.minRCL = roadDefaults.minRCL;
       }
       if (cfg.roads.disableGate !== true && cfg.roads.disableGate !== false) {
-        cfg.roads.disableGate = ECON_DEFAULTS.roads.disableGate;
+        cfg.roads.disableGate = roadDefaults.disableGate;
       }
     }
   }

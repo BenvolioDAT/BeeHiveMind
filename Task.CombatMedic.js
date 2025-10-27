@@ -14,6 +14,7 @@ try {
 } catch (error) {
   Traveler = null;
 }
+var CoreSpawn = require('core.spawn');
 
 var CONFIG = {
   followRange: 1,          // how close we try to stay to buddy
@@ -459,8 +460,6 @@ var TaskCombatMedic = {
 
 module.exports = TaskCombatMedic;
 
-var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
-
 var COMBAT_MEDIC_BODY_TIERS = [
   [
     MOVE, MOVE,
@@ -472,34 +471,12 @@ var COMBAT_MEDIC_BODY_TIERS = [
   ]
 ];
 
-function costOfBody(body) {
-  if (!Array.isArray(body)) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    total += BODY_COSTS[body[i]] || 0;
-  }
-  return total;
-}
-
-function pickLargestAffordable(tiers, energy) {
-  if (!Array.isArray(tiers) || !tiers.length) return [];
-  var available = (typeof energy === 'number') ? energy : 0;
-  for (var i = 0; i < tiers.length; i++) {
-    var candidate = tiers[i];
-    if (!Array.isArray(candidate)) continue;
-    if (costOfBody(candidate) <= available) {
-      return candidate.slice();
-    }
-  }
-  return [];
-}
-
 module.exports.BODY_TIERS = COMBAT_MEDIC_BODY_TIERS.map(function (tier) {
   return tier.slice();
 });
 
 module.exports.getSpawnBody = function (energy) {
-  return pickLargestAffordable(COMBAT_MEDIC_BODY_TIERS, energy);
+  return CoreSpawn.pickLargestAffordable(COMBAT_MEDIC_BODY_TIERS, energy);
 };
 
 module.exports.getSpawnSpec = function (room, ctx) {

@@ -8,11 +8,55 @@ var taskLog = (CoreLogger && typeof CoreLogger.createLogger === 'function')
   ? CoreLogger.createLogger('Worker_Bee', LOG_LEVEL.BASIC)
   : { debug: function () {}, info: function () {}, warn: function () {}, error: function () {} };
 
-var colonyCache = (global.__workerTaskCache = global.__workerTaskCache || {
-  tick: -1,
-  counts: Object.create(null),
-  needs: Object.create(null)
-});
+var colonyCache = global.__workerTaskCache;
+if (!colonyCache || colonyCache.__ver !== 'WORKER_CACHE_v1') {
+  colonyCache = {
+    __ver: 'WORKER_CACHE_v1',
+    tick: -1,
+    counts: Object.create(null),
+    needs: Object.create(null)
+  };
+}
+global.__workerTaskCache = colonyCache;
+
+var missingModuleWarnings = Object.create(null);
+
+function costOfBody(body) {
+  if (!Array.isArray(body)) {
+    return 0;
+  }
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODYPART_COST[body[i]] || 0;
+  }
+  return total;
+}
+
+function pickLargestAffordable(tiers, energy) {
+  if (!Array.isArray(tiers)) {
+    return [];
+  }
+  var i;
+  for (i = 0; i < tiers.length; i++) {
+    var candidate = tiers[i];
+    if (costOfBody(candidate) <= energy) {
+      return Array.isArray(candidate) ? candidate.slice() : [];
+    }
+  }
+  return [];
+}
+
+function _warnMissingModule(moduleName, error) {
+  if (!moduleName || missingModuleWarnings[moduleName]) {
+    return;
+  }
+  missingModuleWarnings[moduleName] = Game && Game.time ? Game.time : 1;
+  if (CoreLogger && typeof CoreLogger.shouldLog === 'function' && taskLog && typeof taskLog.debug === 'function') {
+    if (CoreLogger.shouldLog(LOG_LEVEL.DEBUG)) {
+      taskLog.debug('Failed to require module', moduleName, error);
+    }
+  }
+}
 
 var TASK_MODULE_ALIASES = {
   baseharvest: 'Task.BaseHarvest',
@@ -106,6 +150,7 @@ function _taskAvailable(task) {
     mod = require(moduleName);
   } catch (err) {
     mod = null;
+    _warnMissingModule(moduleName, err);
   }
   return !!(mod && typeof mod.run === 'function');
 }
@@ -120,6 +165,7 @@ function _runTaskByName(creep, task) {
     mod = require(moduleName);
   } catch (err) {
     mod = null;
+    _warnMissingModule(moduleName, err);
   }
   if (mod && typeof mod.run === 'function') {
     try {
@@ -325,14 +371,7 @@ function isAffordable(body, available) {
   if (!Array.isArray(body)) {
     return false;
   }
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    total += BODYPART_COST[body[i]] || 0;
-    if (total > available) {
-      return false;
-    }
-  }
-  return total <= available;
+  return costOfBody(body) <= available;
 }
 
 function generateName(prefix) {
@@ -403,5 +442,7 @@ module.exports = {
   isAffordable: isAffordable,
   generateName: generateName,
   spawnFromSpec: spawnFromSpec,
-  markTaskMemory: markTaskMemory
+  markTaskMemory: markTaskMemory,
+  costOfBody: costOfBody,
+  pickLargestAffordable: pickLargestAffordable
 };

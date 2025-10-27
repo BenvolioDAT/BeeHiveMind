@@ -5,6 +5,7 @@
 'use strict';
 
 var CoreConfig = require('core.config');
+var CoreSpawn = require('core.spawn');
 
 var Traveler = null;
 try {
@@ -286,8 +287,6 @@ var TaskUpgrader = {
 
 module.exports = TaskUpgrader;
 
-var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
-
 function upgraderBody(workCount, carryCount, moveCount) {
   var body = [];
   var i;
@@ -315,32 +314,9 @@ var UPGRADER_BODY_TIERS = [
   upgraderBody(1, 1, 1)
 ];
 
-function costOfBody(body) {
-  var total = 0;
-  if (!Array.isArray(body)) return total;
-  for (var i = 0; i < body.length; i++) {
-    var part = body[i];
-    total += BODY_COSTS[part] || 0;
-  }
-  return total;
-}
-
-function pickLargestAffordable(tiers, energy) {
-  if (!Array.isArray(tiers) || !tiers.length) return [];
-  var available = typeof energy === 'number' ? energy : 0;
-  for (var i = 0; i < tiers.length; i++) {
-    var candidate = tiers[i];
-    if (!Array.isArray(candidate)) continue;
-    if (costOfBody(candidate) <= available) {
-      return candidate.slice();
-    }
-  }
-  return [];
-}
-
 module.exports.BODY_TIERS = UPGRADER_BODY_TIERS.map(function (tier) { return tier.slice(); });
 module.exports.getSpawnBody = function (energy) {
-  return pickLargestAffordable(UPGRADER_BODY_TIERS, energy);
+  return CoreSpawn.pickLargestAffordable(UPGRADER_BODY_TIERS, energy);
 };
 module.exports.getSpawnSpec = function (room, ctx) {
   var context = ctx || {};

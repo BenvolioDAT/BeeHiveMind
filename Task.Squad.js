@@ -577,12 +577,17 @@ var TaskSquad = (function () {
   // -----------------------------
   // Squad snapshot cache (members + follow counts per tick)
   // -----------------------------
-  if (!global.__TASKSQUAD_CACHE) global.__TASKSQUAD_CACHE = { tick: -1, membersBySquad: {}, followCounts: {} };
+  var _squadCache = global.__TASKSQUAD_CACHE;
+  if (!_squadCache || _squadCache.__ver !== 'SQUAD_CACHE_v1') {
+    _squadCache = { __ver: 'SQUAD_CACHE_v1', tick: -1, membersBySquad: {}, followCounts: {} };
+    global.__TASKSQUAD_CACHE = _squadCache;
+  }
+
 
   function _ensureTickCache() {
     var cache = global.__TASKSQUAD_CACHE;
     if (!cache || cache.tick !== Game.time) {
-      cache = { tick: Game.time, membersBySquad: {}, followCounts: {} };
+      cache = { __ver: 'SQUAD_CACHE_v1', tick: Game.time, membersBySquad: {}, followCounts: {} };
       for (var name in Game.creeps) {
         if (!Game.creeps.hasOwnProperty(name)) continue;
         var creep = Game.creeps[name];
