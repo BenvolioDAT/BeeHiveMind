@@ -8,15 +8,19 @@
  * Traveler.js instead of raw moveTo calls.
  */
 
+var CoreConfig = require('core.config');
+var CoreSpawn = require('core.spawn');
 var Logger = require('core.logger');
 var Traveler = require('Traveler');
 
-var DEFAULT_TRAVEL_REUSE = 15;
-var DEFAULT_TRAVEL_RANGE = 1;
-var DEFAULT_TRAVEL_STUCK = 2;
-var DEFAULT_TRAVEL_REPATH = 0.1;
-var DEFAULT_TRAVEL_MAX_OPS = 4000;
-var DEFAULT_TOWER_REFILL_THRESHOLD = 0.7;
+var CourierSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Courier) || {};
+var DEFAULT_TRAVEL_REUSE = (typeof CourierSettings.travelReuse === 'number') ? CourierSettings.travelReuse : 15;
+var DEFAULT_TRAVEL_RANGE = (typeof CourierSettings.travelRange === 'number') ? CourierSettings.travelRange : 1;
+var DEFAULT_TRAVEL_STUCK = (typeof CourierSettings.travelStuck === 'number') ? CourierSettings.travelStuck : 2;
+var DEFAULT_TRAVEL_REPATH = (typeof CourierSettings.travelRepath === 'number') ? CourierSettings.travelRepath : 0.1;
+var DEFAULT_TRAVEL_MAX_OPS = (typeof CourierSettings.travelMaxOps === 'number') ? CourierSettings.travelMaxOps : 4000;
+var DEFAULT_TOWER_REFILL_THRESHOLD = (typeof CourierSettings.towerRefillThreshold === 'number') ? CourierSettings.towerRefillThreshold : 0.7;
+var MIN_WITHDRAW_AMOUNT = (typeof CourierSettings.minWithdrawAmount === 'number') ? CourierSettings.minWithdrawAmount : 50;
 
 function createCarryMove(carryCount, moveCount) {
   var body = [];
@@ -57,34 +61,8 @@ var BODY_TIERS = [
   createCarryMove(1, 1)
 ];
 
-function costOfBodyParts(parts) {
-  if (!Array.isArray(parts) || parts.length === 0) {
-    return 0;
-  }
-  var total = 0;
-  for (var i = 0; i < parts.length; i++) {
-    var part = parts[i];
-    var partCost = BODYPART_COST[part];
-    if (typeof partCost === 'number') {
-      total += partCost;
-    }
-  }
-  return total;
-}
-
 function pickLargestAffordable(tiers, energyAvailable) {
-  var tiersList = Array.isArray(tiers) ? tiers : [];
-  var available = typeof energyAvailable === 'number' ? energyAvailable : 0;
-  for (var i = 0; i < tiersList.length; i++) {
-    var body = tiersList[i];
-    if (!Array.isArray(body) || body.length === 0) {
-      continue;
-    }
-    if (costOfBodyParts(body) <= available) {
-      return body.slice();
-    }
-  }
-  return [];
+  return CoreSpawn.pickLargestAffordable(tiers, energyAvailable);
 }
 
 function getSpawnBody(energy, room, context) {
@@ -118,8 +96,6 @@ var courierLog = Logger.createLogger('Task.Courier', LOG_LEVEL.DEBUG);
 
 var MODE_GATHER = 'gather';
 var MODE_DELIVER = 'deliver';
-var MIN_WITHDRAW_AMOUNT = 50;
-
 /**
  * ensureMode updates creep.memory.mode based on current energy state.
  * Input: creep (Creep).
@@ -396,7 +372,7 @@ function selectEnergyPickupTarget(creep, options) {
     return null;
   }
   var config = options || {};
-  var minAmount = config.minAmount != null ? config.minAmount : 50;
+  var minAmount = config.minAmount != null ? config.minAmount : MIN_WITHDRAW_AMOUNT;
   var profile = ensureRoomEnergyProfile(creep.room);
   if (profile.tombstones.length > 0) {
     sortByStoredEnergyDescending(profile.tombstones);

@@ -7,6 +7,7 @@
 'use strict';
 
 var Traveler = require('Traveler');
+var CoreSpawn = require('core.spawn');
 
 function travel(creep, target, options) {
   var opts = options || {};
@@ -427,8 +428,6 @@ var TaskClaimer = {
 
 module.exports = TaskClaimer;
 
-var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
-
 var CLAIMER_BODY_TIERS = [
   [
     CLAIM, CLAIM,
@@ -440,34 +439,12 @@ var CLAIMER_BODY_TIERS = [
   ]
 ];
 
-function costOfBody(body) {
-  if (!Array.isArray(body)) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    total += BODY_COSTS[body[i]] || 0;
-  }
-  return total;
-}
-
-function pickLargestAffordable(tiers, energy) {
-  if (!Array.isArray(tiers) || !tiers.length) return [];
-  var available = (typeof energy === 'number') ? energy : 0;
-  for (var i = 0; i < tiers.length; i++) {
-    var candidate = tiers[i];
-    if (!Array.isArray(candidate)) continue;
-    if (costOfBody(candidate) <= available) {
-      return candidate.slice();
-    }
-  }
-  return [];
-}
-
 module.exports.BODY_TIERS = CLAIMER_BODY_TIERS.map(function (tier) {
   return tier.slice();
 });
 
 module.exports.getSpawnBody = function (energy) {
-  return pickLargestAffordable(CLAIMER_BODY_TIERS, energy);
+  return CoreSpawn.pickLargestAffordable(CLAIMER_BODY_TIERS, energy);
 };
 
 module.exports.getSpawnSpec = function (room, ctx) {

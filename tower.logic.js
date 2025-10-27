@@ -4,12 +4,18 @@
 // - Short per-tower lock so they don't ping-pong targets every tick
 // - If only one repair target, only one tower repairs it
 
+var CoreConfig = require('core.config');
 var TaskSquad = null;
 try {
   TaskSquad = require('Task.Squad');
 } catch (error) {
   TaskSquad = null;
 }
+
+var towerSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Tower) || {};
+var REPAIR_ENERGY_MIN_DEFAULT = (typeof towerSettings.REPAIR_ENERGY_MIN === 'number')
+  ? towerSettings.REPAIR_ENERGY_MIN
+  : 400;
 
 function isAllyUsername(username) {
   if (!username) return false;
@@ -109,7 +115,7 @@ module.exports = {
     var usedTargetIds = {};
 
     // Energy threshold per tower to allow repairs (tune as you like)
-    var REPAIR_ENERGY_MIN = 400;
+    var REPAIR_ENERGY_MIN = REPAIR_ENERGY_MIN_DEFAULT;
 
     // Helper: claim next available target for a tower (no duplicates this tick)
     function pickTargetForTower(tw) {

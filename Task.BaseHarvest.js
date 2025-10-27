@@ -9,6 +9,7 @@
 
 var Logger = require('core.logger');
 var Traveler = require('Traveler');
+var CoreSpawn = require('core.spawn');
 
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var harvestLog = Logger.createLogger('Task.BaseHarvest', LOG_LEVEL.DEBUG);
@@ -660,21 +661,6 @@ function countBodyPart(body, partType) {
   return total;
 }
 
-function costOfBody(body) {
-  if (!Array.isArray(body) || !body.length) return 0;
-  var sum = 0;
-  for (var i = 0; i < body.length; i++) {
-    var part = body[i];
-    var partCost = BODYPART_COST && BODYPART_COST[part];
-    if (typeof partCost === 'number') {
-      sum += partCost;
-    } else {
-      return 0;
-    }
-  }
-  return sum;
-}
-
 function cloneBody(body) {
   return Array.isArray(body) ? body.slice() : [];
 }
@@ -720,7 +706,7 @@ function selectBodyForEnergy(energy, tiers, maxWork) {
     if (limit && countBodyPart(body, WORK) > limit) {
       continue;
     }
-    var cost = costOfBody(body);
+    var cost = CoreSpawn.costOfBody(body);
     if (cost > 0 && cost <= cap) {
       return body;
     }
@@ -767,7 +753,7 @@ function selectCapacityBody(tiers, capacity, maxWork) {
     if (limit && countBodyPart(body, WORK) > limit) {
       continue;
     }
-    var cost = costOfBody(body);
+    var cost = CoreSpawn.costOfBody(body);
     if (cost > 0 && cost <= cap) {
       return body;
     }
@@ -783,8 +769,8 @@ function getSpawnBody(energy, room, context) {
   var maxWork = (config && typeof config.MAX_WORK === 'number') ? config.MAX_WORK : null;
   var targetBody = selectCapacityBody(tiers, capacity, maxWork);
   var fallbackBody = selectBodyForEnergy(available, tiers, maxWork);
-  var targetCost = costOfBody(targetBody);
-  var fallbackCost = costOfBody(fallbackBody);
+  var targetCost = CoreSpawn.costOfBody(targetBody);
+  var fallbackCost = CoreSpawn.costOfBody(fallbackBody);
 
   var intel = resolveHarvesterIntel(room, context) || null;
   var desired = getNumber((context && context.limit), null);

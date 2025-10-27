@@ -2,17 +2,21 @@
 // Purpose: Sell excess ENERGY via the Market from a room's Terminal.
 // Tone: novice-friendly (verbose comments, clear steps).
 
+var CoreConfig = require('core.config');
+
+var tradeSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Trade && CoreConfig.settings.Trade.energy) || {};
+
 var CFG = {
-  KEEP_ENERGY_STORAGE: 600000,   // don't touch storage below this
-  KEEP_ENERGY_TERMINAL: 50000,   // keep this buffer in the terminal
-  MIN_PRICE: 0.15,               // nominal price floor (credits per unit)
-  MIN_EFFECTIVE_CPE: 0.00,       // optional floor on *effective* credits/energy after fees
-  MAX_PER_DEAL: 20000,           // don't over-swing any single order
-  COOLDOWN_TICKS: 25,            // per-room spacing so we don't spam
-  MIN_ORDER_AMOUNT: 2000,        // ignore crumbs
-  SCAN_TOP_N: 20,                // examine top N by price
-  MAX_DISTANCE: Infinity,        // optional hard cap (e.g. 18). Infinity = off.
-  HISTORY_REFRESH: 5000          // how often to refresh 14d history (ticks)
+  KEEP_ENERGY_STORAGE: (typeof tradeSettings.keepStorage === 'number') ? tradeSettings.keepStorage : 600000,
+  KEEP_ENERGY_TERMINAL: (typeof tradeSettings.keepTerminal === 'number') ? tradeSettings.keepTerminal : 50000,
+  MIN_PRICE: (typeof tradeSettings.minPrice === 'number') ? tradeSettings.minPrice : 0.15,
+  MIN_EFFECTIVE_CPE: (typeof tradeSettings.minEffectiveCpe === 'number') ? tradeSettings.minEffectiveCpe : 0.0,
+  MAX_PER_DEAL: (typeof tradeSettings.maxPerDeal === 'number') ? tradeSettings.maxPerDeal : 20000,
+  COOLDOWN_TICKS: (typeof tradeSettings.cooldownTicks === 'number') ? tradeSettings.cooldownTicks : 25,
+  MIN_ORDER_AMOUNT: (typeof tradeSettings.minOrderAmount === 'number') ? tradeSettings.minOrderAmount : 2000,
+  SCAN_TOP_N: (typeof tradeSettings.scanTopN === 'number') ? tradeSettings.scanTopN : 20,
+  MAX_DISTANCE: (typeof tradeSettings.maxDistance === 'number') ? tradeSettings.maxDistance : Infinity,
+  HISTORY_REFRESH: (typeof tradeSettings.historyRefresh === 'number') ? tradeSettings.historyRefresh : 5000
 };
 
 function isValidRoomName(name) {

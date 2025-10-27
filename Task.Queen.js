@@ -1,6 +1,7 @@
 'use strict';
 
 var CoreConfig = require('core.config');
+var CoreSpawn = require('core.spawn');
 
 /**
  * Task.Queen distributes energy to spawns, extensions, and towers while
@@ -600,8 +601,6 @@ module.exports = {
   run: runQueen
 };
 
-var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
-
 function queenBody(carryCount, moveCount) {
   var body = [];
   var i;
@@ -639,35 +638,9 @@ var QUEEN_BODY_TIERS = [
   queenBody(1, 1)
 ];
 
-function costOfBody(body) {
-  if (!Array.isArray(body)) {
-    return 0;
-  }
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    total += BODY_COSTS[body[i]] || 0;
-  }
-  return total;
-}
-
-function pickLargestAffordable(tiers, energyAvailable) {
-  var tiersList = Array.isArray(tiers) ? tiers : [];
-  var available = typeof energyAvailable === 'number' ? energyAvailable : 0;
-  for (var i = 0; i < tiersList.length; i++) {
-    var candidate = tiersList[i];
-    if (!Array.isArray(candidate) || candidate.length === 0) {
-      continue;
-    }
-    if (costOfBody(candidate) <= available) {
-      return candidate.slice();
-    }
-  }
-  return [];
-}
-
 module.exports.BODY_TIERS = QUEEN_BODY_TIERS.map(function (tier) { return tier.slice(); });
 module.exports.getSpawnBody = function (energy) {
-  return pickLargestAffordable(QUEEN_BODY_TIERS, energy);
+  return CoreSpawn.pickLargestAffordable(QUEEN_BODY_TIERS, energy);
 };
 module.exports.getSpawnSpec = function (room, ctx) {
   var context = ctx || {};

@@ -53,25 +53,154 @@ settings.maintenance = settings.maintenance || Object.freeze({
   roomSweepInterval: 50
 });
 
+var economySettings = settings.Economy || (settings.Economy = {});
+if (typeof economySettings.STORAGE_ENERGY_MIN_BEFORE_REMOTES !== 'number') {
+  economySettings.STORAGE_ENERGY_MIN_BEFORE_REMOTES = 80000;
+}
+if (typeof economySettings.MAX_ACTIVE_REMOTES !== 'number') {
+  economySettings.MAX_ACTIVE_REMOTES = 2;
+}
+if (typeof economySettings.ROAD_REPAIR_THRESHOLD !== 'number') {
+  economySettings.ROAD_REPAIR_THRESHOLD = 0.45;
+}
+if (typeof economySettings.STORAGE_HEALTHY_RATIO !== 'number') {
+  economySettings.STORAGE_HEALTHY_RATIO = 0.7;
+}
+if (typeof economySettings.CPU_MIN_BUCKET !== 'number') {
+  economySettings.CPU_MIN_BUCKET = 500;
+}
+if (!economySettings.roads) {
+  economySettings.roads = { minRCL: 3, disableGate: false };
+} else {
+  if (typeof economySettings.roads.minRCL !== 'number') {
+    economySettings.roads.minRCL = 3;
+  }
+  if (typeof economySettings.roads.disableGate !== 'boolean') {
+    economySettings.roads.disableGate = false;
+  }
+}
+if (!economySettings.remoteRoads) {
+  economySettings.remoteRoads = { minStorageEnergy: 40000 };
+} else if (typeof economySettings.remoteRoads.minStorageEnergy !== 'number') {
+  economySettings.remoteRoads.minStorageEnergy = 40000;
+}
+if (!economySettings.queen) {
+  economySettings.queen = { allowCourierFallback: true };
+} else if (typeof economySettings.queen.allowCourierFallback !== 'boolean') {
+  economySettings.queen.allowCourierFallback = true;
+}
+
+var taskLunaSettings = settings.TaskLuna || (settings.TaskLuna = {});
+if (typeof taskLunaSettings.maxHarvestersPerSource !== 'number') {
+  taskLunaSettings.maxHarvestersPerSource = 1;
+}
+if (typeof taskLunaSettings.reserverRefreshAt !== 'number') {
+  taskLunaSettings.reserverRefreshAt = 1200;
+}
+if (typeof taskLunaSettings.haulerTripTimeMax !== 'number') {
+  taskLunaSettings.haulerTripTimeMax = 150;
+}
+if (typeof taskLunaSettings.containerFullDropPolicy !== 'string') {
+  taskLunaSettings.containerFullDropPolicy = 'avoid';
+}
+if (typeof taskLunaSettings.containerFullDropThreshold !== 'number') {
+  taskLunaSettings.containerFullDropThreshold = 0.85;
+}
+if (typeof taskLunaSettings.logLevel !== 'string') {
+  taskLunaSettings.logLevel = 'BASIC';
+}
+if (typeof taskLunaSettings.healthLogInterval !== 'number') {
+  taskLunaSettings.healthLogInterval = 150;
+}
+if (typeof taskLunaSettings.memoryAuditInterval !== 'number') {
+  taskLunaSettings.memoryAuditInterval = 150;
+}
+if (typeof taskLunaSettings.minerHandoffBuffer !== 'number') {
+  taskLunaSettings.minerHandoffBuffer = 40;
+}
+if (typeof taskLunaSettings.selfTestKey !== 'string') {
+  taskLunaSettings.selfTestKey = 'lunaSelfTest';
+}
+
+var courierSettings = settings.Courier || (settings.Courier = {});
+if (typeof courierSettings.travelReuse !== 'number') {
+  courierSettings.travelReuse = 15;
+}
+if (typeof courierSettings.travelRange !== 'number') {
+  courierSettings.travelRange = 1;
+}
+if (typeof courierSettings.travelStuck !== 'number') {
+  courierSettings.travelStuck = 2;
+}
+if (typeof courierSettings.travelRepath !== 'number') {
+  courierSettings.travelRepath = 0.1;
+}
+if (typeof courierSettings.travelMaxOps !== 'number') {
+  courierSettings.travelMaxOps = 4000;
+}
+if (typeof courierSettings.towerRefillThreshold !== 'number') {
+  courierSettings.towerRefillThreshold = 0.7;
+}
+if (typeof courierSettings.minWithdrawAmount !== 'number') {
+  courierSettings.minWithdrawAmount = 50;
+}
+
+var towerSettings = settings.Tower || (settings.Tower = {});
+if (typeof towerSettings.REPAIR_ENERGY_MIN !== 'number') {
+  towerSettings.REPAIR_ENERGY_MIN = 400;
+}
+
+var mainSettings = settings.Main || (settings.Main = {});
+if (typeof mainSettings.SOURCE_CONTAINER_SCAN_INTERVAL !== 'number') {
+  mainSettings.SOURCE_CONTAINER_SCAN_INTERVAL = 50;
+}
+
+var tradeSettings = settings.Trade || (settings.Trade = {});
+var tradeEnergySettings = tradeSettings.energy || (tradeSettings.energy = {});
+if (typeof tradeEnergySettings.keepStorage !== 'number') {
+  tradeEnergySettings.keepStorage = 600000;
+}
+if (typeof tradeEnergySettings.keepTerminal !== 'number') {
+  tradeEnergySettings.keepTerminal = 50000;
+}
+if (typeof tradeEnergySettings.minPrice !== 'number') {
+  tradeEnergySettings.minPrice = 0.15;
+}
+if (typeof tradeEnergySettings.minEffectiveCpe !== 'number') {
+  tradeEnergySettings.minEffectiveCpe = 0.0;
+}
+if (typeof tradeEnergySettings.maxPerDeal !== 'number') {
+  tradeEnergySettings.maxPerDeal = 20000;
+}
+if (typeof tradeEnergySettings.cooldownTicks !== 'number') {
+  tradeEnergySettings.cooldownTicks = 25;
+}
+if (typeof tradeEnergySettings.minOrderAmount !== 'number') {
+  tradeEnergySettings.minOrderAmount = 2000;
+}
+if (typeof tradeEnergySettings.scanTopN !== 'number') {
+  tradeEnergySettings.scanTopN = 20;
+}
+if (typeof tradeEnergySettings.maxDistance !== 'number') {
+  tradeEnergySettings.maxDistance = Infinity;
+}
+if (typeof tradeEnergySettings.historyRefresh !== 'number') {
+  tradeEnergySettings.historyRefresh = 5000;
+}
+
 var beeHiveSettings = settings['BeeHiveMind'] || (settings['BeeHiveMind'] = {});
 if (!beeHiveSettings.ROAD_GATE_DEFAULTS) {
-  beeHiveSettings.ROAD_GATE_DEFAULTS = { minRCL: 3, disableGate: false };
+  beeHiveSettings.ROAD_GATE_DEFAULTS = {
+    minRCL: economySettings.roads.minRCL,
+    disableGate: economySettings.roads.disableGate
+  };
 }
 // @used_in:
 //   BeeHiveMind.js:61
 //   BeeHiveMind.js:74
 //   BeeHiveMind.js:88
 if (!beeHiveSettings.ECON_DEFAULTS) {
-  beeHiveSettings.ECON_DEFAULTS = {
-    STORAGE_ENERGY_MIN_BEFORE_REMOTES: 80000,
-    MAX_ACTIVE_REMOTES: 2,
-    ROAD_REPAIR_THRESHOLD: 0.45,
-    STORAGE_HEALTHY_RATIO: 0.7,
-    CPU_MIN_BUCKET: 500,
-    roads: beeHiveSettings.ROAD_GATE_DEFAULTS,
-    remoteRoads: { minStorageEnergy: 40000 },
-    queen: { allowCourierFallback: true }
-  };
+  beeHiveSettings.ECON_DEFAULTS = economySettings;
 }
 // @used_in:
 //   BeeHiveMind.js:62
@@ -231,3 +360,6 @@ squadSettings.FRIENDLY_USERNAMES = [
 
 module.exports.LOG_LEVEL = LOG_LEVEL;
 module.exports.settings = settings;
+module.exports.getEconomySettings = function () {
+  return settings.Economy || (settings['BeeHiveMind'] && settings['BeeHiveMind'].ECON_DEFAULTS) || {};
+};
