@@ -135,10 +135,18 @@ var SQUAD_FLAG_CFG = {
 };
 
 function _flagMem() {
-  if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
+  if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {}, manual: {} };
   if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
   if (!Memory.squadFlags.bindings) Memory.squadFlags.bindings = {};
+  if (!Memory.squadFlags.manual) Memory.squadFlags.manual = {};
   return Memory.squadFlags;
+}
+
+function _flagDebug(message) {
+  if (!Memory || !Memory.DEBUG_SQUAD_SPAWN) return;
+  if (squadLog && typeof squadLog.info === 'function') {
+    squadLog.info(message);
+  }
 }
 
 function _flagRoomsWithNonScoutCreeps() {
@@ -320,6 +328,7 @@ function ensureSquadFlags(options) {
   var mem = _flagMem();
   var tick = Game.time | 0;
   var cfg = SQUAD_FLAG_CFG;
+  var manual = mem.manual;
 
   var rooms = _flagRoomsWithNonScoutCreeps();
   for (var r = 0; r < rooms.length; r++) {
@@ -349,6 +358,22 @@ function ensureSquadFlags(options) {
   var boundNames = {};
   var nameIdx, fname, boundRoom;
 
+  for (fname in Game.flags) {
+    if (!_flagHasOwn(Game.flags, fname)) continue;
+    if (cfg.names.indexOf(fname) === -1) continue;
+    var flag = Game.flags[fname];
+    if (!flag || !flag.pos || !flag.pos.roomName) continue;
+    var currentBinding = mem.bindings[fname];
+    if (!currentBinding) {
+      mem.bindings[fname] = flag.pos.roomName;
+      manual[fname] = true;
+      _flagDebug('[TaskSquad] Manual bind: ' + fname + ' -> ' + flag.pos.roomName);
+    } else if (manual[fname] && currentBinding !== flag.pos.roomName) {
+      mem.bindings[fname] = flag.pos.roomName;
+      _flagDebug('[TaskSquad] Manual rebalance: ' + fname + ' -> ' + flag.pos.roomName);
+    }
+  }
+
   for (nameIdx = 0; nameIdx < cfg.names.length; nameIdx++) {
     fname = cfg.names[nameIdx];
     boundRoom = mem.bindings[fname];
@@ -365,6 +390,7 @@ function ensureSquadFlags(options) {
       if ((tick - lastAt) > cfg.dropGrace) {
         _flagRemoveFlag(fname);
         delete mem.bindings[fname];
+        if (manual && manual[fname]) delete manual[fname];
         keep = false;
       }
     }
@@ -423,6 +449,15 @@ function ensureSquadFlags(options) {
     if (SQUAD_FLAG_CFG.names.indexOf(fName) === -1) continue;
     if (!mem.bindings[fName]) {
       _flagRemoveFlag(fName);
+    }
+  }
+
+  for (fname in manual) {
+    if (!_flagHasOwn(manual, fname)) continue;
+    if (!manual[fname]) continue;
+    if (!Game.flags[fname]) {
+      delete manual[fname];
+      delete mem.bindings[fname];
     }
   }
 
