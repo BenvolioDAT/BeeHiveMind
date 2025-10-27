@@ -1,5 +1,7 @@
 'use strict';
 
+var CoreConfig = require('core.config');
+
 // Task.Trucker.js
 var Traveler = null;
 try {
@@ -15,11 +17,13 @@ try {
   TaskCourier = null;
 }
 
-var PICKUP_FLAG_DEFAULT = 'E-Pickup';     // rename if you like
-var MIN_DROPPED = 50;                     // ignore tiny crumbs
-var LOCAL_SEARCH_RADIUS = 12;
-var WIDE_SEARCH_RADIUS = 50;
-var WIDE_SEARCH_COOLDOWN = 25;
+var TaskTruckerSettings = CoreConfig.settings['Task.Trucker'];
+
+var PICKUP_FLAG_DEFAULT = TaskTruckerSettings.PICKUP_FLAG_DEFAULT;
+var MIN_DROPPED = TaskTruckerSettings.MIN_DROPPED;
+var LOCAL_SEARCH_RADIUS = TaskTruckerSettings.LOCAL_SEARCH_RADIUS;
+var WIDE_SEARCH_RADIUS = TaskTruckerSettings.WIDE_SEARCH_RADIUS;
+var WIDE_SEARCH_COOLDOWN = TaskTruckerSettings.WIDE_SEARCH_COOLDOWN;
 var PARK_POS = new RoomPosition(25, 25, 'W0N0'); // only used if no flag & no home; harmless
 
 var GLOBAL_TRUCKER_CACHE = global.__TRUCKER_CACHE || (global.__TRUCKER_CACHE = { rooms: {} });

@@ -4,6 +4,8 @@
 
 'use strict';
 
+var CoreConfig = require('core.config');
+
 var Traveler = null;
 try {
   Traveler = require('Traveler');
@@ -64,12 +66,14 @@ function beeTravel(creep, target, a3, a4, a5) {
 /* =========================
    Tunables
 ========================= */
-var UPGRADER_SIGN_TEXT = "BeeNice Please.";
-var UPGRADER_REFILL_DELAY = 5;    // ticks to wait after upgrading before fetching energy
-var MIN_PICKUP_AMOUNT = 50;       // skip tiny dropped piles
-var MAX_CONTAINER_RANGE = 5;
-var MAX_LINK_RANGE = 3;
-var MAX_UPGRADE_RANGE = 3;        // <-- can upgrade up to range 3
+var UpgraderSettings = CoreConfig.settings['Task.Upgrader'];
+
+var UPGRADER_SIGN_TEXT = UpgraderSettings.UPGRADER_SIGN_TEXT;
+var UPGRADER_REFILL_DELAY = UpgraderSettings.UPGRADER_REFILL_DELAY;    // ticks to wait after upgrading before fetching energy
+var MIN_PICKUP_AMOUNT = UpgraderSettings.MIN_PICKUP_AMOUNT;       // skip tiny dropped piles
+var MAX_CONTAINER_RANGE = UpgraderSettings.MAX_CONTAINER_RANGE;
+var MAX_LINK_RANGE = UpgraderSettings.MAX_LINK_RANGE;
+var MAX_UPGRADE_RANGE = UpgraderSettings.MAX_UPGRADE_RANGE;        // <-- can upgrade up to range 3
 
 /* =========================
    PIB (Predictive Intent Buffer)

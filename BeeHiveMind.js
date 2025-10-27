@@ -1,6 +1,7 @@
 
 "use strict";
 
+var CoreConfig = require('core.config');
 var CoreLogger = require('core.logger');
 var CoreSpawn = require('core.spawn');
 var roleWorkerBee = require('role.Worker_Bee');
@@ -13,6 +14,8 @@ var TaskSquad = require('./Task.Squad');
 var TaskCombatArcher = require('Task.CombatArcher');
 var TaskCombatMelee = require('Task.CombatMelee');
 var TaskCombatMedic = require('Task.CombatMedic');
+
+var BeeHiveSettings = CoreConfig.settings['BeeHiveMind'];
 
 var TASK_MODULE_NAME_MAP = {
   baseharvest: 'BaseHarvest',
@@ -55,18 +58,9 @@ var TASK_REQUIRE_MAP = {
   luna: 'Task.Luna'
 };
 
-var ROAD_GATE_DEFAULTS = { minRCL: 3, disableGate: false };
-var ECON_DEFAULTS = {
-  STORAGE_ENERGY_MIN_BEFORE_REMOTES: 80000,
-  MAX_ACTIVE_REMOTES: 2,
-  ROAD_REPAIR_THRESHOLD: 0.45,
-  STORAGE_HEALTHY_RATIO: 0.7,
-  CPU_MIN_BUCKET: 500,
-  roads: ROAD_GATE_DEFAULTS,
-  remoteRoads: { minStorageEnergy: 40000 },
-  queen: { allowCourierFallback: true }
-};
-var HARVESTER_DEFAULTS = { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
+var ROAD_GATE_DEFAULTS = BeeHiveSettings.ROAD_GATE_DEFAULTS;
+var ECON_DEFAULTS = BeeHiveSettings.ECON_DEFAULTS;
+var HARVESTER_DEFAULTS = BeeHiveSettings.HARVESTER_DEFAULTS;
 
 function ensureEconomyConfig() {
   if (!global.__beeEconomyConfig) {
@@ -869,7 +863,7 @@ var ROLE_DISPATCH = Object.freeze({
   CombatMedic: SQUAD_ROLE_RUNNERS.CombatMedic
 });
 
-var DYING_SOON_TTL = 60;
+var DYING_SOON_TTL = BeeHiveSettings.DYING_SOON_TTL;
 var DEFAULT_LUNA_PER_SOURCE = (TaskLuna && typeof TaskLuna.MAX_LUNA_PER_SOURCE === 'number')
   ? TaskLuna.MAX_LUNA_PER_SOURCE
   : 1;
