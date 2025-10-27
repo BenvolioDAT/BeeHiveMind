@@ -2,7 +2,7 @@
 "use strict";
 
 var CoreLogger = require('core.logger');
-var spawnLogic = require('spawn.logic');
+var CoreSpawn = require('core.spawn');
 var roleWorkerBee = require('role.Worker_Bee');
 var BuilderPlanner = require('Task.Builder.Planner');
 var TradeEnergy = require('Trade.Energy');
@@ -13,6 +13,47 @@ var TaskSquad = require('./Task.Squad');
 var TaskCombatArcher = require('Task.CombatArcher');
 var TaskCombatMelee = require('Task.CombatMelee');
 var TaskCombatMedic = require('Task.CombatMedic');
+
+var TASK_MODULE_NAME_MAP = {
+  baseharvest: 'BaseHarvest',
+  builder: 'Builder',
+  claimer: 'Claimer',
+  combatarcher: 'CombatArcher',
+  combatmedic: 'CombatMedic',
+  combatmelee: 'CombatMelee',
+  courier: 'Courier',
+  dismantler: 'Dismantler',
+  idle: 'Idle',
+  luna: 'Luna',
+  queen: 'Queen',
+  repair: 'Repair',
+  scout: 'Scout',
+  trucker: 'Trucker',
+  upgrader: 'Upgrader',
+  remoteminer: 'Luna',
+  remotehauler: 'Luna',
+  reserver: 'Luna',
+  remoteharvest: 'Luna'
+};
+
+var MODULE_REQUIRE_CACHE = Object.create(null);
+
+var TASK_REQUIRE_MAP = {
+  baseharvest: 'Task.BaseHarvest',
+  courier: 'Task.Courier',
+  trucker: 'Task.Trucker',
+  queen: 'Task.Queen',
+  builder: 'Task.Builder',
+  upgrader: 'Task.Upgrader',
+  repair: 'Task.Repair',
+  scout: 'Task.Scout',
+  combatarcher: 'Task.CombatArcher',
+  combatmelee: 'Task.CombatMelee',
+  combatmedic: 'Task.CombatMedic',
+  dismantler: 'Task.Dismantler',
+  claimer: 'Task.Claimer',
+  luna: 'Task.Luna'
+};
 
 var ROAD_GATE_DEFAULTS = { minRCL: 3, disableGate: false };
 var ECON_DEFAULTS = {
@@ -79,6 +120,42 @@ function ensureEconomyConfig() {
 
 function hasOwn(obj, key) {
   return !!(obj && Object.prototype.hasOwnProperty.call(obj, key));
+}
+
+function CanonicalTaskName(task) {
+  if (!task) return null;
+  var lower = String(task).toLowerCase();
+  if (!lower.length) return null;
+  if (hasOwn(TASK_MODULE_NAME_MAP, lower)) {
+    return TASK_MODULE_NAME_MAP[lower];
+  }
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function tryRequire(moduleName) {
+  if (!moduleName) return null;
+  if (hasOwn(MODULE_REQUIRE_CACHE, moduleName)) {
+    return MODULE_REQUIRE_CACHE[moduleName];
+  }
+  try {
+    var mod = require(moduleName);
+    MODULE_REQUIRE_CACHE[moduleName] = mod || null;
+    return MODULE_REQUIRE_CACHE[moduleName];
+  } catch (err) {
+    MODULE_REQUIRE_CACHE[moduleName] = null;
+    return null;
+  }
+}
+
+function _tryRequireTask(taskName) {
+  if (!taskName) return null;
+  var lower = String(taskName).toLowerCase();
+  var moduleName = TASK_REQUIRE_MAP[lower];
+  if (!moduleName) {
+    var canonical = CanonicalTaskName(taskName);
+    moduleName = canonical ? 'Task.' + canonical : null;
+  }
+  return moduleName ? tryRequire(moduleName) : null;
 }
 
 function costOfBody(body) {
@@ -948,14 +1025,17 @@ function ensureHarvesterIntelForRoom(room, cache) {
 
 function planHarvesterSpawn(room, spawnEnergy, spawnCapacity, intel) {
   var plan = { shouldSpawn: false, body: [], cost: 0 };
-  if (!room || !spawnLogic) return plan;
+  if (!room) return plan;
 
-  var targetBody = (typeof spawnLogic.getBestHarvesterBody === 'function')
-    ? spawnLogic.getBestHarvesterBody(room)
-    : spawnLogic.Generate_BaseHarvest_Body(spawnCapacity);
+  var TaskBaseHarvest = _tryRequireTask('baseharvest');
+  var targetContext = { mode: 'target', intel: intel, availableEnergy: spawnEnergy, capacityEnergy: spawnCapacity };
+  var fallbackContext = { mode: 'fallback', intel: intel, availableEnergy: spawnEnergy, capacityEnergy: spawnCapacity };
+  var targetBody = (TaskBaseHarvest && typeof TaskBaseHarvest.getSpawnBody === 'function')
+    ? TaskBaseHarvest.getSpawnBody(spawnCapacity, room, targetContext)
+    : [];
   var targetCost = costOfBody(targetBody);
-  var fallbackBody = (typeof spawnLogic.Generate_BaseHarvest_Body === 'function')
-    ? spawnLogic.Generate_BaseHarvest_Body(spawnEnergy)
+  var fallbackBody = (TaskBaseHarvest && typeof TaskBaseHarvest.getSpawnBody === 'function')
+    ? TaskBaseHarvest.getSpawnBody(spawnEnergy, room, fallbackContext)
     : [];
   var fallbackCost = costOfBody(fallbackBody);
 
@@ -1251,22 +1331,10 @@ function getBuilderBodyConfigs() {
   if (GLOBAL_CACHE.builderBodyConfigs) {
     return GLOBAL_CACHE.builderBodyConfigs;
   }
-  var result = [];
-  if (spawnLogic && spawnLogic.configurations && typeof spawnLogic.configurations.length === 'number') {
-    for (var i = 0; i < spawnLogic.configurations.length; i++) {
-      var entry = spawnLogic.configurations[i];
-      if (!entry || entry.task !== 'builder') continue;
-      var bodies = entry.body;
-      if (Array.isArray(bodies)) {
-        for (var j = 0; j < bodies.length; j++) {
-          result.push(bodies[j]);
-        }
-      }
-      break;
-    }
-  }
-  GLOBAL_CACHE.builderBodyConfigs = result;
-  return result;
+  var mod = _tryRequireTask('builder');
+  var tiers = (mod && mod.BODY_TIERS) ? mod.BODY_TIERS : [];
+  GLOBAL_CACHE.builderBodyConfigs = tiers && typeof tiers.slice === 'function' ? tiers.slice() : tiers;
+  return GLOBAL_CACHE.builderBodyConfigs;
 }
 
 function determineBuilderFailureReason(available, capacity) {
@@ -1571,19 +1639,34 @@ function trySpawnSquadMember(spawner, plan) {
     }
   }
 
-  var available = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
-    ? spawnLogic.Calculate_Spawn_Resource(spawner)
+  var available = (CoreSpawn && typeof CoreSpawn.availableEnergy === 'function')
+    ? CoreSpawn.availableEnergy(spawner)
     : (room.energyAvailable || 0);
   var capacity = room.energyCapacityAvailable || available;
-  var body = (spawnLogic && typeof spawnLogic.getBodyForTask === 'function')
-    ? spawnLogic.getBodyForTask(plan.role, available)
+  var roleMod = _tryRequireTask(plan.role);
+  var context = {
+    plan: plan,
+    availableEnergy: available,
+    capacityEnergy: capacity,
+    room: room,
+    requestedEnergy: available
+  };
+  var body = (roleMod && typeof roleMod.getSpawnBody === 'function')
+    ? roleMod.getSpawnBody(available, room, context) || []
     : [];
   var cost = costOfBody(body);
 
   if (!body.length || cost <= 0) {
     // Check the best possible body at full capacity to decide if the plan is ever viable.
-    var bestBody = (spawnLogic && typeof spawnLogic.getBodyForTask === 'function')
-      ? spawnLogic.getBodyForTask(plan.role, capacity)
+    var capacityContext = {
+      plan: plan,
+      availableEnergy: available,
+      capacityEnergy: capacity,
+      room: room,
+      requestedEnergy: capacity
+    };
+    var bestBody = (roleMod && typeof roleMod.getSpawnBody === 'function')
+      ? roleMod.getSpawnBody(capacity, room, capacityContext) || []
       : [];
     var bestCost = costOfBody(bestBody);
     if (!bestBody.length || bestCost <= 0 || bestCost > capacity) {
@@ -1609,29 +1692,26 @@ function trySpawnSquadMember(spawner, plan) {
     return 'waiting';
   }
 
-  if (!spawnLogic || typeof spawnLogic.Generate_Creep_Name !== 'function') {
-    return 'failed';
-  }
-
-  var name = spawnLogic.Generate_Creep_Name(plan.role);
-  if (!name) {
-    return 'failed';
-  }
-
   var homeRoom = plan.homeRoom || room.name;
-  var memory = {
-    role: 'squad',
-    squadRole: plan.role,
-    squadId: plan.squadId,
-    task: plan.role,
-    home: homeRoom,
-    state: 'rally',
-    targetRoom: plan.targetRoom,
-    bornTask: plan.role,
-    birthBody: body.slice()
+  var spec = {
+    body: body,
+    namePrefix: plan.role,
+    memory: {
+      role: 'squad',
+      squadRole: plan.role,
+      squadId: plan.squadId,
+      task: plan.role,
+      home: homeRoom,
+      state: 'rally',
+      targetRoom: plan.targetRoom,
+      bornTask: plan.role,
+      birthBody: body.slice()
+    }
   };
 
-  var result = spawner.spawnCreep(body, name, { memory: memory });
+  var result = (CoreSpawn && typeof CoreSpawn.spawnFromSpec === 'function')
+    ? CoreSpawn.spawnFromSpec(spawner, plan.role, spec)
+    : ERR_INVALID_ARGS;
   if (result === OK) {
     var bucket = ensureSquadMemoryRecord(plan.squadId);
     bucket.home = homeRoom;
@@ -1822,8 +1902,8 @@ var BeeHiveMind = {
       var controllerLevel = room.controller && room.controller.level ? room.controller.level : 1;
       var builderLimit = computeBuilderLimit(builderSites, controllerLevel);
 
-      var spawnResource = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
-        ? spawnLogic.Calculate_Spawn_Resource(spawner)
+      var spawnResource = (CoreSpawn && typeof CoreSpawn.availableEnergy === 'function')
+        ? CoreSpawn.availableEnergy(spawner)
         : (room.energyAvailable || 0);
       var spawnCapacity = room.energyCapacityAvailable || spawnResource;
 
@@ -1960,12 +2040,13 @@ var BeeHiveMind = {
           continue;
         }
 
-        if (!spawnLogic || typeof spawnLogic.Spawn_Worker_Bee !== 'function') {
-          if (task === 'builder' && builderLimit > 0) {
-            logBuilderSpawnBlock(spawner, room, builderSites, 'OTHER_FAIL', spawnResource, spawnCapacity, builderFailLog);
-          }
-          continue;
-        }
+        var specContext = {
+          availableEnergy: spawnResource,
+          capacityEnergy: spawnCapacity,
+          current: current,
+          limit: limit
+        };
+        var mod = _tryRequireTask(task);
 
         var didSpawn = false;
         if (task === 'luna') {
@@ -1993,7 +2074,7 @@ var BeeHiveMind = {
               spawnResult = spawnErr && typeof spawnErr === 'number' ? spawnErr : ERR_INVALID_TARGET;
             }
           } else {
-            spawnResult = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+            spawnResult = ERR_INVALID_TARGET;
           }
           if (spawnResult === OK || spawnResult === true) {
             didSpawn = true;
@@ -2008,27 +2089,134 @@ var BeeHiveMind = {
           if (!harvesterPlan.shouldSpawn) {
             continue;
           }
-          var overrideBody = harvesterPlan.body && harvesterPlan.body.slice ? harvesterPlan.body.slice() : harvesterPlan.body;
-          var harvesterMemory = { home: room.name, _harvesterBodyOverride: overrideBody };
-          didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource, harvesterMemory);
-          if (didSpawn === true) {
-            harvesterIntel.hatching = (harvesterIntel.hatching || 0) + 1;
-            harvesterIntel.coverage = (harvesterIntel.coverage || 0) + 1;
-            if (!harvesterIntel.highestCost || harvesterPlan.cost > harvesterIntel.highestCost) {
-              harvesterIntel.highestCost = harvesterPlan.cost;
+          if (!didSpawn && mod && typeof mod.getSpawnSpec === 'function') {
+            var harvesterSpec = null;
+            try {
+              harvesterSpec = mod.getSpawnSpec(room, specContext);
+            } catch (harvesterSpecErr) {
+              harvesterSpec = null;
+            }
+            if (harvesterSpec && harvesterSpec.body && harvesterSpec.body.length && (!CoreSpawn || typeof CoreSpawn.isAffordable !== 'function' || CoreSpawn.isAffordable(harvesterSpec.body, spawnResource))) {
+              var harvesterSpecResult;
+              try {
+                harvesterSpecResult = CoreSpawn.spawnFromSpec(spawner, task, harvesterSpec);
+              } catch (harvesterSpecSpawnErr) {
+                harvesterSpecResult = (harvesterSpecSpawnErr && typeof harvesterSpecSpawnErr === 'number')
+                  ? harvesterSpecSpawnErr
+                  : ERR_INVALID_ARGS;
+              }
+              if (harvesterSpecResult === OK) {
+                didSpawn = true;
+                harvesterIntel.hatching = (harvesterIntel.hatching || 0) + 1;
+                harvesterIntel.coverage = (harvesterIntel.coverage || 0) + 1;
+                if (!harvesterIntel.highestCost || harvesterPlan.cost > harvesterIntel.highestCost) {
+                  harvesterIntel.highestCost = harvesterPlan.cost;
+                }
+              }
+            }
+          }
+          if (!didSpawn) {
+            var overrideBody = Array.isArray(harvesterPlan.body) ? harvesterPlan.body.slice() : [];
+            if (overrideBody.length && (!CoreSpawn || typeof CoreSpawn.isAffordable !== 'function' || CoreSpawn.isAffordable(overrideBody, spawnResource))) {
+              var harvesterMemory = { role: 'Worker_Bee', task: 'baseharvest', home: room.name };
+              var harvesterSpecDirect = {
+                body: overrideBody,
+                namePrefix: 'baseharvest',
+                memory: harvesterMemory
+              };
+              var harvesterDirectResult = CoreSpawn.spawnFromSpec(spawner, 'baseharvest', harvesterSpecDirect);
+              didSpawn = (harvesterDirectResult === OK);
+            }
+            if (didSpawn) {
+              harvesterIntel.hatching = (harvesterIntel.hatching || 0) + 1;
+              harvesterIntel.coverage = (harvesterIntel.coverage || 0) + 1;
+              if (!harvesterIntel.highestCost || harvesterPlan.cost > harvesterIntel.highestCost) {
+                harvesterIntel.highestCost = harvesterPlan.cost;
+              }
             }
           }
         } else if (task === 'builder') {
-          didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
-          if (didSpawn !== true && builderLimit > 0) {
-            var reason = determineBuilderFailureReason(spawnResource, spawnCapacity);
-            logBuilderSpawnBlock(spawner, room, builderSites, reason, spawnResource, spawnCapacity, builderFailLog);
+          if (!didSpawn && mod && typeof mod.getSpawnSpec === 'function') {
+            var builderSpec = null;
+            try {
+              builderSpec = mod.getSpawnSpec(room, specContext);
+            } catch (builderSpecErr) {
+              builderSpec = null;
+            }
+            if (builderSpec && builderSpec.body && builderSpec.body.length && (!CoreSpawn || typeof CoreSpawn.isAffordable !== 'function' || CoreSpawn.isAffordable(builderSpec.body, spawnResource))) {
+              var builderSpecResult;
+              try {
+                builderSpecResult = CoreSpawn.spawnFromSpec(spawner, task, builderSpec);
+              } catch (builderSpecSpawnErr) {
+                builderSpecResult = (builderSpecSpawnErr && typeof builderSpecSpawnErr === 'number')
+                  ? builderSpecSpawnErr
+                  : ERR_INVALID_ARGS;
+              }
+              if (builderSpecResult === OK) {
+                didSpawn = true;
+              }
+            }
+          }
+          if (!didSpawn) {
+            var builderBody = (mod && typeof mod.getSpawnBody === 'function')
+              ? mod.getSpawnBody(spawnResource, room, specContext)
+              : [];
+            if ((!builderBody || !builderBody.length) && mod && typeof mod.getSpawnBody === 'function') {
+              builderBody = mod.getSpawnBody(spawnCapacity, room, specContext) || [];
+            }
+            if (builderBody && builderBody.length && (!CoreSpawn || typeof CoreSpawn.isAffordable !== 'function' || CoreSpawn.isAffordable(builderBody, spawnResource))) {
+              var builderFallbackSpec = {
+                body: builderBody,
+                namePrefix: 'builder',
+                memory: { role: 'Worker_Bee', task: 'builder', home: room.name }
+              };
+              var builderFallbackResult = CoreSpawn.spawnFromSpec(spawner, task, builderFallbackSpec);
+              didSpawn = (builderFallbackResult === OK);
+            }
+            if (!didSpawn && builderLimit > 0) {
+              var reason = determineBuilderFailureReason(spawnResource, spawnCapacity);
+              logBuilderSpawnBlock(spawner, room, builderSites, reason, spawnResource, spawnCapacity, builderFailLog);
+            }
           }
         } else {
-          didSpawn = spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource);
+          if (!didSpawn && mod && typeof mod.getSpawnSpec === 'function') {
+            var taskSpec = null;
+            try {
+              taskSpec = mod.getSpawnSpec(room, specContext);
+            } catch (taskSpecErr) {
+              taskSpec = null;
+            }
+            if (taskSpec && taskSpec.body && taskSpec.body.length && (!CoreSpawn || typeof CoreSpawn.isAffordable !== 'function' || CoreSpawn.isAffordable(taskSpec.body, spawnResource))) {
+              var taskSpecResult;
+              try {
+                taskSpecResult = CoreSpawn.spawnFromSpec(spawner, task, taskSpec);
+              } catch (taskSpecSpawnErr) {
+                taskSpecResult = (taskSpecSpawnErr && typeof taskSpecSpawnErr === 'number')
+                  ? taskSpecSpawnErr
+                  : ERR_INVALID_ARGS;
+              }
+              if (taskSpecResult === OK) {
+                didSpawn = true;
+              }
+            }
+          }
+          if (!didSpawn) {
+            var fallbackBody = (mod && typeof mod.getSpawnBody === 'function')
+              ? mod.getSpawnBody(spawnResource, room, specContext)
+              : [];
+            if (fallbackBody && fallbackBody.length && (!CoreSpawn || typeof CoreSpawn.isAffordable !== 'function' || CoreSpawn.isAffordable(fallbackBody, spawnResource))) {
+              var fallbackSpec = {
+                body: fallbackBody,
+                namePrefix: task,
+                memory: { role: 'Worker_Bee', task: task, home: room.name }
+              };
+              var fallbackResult = CoreSpawn.spawnFromSpec(spawner, task, fallbackSpec);
+              didSpawn = (fallbackResult === OK);
+            }
+          }
         }
 
-        if (didSpawn === true) {
+        if (didSpawn) {
           roleCounts[task] = (roleCounts[task] || 0) + 1;
           if (task === 'luna') {
             lunaCountsByHome[room.name] = (lunaCountsByHome[room.name] || 0) + 1;

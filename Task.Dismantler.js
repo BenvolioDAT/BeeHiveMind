@@ -186,3 +186,60 @@ var TaskDismantler = {
 };
 
 module.exports = TaskDismantler;
+
+var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
+
+var DISMANTLER_BODY_TIERS = [
+  [
+    WORK, WORK, WORK, WORK, WORK,
+    MOVE, MOVE, MOVE, MOVE, MOVE
+  ]
+];
+
+function costOfBody(body) {
+  if (!Array.isArray(body)) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODY_COSTS[body[i]] || 0;
+  }
+  return total;
+}
+
+function pickLargestAffordable(tiers, energy) {
+  if (!Array.isArray(tiers) || !tiers.length) return [];
+  var available = (typeof energy === 'number') ? energy : 0;
+  for (var i = 0; i < tiers.length; i++) {
+    var candidate = tiers[i];
+    if (!Array.isArray(candidate)) continue;
+    if (costOfBody(candidate) <= available) {
+      return candidate.slice();
+    }
+  }
+  return [];
+}
+
+module.exports.BODY_TIERS = DISMANTLER_BODY_TIERS.map(function (tier) {
+  return tier.slice();
+});
+
+module.exports.getSpawnBody = function (energy) {
+  return pickLargestAffordable(DISMANTLER_BODY_TIERS, energy);
+};
+
+module.exports.getSpawnSpec = function (room, ctx) {
+  var context = ctx || {};
+  var available = (typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
+  if (available === null && room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+  var body = module.exports.getSpawnBody(available, room, context);
+  return {
+    body: body,
+    namePrefix: 'Dismantler',
+    memory: {
+      role: 'Worker_Bee',
+      task: 'Dismantler',
+      home: room && room.name
+    }
+  };
+};

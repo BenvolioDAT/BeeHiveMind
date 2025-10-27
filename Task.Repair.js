@@ -1,5 +1,45 @@
 'use strict';
 
+var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
+
+function repairBody(workCount, carryCount, moveCount) {
+  var body = [];
+  var i;
+  for (i = 0; i < workCount; i++) body.push(WORK);
+  for (i = 0; i < carryCount; i++) body.push(CARRY);
+  for (i = 0; i < moveCount; i++) body.push(MOVE);
+  return body;
+}
+
+var REPAIR_BODY_TIERS = [
+  repairBody(5, 2, 7),
+  repairBody(4, 1, 5),
+  repairBody(2, 1, 3)
+];
+
+function costOfBody(body) {
+  var total = 0;
+  if (!Array.isArray(body)) return total;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    total += BODY_COSTS[part] || 0;
+  }
+  return total;
+}
+
+function pickLargestAffordable(tiers, energyAvailable) {
+  if (!Array.isArray(tiers) || !tiers.length) return [];
+  var available = typeof energyAvailable === 'number' ? energyAvailable : 0;
+  for (var i = 0; i < tiers.length; i++) {
+    var candidate = tiers[i];
+    if (!Array.isArray(candidate)) continue;
+    if (costOfBody(candidate) <= available) {
+      return candidate.slice();
+    }
+  }
+  return [];
+}
+
 // Logging Levels
 var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
 var currentLogLevel = LOG_LEVEL.NONE;  // Adjust to LOG_LEVEL.DEBUG for more detailed logs
@@ -434,3 +474,18 @@ var TaskRepair = {
 };
 
 module.exports = TaskRepair;
+module.exports.BODY_TIERS = REPAIR_BODY_TIERS.map(function (tier) { return tier.slice(); });
+module.exports.pickLargestAffordable = pickLargestAffordable;
+module.exports.getSpawnBody = function (energy) {
+  return pickLargestAffordable(REPAIR_BODY_TIERS, energy);
+};
+module.exports.getSpawnSpec = function (room, ctx) {
+  var context = ctx || {};
+  var energy = context.availableEnergy;
+  var body = module.exports.getSpawnBody(energy, room, context);
+  return {
+    body: body,
+    namePrefix: 'repair',
+    memory: { role: 'Worker_Bee', task: 'repair', home: room && room.name }
+  };
+};
