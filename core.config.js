@@ -13,6 +13,30 @@ settings.logging = settings.logging || Object.freeze({
   defaultLevel: LOG_LEVEL.NONE
 });
 
+var workerSettings = settings['Worker'] || (settings['Worker'] = {});
+// @used_in: core.spawn.js (task counts & queue)
+if (!workerSettings.DEFAULT_ROLE_REQUIREMENTS) {
+  workerSettings.DEFAULT_ROLE_REQUIREMENTS = {
+    baseharvest: 2,
+    builder: 2,
+    repair: 1,
+    courier: 2,
+    queen: 1,
+    upgrader: 2,
+    scout: 1
+  };
+}
+if (!workerSettings.DEFAULT_PRIORITY_QUEUE) {
+  workerSettings.DEFAULT_PRIORITY_QUEUE = [
+    'baseharvest',
+    'courier',
+    'queen',
+    'builder',
+    'upgrader',
+    'repair'
+  ];
+}
+
 settings.pixels = settings.pixels || Object.freeze({
   /** Toggle CPU bucket based pixel generation. */
   enabled: false,
