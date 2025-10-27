@@ -1,17 +1,3 @@
-// -----------------------------------------------------------------------------
-// Task.Luna.js - Remote Mining Orchestrator
-// CHANGELOG
-// 2024-05-19: Rebuilt Luna around Memory.remotes ledger, phased lifecycle, and
-//             remote-role spawning (miners, haulers, reservers) with diagnostics.
-// README (short):
-//   plan()   → audit Memory.remotes entries, refresh source intel, compute quotas.
-//   assign() → bind creeps to seats, queue replacements when TTL < travel lead.
-//   act()    → role handlers (miner / hauler / reserver) invoked per creep.
-//   report() → health logs, Memory audits (visual overlays removed).
-// -----------------------------------------------------------------------------
-
-'use strict';
-
 var Logger = require('core.logger');
 var CoreSpawn = require('core.spawn');
 var CoreConfig = require('core.config');

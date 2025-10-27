@@ -1,5 +1,3 @@
-'use strict';
-
 var CoreConfig = require('core.config');
 var LOG_LEVEL = CoreConfig.LOG_LEVEL;
 

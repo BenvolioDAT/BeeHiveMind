@@ -1,6 +1,3 @@
-// Task.Dismantler.js — siege with Invader Core handling (ES5-safe)
-'use strict';
-
 var TaskSquad = require('Task.Squad');
 var CoreSpawn = require('core.spawn');
 

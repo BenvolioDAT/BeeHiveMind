@@ -1,14 +1,5 @@
-'use strict';
-
 var CoreConfig = require('core.config');
 var CoreSpawn = require('core.spawn');
-
-/**
- * Task.Queen distributes energy to spawns, extensions, and towers while
- * maintaining a smooth harvest/delivery cycle. The behaviour mirrors a classic
- * "queen" role: gather energy when empty, then deliver it in priority order.
- * ES5 syntax is used throughout and movement prefers Traveler when present.
- */
 
 var Logger = require('core.logger');
 var TaskCourier = require('Task.Courier');

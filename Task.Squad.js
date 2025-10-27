@@ -1,10 +1,3 @@
-// Task.Squad.js — Traveler-powered movement + polite traffic shim + tile reservations (ES5-safe)
-'use strict';
-
-/**
- * Dependencies:
- *   - Traveler.js (attaches creep.travelTo)
- */
 var CoreConfig = require('core.config');
 var CoreLogger = require('core.logger');
 try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }

@@ -1,5 +1,3 @@
-'use strict';
-
 var CoreSpawn = require('core.spawn');
 
 function repairBody(workCount, carryCount, moveCount) {

@@ -1,9 +1,3 @@
-// Task.Scout.spread.es5.js
-// ES5-safe, Traveler-powered scout that fans out within EXPLORE_RADIUS,
-// coordinates across multiple scouts, and avoids exit deadlocks in low-exit rooms.
-
-'use strict';
-
 var TaskSquad = require('Task.Squad');
 var Traveler = require('Traveler');
 

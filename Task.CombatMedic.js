@@ -1,11 +1,3 @@
-// Task.CombatMedic.js — Traveler/Task.Squad-aware healer (ES5-safe)
-// - Uses TaskSquad.stepToward for all navigation (Traveler under the hood)
-// - One heal per tick (prioritizes buddy/patient/self)
-// - Enforces max medics per target to prevent dogpiles
-// - Triage prefers targets under tower pressure
-// - Avoids stepping into melee tiles if rangedHeal suffices
-'use strict';
-
 var TaskSquad = require('Task.Squad');
 
 var Traveler = null;

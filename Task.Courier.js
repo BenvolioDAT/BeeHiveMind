@@ -1,13 +1,3 @@
-'use strict';
-
-/**
- * Task.Courier shuttles energy between harvest infrastructure and consumers.
- * The logic favors clarity over micro-optimizations and is written in ES5 syntax
- * (no const/let, arrow functions, or template strings) per project standards.
- * Movement relies on the local travelTo helper so that creeps consistently use
- * Traveler.js instead of raw moveTo calls.
- */
-
 var CoreConfig = require('core.config');
 var CoreSpawn = require('core.spawn');
 var Logger = require('core.logger');

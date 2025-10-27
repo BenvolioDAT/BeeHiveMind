@@ -1,9 +1,3 @@
-// role.TaskUpgrader.PIB.es5.js
-// ES5-safe Upgrader with Predictive Intent Buffer + Smart Energy Flow + Sign Management
-// Optimized for low CPU and clear intent tracking (Traveler-compatible)
-
-'use strict';
-
 var CoreConfig = require('core.config');
 var CoreSpawn = require('core.spawn');
 

@@ -1,5 +1,3 @@
-'use strict';
-
 var LOG_LEVEL = Object.freeze({
   NONE: 0,
   BASIC: 1,

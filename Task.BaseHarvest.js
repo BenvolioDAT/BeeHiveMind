@@ -1,12 +1,3 @@
-'use strict';
-
-/**
- * Task.BaseHarvest assigns miners to fixed seats and maintains source containers.
- * All logic is ES5-compatible to match team conventions (no const/let, arrow
- * functions, or template literals). Movement always relies on Traveler
- * (creep.travelTo/Traveler.travelTo) so that path reuse stays unified.
- */
-
 var Logger = require('core.logger');
 var Traveler = require('Traveler');
 var CoreSpawn = require('core.spawn');

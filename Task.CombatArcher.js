@@ -1,6 +1,3 @@
-// Task.CombatArcher.js — Stoic archer (no dancing) + DPS-first + safe kiting (ES5-safe)
-'use strict';
-
 var Traveler = null;
 try {
   Traveler = require('Traveler');

@@ -1,6 +1,3 @@
-
-"use strict";
-
 var CoreConfig = require('core.config');
 var CoreLogger = require('core.logger');
 var CoreSpawn = require('core.spawn');

@@ -1,12 +1,3 @@
-// role.LinkManager.cpu.es5.js
-// ES5-safe, CPU-lean link manager
-// - Works per owned room (not per spawn)
-// - Caches sender/receiver link IDs in Memory (rescan every N ticks or if invalid)
-// - Sender: closest to storage (else spawn); Receiver: closest to controller
-// - Ensures sender !== receiver, skips if low energy / no free capacity
-
-'use strict';
-
 var hasOwn = function (obj, prop) {
   return Object.prototype.hasOwnProperty.call(obj, prop);
 };

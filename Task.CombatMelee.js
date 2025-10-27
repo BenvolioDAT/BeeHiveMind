@@ -1,7 +1,3 @@
-// Task.CombatMelee.js — Vanguard + bodyguard + squad anchor (ES5-safe)
-// Traveler/TaskSquad movement + polite traffic + invader core handling
-'use strict';
-
 var Traveler = require('Traveler');
 var TaskSquad = require('Task.Squad');
 var CoreSpawn = require('core.spawn');

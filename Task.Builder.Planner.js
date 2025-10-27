@@ -1,5 +1,3 @@
-"use strict";
-
 var CoreLogger = require('core.logger');
 var CoreConfig = require('core.config');
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;

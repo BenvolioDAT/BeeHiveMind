@@ -1,7 +1,3 @@
-// Trade.Energy.v2.1.js
-// Purpose: Sell excess ENERGY via the Market from a room's Terminal.
-// Tone: novice-friendly (verbose comments, clear steps).
-
 var CoreConfig = require('core.config');
 
 var tradeSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Trade && CoreConfig.settings.Trade.energy) || {};

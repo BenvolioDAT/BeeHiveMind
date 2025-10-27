@@ -1,5 +1,3 @@
-"use strict";
-
 var CoreConfig = require('core.config');
 var Logger = require('core.logger');
 
