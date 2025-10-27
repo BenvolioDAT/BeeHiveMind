@@ -39,7 +39,7 @@ settings.pixels = settings.pixels || Object.freeze({
   /** Toggle CPU bucket based pixel generation. */
   enabled: true,
   /** Minimum bucket value before attempting pixel generation. */
-  bucketThreshold: 9900,
+  bucketThreshold: 9990,
   /** Optional modulus so pixels are generated every N ticks. */
   tickModulo: 5
 });
