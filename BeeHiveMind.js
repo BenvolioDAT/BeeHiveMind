@@ -864,6 +864,33 @@ var SQUAD_ROLE_RUNNERS = {
   CombatMedic: (TaskCombatMedic && typeof TaskCombatMedic.run === 'function') ? TaskCombatMedic.run : null
 };
 
+function shouldDebugSquad() {
+  return !!(Memory && Memory.DEBUG_SQUAD_SPAWN);
+}
+
+function debugSquadLog(message) {
+  if (!shouldDebugSquad()) return;
+  if (hiveLog && typeof hiveLog.info === 'function') {
+    hiveLog.info(message);
+  }
+}
+
+function hasManualSquadFlag(roomName) {
+  if (!roomName) return false;
+  var squadFlags = Memory && Memory.squadFlags;
+  if (!squadFlags || !squadFlags.manual || !squadFlags.bindings) {
+    return false;
+  }
+  for (var flagName in squadFlags.manual) {
+    if (!hasOwn(squadFlags.manual, flagName)) continue;
+    if (!squadFlags.manual[flagName]) continue;
+    if (squadFlags.bindings[flagName] === roomName) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function runSquadRole(creep) {
   if (!creep || !creep.memory) return;
   var role = creep.memory.squadRole || creep.memory.task;
@@ -992,8 +1019,31 @@ function deriveEconomyDecisionState(room, harvesterIntel, economyMap) {
 
   state.allEssentialPresent = state.hasHarvester && state.hasCourier && state.hasQueen && state.hasBuilder && state.hasUpgrader;
   state.recoveryMode = !state.hasHarvester || !state.hasCourier;
-  // Combat spawning is only permitted when the economy is healthy or buffered by storage.
-  state.allowCombat = !state.recoveryMode && (state.storageHealthy || state.allEssentialPresent);
+  // Combat spawning is only permitted when the economy is healthy or buffered by storage,
+  // unless a manual squad flag authorizes a minimal economy override.
+  var baselineAllow = !state.recoveryMode && (state.storageHealthy || state.allEssentialPresent);
+  var manualOverride = hasManualSquadFlag(roomName);
+  var minimalEconomyReady = state.hasHarvester && (state.hasCourier || state.hasQueen);
+  var forceAllow = !!(Memory && Memory.combat && Memory.combat.forceAllow);
+  var gateReason = baselineAllow ? 'baseline' : 'suppressed';
+  state.allowCombat = baselineAllow;
+  if (!state.allowCombat && manualOverride && minimalEconomyReady) {
+    state.allowCombat = true;
+    gateReason = 'manual';
+  }
+  if (!state.allowCombat && forceAllow) {
+    state.allowCombat = true;
+    gateReason = 'force';
+  } else if (state.allowCombat && forceAllow) {
+    gateReason = 'force';
+  }
+  if (state.allowCombat && gateReason === 'manual') {
+    debugSquadLog('[CombatGate] Manual flag present; allowing combat at ' + roomName + ' with minimal economy.');
+  } else if (state.allowCombat && gateReason === 'force') {
+    debugSquadLog('[CombatGate] Force override enabled; allowing combat at ' + roomName + '.');
+  } else if (shouldDebugSquad()) {
+    debugSquadLog('[CombatGate] ' + roomName + ' allowCombat=' + state.allowCombat + ' reason=' + gateReason + ' (harv=' + state.harvesterCount + ' courier=' + state.courierCount + ' queen=' + state.queenCount + ')');
+  }
 
   return state;
 }
@@ -1638,6 +1688,49 @@ function buildSquadSpawnPlans(cache) {
   return plansByHome;
 }
 
+function _squadBodiesEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) {
+    return false;
+  }
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function _findSquadTierIndex(tiers, body) {
+  if (!Array.isArray(tiers) || !Array.isArray(body)) {
+    return -1;
+  }
+  for (var i = 0; i < tiers.length; i++) {
+    if (_squadBodiesEqual(tiers[i], body)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function _pickAffordableSquadTier(tiers, maxCost) {
+  if (!Array.isArray(tiers)) {
+    return null;
+  }
+  for (var i = 0; i < tiers.length; i++) {
+    var candidate = tiers[i];
+    var cost = CoreSpawn.costOfBody(candidate);
+    if (cost <= maxCost) {
+      return { body: candidate.slice(), cost: cost, index: i };
+    }
+  }
+  return null;
+}
+
+function _squadTierLabel(index) {
+  return (typeof index === 'number' && index >= 0) ? ('T' + (index + 1)) : 'n/a';
+}
+
 /* === FIX: Squad spawn blocking === */
 function trySpawnSquadMember(spawner, plan) {
   if (!spawner || !plan) {
@@ -1653,6 +1746,7 @@ function trySpawnSquadMember(spawner, plan) {
     var economyState = economyStates[room.name];
     if (economyState && !economyState.allowCombat) {
       // Spawn is intentionally idled until the economy is back online.
+      debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=waiting reason=economy');
       return 'waiting';
     }
   }
@@ -1673,6 +1767,9 @@ function trySpawnSquadMember(spawner, plan) {
     ? roleMod.getSpawnBody(available, room, context) || []
     : [];
   var cost = CoreSpawn.costOfBody(body);
+  var tiers = (roleMod && Array.isArray(roleMod.BODY_TIERS)) ? roleMod.BODY_TIERS : null;
+  var initialTierIndex = _findSquadTierIndex(tiers, body);
+  var downshiftFromIndex = -1;
 
   if (!body.length || cost <= 0) {
     // Check the best possible body at full capacity to decide if the plan is ever viable.
@@ -1687,19 +1784,56 @@ function trySpawnSquadMember(spawner, plan) {
       ? roleMod.getSpawnBody(capacity, room, capacityContext) || []
       : [];
     var bestCost = CoreSpawn.costOfBody(bestBody);
-    if (!bestBody.length || bestCost <= 0 || bestCost > capacity) {
+    if (!bestBody.length || bestCost <= 0) {
+      debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=drop reason=no-body');
       return 'skip';
     }
     body = bestBody;
     cost = bestCost;
+    initialTierIndex = _findSquadTierIndex(tiers, body);
   }
 
   if (cost > capacity) {
-    // Abort plans that can never fit within the room's energy capacity.
+    var affordableTier = _pickAffordableSquadTier(tiers, capacity);
+    if (affordableTier) {
+      if (!_squadBodiesEqual(affordableTier.body, body)) {
+        downshiftFromIndex = initialTierIndex;
+      }
+      body = affordableTier.body;
+      cost = affordableTier.cost;
+      initialTierIndex = affordableTier.index;
+    } else {
+      debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=drop reason=overcap cost=' + cost + ' cap=' + capacity);
+      return 'skip';
+    }
+  }
+
+  var selectedTierIndex = initialTierIndex;
+  if (Array.isArray(tiers) && selectedTierIndex === -1) {
+    selectedTierIndex = _findSquadTierIndex(tiers, body);
+  }
+
+  function logDecision(decision, extra) {
+    if (!shouldDebugSquad()) return;
+    var tierLabel = _squadTierLabel(selectedTierIndex);
+    var note = '';
+    if (downshiftFromIndex >= 0 && selectedTierIndex >= 0 && selectedTierIndex > downshiftFromIndex) {
+      note = ' (from ' + _squadTierLabel(downshiftFromIndex) + ')';
+    }
+    var message = '[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' tier=' + tierLabel + note + ' cost=' + cost + ' cap=' + capacity + ' avail=' + available + ' decision=' + decision;
+    if (extra) {
+      message += ' ' + extra;
+    }
+    debugSquadLog(message);
+  }
+
+  if (!body.length) {
+    logDecision('drop', 'reason=no-body');
     return 'skip';
   }
 
-  if (!body.length || cost > available) {
+  if (cost > available) {
+    logDecision('waiting', 'reason=energy');
     return 'waiting';
   }
 
@@ -1707,6 +1841,7 @@ function trySpawnSquadMember(spawner, plan) {
     ? ECON_CFG.CPU_MIN_BUCKET
     : 500;
   if (!isCpuBucketHealthy(cpuThreshold)) {
+    logDecision('waiting', 'reason=cpu');
     return 'waiting';
   }
 
@@ -1731,6 +1866,7 @@ function trySpawnSquadMember(spawner, plan) {
     ? CoreSpawn.spawnFromSpec(spawner, plan.role, spec)
     : ERR_INVALID_ARGS;
   if (result === OK) {
+    logDecision('spawn');
     var bucket = ensureSquadMemoryRecord(plan.squadId);
     bucket.home = homeRoom;
     bucket.lastSpawnTick = Game.time;
@@ -1745,9 +1881,11 @@ function trySpawnSquadMember(spawner, plan) {
   }
 
   if (result === ERR_NOT_ENOUGH_ENERGY) {
+    logDecision('waiting', 'reason=spawn-energy');
     return 'waiting';
   }
 
+  logDecision('error', 'code=' + result);
   return 'failed';
 }
 
@@ -2007,7 +2145,7 @@ var BeeHiveMind = {
             continue;
           }
           if (planOutcome === 'waiting') {
-            roomSpawned[room.name] = true;
+            debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (currentPlan.squadId || '?') + ':' + currentPlan.role + ' waiting (workers still eligible this tick).');
             continue;
           }
           if (planOutcome === 'skip') {
