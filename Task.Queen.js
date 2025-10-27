@@ -1,5 +1,7 @@
 'use strict';
 
+var CoreConfig = require('core.config');
+
 /**
  * Task.Queen distributes energy to spawns, extensions, and towers while
  * maintaining a smooth harvest/delivery cycle. The behaviour mirrors a classic
@@ -13,9 +15,11 @@ var TaskCourier = require('Task.Courier');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var queenLog = Logger.createLogger('Task.Queen', LOG_LEVEL.DEBUG);
 
+var QueenSettings = CoreConfig.settings['Task.Queen'];
+
 var MODE_COLLECT = 'collect';
 var MODE_FEED = 'feed';
-var ENABLE_COURIER_FALLBACK = true;
+var ENABLE_COURIER_FALLBACK = QueenSettings.ENABLE_COURIER_FALLBACK;
 
 var Traveler = null;
 try {
@@ -24,12 +28,12 @@ try {
   Traveler = null;
 }
 
-var DEFAULT_TRAVEL_RANGE = 1;
-var DEFAULT_TRAVEL_REUSE = 15;
-var DEFAULT_TRAVEL_STUCK = 2;
-var DEFAULT_TRAVEL_REPATH = 0.1;
-var DEFAULT_TRAVEL_MAX_OPS = 4000;
-var DEFAULT_TOWER_REFILL_THRESHOLD = 0.7;
+var DEFAULT_TRAVEL_RANGE = QueenSettings.DEFAULT_TRAVEL_RANGE;
+var DEFAULT_TRAVEL_REUSE = QueenSettings.DEFAULT_TRAVEL_REUSE;
+var DEFAULT_TRAVEL_STUCK = QueenSettings.DEFAULT_TRAVEL_STUCK;
+var DEFAULT_TRAVEL_REPATH = QueenSettings.DEFAULT_TRAVEL_REPATH;
+var DEFAULT_TRAVEL_MAX_OPS = QueenSettings.DEFAULT_TRAVEL_MAX_OPS;
+var DEFAULT_TOWER_REFILL_THRESHOLD = QueenSettings.DEFAULT_TOWER_REFILL_THRESHOLD;
 
 var ROOM_CACHE_KEY = '__queenRoomEnergy';
 var THROTTLE_CACHE_KEY = '__queenLogThrottle';
