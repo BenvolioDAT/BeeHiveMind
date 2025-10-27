@@ -37,7 +37,7 @@ if (!workerSettings.DEFAULT_PRIORITY_QUEUE) {
 
 settings.pixels = settings.pixels || Object.freeze({
   /** Toggle CPU bucket based pixel generation. */
-  enabled: false,
+  enabled: true,
   /** Minimum bucket value before attempting pixel generation. */
   bucketThreshold: 9900,
   /** Optional modulus so pixels are generated every N ticks. */
