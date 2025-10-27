@@ -4,7 +4,7 @@
 
 'use strict';
 
-var AllianceManager = require('AllianceManager');
+var TaskSquad = require('Task.Squad');
 var Traveler = require('Traveler');
 
 // ---------- Tunables ----------
@@ -89,8 +89,8 @@ function markRoomForeignAvoid(roomMem, owner, reason, ttl) {
 
 function isAllyUsername(username) {
   if (!username) return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
-    return AllianceManager.isAlly(username);
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function') {
+    return TaskSquad.isAlly(username);
   }
   return false;
 }
@@ -403,7 +403,7 @@ function logRoomIntel(room) {
 function isEnemyPlayer(username) {
   if (!username) return false;
   if (username === 'Invader' || username === 'Source Keeper') return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function' && AllianceManager.isAlly(username)) return false;
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function' && TaskSquad.isAlly(username)) return false;
   var mine = getMyUsername();
   if (mine && username === mine) return false;
   return true;

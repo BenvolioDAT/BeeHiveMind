@@ -3,8 +3,7 @@
 'use strict';
 
 var Traveler = require('Traveler');
-var TaskSquad  = require('./Task.Squad');
-var AllianceManager = require('AllianceManager');
+var TaskSquad = require('Task.Squad');
 
 var CONFIG = {
   focusSticky: 15,
@@ -52,7 +51,7 @@ function _getMyUsername() {
 
 function _isEnemyUsername(username) {
   if (!username) return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function' && AllianceManager.isAlly(username)) {
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function' && TaskSquad.isAlly(username)) {
     return false;
   }
   var mine = _getMyUsername();
@@ -444,7 +443,7 @@ var CombatMelee = {
       return;
     }
     if (target.owner && !_isEnemyUsername(target.owner.username)) {
-      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'melee-sharedTarget');
+      TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'melee-sharedTarget');
       return;
     }
 

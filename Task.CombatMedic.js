@@ -6,20 +6,13 @@
 // - Avoids stepping into melee tiles if rangedHeal suffices
 'use strict';
 
-var TaskSquad  = require('./Task.Squad');
+var TaskSquad = require('Task.Squad');
 
 var Traveler = null;
 try {
   Traveler = require('Traveler');
 } catch (error) {
   Traveler = null;
-}
-
-var AllianceManager = null;
-try {
-  AllianceManager = require('AllianceManager');
-} catch (error) {
-  AllianceManager = null;
 }
 
 var CONFIG = {
@@ -79,8 +72,8 @@ function getMyUsername() {
 
 function isAllyUsername(username) {
   if (!username) return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
-    return AllianceManager.isAlly(username);
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function') {
+    return TaskSquad.isAlly(username);
   }
   return false;
 }

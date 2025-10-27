@@ -4,17 +4,17 @@
 // - Short per-tower lock so they don't ping-pong targets every tick
 // - If only one repair target, only one tower repairs it
 
-var AllianceManager = null;
+var TaskSquad = null;
 try {
-  AllianceManager = require('AllianceManager');
+  TaskSquad = require('Task.Squad');
 } catch (error) {
-  AllianceManager = null;
+  TaskSquad = null;
 }
 
 function isAllyUsername(username) {
   if (!username) return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
-    return AllianceManager.isAlly(username);
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function') {
+    return TaskSquad.isAlly(username);
   }
   return false;
 }

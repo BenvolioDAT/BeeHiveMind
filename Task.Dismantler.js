@@ -1,7 +1,7 @@
 // Task.Dismantler.js — siege with Invader Core handling (ES5-safe)
 'use strict';
 
-var AllianceManager = require('AllianceManager');
+var TaskSquad = require('Task.Squad');
 
 var _cachedUsername = null;
 
@@ -37,8 +37,8 @@ function getMyUsername() {
 
 function isAllyUsername(username) {
   if (!username) return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function') {
-    return AllianceManager.isAlly(username);
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function') {
+    return TaskSquad.isAlly(username);
   }
   return false;
 }
@@ -65,7 +65,7 @@ var TaskDismantler = {
 
     var target = Game.getObjectById(creep.memory.tid);
     if (target && target.owner && !isEnemyUsername(target.owner.username)) {
-      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-memoryTarget');
+      TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-memoryTarget');
       delete creep.memory.tid;
       target = null;
     }
@@ -138,7 +138,7 @@ var TaskDismantler = {
 
     // -------- B) Execute action --------
     if (target && target.owner && !isEnemyUsername(target.owner.username)) {
-      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-active');
+      TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-active');
       delete creep.memory.tid;
       target = null;
     }

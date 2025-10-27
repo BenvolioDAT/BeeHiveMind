@@ -7,8 +7,7 @@ try {
 } catch (error) {
   Traveler = null;
 }
-var TaskSquad  = require('./Task.Squad');
-var AllianceManager = require('AllianceManager');
+var TaskSquad = require('Task.Squad');
 
 var _cachedUsername = null;
 
@@ -41,7 +40,7 @@ function _getMyUsername() {
 
 function isEnemyUsername(username) {
   if (!username) return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function' && AllianceManager.isAlly(username)) {
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function' && TaskSquad.isAlly(username)) {
     return false;
   }
   var mine = _getMyUsername();
@@ -58,8 +57,8 @@ function isEnemyCreep(creep) {
 
 function _noteFriendlyFire(creep, target, context) {
   if (!creep || !target || !target.owner || !target.owner.username) return;
-  if (!AllianceManager || typeof AllianceManager.noteFriendlyFireAvoid !== 'function') return;
-  AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, context);
+  if (!TaskSquad || typeof TaskSquad.noteFriendlyFireAvoid !== 'function') return;
+  TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, context);
 }
 
 function shouldWaitForMedic(attacker) {
@@ -357,7 +356,7 @@ var TaskCombatArcher = {
       return;
     }
     if (target.owner && !isEnemyUsername(target.owner.username)) {
-      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'archer-sharedTarget');
+      TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'archer-sharedTarget');
       return;
     }
 
