@@ -18,6 +18,96 @@ var DEFAULT_TRAVEL_REPATH = 0.1;
 var DEFAULT_TRAVEL_MAX_OPS = 4000;
 var DEFAULT_TOWER_REFILL_THRESHOLD = 0.7;
 
+function createCarryMove(carryCount, moveCount) {
+  var body = [];
+  var i;
+  for (i = 0; i < carryCount; i++) {
+    body.push(CARRY);
+  }
+  for (i = 0; i < moveCount; i++) {
+    body.push(MOVE);
+  }
+  return body;
+}
+
+var BODY_TIERS = [
+  createCarryMove(30, 15),
+  createCarryMove(23, 23),
+  createCarryMove(22, 22),
+  createCarryMove(21, 21),
+  createCarryMove(20, 20),
+  createCarryMove(19, 19),
+  createCarryMove(18, 18),
+  createCarryMove(17, 17),
+  createCarryMove(16, 16),
+  createCarryMove(15, 15),
+  createCarryMove(14, 14),
+  createCarryMove(13, 13),
+  createCarryMove(12, 12),
+  createCarryMove(11, 11),
+  createCarryMove(10, 10),
+  createCarryMove(9, 9),
+  createCarryMove(8, 8),
+  createCarryMove(7, 7),
+  createCarryMove(6, 6),
+  createCarryMove(5, 5),
+  createCarryMove(4, 4),
+  createCarryMove(3, 3),
+  createCarryMove(2, 2),
+  createCarryMove(1, 1)
+];
+
+function costOfBodyParts(parts) {
+  if (!Array.isArray(parts) || parts.length === 0) {
+    return 0;
+  }
+  var total = 0;
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i];
+    var partCost = BODYPART_COST[part];
+    if (typeof partCost === 'number') {
+      total += partCost;
+    }
+  }
+  return total;
+}
+
+function pickLargestAffordable(tiers, energyAvailable) {
+  var tiersList = Array.isArray(tiers) ? tiers : [];
+  var available = typeof energyAvailable === 'number' ? energyAvailable : 0;
+  for (var i = 0; i < tiersList.length; i++) {
+    var body = tiersList[i];
+    if (!Array.isArray(body) || body.length === 0) {
+      continue;
+    }
+    if (costOfBodyParts(body) <= available) {
+      return body.slice();
+    }
+  }
+  return [];
+}
+
+function getSpawnBody(energy, room, context) {
+  return pickLargestAffordable(BODY_TIERS, energy);
+}
+
+function getSpawnSpec(room, ctx) {
+  var context = ctx || {};
+  var energy = context && typeof context.availableEnergy === 'number'
+    ? context.availableEnergy
+    : 0;
+  var body = getSpawnBody(energy, room, context);
+  return {
+    body: body,
+    namePrefix: 'courier',
+    memory: {
+      role: 'Worker_Bee',
+      task: 'courier',
+      home: room && room.name
+    }
+  };
+}
+
 var _roomEnergyCache = global.__beeEnergyRoomCache || (global.__beeEnergyRoomCache = {
   tick: 0,
   rooms: {}
@@ -259,6 +349,11 @@ module.exports = {
   gatherEnergy: gatherEnergy,
   deliverEnergy: deliverEnergy
 };
+
+module.exports.BODY_TIERS = BODY_TIERS;
+module.exports.pickLargestAffordable = pickLargestAffordable;
+module.exports.getSpawnBody = getSpawnBody;
+module.exports.getSpawnSpec = getSpawnSpec;
 
 function travelTo(creep, destination, options) {
   if (!creep || !destination) {

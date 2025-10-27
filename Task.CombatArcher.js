@@ -432,3 +432,66 @@ var TaskCombatArcher = {
 };
 
 module.exports = TaskCombatArcher;
+
+var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
+
+var COMBAT_ARCHER_BODY_TIERS = [
+  [
+    TOUGH, TOUGH,
+    RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK,
+    MOVE, MOVE, MOVE, MOVE, MOVE, MOVE
+  ],
+  [
+    TOUGH,
+    RANGED_ATTACK, RANGED_ATTACK,
+    MOVE, MOVE, MOVE
+  ]
+];
+
+function costOfBody(body) {
+  if (!Array.isArray(body)) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODY_COSTS[body[i]] || 0;
+  }
+  return total;
+}
+
+function pickLargestAffordable(tiers, energy) {
+  if (!Array.isArray(tiers) || !tiers.length) return [];
+  var available = (typeof energy === 'number') ? energy : 0;
+  for (var i = 0; i < tiers.length; i++) {
+    var candidate = tiers[i];
+    if (!Array.isArray(candidate)) continue;
+    if (costOfBody(candidate) <= available) {
+      return candidate.slice();
+    }
+  }
+  return [];
+}
+
+module.exports.BODY_TIERS = COMBAT_ARCHER_BODY_TIERS.map(function (tier) {
+  return tier.slice();
+});
+
+module.exports.getSpawnBody = function (energy) {
+  return pickLargestAffordable(COMBAT_ARCHER_BODY_TIERS, energy);
+};
+
+module.exports.getSpawnSpec = function (room, ctx) {
+  var context = ctx || {};
+  var available = (typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
+  if (available === null && room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+  var body = module.exports.getSpawnBody(available, room, context);
+  return {
+    body: body,
+    namePrefix: 'CombatArcher',
+    memory: {
+      role: 'Worker_Bee',
+      task: 'CombatArcher',
+      home: room && room.name
+    }
+  };
+};

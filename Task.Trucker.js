@@ -8,6 +8,13 @@ try {
   Traveler = null;
 }
 
+var TaskCourier = null;
+try {
+  TaskCourier = require('Task.Courier');
+} catch (error) {
+  TaskCourier = null;
+}
+
 var PICKUP_FLAG_DEFAULT = 'E-Pickup';     // rename if you like
 var MIN_DROPPED = 50;                     // ignore tiny crumbs
 var LOCAL_SEARCH_RADIUS = 12;
@@ -255,3 +262,22 @@ var TaskTrucker = {
 };
 
 module.exports = TaskTrucker;
+module.exports.getSpawnBody = function (energy) {
+  if (TaskCourier && typeof TaskCourier.getSpawnBody === 'function') {
+    return TaskCourier.getSpawnBody(energy);
+  }
+  return [];
+};
+module.exports.getSpawnSpec = function (room, ctx) {
+  var available = (ctx && typeof ctx.availableEnergy === 'number') ? ctx.availableEnergy : ((room && room.energyAvailable) || 0);
+  var body = module.exports.getSpawnBody(available, room, ctx);
+  return {
+    body: body,
+    namePrefix: 'trucker',
+    memory: {
+      role: 'Worker_Bee',
+      task: 'trucker',
+      home: room && room.name
+    }
+  };
+};

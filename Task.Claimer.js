@@ -426,3 +426,64 @@ var TaskClaimer = {
 };
 
 module.exports = TaskClaimer;
+
+var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
+
+var CLAIMER_BODY_TIERS = [
+  [
+    CLAIM, CLAIM,
+    MOVE, MOVE
+  ],
+  [
+    CLAIM,
+    MOVE
+  ]
+];
+
+function costOfBody(body) {
+  if (!Array.isArray(body)) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODY_COSTS[body[i]] || 0;
+  }
+  return total;
+}
+
+function pickLargestAffordable(tiers, energy) {
+  if (!Array.isArray(tiers) || !tiers.length) return [];
+  var available = (typeof energy === 'number') ? energy : 0;
+  for (var i = 0; i < tiers.length; i++) {
+    var candidate = tiers[i];
+    if (!Array.isArray(candidate)) continue;
+    if (costOfBody(candidate) <= available) {
+      return candidate.slice();
+    }
+  }
+  return [];
+}
+
+module.exports.BODY_TIERS = CLAIMER_BODY_TIERS.map(function (tier) {
+  return tier.slice();
+});
+
+module.exports.getSpawnBody = function (energy) {
+  return pickLargestAffordable(CLAIMER_BODY_TIERS, energy);
+};
+
+module.exports.getSpawnSpec = function (room, ctx) {
+  var context = ctx || {};
+  var available = (typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
+  if (available === null && room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+  var body = module.exports.getSpawnBody(available, room, context);
+  return {
+    body: body,
+    namePrefix: 'Claimer',
+    memory: {
+      role: 'Worker_Bee',
+      task: 'Claimer',
+      home: room && room.name
+    }
+  };
+};

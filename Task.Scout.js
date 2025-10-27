@@ -869,3 +869,10 @@ var TaskScout = {
 };
 
 module.exports = TaskScout;
+module.exports.BODY_TIERS = [ [MOVE] ];
+module.exports.getSpawnBody = function () {
+  return [MOVE];
+};
+module.exports.getSpawnSpec = function (room, ctx) {
+  return { body: [MOVE], namePrefix: 'scout', memory: { role: 'Worker_Bee', task: 'scout', home: room.name } };
+};

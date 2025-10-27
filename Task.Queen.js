@@ -595,3 +595,87 @@ function runQueen(creep) {
 module.exports = {
   run: runQueen
 };
+
+var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
+
+function queenBody(carryCount, moveCount) {
+  var body = [];
+  var i;
+  for (i = 0; i < carryCount; i++) {
+    body.push(CARRY);
+  }
+  for (i = 0; i < moveCount; i++) {
+    body.push(MOVE);
+  }
+  return body;
+}
+
+var QUEEN_BODY_TIERS = [
+  queenBody(22, 22),
+  queenBody(21, 21),
+  queenBody(20, 20),
+  queenBody(19, 19),
+  queenBody(18, 18),
+  queenBody(17, 17),
+  queenBody(16, 16),
+  queenBody(15, 15),
+  queenBody(14, 14),
+  queenBody(13, 13),
+  queenBody(12, 12),
+  queenBody(11, 11),
+  queenBody(10, 10),
+  queenBody(9, 9),
+  queenBody(8, 8),
+  queenBody(7, 7),
+  queenBody(6, 6),
+  queenBody(5, 5),
+  queenBody(4, 4),
+  queenBody(3, 3),
+  queenBody(2, 2),
+  queenBody(1, 1)
+];
+
+function costOfBody(body) {
+  if (!Array.isArray(body)) {
+    return 0;
+  }
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODY_COSTS[body[i]] || 0;
+  }
+  return total;
+}
+
+function pickLargestAffordable(tiers, energyAvailable) {
+  var tiersList = Array.isArray(tiers) ? tiers : [];
+  var available = typeof energyAvailable === 'number' ? energyAvailable : 0;
+  for (var i = 0; i < tiersList.length; i++) {
+    var candidate = tiersList[i];
+    if (!Array.isArray(candidate) || candidate.length === 0) {
+      continue;
+    }
+    if (costOfBody(candidate) <= available) {
+      return candidate.slice();
+    }
+  }
+  return [];
+}
+
+module.exports.BODY_TIERS = QUEEN_BODY_TIERS.map(function (tier) { return tier.slice(); });
+module.exports.getSpawnBody = function (energy) {
+  return pickLargestAffordable(QUEEN_BODY_TIERS, energy);
+};
+module.exports.getSpawnSpec = function (room, ctx) {
+  var context = ctx || {};
+  var energy = context && typeof context.availableEnergy === 'number' ? context.availableEnergy : 0;
+  var body = module.exports.getSpawnBody(energy, room, context);
+  return {
+    body: body,
+    namePrefix: 'queen',
+    memory: {
+      role: 'Worker_Bee',
+      task: 'queen',
+      home: room && room.name
+    }
+  };
+};

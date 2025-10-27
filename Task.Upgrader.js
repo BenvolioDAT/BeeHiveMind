@@ -281,3 +281,70 @@ var TaskUpgrader = {
 };
 
 module.exports = TaskUpgrader;
+
+var BODY_COSTS = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : (global && global.BODYPART_COST) || {};
+
+function upgraderBody(workCount, carryCount, moveCount) {
+  var body = [];
+  var i;
+  for (i = 0; i < workCount; i++) body.push(WORK);
+  for (i = 0; i < carryCount; i++) body.push(CARRY);
+  for (i = 0; i < moveCount; i++) body.push(MOVE);
+  return body;
+}
+
+var UPGRADER_BODY_TIERS = [
+  upgraderBody(8, 8, 8),
+  upgraderBody(8, 7, 7),
+  upgraderBody(8, 6, 6),
+  upgraderBody(8, 5, 5),
+  upgraderBody(8, 4, 4),
+  upgraderBody(7, 4, 4),
+  upgraderBody(6, 4, 4),
+  upgraderBody(5, 4, 4),
+  upgraderBody(4, 4, 4),
+  upgraderBody(4, 3, 4),
+  upgraderBody(3, 2, 4),
+  upgraderBody(3, 1, 4),
+  upgraderBody(2, 1, 3),
+  upgraderBody(1, 1, 2),
+  upgraderBody(1, 1, 1)
+];
+
+function costOfBody(body) {
+  var total = 0;
+  if (!Array.isArray(body)) return total;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    total += BODY_COSTS[part] || 0;
+  }
+  return total;
+}
+
+function pickLargestAffordable(tiers, energy) {
+  if (!Array.isArray(tiers) || !tiers.length) return [];
+  var available = typeof energy === 'number' ? energy : 0;
+  for (var i = 0; i < tiers.length; i++) {
+    var candidate = tiers[i];
+    if (!Array.isArray(candidate)) continue;
+    if (costOfBody(candidate) <= available) {
+      return candidate.slice();
+    }
+  }
+  return [];
+}
+
+module.exports.BODY_TIERS = UPGRADER_BODY_TIERS.map(function (tier) { return tier.slice(); });
+module.exports.getSpawnBody = function (energy) {
+  return pickLargestAffordable(UPGRADER_BODY_TIERS, energy);
+};
+module.exports.getSpawnSpec = function (room, ctx) {
+  var context = ctx || {};
+  var energy = context.availableEnergy;
+  var body = module.exports.getSpawnBody(energy, room, context);
+  return {
+    body: body,
+    namePrefix: 'upgrader',
+    memory: { role: 'Worker_Bee', task: 'upgrader', home: room && room.name }
+  };
+};

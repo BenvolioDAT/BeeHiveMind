@@ -13,12 +13,33 @@
 'use strict';
 
 var Logger = require('core.logger');
-var spawnLogic = require('spawn.logic');
+var CoreSpawn = require('core.spawn');
 var Traveler = null;
 try {
   Traveler = require('Traveler');
 } catch (e) {
   Traveler = null;
+}
+
+var TaskBaseHarvest = null;
+try {
+  TaskBaseHarvest = require('Task.BaseHarvest');
+} catch (baseHarvestErr) {
+  TaskBaseHarvest = null;
+}
+
+var TaskCourier = null;
+try {
+  TaskCourier = require('Task.Courier');
+} catch (courierErr) {
+  TaskCourier = null;
+}
+
+var TaskClaimer = null;
+try {
+  TaskClaimer = require('Task.Claimer');
+} catch (claimerErr) {
+  TaskClaimer = null;
 }
 
 var CONFIG = {
@@ -1291,48 +1312,6 @@ function runSelfTest(state) {
   }
 }
 
-var remoteConfigCache = null;
-function getRemoteConfigTiers(taskKey) {
-  if (!taskKey) return [];
-  if (!remoteConfigCache) {
-    remoteConfigCache = Object.create(null);
-    var configs = spawnLogic && spawnLogic.configurations;
-    if (Array.isArray(configs)) {
-      for (var i = 0; i < configs.length; i++) {
-        var entry = configs[i];
-        if (!entry || !entry.task) continue;
-        var tiers = [];
-        if (Array.isArray(entry.body)) {
-          for (var j = 0; j < entry.body.length; j++) {
-            var candidate = entry.body[j];
-            if (!candidate || !candidate.length) continue;
-            tiers.push({ body: cloneBody(candidate), cost: costOfBody(candidate) });
-          }
-        }
-        remoteConfigCache[entry.task] = tiers;
-      }
-    }
-  }
-  return remoteConfigCache[taskKey] || [];
-}
-
-function generateRemoteBody(taskKey, energy) {
-  if (!taskKey || !spawnLogic) return [];
-  if (taskKey === 'remoteMiner' && typeof spawnLogic.Generate_RemoteMiner_Body === 'function') {
-    return cloneBody(spawnLogic.Generate_RemoteMiner_Body(energy));
-  }
-  if (taskKey === 'remoteHauler' && typeof spawnLogic.Generate_RemoteHauler_Body === 'function') {
-    return cloneBody(spawnLogic.Generate_RemoteHauler_Body(energy));
-  }
-  if (taskKey === 'reserver' && typeof spawnLogic.Generate_Reserver_Body === 'function') {
-    return cloneBody(spawnLogic.Generate_Reserver_Body(energy));
-  }
-  if (typeof spawnLogic.Generate_Body_From_Config === 'function') {
-    return cloneBody(spawnLogic.Generate_Body_From_Config(taskKey, energy));
-  }
-  return [];
-}
-
 function mapRemoteTypeToTaskKey(remoteType) {
   if (remoteType === ROLE_MINER) return 'remoteMiner';
   if (remoteType === ROLE_HAULER) return 'remoteHauler';
@@ -1340,7 +1319,59 @@ function mapRemoteTypeToTaskKey(remoteType) {
   return null;
 }
 
-function evaluateRemoteBodyPlan(remoteType, available, capacity) {
+function getRemoteRoleModule(remoteType) {
+  if (!remoteType) return null;
+  var key = String(remoteType).toLowerCase();
+  if (key === 'remoteminer' || key === 'remote_miner' || key === ROLE_MINER) {
+    return TaskBaseHarvest;
+  }
+  if (key === 'remotehauler' || key === 'remote_hauler' || key === ROLE_HAULER) {
+    return TaskCourier;
+  }
+  if (key === 'reserver' || key === ROLE_RESERVER) {
+    return TaskClaimer;
+  }
+  return null;
+}
+
+function getRemoteBodyTiers(remoteType) {
+  var mod = getRemoteRoleModule(remoteType);
+  if (!mod) return [];
+  var tiers = [];
+  var source = mod.BODY_TIERS;
+  if (Array.isArray(source)) {
+    for (var i = 0; i < source.length; i++) {
+      var tier = source[i];
+      if (Array.isArray(tier)) {
+        tiers.push(cloneBody(tier));
+      } else if (tier && Array.isArray(tier.body)) {
+        tiers.push(cloneBody(tier.body));
+      }
+    }
+  }
+  return tiers;
+}
+
+function selectRemoteBody(remoteType, energy, context) {
+  var mod = getRemoteRoleModule(remoteType);
+  if (!mod || typeof mod.getSpawnBody !== 'function') {
+    return [];
+  }
+  var room = context && context.room ? context.room : null;
+  var specContext = {
+    availableEnergy: energy,
+    capacityEnergy: context && context.capacity != null ? context.capacity : null,
+    current: context && context.current != null ? context.current : null,
+    limit: context && context.limit != null ? context.limit : null,
+    plan: context && context.plan ? context.plan : null,
+    remote: context && context.remote ? context.remote : null,
+    remoteRole: remoteType
+  };
+  var body = mod.getSpawnBody(energy, room, specContext);
+  return Array.isArray(body) ? cloneBody(body) : [];
+}
+
+function evaluateRemoteBodyPlan(remoteType, available, capacity, context) {
   var taskKey = mapRemoteTypeToTaskKey(remoteType);
   var result = {
     configKey: taskKey,
@@ -1357,42 +1388,50 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity) {
     return result;
   }
 
-  var tiers = getRemoteConfigTiers(taskKey);
+  var tiers = getRemoteBodyTiers(taskKey || remoteType);
   var tierInfo = evaluateBodyTiers(tiers, available, capacity);
   if (tierInfo.minCost) {
     result.minCost = tierInfo.minCost;
   } else if (tiers.length) {
-    result.minCost = tiers[tiers.length - 1].cost || 0;
+    var lastEntry = tiers[tiers.length - 1];
+    result.minCost = costOfBody(Array.isArray(lastEntry.body) ? lastEntry.body : lastEntry) || 0;
   }
 
-  var idealBody = generateRemoteBody(taskKey, capacity);
+  var evalContext = context || {};
+  evalContext.capacity = capacity;
+  evalContext.available = available;
+  evalContext.remote = evalContext.remote || (context && context.remote);
+  var idealBody = selectRemoteBody(taskKey || remoteType, capacity, evalContext);
   var idealCost = costOfBody(idealBody);
   if ((!idealBody.length || idealCost > capacity) && tierInfo.capacityBody.length) {
     idealBody = cloneBody(tierInfo.capacityBody);
     idealCost = tierInfo.capacityCost;
   }
   if (!idealBody.length && tiers.length) {
-    idealBody = cloneBody(tiers[tiers.length - 1].body);
-    idealCost = tiers[tiers.length - 1].cost;
+    var lastTier = tiers[tiers.length - 1];
+    idealBody = cloneBody(Array.isArray(lastTier.body) ? lastTier.body : lastTier);
+    idealCost = costOfBody(idealBody);
   }
   result.idealBody = idealBody;
   result.idealCost = idealCost;
 
-  var workingBody = generateRemoteBody(taskKey, available);
+  var workingBody = selectRemoteBody(taskKey || remoteType, available, evalContext);
   var workingCost = costOfBody(workingBody);
   if ((!workingBody.length || workingCost > available) && tierInfo.availableBody.length) {
     workingBody = cloneBody(tierInfo.availableBody);
     workingCost = tierInfo.availableCost;
   }
   if ((!workingBody.length || workingCost > available) && tiers.length) {
-    workingBody = cloneBody(tiers[tiers.length - 1].body);
-    workingCost = tiers[tiers.length - 1].cost;
+    var fallbackTier = tiers[tiers.length - 1];
+    workingBody = cloneBody(Array.isArray(fallbackTier.body) ? fallbackTier.body : fallbackTier);
+    workingCost = costOfBody(workingBody);
   }
   result.body = workingBody;
   result.cost = workingCost;
 
   if (!result.minCost && tiers.length) {
-    result.minCost = tiers[tiers.length - 1].cost || 0;
+    var tail = tiers[tiers.length - 1];
+    result.minCost = costOfBody(Array.isArray(tail.body) ? tail.body : tail) || 0;
   }
 
   return result;
@@ -1513,7 +1552,14 @@ function planSpawnForRoom(spawn, context) {
   }
   var available = context && context.availableEnergy != null ? context.availableEnergy : spawn.room.energyAvailable;
   var capacity = context && context.capacityEnergy != null ? context.capacityEnergy : spawn.room.energyCapacityAvailable;
-  var bodyPlan = evaluateRemoteBodyPlan(plan.type, available, capacity);
+  var planContext = {
+    room: spawn.room,
+    remote: plan.remote,
+    plan: plan,
+    limit: plan.desired || plan.limit || null,
+    current: plan.actual && plan.type ? plan.actual[plan.type] : null
+  };
+  var bodyPlan = evaluateRemoteBodyPlan(plan.type, available, capacity, planContext);
   if (!bodyPlan.idealBody.length || bodyPlan.idealCost > capacity) {
     var detail = 'idealCost=' + bodyPlan.idealCost + ' capacity=' + capacity;
     logSpawnSkip(spawn, plan, 'BODY_TOO_LARGE', detail);
@@ -1556,21 +1602,26 @@ function spawnFromPlan(spawn, plan) {
   var room = spawn.room;
   var available = room && room.energyAvailable != null ? room.energyAvailable : 0;
   var capacity = room && room.energyCapacityAvailable != null ? room.energyCapacityAvailable : available;
-  var roleKey = plan.remoteRole || plan.type || 'worker';
-  roleKey = (roleKey != null) ? String(roleKey) : 'worker';
-  roleKey = roleKey.replace(/[^A-Za-z0-9]/g, '');
-  if (!roleKey) roleKey = 'Role';
+  var remoteRole = plan.remoteRole || plan.type || 'worker';
+  remoteRole = (remoteRole != null) ? String(remoteRole) : 'worker';
+  var sanitizedRole = remoteRole.replace(/[^A-Za-z0-9]/g, '');
+  if (!sanitizedRole) sanitizedRole = 'Role';
   var roomKey = plan.remote || (room && room.name) || (spawn && spawn.room && spawn.room.name) || 'home';
-  roomKey = String(roomKey).replace(/[^A-Za-z0-9]/g, '');
+  roomKey = String(roomKey || 'home').replace(/[^A-Za-z0-9]/g, '');
   if (!roomKey) roomKey = 'Home';
-  var prefix = 'Luna_' + roleKey + '_' + roomKey;
+  var prefix = 'Luna_' + sanitizedRole + '_' + roomKey;
   prefix = prefix.replace(/__+/g, '_');
-  var name = spawnLogic.Generate_Creep_Name(prefix);
-  if (!name) return ERR_FULL;
   var body = plan.body.slice();
   var cost = plan.bodyCost != null ? plan.bodyCost : costOfBody(body);
   if (cost > available) {
-    var fallback = evaluateRemoteBodyPlan(plan.remoteRole, available, capacity);
+    var fallbackContext = {
+      room: room,
+      remote: plan.remote,
+      plan: plan,
+      limit: plan.desired || plan.limit || null,
+      current: plan.actual && plan.remoteRole ? plan.actual[plan.remoteRole] : null
+    };
+    var fallback = evaluateRemoteBodyPlan(plan.remoteRole || plan.type, available, capacity, fallbackContext);
     if (fallback.body.length && fallback.cost > 0 && fallback.cost <= available) {
       body = fallback.body.slice();
       cost = fallback.cost;
@@ -1584,18 +1635,24 @@ function spawnFromPlan(spawn, plan) {
   }
   plan.body = body.slice();
   plan.bodyCost = cost;
-  var memory = {
+  var specMemory = {
     role: 'Worker_Bee',
     task: 'luna',
+    bornTask: 'luna',
     remoteRole: plan.remoteRole,
     remoteRoom: plan.remote,
     targetRoom: plan.remote,
-    home: spawn.room.name,
+    home: spawn.room && spawn.room.name,
     birthBody: body.slice(),
     sourceId: plan.seatId || null,
     targetId: plan.seatId || null
   };
-  var result = spawn.spawnCreep(body, name, { memory: memory });
+  var spec = {
+    body: body.slice(),
+    namePrefix: prefix,
+    memory: specMemory
+  };
+  var result = CoreSpawn.spawnFromSpec(spawn, remoteRole, spec);
   if (result === OK) {
     var ledger = getRemoteLedger(plan.remote);
     if (plan.remoteRole === ROLE_HAULER) {
@@ -1606,16 +1663,17 @@ function spawnFromPlan(spawn, plan) {
     } else if (plan.remoteRole === ROLE_RESERVER) {
       ledger.reserver.lastBodyLength = body.length;
     }
-    var queue = _phaseState.spawnQueueByHome[spawn.room.name];
+    var queue = _phaseState && _phaseState.spawnQueueByHome ? _phaseState.spawnQueueByHome[spawn.room.name] : null;
     if (queue && queue.length && queue[0].remote === plan.remote && queue[0].type === plan.remoteRole) {
       queue.shift();
     }
-    lunaLog.info('[LUNA] spawn ' + plan.remoteRole + ' ' + name + ' → ' + plan.remote + ' (cost=' + cost + ')');
+    var spawnName = (spawn && spawn.spawning && spawn.spawning.name) ? spawn.spawning.name : null;
+    lunaLog.info('[LUNA] spawn ' + plan.remoteRole + ' ' + (spawnName || prefix) + ' → ' + plan.remote + ' (cost=' + cost + ')');
     if (room) {
       var homeMem = ensureRoomMemory(room.name);
       if (homeMem && homeMem.__lunaSpawnBlock) {
         delete homeMem.__lunaSpawnBlock;
-        traceFixLog(room.name, null, 'spawn-unblock', 'name=' + name);
+        traceFixLog(room.name, null, 'spawn-unblock', 'name=' + (spawnName || prefix));
       }
     }
     return OK;
