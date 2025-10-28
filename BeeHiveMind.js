@@ -875,13 +875,46 @@ function debugSquadLog(message) {
 function hasManualSquadFlag(roomName) {
   if (!roomName) return false;
   var squadFlags = Memory && Memory.squadFlags;
-  if (!squadFlags || !squadFlags.manual || !squadFlags.bindings) {
+  if (!squadFlags || !squadFlags.manual) {
     return false;
   }
-  for (var flagName in squadFlags.manual) {
-    if (!hasOwn(squadFlags.manual, flagName)) continue;
-    if (!squadFlags.manual[flagName]) continue;
-    if (squadFlags.bindings[flagName] === roomName) {
+  var manual = squadFlags.manual;
+  var bindings = squadFlags.bindings || {};
+  for (var flagName in manual) {
+    if (!hasOwn(manual, flagName)) continue;
+    if (!manual[flagName]) continue;
+    if (bindings[flagName] === roomName) {
+      return true;
+    }
+    if (Memory && Memory.squads) {
+      var squadId = null;
+      if (flagName.indexOf('Squad_') === 0) {
+        squadId = flagName.substr(6);
+      } else if (flagName.indexOf('Squad') === 0) {
+        squadId = flagName.substr(5);
+      } else {
+        squadId = flagName;
+      }
+      var bucket = Memory.squads[squadId];
+      if (bucket && bucket.home === roomName) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function planHasManualOverride(plan) {
+  if (!plan || !plan.squadId) return false;
+  var squadFlags = Memory && Memory.squadFlags;
+  if (!squadFlags || !squadFlags.manual) {
+    return false;
+  }
+  var manual = squadFlags.manual;
+  var candidates = ['Squad' + plan.squadId, 'Squad_' + plan.squadId];
+  for (var i = 0; i < candidates.length; i++) {
+    var name = candidates[i];
+    if (hasOwn(manual, name) && manual[name]) {
       return true;
     }
   }
@@ -1739,9 +1772,10 @@ function trySpawnSquadMember(spawner, plan) {
   }
 
   var economyStates = GLOBAL_CACHE.economyStateByRoom;
+  var manualOverride = planHasManualOverride(plan);
   if (economyStates) {
     var economyState = economyStates[room.name];
-    if (economyState && !economyState.allowCombat) {
+    if (economyState && !economyState.allowCombat && !manualOverride) {
       // Spawn is intentionally idled until the economy is back online.
       debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=waiting reason=economy');
       return 'waiting';
@@ -1822,6 +1856,9 @@ function trySpawnSquadMember(spawner, plan) {
       message += ' ' + extra;
     }
     debugSquadLog(message);
+    if (Memory && Memory.debug && Memory.debug.spawn) {
+      console.log('[SpawnDebug]', room.name, plan.role, 'cost=' + cost, 'cap=' + capacity, 'decision=' + decision);
+    }
   }
 
   if (!body.length) {
