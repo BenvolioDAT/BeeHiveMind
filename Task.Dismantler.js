@@ -1,8 +1,58 @@
-// Task.Dismantler.js — siege with Invader Core handling (ES5-safe)
-'use strict';
+var TaskSquad = require('Task.Squad');
+var CoreSpawn = require('core.spawn');
 
-var BeeToolbox = require('BeeToolbox');
-var AllianceManager = require('AllianceManager');
+var _cachedUsername = null;
+
+function getMyUsername() {
+  if (_cachedUsername) return _cachedUsername;
+
+  var name = null;
+  var k;
+
+  for (k in Game.spawns) {
+    if (!Game.spawns.hasOwnProperty(k)) continue;
+    var sp = Game.spawns[k];
+    if (sp && sp.owner && sp.owner.username) {
+      name = sp.owner.username;
+      break;
+    }
+  }
+
+  if (!name) {
+    for (k in Game.creeps) {
+      if (!Game.creeps.hasOwnProperty(k)) continue;
+      var c = Game.creeps[k];
+      if (c && c.owner && c.owner.username) {
+        name = c.owner.username;
+        break;
+      }
+    }
+  }
+
+  _cachedUsername = name || 'me';
+  return _cachedUsername;
+}
+
+function isAllyUsername(username) {
+  if (!username) return false;
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function') {
+    return TaskSquad.isAlly(username);
+  }
+  return false;
+}
+
+function isEnemyUsername(username) {
+  if (!username) return false;
+  if (isAllyUsername(username)) return false;
+  var mine = getMyUsername();
+  if (mine && username === mine) return false;
+  return true;
+}
+
+function isEnemyStructure(structure) {
+  if (!structure || !structure.owner || !structure.owner.username) return false;
+  return isEnemyUsername(structure.owner.username);
+}
 
 var TaskDismantler = {
   run: function (creep) {
@@ -12,8 +62,8 @@ var TaskDismantler = {
     if (creep.memory.delay && Game.time < creep.memory.delay) return;
 
     var target = Game.getObjectById(creep.memory.tid);
-    if (target && target.owner && !BeeToolbox.isEnemyUsername(target.owner.username)) {
-      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-memoryTarget');
+    if (target && target.owner && !isEnemyUsername(target.owner.username)) {
+      TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-memoryTarget');
       delete creep.memory.tid;
       target = null;
     }
@@ -27,14 +77,14 @@ var TaskDismantler = {
       var towers = creep.room.find(FIND_HOSTILE_STRUCTURES, {
         filter: function (s) {
           if (s.structureType !== STRUCTURE_TOWER) return false;
-          if (s.owner && !BeeToolbox.isEnemyStructure(s)) return false;
+          if (s.owner && !isEnemyStructure(s)) return false;
           return true;
         }
       });
       var spawns = creep.room.find(FIND_HOSTILE_SPAWNS, {
         filter: function (s) {
           if (!s) return false;
-          if (s.owner && !BeeToolbox.isEnemyUsername(s.owner.username)) return false;
+          if (s.owner && !isEnemyUsername(s.owner.username)) return false;
           return true;
         }
       });
@@ -48,7 +98,7 @@ var TaskDismantler = {
       var others = creep.room.find(FIND_HOSTILE_STRUCTURES, {
         filter: function (s) {
           if (!s || s.hits === undefined) return false;
-          if (s.owner && !BeeToolbox.isEnemyStructure(s)) return false;
+          if (s.owner && !isEnemyStructure(s)) return false;
           // exclude types we don't want to waste time dismantling
           if (s.structureType === STRUCTURE_CONTROLLER) return false;
           if (s.structureType === STRUCTURE_ROAD)        return false;
@@ -85,8 +135,8 @@ var TaskDismantler = {
     }
 
     // -------- B) Execute action --------
-    if (target && target.owner && !BeeToolbox.isEnemyUsername(target.owner.username)) {
-      AllianceManager.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-active');
+    if (target && target.owner && !isEnemyUsername(target.owner.username)) {
+      TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-active');
       delete creep.memory.tid;
       target = null;
     }
@@ -134,3 +184,36 @@ var TaskDismantler = {
 };
 
 module.exports = TaskDismantler;
+
+var DISMANTLER_BODY_TIERS = [
+  [
+    WORK, WORK, WORK, WORK, WORK,
+    MOVE, MOVE, MOVE, MOVE, MOVE
+  ]
+];
+
+module.exports.BODY_TIERS = DISMANTLER_BODY_TIERS.map(function (tier) {
+  return tier.slice();
+});
+
+module.exports.getSpawnBody = function (energy) {
+  return CoreSpawn.pickLargestAffordable(DISMANTLER_BODY_TIERS, energy);
+};
+
+module.exports.getSpawnSpec = function (room, ctx) {
+  var context = ctx || {};
+  var available = (typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
+  if (available === null && room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+  var body = module.exports.getSpawnBody(available, room, context);
+  return {
+    body: body,
+    namePrefix: 'Dismantler',
+    memory: {
+      role: 'Worker_Bee',
+      task: 'Dismantler',
+      home: room && room.name
+    }
+  };
+};

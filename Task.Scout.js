@@ -1,12 +1,5 @@
-// Task.Scout.spread.es5.js
-// ES5-safe, Traveler-powered scout that fans out within EXPLORE_RADIUS,
-// coordinates across multiple scouts, and avoids exit deadlocks in low-exit rooms.
-
-'use strict';
-
-var BeeToolbox = require('BeeToolbox');
-var AllianceManager = require('AllianceManager');
-try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
+var TaskSquad = require('Task.Squad');
+var Traveler = require('Traveler');
 
 // ---------- Tunables ----------
 var EXPLORE_RADIUS     = 5;      // max linear distance (rooms) from home
@@ -16,6 +9,160 @@ var EXIT_BLOCK_TTL     = 600;    // cache exit-is-blocked checks
 var INTEL_INTERVAL     = 150;    // same-room deep intel cadence
 var PATH_REUSE         = 50;     // path reuse for inter-room moves
 var DIRS_CLOCKWISE     = [RIGHT, BOTTOM, LEFT, TOP]; // E,S,W,N
+
+var DEFAULT_FOREIGN_AVOID_TTL = 500;
+var IMPORTANT_FOREIGN_STRUCTURES = {};
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_TOWER] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_SPAWN] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_EXTENSION] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_STORAGE] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_TERMINAL] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_NUKER] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_POWER_SPAWN] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_OBSERVER] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_FACTORY] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LAB] = true;
+IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LINK] = true;
+
+var _cachedUsername = null;
+
+function isValidRoomName(name) {
+  if (typeof name !== 'string') return false;
+  return /^[WE]\d+[NS]\d+$/.test(name);
+}
+
+function safeLinearDistance(a, b, allowInexact) {
+  if (!isValidRoomName(a) || !isValidRoomName(b)) return 9999;
+  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') return 9999;
+  return Game.map.getRoomLinearDistance(a, b, allowInexact);
+}
+
+function getRoomMemory(roomName) {
+  if (!isValidRoomName(roomName)) return null;
+  Memory.rooms = Memory.rooms || {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  return Memory.rooms[roomName];
+}
+
+function getMyUsername() {
+  if (_cachedUsername) return _cachedUsername;
+  var name = null;
+  var key;
+  for (key in Game.spawns) {
+    if (!Game.spawns.hasOwnProperty(key)) continue;
+    var sp = Game.spawns[key];
+    if (sp && sp.owner && sp.owner.username) { name = sp.owner.username; break; }
+  }
+  if (!name) {
+    for (key in Game.creeps) {
+      if (!Game.creeps.hasOwnProperty(key)) continue;
+      var c = Game.creeps[key];
+      if (c && c.owner && c.owner.username) { name = c.owner.username; break; }
+    }
+  }
+  _cachedUsername = name || 'me';
+  return _cachedUsername;
+}
+
+function cleanupRoomForeignAvoid(roomMem) {
+  if (!roomMem) return;
+  if (typeof roomMem._avoidOtherOwnerUntil === 'number' && roomMem._avoidOtherOwnerUntil <= Game.time) {
+    delete roomMem._avoidOtherOwnerUntil;
+    delete roomMem._avoidOtherOwnerBy;
+    delete roomMem._avoidOtherOwnerReason;
+  }
+}
+
+function markRoomForeignAvoid(roomMem, owner, reason, ttl) {
+  if (!roomMem) return;
+  var expire = Game.time + (typeof ttl === 'number' ? ttl : DEFAULT_FOREIGN_AVOID_TTL);
+  roomMem._avoidOtherOwnerUntil = expire;
+  roomMem._avoidOtherOwnerBy = owner || null;
+  roomMem._avoidOtherOwnerReason = reason || null;
+}
+
+function isAllyUsername(username) {
+  if (!username) return false;
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function') {
+    return TaskSquad.isAlly(username);
+  }
+  return false;
+}
+
+function detectForeignPresence(roomName, roomObj, roomMem) {
+  var mem = roomMem;
+  if (!mem) mem = getRoomMemory(roomName);
+  if (mem) cleanupRoomForeignAvoid(mem);
+
+  if (mem && typeof mem._avoidOtherOwnerUntil === 'number' && mem._avoidOtherOwnerUntil > Game.time) {
+    return {
+      avoid: true,
+      owner: mem._avoidOtherOwnerBy || null,
+      reason: mem._avoidOtherOwnerReason || 'recentForeign',
+      memo: true
+    };
+  }
+
+  var myName = getMyUsername();
+
+  if (roomObj) {
+    var ctrl = roomObj.controller;
+    if (ctrl) {
+      if (ctrl.my === false && ctrl.owner && ctrl.owner.username && ctrl.owner.username !== myName) {
+        return { avoid: true, owner: ctrl.owner.username, reason: 'controllerOwned' };
+      }
+      if (ctrl.reservation && ctrl.reservation.username && ctrl.reservation.username !== myName) {
+        return { avoid: true, owner: ctrl.reservation.username, reason: 'reserved' };
+      }
+    }
+
+    var hostiles = roomObj.find(FIND_HOSTILE_CREEPS, {
+      filter: function (h) {
+        if (!h || !h.owner) return false;
+        var uname = h.owner.username;
+        if (uname === 'Invader' || uname === 'Source Keeper') return false;
+        if (isAllyUsername(uname)) return false;
+        return uname !== myName;
+      }
+    }) || [];
+    if (hostiles.length) {
+      return { avoid: true, owner: (hostiles[0].owner && hostiles[0].owner.username) || null, reason: 'hostileCreeps' };
+    }
+
+    var hostileStructs = roomObj.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) {
+        if (!s || !s.owner) return false;
+        if (s.owner.username === myName) return false;
+        if (isAllyUsername(s.owner.username)) return false;
+        return IMPORTANT_FOREIGN_STRUCTURES[s.structureType] === true;
+      }
+    }) || [];
+    if (hostileStructs.length) {
+      return { avoid: true, owner: (hostileStructs[0].owner && hostileStructs[0].owner.username) || null, reason: 'hostileStructures' };
+    }
+  }
+
+  if (mem && mem.intel) {
+    var intel = mem.intel;
+    if (intel.owner && intel.owner !== myName && !isAllyUsername(intel.owner)) {
+      return { avoid: true, owner: intel.owner, reason: 'intelOwner' };
+    }
+    if (intel.reservation && intel.reservation !== myName && !isAllyUsername(intel.reservation)) {
+      return { avoid: true, owner: intel.reservation, reason: 'intelReservation' };
+    }
+  }
+
+  return { avoid: false };
+}
+
+function getTravelRoomCallback() {
+  if (typeof global !== 'undefined') {
+    if (typeof global.__beeRoomCallback === 'function') {
+      return global.__beeRoomCallback;
+    }
+  }
+  return null;
+}
 
 // ---------- Global caches ----------
 if (!global.__SCOUT) {
@@ -238,16 +385,10 @@ function logRoomIntel(room) {
 
   seedSourcesFromVision(room);
 
-  if (BeeToolbox && typeof BeeToolbox.detectForeignPresence === 'function') {
-    var rm = BeeToolbox.getRoomMemory ? BeeToolbox.getRoomMemory(room.name) : (function () {
-      Memory.rooms = Memory.rooms || {};
-      if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-      return Memory.rooms[room.name];
-    })();
-    var foreign = BeeToolbox.detectForeignPresence(room.name, room, rm);
-    if (foreign.avoid && !foreign.memo && typeof BeeToolbox.markRoomForeignAvoid === 'function') {
-      BeeToolbox.markRoomForeignAvoid(rm, foreign.owner, foreign.reason);
-    }
+  var rm = getRoomMemory(room.name);
+  var foreign = detectForeignPresence(room.name, room, rm);
+  if (foreign.avoid && !foreign.memo) {
+    markRoomForeignAvoid(rm, foreign.owner, foreign.reason);
   }
 
   updateAttackOrders(room);
@@ -256,11 +397,9 @@ function logRoomIntel(room) {
 function isEnemyPlayer(username) {
   if (!username) return false;
   if (username === 'Invader' || username === 'Source Keeper') return false;
-  if (AllianceManager && typeof AllianceManager.isAlly === 'function' && AllianceManager.isAlly(username)) return false;
-  if (BeeToolbox && typeof BeeToolbox.getMyUsername === 'function') {
-    var mine = BeeToolbox.getMyUsername();
-    if (mine && username === mine) return false;
-  }
+  if (TaskSquad && typeof TaskSquad.isAlly === 'function' && TaskSquad.isAlly(username)) return false;
+  var mine = getMyUsername();
+  if (mine && username === mine) return false;
   return true;
 }
 
@@ -373,10 +512,10 @@ function ensureScoutMem(creep) {
     for (var k in Game.spawns) if (Game.spawns.hasOwnProperty(k)) spawns.push(Game.spawns[k]);
     if (spawns.length) {
       var best = spawns[0];
-      var bestD = BeeToolbox.safeLinearDistance(creep.pos.roomName, best.pos.roomName);
+      var bestD = safeLinearDistance(creep.pos.roomName, best.pos.roomName);
       for (var i = 1; i < spawns.length; i++) {
         var s = spawns[i];
-        var d = BeeToolbox.safeLinearDistance(creep.pos.roomName, s.pos.roomName);
+        var d = safeLinearDistance(creep.pos.roomName, s.pos.roomName);
         if (d < bestD) { best = s; bestD = d; }
       }
       m.home = best.pos.roomName;
@@ -408,9 +547,20 @@ function go(creep, dest, opts) {
     maxOps: 6000,
     returnData: retData
   };
-  if (BeeToolbox && BeeToolbox.roomCallback) tOpts.roomCallback = BeeToolbox.roomCallback;
+  var travelCallback = getTravelRoomCallback();
+  if (travelCallback) tOpts.roomCallback = travelCallback;
 
-  return creep.travelTo((dest.pos || dest), tOpts);
+  var target = dest.pos || dest;
+  if (typeof creep.travelTo === 'function') {
+    return creep.travelTo(target, tOpts);
+  }
+  if (Traveler && typeof Traveler.travelTo === 'function') {
+    return Traveler.travelTo(creep, target, tOpts);
+  }
+  if (typeof creep.moveTo === 'function') {
+    return creep.moveTo(target, { reusePath: reuse, maxOps: tOpts.maxOps });
+  }
+  return ERR_INVALID_ARGS;
 }
 
 // ---------- Exit-block cache ----------
@@ -485,7 +635,7 @@ function rebuildQueueAllRings(mem, creep) {
     var layer = getRingCached(home, r);
     for (var i = 0; i < layer.length; i++) {
       var rn = layer[i];
-      if (BeeToolbox.safeLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn)) {
+      if (safeLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn)) {
         all.push(rn);
       }
     }
@@ -539,7 +689,7 @@ function rebuildQueueAllRings(mem, creep) {
     for (var i2 = 0; i2 < fb.length; i2++) {
       var rn2 = fb[i2];
       if (okRoomName(rn2) &&
-          BeeToolbox.safeLinearDistance(home, rn2) <= EXPLORE_RADIUS &&
+          safeLinearDistance(home, rn2) <= EXPLORE_RADIUS &&
           !isBlockedRecently(rn2)) filt.push(rn2);
     }
     queue = filt;
@@ -554,7 +704,7 @@ function inwardNeighborTowardHome(current, home) {
   var best = null, bestD = 9999;
   for (var i = 0; i < neigh.length; i++) {
     var rn = neigh[i];
-    var d = BeeToolbox.safeLinearDistance(home, rn);
+    var d = safeLinearDistance(home, rn);
     if (d < bestD) { bestD = d; best = rn; }
   }
   return best;
@@ -594,7 +744,7 @@ var TaskScout = {
     if (!creep.memory.lastRoom) creep.memory.lastRoom = creep.room.name;
 
     // leash: if we're outside radius, step one room inward first
-    var curDist = BeeToolbox.safeLinearDistance(M.home, creep.room.name);
+    var curDist = safeLinearDistance(M.home, creep.room.name);
     if (curDist > EXPLORE_RADIUS) {
       var back = inwardNeighborTowardHome(creep.room.name, M.home);
       if (back) {
@@ -667,7 +817,7 @@ var TaskScout = {
     while (M.queue.length) {
       var next = M.queue.shift();
       if (!okRoomName(next) || isBlockedRecently(next)) continue;
-      if (BeeToolbox.safeLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
+      if (safeLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
       if (next === (M.prevRoom || null) && M.queue.length) continue;
 
       var claimOK = tryClaimRoomThisTick(creep, next);
@@ -713,3 +863,10 @@ var TaskScout = {
 };
 
 module.exports = TaskScout;
+module.exports.BODY_TIERS = [ [MOVE] ];
+module.exports.getSpawnBody = function () {
+  return [MOVE];
+};
+module.exports.getSpawnSpec = function (room, ctx) {
+  return { body: [MOVE], namePrefix: 'scout', memory: { role: 'Worker_Bee', task: 'scout', home: room.name } };
+};

@@ -1,10 +1,25 @@
-'use strict';
-
 var CoreConfig = require('core.config');
 var Logger = require('core.logger');
-var BeeToolbox = require('BeeToolbox');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var maintLog = Logger.createLogger('Maintenance', LOG_LEVEL.DEBUG);
+
+function hasOwn(obj, key) {
+  return !!(obj && Object.prototype.hasOwnProperty.call(obj, key));
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object';
+}
+
+function isEmptyObject(obj) {
+  if (!isObject(obj)) return true;
+  for (var key in obj) {
+    if (hasOwn(obj, key)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 var BeeMaintenance = (function () {
   // -----------------------------
@@ -45,36 +60,36 @@ var BeeMaintenance = (function () {
     var now = _now();
 
     // Drop old "blocked" hints
-    if (BeeToolbox.hasOwn(mem, 'blocked') && typeof mem.blocked === 'number') {
+    if (hasOwn(mem, 'blocked') && typeof mem.blocked === 'number') {
       if (now - mem.blocked > CFG.BLOCK_MARK_TTL) delete mem.blocked;
     }
 
     // Empty sub-objects pruning
     // sources: object keyed by id; keep only if any key remains
-    if (BeeToolbox.isObject(mem.sources)) {
+    if (isObject(mem.sources)) {
       // if stored as array: normalize drop if empty
       var hasSrc = false;
-      for (var s in mem.sources) { if (BeeToolbox.hasOwn(mem.sources, s)) { hasSrc = true; break; } }
+      for (var s in mem.sources) { if (hasOwn(mem.sources, s)) { hasSrc = true; break; } }
       if (!hasSrc) delete mem.sources;
     }
 
     // sourceContainers: id -> creepName; drop non-existent containers & empty map
-    if (BeeToolbox.isObject(mem.sourceContainers)) {
+    if (isObject(mem.sourceContainers)) {
       for (var cid in mem.sourceContainers) {
-        if (!BeeToolbox.hasOwn(mem.sourceContainers, cid)) continue;
+        if (!hasOwn(mem.sourceContainers, cid)) continue;
         if (!Game.getObjectById(cid)) delete mem.sourceContainers[cid];
       }
       var anyCont = false;
-      for (cid in mem.sourceContainers) { if (BeeToolbox.hasOwn(mem.sourceContainers, cid)) { anyCont = true; break; } }
+      for (cid in mem.sourceContainers) { if (hasOwn(mem.sourceContainers, cid)) { anyCont = true; break; } }
       if (!anyCont) delete mem.sourceContainers;
     }
 
     // intel: drop if it has no meaningful fields
-    if (BeeToolbox.isObject(mem.intel)) {
+    if (isObject(mem.intel)) {
       var intel = mem.intel;
       // remove empty arrays/zeroish
-      if (BeeToolbox.isObject(intel.portals) && intel.portals.length === 0) delete intel.portals;
-      if (BeeToolbox.isObject(intel.deposits) && intel.deposits.length === 0) delete intel.deposits;
+      if (isObject(intel.portals) && intel.portals.length === 0) delete intel.portals;
+      if (isObject(intel.deposits) && intel.deposits.length === 0) delete intel.deposits;
       if (intel.powerBank === null) delete intel.powerBank;
 
       // detect "empty intel"
@@ -82,30 +97,30 @@ var BeeMaintenance = (function () {
       var keepKeys = ['lastVisited','lastScanAt','sources','owner','reservation','rcl','safeMode','invaderCore','keeperLairs','mineral','enemySpawns','enemyTowers','hostiles','powerBank','portals','deposits'];
       for (var i1 = 0; i1 < keepKeys.length; i1++) {
         var kk = keepKeys[i1];
-        if (BeeToolbox.hasOwn(intel, kk)) { intelHas = true; break; }
+        if (hasOwn(intel, kk)) { intelHas = true; break; }
       }
       if (!intelHas) delete mem.intel;
     }
 
     // scout: keep only with lastVisited
-    if (BeeToolbox.isObject(mem.scout)) {
+    if (isObject(mem.scout)) {
       if (typeof mem.scout.lastVisited !== 'number') delete mem.scout;
     }
 
     // internal maintenance bucket: drop if fully empty
-    if (BeeToolbox.isObject(mem._maint)) {
+    if (isObject(mem._maint)) {
       // cachedRepairTargets can go stale; drop if empty
-      if (BeeToolbox.isObject(mem._maint.cachedRepairTargets) && mem._maint.cachedRepairTargets.length === 0) {
+      if (isObject(mem._maint.cachedRepairTargets) && mem._maint.cachedRepairTargets.length === 0) {
         delete mem._maint.cachedRepairTargets;
       }
       var anyM = false;
-      for (var mk in mem._maint) { if (BeeToolbox.hasOwn(mem._maint, mk)) { anyM = true; break; } }
+      for (var mk in mem._maint) { if (hasOwn(mem._maint, mk)) { anyM = true; break; } }
       if (!anyM) delete mem._maint;
     }
 
     // If only trivial crumbs remain (e.g., lastSeenAt), consider empty after grace
     var keys = [];
-    for (var k in mem) { if (BeeToolbox.hasOwn(mem, k)) keys.push(k); }
+    for (var k in mem) { if (hasOwn(mem, k)) keys.push(k); }
 
     if (keys.length === 0) return true;
 
@@ -127,7 +142,7 @@ var BeeMaintenance = (function () {
     // Cheap visibility stamp WITHOUT creating new room entries
     // (This avoids generating empty objects just by looking at rooms.)
     for (var rn in Game.rooms) {
-      if (!BeeToolbox.hasOwn(Game.rooms, rn)) continue;
+      if (!hasOwn(Game.rooms, rn)) continue;
       if (Memory.rooms && Memory.rooms[rn]) {
         Memory.rooms[rn].lastSeenAt = T;
       }
@@ -141,7 +156,7 @@ var BeeMaintenance = (function () {
 
     // Pass 1: delete rooms clearly stale by "last seen"
     for (var roomName in Memory.rooms) {
-      if (!BeeToolbox.hasOwn(Memory.rooms, roomName)) continue;
+      if (!hasOwn(Memory.rooms, roomName)) continue;
       if (Game.rooms[roomName]) continue; // visible now → not stale
 
       var mem = Memory.rooms[roomName];
@@ -155,7 +170,7 @@ var BeeMaintenance = (function () {
 
     // Pass 2: compact survivors & drop truly-empty rooms
     for (roomName in Memory.rooms) {
-      if (!BeeToolbox.hasOwn(Memory.rooms, roomName)) continue;
+      if (!hasOwn(Memory.rooms, roomName)) continue;
       var m = Memory.rooms[roomName];
 
       if (_compactRoomMem(roomName, m)) {
@@ -183,7 +198,7 @@ var BeeMaintenance = (function () {
     // Always: remove memory of dead creeps (cheap)
     if (Memory.creeps) {
       for (var name in Memory.creeps) {
-        if (!BeeToolbox.hasOwn(Memory.creeps, name)) continue;
+        if (!hasOwn(Memory.creeps, name)) continue;
         if (!Game.creeps[name]) {
           delete Memory.creeps[name];
           _log('🧼 Removed creep mem: ' + name);
@@ -197,13 +212,13 @@ var BeeMaintenance = (function () {
     if (!Memory.rooms) return;
 
     for (var roomName in Memory.rooms) {
-      if (!BeeToolbox.hasOwn(Memory.rooms, roomName)) continue;
+      if (!hasOwn(Memory.rooms, roomName)) continue;
       var roomMemory = Memory.rooms[roomName];
 
       // Nurse/Worker source claims:
-      if (BeeToolbox.isObject(roomMemory.sources)) {
+      if (isObject(roomMemory.sources)) {
         for (var sourceId in roomMemory.sources) {
-          if (!BeeToolbox.hasOwn(roomMemory.sources, sourceId)) continue;
+          if (!hasOwn(roomMemory.sources, sourceId)) continue;
 
           var assignedCreeps = roomMemory.sources[sourceId];
 
@@ -221,23 +236,23 @@ var BeeMaintenance = (function () {
               // optional: delete empty arrays to reduce bloat
               delete roomMemory.sources[sourceId];
             }
-          } else if (BeeToolbox.isObject(assignedCreeps)) {
+          } else if (isObject(assignedCreeps)) {
             // treat as object of arbitrary fields; drop obviously empty
-            if (BeeToolbox.isEmptyObject(assignedCreeps)) {
+            if (isEmptyObject(assignedCreeps)) {
               delete roomMemory.sources[sourceId];
             }
           }
         }
         // drop sources map if empty
         var anySrc = false;
-        for (sourceId in roomMemory.sources) { if (BeeToolbox.hasOwn(roomMemory.sources, sourceId)) { anySrc = true; break; } }
+        for (sourceId in roomMemory.sources) { if (hasOwn(roomMemory.sources, sourceId)) { anySrc = true; break; } }
         if (!anySrc) delete roomMemory.sources;
       }
 
       // Courier_Bee container assignments: drop if creep gone
-      if (BeeToolbox.isObject(roomMemory.sourceContainers)) {
+      if (isObject(roomMemory.sourceContainers)) {
         for (var containerId in roomMemory.sourceContainers) {
-          if (!BeeToolbox.hasOwn(roomMemory.sourceContainers, containerId)) continue;
+          if (!hasOwn(roomMemory.sourceContainers, containerId)) continue;
           var assigned = roomMemory.sourceContainers[containerId];
           if (assigned && !Game.creeps[assigned]) {
             delete roomMemory.sourceContainers[containerId];
@@ -246,11 +261,11 @@ var BeeMaintenance = (function () {
         }
         // drop map if empty OR containers vanished
         for (containerId in roomMemory.sourceContainers) {
-          if (!BeeToolbox.hasOwn(roomMemory.sourceContainers, containerId)) continue;
+          if (!hasOwn(roomMemory.sourceContainers, containerId)) continue;
           if (!Game.getObjectById(containerId)) delete roomMemory.sourceContainers[containerId];
         }
         var anyCont = false;
-        for (containerId in roomMemory.sourceContainers) { if (BeeToolbox.hasOwn(roomMemory.sourceContainers, containerId)) { anyCont = true; break; } }
+        for (containerId in roomMemory.sourceContainers) { if (hasOwn(roomMemory.sourceContainers, containerId)) { anyCont = true; break; } }
         if (!anyCont) delete roomMemory.sourceContainers;
       }
 
