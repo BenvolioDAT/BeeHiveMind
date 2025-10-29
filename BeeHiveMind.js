@@ -2237,7 +2237,7 @@ var BeeHiveMind = {
         CombatMelee: 0,
         CombatMedic: 0,
         Dismantler: 0,
-        Trucker: 1,
+        Trucker: 0,
         Claimer: 0
       };
 
