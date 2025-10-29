@@ -224,34 +224,50 @@ if (typeof truckerSettings.PICKUP_FLAG_DEFAULT !== 'string') {
   truckerSettings.PICKUP_FLAG_DEFAULT = 'E-Pickup';
 }
 // @used_in:
-//   Task.Trucker.js:22
-//   Task.Trucker.js:129
+//   Task.Trucker.js:20
+//   Task.Trucker.js:141
 if (typeof truckerSettings.MIN_DROPPED !== 'number') {
   truckerSettings.MIN_DROPPED = 50;
 }
 // @used_in:
-//   Task.Trucker.js:23
-//   Task.Trucker.js:94
-//   Task.Trucker.js:113
-//   Task.Trucker.js:176
+//   Task.Trucker.js:21
+//   Task.Trucker.js:106
+//   Task.Trucker.js:125
+//   Task.Trucker.js:189
+//   Task.Trucker.js:222
+//   Task.Trucker.js:236
 if (typeof truckerSettings.LOCAL_SEARCH_RADIUS !== 'number') {
   truckerSettings.LOCAL_SEARCH_RADIUS = 12;
 }
 // @used_in:
-//   Task.Trucker.js:24
-//   Task.Trucker.js:174
+//   Task.Trucker.js:22
+//   Task.Trucker.js:187
+//   Task.Trucker.js:214
+//   Task.Trucker.js:228
 if (typeof truckerSettings.WIDE_SEARCH_RADIUS !== 'number') {
   truckerSettings.WIDE_SEARCH_RADIUS = 50;
 }
 // @used_in:
-//   Task.Trucker.js:25
-//   Task.Trucker.js:92
+//   Task.Trucker.js:23
+//   Task.Trucker.js:104
 if (typeof truckerSettings.WIDE_SEARCH_COOLDOWN !== 'number') {
   truckerSettings.WIDE_SEARCH_COOLDOWN = 25;
 }
 // @used_in:
-//   Task.Trucker.js:26
-//   Task.Trucker.js:91
+//   Task.Trucker.js:24
+//   Task.Trucker.js:103
+if (!truckerSettings.ALLOWED_RESOURCES || !truckerSettings.ALLOWED_RESOURCES.length) {
+  truckerSettings.ALLOWED_RESOURCES = [RESOURCE_ENERGY, RESOURCE_POWER];
+}
+// @used_in:
+//   Task.Trucker.js:25
+//   Task.Trucker.js:31
+//   Task.Trucker.js:34
+//   Task.Trucker.js:106
+//   Task.Trucker.js:125
+//   Task.Trucker.js:189
+//   Task.Trucker.js:214
+//   Task.Trucker.js:228
 
 var queenSettings = settings['Task.Queen'] || (settings['Task.Queen'] = {});
 if (typeof queenSettings.ENABLE_COURIER_FALLBACK !== 'boolean') {
