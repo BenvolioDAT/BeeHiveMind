@@ -30,6 +30,87 @@ Object.defineProperty(global, 'currentLogLevel', {
 var mainLog = Logger.createLogger('Main', LOG_LEVEL.BASIC);
 var toolboxLog = Logger.createLogger('Toolbox', TOOLBOX_LOG_LEVEL ? TOOLBOX_LOG_LEVEL.BASIC : LOG_LEVEL.BASIC);
 
+function installBeeDebug() {
+    if (typeof global === 'undefined') return;
+    if (!global.BeeDebug) global.BeeDebug = {};
+
+    if (!global.BeeDebug.listSquads) {
+        global.BeeDebug.listSquads = function () {
+            var snapshot = null;
+            if (TaskSquad && typeof TaskSquad.getSquadRegistrySnapshot === 'function') {
+                try {
+                    snapshot = TaskSquad.getSquadRegistrySnapshot();
+                } catch (err) {
+                    snapshot = null;
+                }
+            }
+            if (!snapshot) {
+                console.log('[BeeDebug] squad snapshot unavailable.');
+                return 0;
+            }
+            var registry = snapshot.registry || (Memory && Memory.squads) || {};
+            var callsigns = snapshot.callsigns && snapshot.callsigns.length ? snapshot.callsigns.slice() : [];
+            if (!callsigns.length) {
+                for (var key in registry) {
+                    if (Object.prototype.hasOwnProperty.call(registry, key)) {
+                        callsigns.push(key);
+                    }
+                }
+            }
+            console.log('Callsign | State | Target | Colony | Members | Age | LastActive');
+            for (var i = 0; i < callsigns.length; i++) {
+                var call = callsigns[i];
+                var entry = registry[call];
+                if (!entry) continue;
+                var state = entry.state || 'assembling';
+                var target = entry.targetRoom || entry.target || '-';
+                var colony = entry.colony || entry.home || '-';
+                var members = entry.members || {};
+                var memberParts = [];
+                if (members.melee && members.melee.length) memberParts.push('melee:' + members.melee.length);
+                if (members.archer && members.archer.length) memberParts.push('archer:' + members.archer.length);
+                if (members.medic && members.medic.length) memberParts.push('medic:' + members.medic.length);
+                if (members.dismantler && members.dismantler.length) memberParts.push('dismantler:' + members.dismantler.length);
+                if (members.other && members.other.length) memberParts.push('other:' + members.other.length);
+                var memberStr = memberParts.length ? memberParts.join(', ') : '-';
+                var createdAt = entry.createdAt || 0;
+                var lastActive = entry.lastActive || 0;
+                var age = Game.time && createdAt ? (Game.time - createdAt) : 0;
+                var sinceActive = Game.time && lastActive ? (Game.time - lastActive) : 0;
+                console.log(call + ' | ' + state + ' | ' + target + ' | ' + colony + ' | ' + memberStr + ' | age ' + age + ' | idle ' + sinceActive);
+            }
+            return callsigns.length;
+        };
+    }
+
+    if (!global.BeeDebug.releaseSquad) {
+        global.BeeDebug.releaseSquad = function (callsign) {
+            if (!callsign) {
+                console.log('[BeeDebug] Usage: BeeDebug.releaseSquad("Alpha")');
+                return false;
+            }
+            if (TaskSquad && typeof TaskSquad.releaseCallsign === 'function') {
+                var ok = false;
+                try {
+                    ok = TaskSquad.releaseCallsign(callsign);
+                } catch (err2) {
+                    ok = false;
+                }
+                if (ok) {
+                    console.log('[BeeDebug] Released squad ' + callsign + '.');
+                } else {
+                    console.log('[BeeDebug] Squad ' + callsign + ' not found.');
+                }
+                return ok;
+            }
+            console.log('[BeeDebug] releaseSquad not available.');
+            return false;
+        };
+    }
+}
+
+installBeeDebug();
+
 function logSourceContainersInRoom(room) {
     if (!room) return;
     if (!Memory.rooms) Memory.rooms = {};
