@@ -255,6 +255,14 @@ function selectEnergyPickupTarget(creep, options) {
   var config = options || {};
   var minAmount = config.minAmount != null ? config.minAmount : 50;
   var profile = getRoomEnergyProfile(creep.room);
+  if (config.allowStorage !== false) {
+    if (profile.storage && (profile.storage.store[RESOURCE_ENERGY] | 0) >= minAmount) {
+      return { target: profile.storage, action: 'withdraw' };
+    }
+    if (profile.terminal && (profile.terminal.store[RESOURCE_ENERGY] | 0) >= minAmount) {
+      return { target: profile.terminal, action: 'withdraw' };
+    }
+  } 
 
   if (profile.tombstones.length > 0) {
     sortByStoredEnergyDescending(profile.tombstones);
@@ -276,14 +284,7 @@ function selectEnergyPickupTarget(creep, options) {
     }
   }
 
-  if (config.allowStorage !== false) {
-    if (profile.storage && (profile.storage.store[RESOURCE_ENERGY] | 0) >= minAmount) {
-      return { target: profile.storage, action: 'withdraw' };
-    }
-    if (profile.terminal && (profile.terminal.store[RESOURCE_ENERGY] | 0) >= minAmount) {
-      return { target: profile.terminal, action: 'withdraw' };
-    }
-  } 
+
    
   if (profile.sourceContainers.length > 0) {
     sortByStoredEnergyDescending(profile.sourceContainers);
@@ -394,12 +395,6 @@ function getQueenSettings(room) {
   return { allowCourierFallback: allowFallback };
 }
 
-/**
- * ensureMode maintains the collect/feed state machine for the queen.
- * Input: creep (Creep).
- * Output: active mode string.
- * Side-effects: writes creep.memory.mode.
- */
 function ensureMode(creep) {
   if (!creep.memory) {
     return MODE_COLLECT;
@@ -416,12 +411,6 @@ function ensureMode(creep) {
   return creep.memory.mode;
 }
 
-/**
- * pickCollectionTarget chooses where the queen should gather energy.
- * Input: creep (Creep).
- * Output: { target, action } or null when no source exists.
- * Side-effects: stores pickup metadata on memory for reuse.
- */
 function pickCollectionTarget(creep) {
   var selection = selectEnergyPickupTarget(creep, {
     minAmount: 100,
@@ -442,12 +431,6 @@ function pickCollectionTarget(creep) {
   return selection;
 }
 
-/**
- * collectEnergy handles the gathering behaviour for the queen.
- * Input: creep (Creep).
- * Output: boolean, true when an action was attempted.
- * Side-effects: withdraws or picks up energy.
- */
 function collectEnergy(creep) {
   var targetId = creep.memory && creep.memory.pickupId;
   var action = creep.memory && creep.memory.pickupAction;
@@ -486,12 +469,6 @@ function collectEnergy(creep) {
   return true;
 }
 
-/**
- * pickFeedTarget chooses the best destination for delivery mode.
- * Input: creep (Creep).
- * Output: structure or null.
- * Side-effects: updates creep.memory.dropoffId.
- */
 function pickFeedTarget(creep) {
   var target = selectEnergyDepositStructure(creep, {
     includeStorage: true,
@@ -508,13 +485,6 @@ function pickFeedTarget(creep) {
   return target;
 }
 
-/**
- * feedStructures deposits energy and, when no direct targets exist, optionally
- * falls back to courier-style helper actions.
- * Input: creep (Creep).
- * Output: boolean indicating whether an action occurred.
- * Side-effects: transfers energy or performs courier helper actions.
- */
 function feedStructures(creep) {
   var targetId = creep.memory && creep.memory.dropoffId;
   var target = targetId ? Game.getObjectById(targetId) : null;
@@ -557,12 +527,6 @@ function feedStructures(creep) {
   return false;
 }
 
-/**
- * run executes the queen behaviour each tick.
- * Input: creep (Creep).
- * Output: none.
- * Side-effects: movement, withdraw, transfer, and optional courier helper intents.
- */
 function runQueen(creep) {
   if (!creep) {
     return;
