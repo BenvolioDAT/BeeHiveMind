@@ -57,14 +57,32 @@ function isEnemyStructure(structure) {
 
 var TaskDismantler = {
   run: function (creep) {
-    if (creep.spawning) return;
+    var debugInfo = {
+      role: 'dismantler',
+      state: (creep.memory && creep.memory.state) || 'active',
+      intent: 'none',
+      intentResult: null,
+      reason: null,
+      targetId: null,
+      targetRange: null
+    };
 
-    // Optional “wait behind decoy” start delay
-    if (creep.memory.delay && Game.time < creep.memory.delay) return;
+    if (creep.spawning) {
+      debugInfo.reason = 'spawning';
+      TaskSquad.logCombat(creep, debugInfo);
+      return;
+    }
+
+    if (creep.memory.delay && Game.time < creep.memory.delay) {
+      debugInfo.reason = 'delay';
+      TaskSquad.logCombat(creep, debugInfo);
+      return;
+    }
 
     var target = Game.getObjectById(creep.memory.tid);
     if (target && target.owner && !isEnemyUsername(target.owner.username)) {
       TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-memoryTarget');
+      debugInfo.reason = 'friendlyFire';
       delete creep.memory.tid;
       target = null;
     }
@@ -138,48 +156,60 @@ var TaskDismantler = {
     // -------- B) Execute action --------
     if (target && target.owner && !isEnemyUsername(target.owner.username)) {
       TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'dismantler-active');
+      debugInfo.reason = 'friendlyFire';
       delete creep.memory.tid;
       target = null;
     }
 
-    if (target) {
-      var inMelee = creep.pos.isNearTo(target);
-      var range = creep.pos.getRangeTo(target);
+    try {
+      if (target) {
+        debugInfo.targetId = target.id;
+        debugInfo.targetRange = creep.pos.getRangeTo(target);
+        var inMelee = creep.pos.isNearTo(target);
+        var range = debugInfo.targetRange;
 
-      // Special case: Invader Core must be attacked (not dismantled)
-      if (target.structureType === STRUCTURE_INVADER_CORE) {
-        // Try ranged if we have it and are in range 3
-        if (range <= 3 && creep.getActiveBodyparts(RANGED_ATTACK) > 0) {
-          creep.rangedAttack(target);
+        if (target.structureType === STRUCTURE_INVADER_CORE) {
+          if (range <= 3 && creep.getActiveBodyparts(RANGED_ATTACK) > 0) {
+            debugInfo.intent = 'ranged';
+            debugInfo.intentResult = creep.rangedAttack(target);
+          }
+          if (inMelee && creep.getActiveBodyparts(ATTACK) > 0) {
+            debugInfo.intent = 'melee';
+            debugInfo.intentResult = creep.attack(target);
+          }
+          if (!inMelee) {
+            debugInfo.intent = 'move';
+            debugInfo.intentResult = creep.moveTo(target, { reusePath: 10, maxRooms: 1 });
+          }
+          debugInfo.reason = debugInfo.reason || 'core';
+          return;
         }
-        // Close in to melee and attack if possible
-        if (inMelee && creep.getActiveBodyparts(ATTACK) > 0) {
-          creep.attack(target);
-        }
-        if (!inMelee) {
-          creep.moveTo(target, { reusePath: 10, maxRooms: 1 });
-        }
-        // If we have no ATTACK parts at all, keep ID so escorts can kill it,
-        // or you can spawn a proper smasher for cores.
-        return;
-      }
 
-      // Normal hostile structure: dismantle is most efficient
-      if (inMelee) {
-        var rc = creep.dismantle(target);
-        // If dismantle is invalid for any reason, try attack as a fallback
-        if (rc === ERR_INVALID_TARGET) {
-          if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
+        if (inMelee) {
+          var rc = creep.dismantle(target);
+          debugInfo.intent = 'dismantle';
+          debugInfo.intentResult = rc;
+          if (rc === ERR_INVALID_TARGET && creep.getActiveBodyparts(ATTACK) > 0) {
+            debugInfo.intent = 'melee';
+            debugInfo.intentResult = creep.attack(target);
+          }
+          if (target.hits && target.hits <= 1000) delete creep.memory.tid;
+        } else {
+          debugInfo.intent = 'move';
+          debugInfo.intentResult = creep.moveTo(target, { reusePath: 10, maxRooms: 1 });
         }
-        // Retarget early when low hits to avoid idle ticks on empty swings
-        if (target.hits && target.hits <= 1000) delete creep.memory.tid;
       } else {
-        creep.moveTo(target, { reusePath: 10, maxRooms: 1 });
+        var rally = Game.flags.Rally || Game.flags.Attack;
+        if (rally) {
+          debugInfo.intent = 'move';
+          debugInfo.intentResult = creep.moveTo(rally, { reusePath: 20 });
+          debugInfo.reason = 'rally';
+        } else {
+          debugInfo.reason = debugInfo.reason || 'idle';
+        }
       }
-    } else {
-      // No targets: rally
-      var rally = Game.flags.Rally || Game.flags.Attack;
-      if (rally) creep.moveTo(rally, { reusePath: 20 });
+    } finally {
+      TaskSquad.logCombat(creep, debugInfo);
     }
   }
 };

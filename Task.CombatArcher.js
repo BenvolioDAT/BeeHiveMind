@@ -156,21 +156,20 @@ function combatThreats(room) {
 }
 
 function combatShootOpportunistic(creep) {
-  if (!creep) return false;
+  if (!creep) return null;
   var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
     filter: function (c) {
       return isEnemyCreep(c);
     }
   });
   if (closer && creep.pos.inRangeTo(closer, 3)) {
-    creep.rangedAttack(closer);
-    return true;
+    return creep.rangedAttack(closer);
   }
-  return false;
+  return null;
 }
 
 function combatShootPrimary(creep, target, config) {
-  if (!creep || !target) return false;
+  if (!creep || !target) return null;
   var opts = config || {};
   var threshold = (opts.massAttackThreshold != null) ? opts.massAttackThreshold : 3;
   var hostiles = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, {
@@ -179,17 +178,15 @@ function combatShootPrimary(creep, target, config) {
     }
   });
   if (hostiles.length >= threshold) {
-    creep.rangedMassAttack();
-    return true;
+    return creep.rangedMassAttack();
   }
   var range = creep.pos.getRangeTo(target);
   if (range <= 3) {
     if (target.owner && !isEnemyCreep(target)) {
       _noteFriendlyFire(creep, target, 'ranged-attack');
-      return false;
+      return ERR_INVALID_TARGET;
     }
-    creep.rangedAttack(target);
-    return true;
+    return creep.rangedAttack(target);
   }
   return combatShootOpportunistic(creep);
 }
@@ -313,119 +310,168 @@ var CONFIG = {
 
 var TaskCombatArcher = {
   run: function (creep) {
-    if (creep.spawning) return;
+    var debugInfo = {
+      role: 'archer',
+      state: (creep.memory && creep.memory.state) || 'rally',
+      intent: 'none',
+      intentResult: null,
+      reason: null,
+      targetId: null,
+      targetRange: null
+    };
+
+    if (creep.spawning) {
+      debugInfo.reason = 'spawning';
+      TaskSquad.logCombat(creep, debugInfo);
+      return;
+    }
 
     creep.memory = creep.memory || {};
     var mem = creep.memory;
     if (!mem.state) mem.state = 'rally';
+    debugInfo.state = mem.state;
     var squadId = mem.squadId || TaskSquad.getSquadId(creep);
     var squadRole = mem.squadRole || mem.task || 'CombatArcher';
     var rallyPos = TaskSquad.getRallyPos(squadId) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
-    TaskSquad.registerMember(squadId, creep.name, squadRole, {
-      creep: creep,
-      rallyPos: rallyPos,
-      rallied: rallyPos ? creep.pos.inRangeTo(rallyPos, 1) : false
-    });
 
-    if (mem.state === 'rally') {
-      if (rallyPos && !creep.pos.inRangeTo(rallyPos, 1)) {
-        creep.travelTo(rallyPos, { range: 1, reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
+    try {
+      TaskSquad.registerMember(squadId, creep.name, squadRole, {
+        creep: creep,
+        rallyPos: rallyPos,
+        rallied: rallyPos ? creep.pos.inRangeTo(rallyPos, 1) : false
+      });
+
+      if (mem.state === 'rally') {
+        if (rallyPos && !creep.pos.inRangeTo(rallyPos, 1)) {
+          var rallyMove = creep.travelTo(rallyPos, { range: 1, reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
+          debugInfo.intent = 'move';
+          debugInfo.intentResult = rallyMove;
+          debugInfo.reason = 'rally';
+          return;
+        }
+        if (TaskSquad.isReady(squadId)) {
+          mem.state = 'engage';
+          debugInfo.state = mem.state;
+        } else {
+          debugInfo.reason = 'awaitingReady';
+          return;
+        }
+      }
+
+      if (CONFIG.waitForMedic && shouldWaitForMedic(creep)) {
+        var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
+        var waitMove = rf ? stepToward(creep, (rf.pos || rf), 0, TaskSquad) : null;
+        debugInfo.intent = 'move';
+        debugInfo.intentResult = waitMove;
+        debugInfo.reason = 'waitMedic';
         return;
       }
-      if (TaskSquad.isReady(squadId)) {
-        mem.state = 'engage';
-      } else {
+
+      var target = TaskSquad.sharedTarget(creep);
+      if (!target) {
+        var anc = TaskSquad.getAnchor(creep) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
+        if (anc) {
+          debugInfo.intent = 'move';
+          debugInfo.intentResult = stepToward(creep, anc, 0, TaskSquad);
+          debugInfo.reason = 'anchor';
+        } else {
+          debugInfo.reason = 'noTarget';
+        }
+        var opportunistic = combatShootOpportunistic(creep);
+        if (opportunistic !== null) {
+          debugInfo.intent = 'ranged';
+          debugInfo.intentResult = opportunistic;
+        }
         return;
       }
-    }
+      debugInfo.targetId = target.id;
+      debugInfo.targetRange = creep.pos.getRangeTo(target);
+      if (target.owner && !isEnemyUsername(target.owner.username)) {
+        TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'archer-sharedTarget');
+        debugInfo.reason = 'friendlyFire';
+        return;
+      }
 
-    // (0) Optional: wait for medic / rally
-    if (CONFIG.waitForMedic && shouldWaitForMedic(creep)) {
-      var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
-      if (rf) stepToward(creep, (rf.pos || rf), 0, TaskSquad);
-      return;
-    }
+      if (!mem.archer) mem.archer = {};
+      var A = mem.archer;
 
-    // (1) Acquire target or rally
-    var target = TaskSquad.sharedTarget(creep);
-    if (!target) {
-      var anc = TaskSquad.getAnchor(creep) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
-      if (anc) stepToward(creep, anc, 0, TaskSquad);
-      combatShootOpportunistic(creep); // still shoot if anything in range
-      return;
-    }
-    if (target.owner && !isEnemyUsername(target.owner.username)) {
-      TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'archer-sharedTarget');
-      return;
-    }
+      var tpos = target.pos;
+      var tMoved = true;
+      if (A.tX === tpos.x && A.tY === tpos.y && A.tR === tpos.roomName) {
+        tMoved = false;
+      }
+      A.tX = tpos.x; A.tY = tpos.y; A.tR = tpos.roomName; A.lastSeen = Game.time;
 
-    // (2) Update memory about target motion (for "don’t move if they aren’t" logic)
-    var mem = creep.memory;
-    if (!mem.archer) mem.archer = {};
-    var A = mem.archer;
+      var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
+      var dangerAdj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h){
+        if (!isEnemyCreep(h)) return false;
+        return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0;
+      }}).length > 0;
+      var inTowerBad = isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius);
 
-    var tpos = target.pos;
-    var tMoved = true;
-    if (A.tX === tpos.x && A.tY === tpos.y && A.tR === tpos.roomName) {
-      tMoved = false;
-    }
-    A.tX = tpos.x; A.tY = tpos.y; A.tR = tpos.roomName; A.lastSeen = Game.time;
+      if (lowHp || dangerAdj || inTowerBad) {
+        var flee = combatFlee(
+          creep,
+          combatThreats(creep.room).concat([target]),
+          3,
+          { maxOps: CONFIG.maxOps, taskSquad: TaskSquad }
+        );
+        debugInfo.intent = 'move';
+        debugInfo.intentResult = flee ? OK : ERR_NO_PATH;
+        debugInfo.reason = 'danger';
+        var fleeShot = combatShootOpportunistic(creep);
+        if (fleeShot !== null) {
+          debugInfo.intent = 'ranged';
+          debugInfo.intentResult = fleeShot;
+        }
+        A.movedAt = Game.time;
+        return;
+      }
 
-    // (3) Danger gates first
-    var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
-    var dangerAdj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h){
-      if (!isEnemyCreep(h)) return false;
-      return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0;
-    }}).length > 0;
-    var inTowerBad = isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius);
+      var attackRc = combatShootPrimary(creep, target, { desiredRange: CONFIG.desiredRange, massAttackThreshold: 3 });
+      if (attackRc !== null) {
+        debugInfo.intent = 'ranged';
+        debugInfo.intentResult = attackRc;
+      }
+      debugInfo.targetRange = creep.pos.getRangeTo(target);
 
-    if (lowHp || dangerAdj || inTowerBad) {
-      combatFlee(
-        creep,
-        combatThreats(creep.room).concat([target]),
-        3,
-        { maxOps: CONFIG.maxOps, taskSquad: TaskSquad }
-      );
-      combatShootOpportunistic(creep); // still try to shoot after stepping
-      A.movedAt = Game.time;
-      return;
-    }
+      if (typeof A.movedAt === 'number' && (Game.time - A.movedAt) < CONFIG.shuffleCooldown) {
+        debugInfo.reason = 'shuffleCooldown';
+        return;
+      }
 
-    // (4) Combat first: fire before footwork
-    combatShootPrimary(creep, target, { desiredRange: CONFIG.desiredRange, massAttackThreshold: 3 });
+      if (!tMoved && combatInHoldBand(debugInfo.targetRange, CONFIG.desiredRange, CONFIG.holdBand)) {
+        debugInfo.reason = 'holdBandStatic';
+        return;
+      }
 
-    // (5) Decide if we should move at all (anti-dance)
-    var range = creep.pos.getRangeTo(target);
+      var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: isEnemyCreep });
+      if (hostilesIn3 && hostilesIn3.length && combatInHoldBand(debugInfo.targetRange, CONFIG.desiredRange, CONFIG.holdBand)) {
+        debugInfo.reason = 'holdBandThreat';
+        return;
+      }
 
-    // Cooldown: if we moved very recently, hold to prevent jitter
-    if (typeof A.movedAt === 'number' && (Game.time - A.movedAt) < CONFIG.shuffleCooldown) {
-      return; // hold position
-    }
-
-    // If target is NOT moving and we are within a comfy band, HOLD.
-    if (!tMoved && combatInHoldBand(range, CONFIG.desiredRange, CONFIG.holdBand)) {
-      return; // statuesque elegance achieved 🗿
-    }
-
-    // If we have a good shot and no extra need to adjust, also prefer holding in the band
-    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: isEnemyCreep });
-    if (hostilesIn3 && hostilesIn3.length && combatInHoldBand(range, CONFIG.desiredRange, CONFIG.holdBand)) {
-      return;
-    }
-
-    // (6) Movement with hysteresis: only advance if too far; only kite if truly close
-    var moved = false;
-    if (range <= CONFIG.kiteIfAtOrBelow) {
-      if (combatFlee(creep, [target], 3, { maxOps: CONFIG.maxOps, taskSquad: TaskSquad })) {
+      var moved = false;
+      if (debugInfo.targetRange <= CONFIG.kiteIfAtOrBelow) {
+        if (combatFlee(creep, [target], 3, { maxOps: CONFIG.maxOps, taskSquad: TaskSquad })) {
+          moved = true;
+          debugInfo.intent = 'move';
+          debugInfo.intentResult = OK;
+          debugInfo.reason = 'kite';
+        }
+      } else if (debugInfo.targetRange > (CONFIG.desiredRange + CONFIG.approachSlack)) {
+        debugInfo.intent = 'move';
+        debugInfo.intentResult = stepToward(creep, target.pos, CONFIG.desiredRange, TaskSquad);
+        debugInfo.reason = 'advance';
         moved = true;
+      } else {
+        debugInfo.reason = 'holdBand';
       }
-    } else if (range > (CONFIG.desiredRange + CONFIG.approachSlack)) {
-      stepToward(creep, target.pos, CONFIG.desiredRange, TaskSquad); moved = true;
-    } else {
-      // in band but target moved: do nothing (don’t orbit/strafe)
-    }
 
-    if (moved) A.movedAt = Game.time;
+      if (moved) A.movedAt = Game.time;
+    } finally {
+      TaskSquad.logCombat(creep, debugInfo);
+    }
   },
 };
 

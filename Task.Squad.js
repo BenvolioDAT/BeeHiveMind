@@ -11,6 +11,129 @@ var squadLog = (CoreLogger && CoreLogger.createLogger)
       error: function () {}
     };
 
+var COMBAT_DEBUG = !!(CoreConfig &&
+  CoreConfig.settings &&
+  CoreConfig.settings.Combat &&
+  CoreConfig.settings.Combat.DEBUG);
+
+var ERR_CODE_STRINGS = null;
+
+function _errStrings() {
+  if (ERR_CODE_STRINGS) return ERR_CODE_STRINGS;
+  var map = {};
+  map[OK] = 'OK';
+  map[ERR_NOT_OWNER] = 'ERR_NOT_OWNER';
+  map[ERR_NO_PATH] = 'ERR_NO_PATH';
+  map[ERR_BUSY] = 'ERR_BUSY';
+  map[ERR_NAME_EXISTS] = 'ERR_NAME_EXISTS';
+  map[ERR_NOT_FOUND] = 'ERR_NOT_FOUND';
+  map[ERR_NOT_ENOUGH_ENERGY] = 'ERR_NOT_ENOUGH_ENERGY';
+  map[ERR_NOT_ENOUGH_RESOURCES] = 'ERR_NOT_ENOUGH_RESOURCES';
+  map[ERR_INVALID_TARGET] = 'ERR_INVALID_TARGET';
+  map[ERR_FULL] = 'ERR_FULL';
+  map[ERR_NOT_IN_RANGE] = 'ERR_NOT_IN_RANGE';
+  map[ERR_INVALID_ARGS] = 'ERR_INVALID_ARGS';
+  map[ERR_TIRED] = 'ERR_TIRED';
+  map[ERR_NO_BODYPART] = 'ERR_NO_BODYPART';
+  map[ERR_NOT_ENOUGH_EXTENSIONS] = 'ERR_NOT_ENOUGH_EXTENSIONS';
+  map[ERR_RCL_NOT_ENOUGH] = 'ERR_RCL_NOT_ENOUGH';
+  map[ERR_GCL_NOT_ENOUGH] = 'ERR_GCL_NOT_ENOUGH';
+  ERR_CODE_STRINGS = map;
+  return ERR_CODE_STRINGS;
+}
+
+function _codeToString(code) {
+  if (code === undefined || code === null) return 'NA';
+  if (typeof code === 'string') return code;
+  var map = _errStrings();
+  if (map[code]) return map[code];
+  return '' + code;
+}
+
+function _combatWatchRegistry() {
+  if (typeof global === 'undefined') return {};
+  if (!global.BeeDebug) global.BeeDebug = {};
+  if (!global.BeeDebug._combatWatch) global.BeeDebug._combatWatch = {};
+  return global.BeeDebug._combatWatch;
+}
+
+if (typeof global !== 'undefined') {
+  if (!global.BeeDebug) global.BeeDebug = {};
+  if (typeof global.BeeDebug.watchCombat !== 'function') {
+    global.BeeDebug.watchCombat = function (name, enable) {
+      if (!name) return;
+      var reg = _combatWatchRegistry();
+      if (enable === false) {
+        delete reg[name];
+      } else {
+        reg[name] = true;
+      }
+    };
+  }
+}
+
+function logCombat(creep, payload) {
+  if (!creep) return;
+
+  var reg = _combatWatchRegistry();
+  var watch = reg[creep.name];
+  var targetRange = null;
+  var targetId = 'none';
+  if (payload) {
+    if (payload.targetRange !== undefined && payload.targetRange !== null) {
+      targetRange = payload.targetRange;
+    } else if (payload.targetPos) {
+      targetRange = creep.pos.getRangeTo(payload.targetPos);
+    }
+    if (payload.targetId) {
+      targetId = payload.targetId;
+    } else if (payload.target && payload.target.id) {
+      targetId = payload.target.id;
+    }
+  }
+
+  var shouldLog = !!watch;
+  if (!shouldLog) {
+    if (!COMBAT_DEBUG) {
+      if (!payload || !payload.forceLog) return;
+    } else {
+      if (targetRange !== null && targetRange !== undefined && targetRange <= 3) {
+        shouldLog = true;
+      } else if (Game.time % 3 === 0) {
+        shouldLog = true;
+      }
+    }
+  }
+
+  if (!shouldLog) return;
+
+  var atkParts = creep.getActiveBodyparts ? creep.getActiveBodyparts(ATTACK) : 0;
+  var rngParts = creep.getActiveBodyparts ? creep.getActiveBodyparts(RANGED_ATTACK) : 0;
+  var healParts = creep.getActiveBodyparts ? creep.getActiveBodyparts(HEAL) : 0;
+
+  var intent = (payload && payload.intent) || 'none';
+  var result = (payload && payload.intentResult !== undefined) ? payload.intentResult : null;
+  var reason = (payload && payload.reason) || null;
+  var state = (payload && payload.state) || ((creep.memory && creep.memory.state) || 'na');
+  var role = (payload && payload.role) || ((creep.memory && (creep.memory.role || creep.memory.task)) || 'unknown');
+  var dist = (targetRange !== null && targetRange !== undefined) ? targetRange : 'NA';
+
+  var bits = [
+    '[CMB] ' + creep.name,
+    'state=' + state,
+    'role=' + role,
+    'target=' + targetId,
+    'dist=' + dist,
+    'atkParts=' + atkParts,
+    'rngParts=' + rngParts,
+    'healParts=' + healParts,
+    'intent=' + intent,
+    'result=' + _codeToString(result)
+  ];
+  if (reason) bits.push('reason=' + reason);
+  console.log(bits.join(' '));
+}
+
 var DEFAULT_CALLSIGNS = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot'];
 var SQUAD_STATE_ASSEMBLING = 'assembling';
 var SQUAD_STATE_ACTIVE = 'active';
@@ -1658,6 +1781,7 @@ var TaskSquad = (function () {
   API.getSquadId     = getSquadId;
   API.sharedTarget   = sharedTarget;
   API.getAnchor      = getAnchor;
+  API.logCombat      = logCombat;
   API.getRallyPos    = getRallyPos;
   API.stepToward     = stepToward;
   API.politelyYieldFor = _politelyYieldFor;
@@ -1695,3 +1819,4 @@ module.exports.getSquadRegistrySnapshot = TaskSquad.getSquadRegistrySnapshot;
 module.exports.maintainSquadRegistry = TaskSquad.maintainSquadRegistry;
 module.exports.noteSquadPlan = TaskSquad.noteSquadPlan;
 module.exports.noteSpawnResult = TaskSquad.noteSpawnResult;
+module.exports.logCombat = logCombat;

@@ -378,114 +378,180 @@ function _combatWeakestHostile(creep, range) {
 
 var CombatMelee = {
   run: function (creep) {
-    if (creep.spawning) return;
+    var debugInfo = {
+      role: 'melee',
+      state: (creep.memory && creep.memory.state) || 'rally',
+      intent: 'none',
+      intentResult: null,
+      reason: null,
+      targetId: null,
+      targetRange: null
+    };
+
+    if (creep.spawning) {
+      debugInfo.reason = 'spawning';
+      TaskSquad.logCombat(creep, debugInfo);
+      return;
+    }
 
     creep.memory = creep.memory || {};
     var mem = creep.memory;
     if (!mem.state) mem.state = 'rally';
+    debugInfo.state = mem.state;
     var squadId = mem.squadId || TaskSquad.getSquadId(creep);
     var squadRole = mem.squadRole || mem.task || 'CombatMelee';
     var rallyPos = TaskSquad.getRallyPos(squadId) || TaskSquad.getAnchor(creep);
-    TaskSquad.registerMember(squadId, creep.name, squadRole, {
-      creep: creep,
-      rallyPos: rallyPos,
-      rallied: rallyPos ? creep.pos.inRangeTo(rallyPos, 1) : false
-    });
 
-    if (mem.state === 'rally') {
-      if (rallyPos && !creep.pos.inRangeTo(rallyPos, 1)) {
-        Traveler.travelTo(creep, rallyPos, { range: 1, maxRooms: CONFIG.maxRooms, reusePath: 5 });
-        return;
+    try {
+      TaskSquad.registerMember(squadId, creep.name, squadRole, {
+        creep: creep,
+        rallyPos: rallyPos,
+        rallied: rallyPos ? creep.pos.inRangeTo(rallyPos, 1) : false
+      });
+
+      if (mem.state === 'rally') {
+        if (rallyPos && !creep.pos.inRangeTo(rallyPos, 1)) {
+          var rallyMove = Traveler.travelTo(creep, rallyPos, { range: 1, maxRooms: CONFIG.maxRooms, reusePath: 5 });
+          debugInfo.intent = 'move';
+          debugInfo.intentResult = rallyMove;
+          debugInfo.reason = 'rally';
+          return;
+        }
+        if (TaskSquad.isReady(squadId)) {
+          mem.state = 'engage';
+          debugInfo.state = mem.state;
+        } else {
+          debugInfo.reason = 'awaitingReady';
+          return;
+        }
       }
-      if (TaskSquad.isReady(squadId)) {
-        mem.state = 'engage';
-      } else {
-        return;
-      }
-    }
 
-    // (0) optional: wait for medic if you want tighter stack
-    if (CONFIG.waitForMedic && _shouldWaitForMedic(creep)) {
-      var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
-      if (rf) _stepToward(creep, rf.pos || rf, 0);
-      return;
-    }
-
-    // quick self/buddy healing if we have HEAL
-    _combatAuxHeal(creep);
-
-    // (1) emergency bail if low HP or in tower ring
-    var lowHp = (creep.hits / creep.hitsMax) < CONFIG.fleeHpPct;
-    if (lowHp || _isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius)) {
-      _retreatToRally(creep, { anchorProvider: TaskSquad.getAnchor, range: 1 });
-      var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isEnemyCreep })[0];
-      if (adjBad) creep.attack(adjBad);
-      return;
-    }
-
-    // (2) bodyguard: interpose for squishy squadmates
-    if (_combatGuardSquadmate(creep, {
-      edgePenalty: CONFIG.edgePenalty,
-      towerRadius: CONFIG.towerAvoidRadius
-    })) {
-      var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isEnemyCreep })[0];
-      if (hugger) creep.attack(hugger);
-      return;
-    }
-
-    // (3) squad shared target
-    var target = TaskSquad.sharedTarget(creep);
-    if (!target) {
-      var anc = TaskSquad.getAnchor(creep);
-      if (anc) _stepToward(creep, anc, 1);
-      return;
-    }
-    if (target.owner && !_isEnemyUsername(target.owner.username)) {
-      TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'melee-sharedTarget');
-      return;
-    }
-
-    // (4) approach & strike
-    if (creep.pos.isNearTo(target)) {
-      // Explicit Invader Core handling: stand and swing
-      if (target.structureType && target.structureType === STRUCTURE_INVADER_CORE) {
-        creep.say('⚔ core!');
-        creep.attack(target);
+      // (0) optional: wait for medic if you want tighter stack
+      if (CONFIG.waitForMedic && _shouldWaitForMedic(creep)) {
+        var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
+        var waitMove = rf ? _stepToward(creep, rf.pos || rf, 0) : null;
+        debugInfo.intent = 'move';
+        debugInfo.intentResult = waitMove;
+        debugInfo.reason = 'waitMedic';
         return;
       }
 
-      // Normal melee attack
-      creep.attack(target);
-
-      // Micro-step to a safer/better adjacent tile (avoid tower/edges/melee stacks)
-      var better = _combatBestAdjacentTile(creep, target, { edgePenalty: CONFIG.edgePenalty, towerRadius: CONFIG.towerAvoidRadius });
-      if (better && (better.x !== creep.pos.x || better.y !== creep.pos.y)) {
-        var dir = creep.pos.getDirectionTo(better);
-        creep.move(dir);
+      // quick self/buddy healing if we have HEAL
+      if (_combatAuxHeal(creep)) {
+        debugInfo.intent = 'heal';
+        debugInfo.intentResult = OK;
       }
-      return;
-    }
 
-    // (5) door bash if a blocking wall/rampart is the nearer path at range 1
-    if (CONFIG.doorBash) {
-      var blocker = _combatBlockingDoor(creep, target);
-      if (blocker && creep.pos.isNearTo(blocker)) {
-        creep.attack(blocker);
+      // (1) emergency bail if low HP or in tower ring
+      var lowHp = (creep.hits / creep.hitsMax) < CONFIG.fleeHpPct;
+      if (lowHp || _isInTowerDanger(creep.pos, CONFIG.towerAvoidRadius)) {
+        var fleeMove = _retreatToRally(creep, { anchorProvider: TaskSquad.getAnchor, range: 1 });
+        debugInfo.intent = 'move';
+        debugInfo.intentResult = fleeMove;
+        debugInfo.reason = lowHp ? 'lowHp' : 'towerDanger';
+        var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isEnemyCreep })[0];
+        if (adjBad) {
+          debugInfo.targetId = adjBad.id;
+          debugInfo.targetRange = creep.pos.getRangeTo(adjBad);
+          debugInfo.intent = 'melee';
+          debugInfo.intentResult = creep.attack(adjBad);
+        }
         return;
       }
-    }
 
-    // (6) close in via Traveler-powered TaskSquad (polite traffic + swaps)
-    _stepToward(creep, target.pos, 1);
+      // (2) bodyguard: interpose for squishy squadmates
+      if (_combatGuardSquadmate(creep, {
+        edgePenalty: CONFIG.edgePenalty,
+        towerRadius: CONFIG.towerAvoidRadius
+      })) {
+        debugInfo.intent = 'move';
+        debugInfo.intentResult = OK;
+        debugInfo.reason = 'guard';
+        var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isEnemyCreep })[0];
+        if (hugger) {
+          debugInfo.targetId = hugger.id;
+          debugInfo.targetRange = creep.pos.getRangeTo(hugger);
+          debugInfo.intent = 'melee';
+          debugInfo.intentResult = creep.attack(hugger);
+        }
+        return;
+      }
 
-    // opportunistic hit if we brushed into melee
-    var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isEnemyCreep })[0];
-    if (adj) creep.attack(adj);
+      // (3) squad shared target
+      var target = TaskSquad.sharedTarget(creep);
+      if (!target) {
+        var anc = TaskSquad.getAnchor(creep);
+        if (anc) {
+          debugInfo.intent = 'move';
+          debugInfo.intentResult = _stepToward(creep, anc, 1);
+          debugInfo.reason = 'anchor';
+        } else {
+          debugInfo.reason = 'noTarget';
+        }
+        return;
+      }
+      debugInfo.targetId = target.id;
+      debugInfo.targetRange = creep.pos.getRangeTo(target);
+      if (target.owner && !_isEnemyUsername(target.owner.username)) {
+        TaskSquad.noteFriendlyFireAvoid(creep.name, target.owner.username, 'melee-sharedTarget');
+        debugInfo.reason = 'friendlyFire';
+        return;
+      }
 
-    // (7) occasional opportunistic retarget to weaklings in 1..2
-    if (Game.time % 3 === 0) {
-      var weak = _combatWeakestHostile(creep, 2);
-      if (weak && (weak.hits / weak.hitsMax) < 0.5) target = weak;
+      // (4) approach & strike
+      if (creep.pos.isNearTo(target)) {
+        if (target.structureType && target.structureType === STRUCTURE_INVADER_CORE) {
+          creep.say('⚔ core!');
+          debugInfo.intent = 'melee';
+          debugInfo.intentResult = creep.attack(target);
+          debugInfo.reason = 'core';
+          return;
+        }
+
+        debugInfo.intent = 'melee';
+        debugInfo.intentResult = creep.attack(target);
+
+        var better = _combatBestAdjacentTile(creep, target, { edgePenalty: CONFIG.edgePenalty, towerRadius: CONFIG.towerAvoidRadius });
+        if (better && (better.x !== creep.pos.x || better.y !== creep.pos.y)) {
+          creep.move(creep.pos.getDirectionTo(better));
+        }
+        return;
+      }
+
+      // (5) door bash if a blocking wall/rampart is the nearer path at range 1
+      if (CONFIG.doorBash) {
+        var blocker = _combatBlockingDoor(creep, target);
+        if (blocker && creep.pos.isNearTo(blocker)) {
+          debugInfo.targetId = blocker.id;
+          debugInfo.targetRange = creep.pos.getRangeTo(blocker);
+          debugInfo.intent = 'melee';
+          debugInfo.intentResult = creep.attack(blocker);
+          debugInfo.reason = 'doorBash';
+          return;
+        }
+      }
+
+      // (6) close in via Traveler-powered TaskSquad (polite traffic + swaps)
+      debugInfo.intent = 'move';
+      debugInfo.intentResult = _stepToward(creep, target.pos, 1);
+      debugInfo.targetId = target.id;
+      debugInfo.targetRange = creep.pos.getRangeTo(target);
+
+      // opportunistic hit if we brushed into melee
+      var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isEnemyCreep })[0];
+      if (adj) {
+        debugInfo.targetId = adj.id;
+        debugInfo.targetRange = creep.pos.getRangeTo(adj);
+        debugInfo.intent = 'melee';
+        debugInfo.intentResult = creep.attack(adj);
+      }
+
+      if (Game.time % 3 === 0) {
+        var weak = _combatWeakestHostile(creep, 2);
+        if (weak && (weak.hits / weak.hitsMax) < 0.5) target = weak;
+      }
+    } finally {
+      TaskSquad.logCombat(creep, debugInfo);
     }
   }
 };
