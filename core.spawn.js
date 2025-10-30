@@ -87,11 +87,11 @@ function _defaultRoleReq() {
   }
   return {
     baseharvest: 2,
-    builder: 2,
+    builder: 1,
     repair: 1,
     courier: 2,
     queen: 1,
-    upgrader: 2,
+    upgrader: 1,
     scout: 1
   };
 }
