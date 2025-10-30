@@ -9,21 +9,6 @@ var TaskCombatArcher = require('Task.CombatArcher');
 var TaskCombatMelee = require('Task.CombatMelee');
 var TaskCombatMedic = require('Task.CombatMedic');
 
-/*
-Test Script (Combat Squad Cap Validation):
-1. Set `CoreConfig.settings.Combat.MAX_ACTIVE_SQUADS_GLOBAL = 1` and ensure the callsign list includes at least Alpha and Bravo.
-2. Place multiple Squad flags (or remote attack targets) so that more than one squad is requested.
-   - Observe the console for `CAP_REACHED` logs and confirm only one callsign (Alpha) is allocated while others wait.
-3. Use `BeeDebug.listSquads()` to view the active registry. Expect output similar to:
-   Callsign | State | Target | Colony | Members | Age | LastActive
-   Alpha | assembling | W2N1 | W1N1 | melee:1, medic:1 | age 12 | idle 0
-4. Remove the squad flag or eliminate the active squad. After creeps die, watch `BeeDebug.listSquads()` until Alpha disappears or is marked available.
-5. Add a new flag to trigger another squad; confirm the next available callsign (e.g., Bravo) or a re-used Alpha is assigned.
-6. Configure a squad body that exceeds a room's energy capacity. Verify logs report the plan as unaffordable, the plan clears, and worker roles continue spawning normally.
-7. Create multiple flags for the same target room. Confirm only one squad per target is generated (deduped in the registry).
-8. While running, call `BeeDebug.releaseSquad("Alpha")` to manually free a callsign and confirm the log reflects the release.
-*/
-
 var BeeHiveSettings = CoreConfig.settings['BeeHiveMind'];
 var getEconomySettings = (typeof CoreConfig.getEconomySettings === 'function')
   ? CoreConfig.getEconomySettings
