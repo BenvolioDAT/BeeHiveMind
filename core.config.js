@@ -114,6 +114,17 @@ settings.maintenance = settings.maintenance || Object.freeze({
   roomSweepInterval: 50
 });
 
+var combatSettings = settings.Combat || (settings.Combat = {});
+if (!Array.isArray(combatSettings.SQUAD_CALLSIGNS) || combatSettings.SQUAD_CALLSIGNS.length === 0) {
+  combatSettings.SQUAD_CALLSIGNS = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot'];
+}
+if (typeof combatSettings.MAX_ACTIVE_SQUADS_GLOBAL !== 'number' || combatSettings.MAX_ACTIVE_SQUADS_GLOBAL <= 0) {
+  combatSettings.MAX_ACTIVE_SQUADS_GLOBAL = Math.min(2, combatSettings.SQUAD_CALLSIGNS.length);
+}
+if (typeof combatSettings.MAX_ACTIVE_SQUADS_PER_COLONY !== 'number' || combatSettings.MAX_ACTIVE_SQUADS_PER_COLONY <= 0) {
+  combatSettings.MAX_ACTIVE_SQUADS_PER_COLONY = 1;
+}
+
 var economySettings = settings.Economy || (settings.Economy = {});
 if (typeof economySettings.STORAGE_ENERGY_MIN_BEFORE_REMOTES !== 'number') {
   economySettings.STORAGE_ENERGY_MIN_BEFORE_REMOTES = 80000;

@@ -11,6 +11,70 @@ var squadLog = (CoreLogger && CoreLogger.createLogger)
       error: function () {}
     };
 
+var DEFAULT_CALLSIGNS = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot'];
+var SQUAD_STATE_ASSEMBLING = 'assembling';
+var SQUAD_STATE_ACTIVE = 'active';
+var SQUAD_STATE_RETREATING = 'retreating';
+var SQUAD_STATE_DISBANDED = 'disbanded';
+var SQUAD_ASSEMBLING_TIMEOUT = 300;
+
+var MEMBER_ROLE_KEYS = {
+  CombatMelee: 'melee',
+  CombatArcher: 'archer',
+  CombatMedic: 'medic',
+  Dismantler: 'dismantler'
+};
+
+function _combatSettings() {
+  var settings = (CoreConfig && CoreConfig.settings) ? CoreConfig.settings : {};
+  var combat = settings.Combat;
+  if (!combat) {
+    combat = settings.Combat = {};
+  }
+  if (!Array.isArray(combat.SQUAD_CALLSIGNS) || combat.SQUAD_CALLSIGNS.length === 0) {
+    combat.SQUAD_CALLSIGNS = DEFAULT_CALLSIGNS.slice();
+  }
+  if (typeof combat.MAX_ACTIVE_SQUADS_GLOBAL !== 'number' || combat.MAX_ACTIVE_SQUADS_GLOBAL <= 0) {
+    combat.MAX_ACTIVE_SQUADS_GLOBAL = Math.min(2, combat.SQUAD_CALLSIGNS.length);
+  }
+  if (typeof combat.MAX_ACTIVE_SQUADS_PER_COLONY !== 'number' || combat.MAX_ACTIVE_SQUADS_PER_COLONY <= 0) {
+    combat.MAX_ACTIVE_SQUADS_PER_COLONY = 1;
+  }
+  return combat;
+}
+
+function _callsignList() {
+  var combat = _combatSettings();
+  if (!Array.isArray(combat.SQUAD_CALLSIGNS) || combat.SQUAD_CALLSIGNS.length === 0) {
+    return DEFAULT_CALLSIGNS.slice();
+  }
+  return combat.SQUAD_CALLSIGNS.slice();
+}
+
+function _maxGlobalSquads() {
+  var combat = _combatSettings();
+  var list = _callsignList();
+  var max = combat.MAX_ACTIVE_SQUADS_GLOBAL;
+  if (typeof max !== 'number' || max <= 0) {
+    max = list.length;
+  }
+  return Math.min(max, list.length);
+}
+
+function _maxSquadsPerColony() {
+  var combat = _combatSettings();
+  var per = combat.MAX_ACTIVE_SQUADS_PER_COLONY;
+  if (typeof per !== 'number' || per <= 0) {
+    per = 1;
+  }
+  return per;
+}
+
+function _flagNameForCallsign(callsign) {
+  if (!callsign) return 'SquadAlpha';
+  return 'Squad' + callsign;
+}
+
 function _friendlyList() {
   var settings = CoreConfig && CoreConfig.settings && CoreConfig.settings['Task.Squad'];
   var list = settings && settings.FRIENDLY_USERNAMES;
@@ -123,9 +187,395 @@ var SQUAD_FLAG_CFG = {
   },
   dropGrace: 50,
   assignRecentWindow: 20,
-  names: ['SquadAlpha', 'SquadBravo', 'SquadCharlie', 'SquadDelta'],
-  maxFlags: 4
+  names: [],
+  maxFlags: 0
 };
+
+function _refreshFlagConfigNames() {
+  var names = [];
+  var callsigns = _callsignList();
+  for (var i = 0; i < callsigns.length; i++) {
+    names.push(_flagNameForCallsign(callsigns[i]));
+  }
+  SQUAD_FLAG_CFG.names = names;
+  SQUAD_FLAG_CFG.maxFlags = Math.min(_maxGlobalSquads(), names.length);
+}
+
+_refreshFlagConfigNames();
+
+var SQUAD_REGISTRY_VERSION = 2;
+
+function _createSquadRecord(id) {
+  var now = Game.time || 0;
+  return {
+    callsign: id || 'Alpha',
+    state: SQUAD_STATE_ASSEMBLING,
+    colony: null,
+    targetRoom: null,
+    members: { melee: [], archer: [], medic: [], dismantler: [], other: [] },
+    memberRecords: {},
+    createdAt: now,
+    lastActive: now,
+    lastPlanTick: 0,
+    flagName: null,
+    spawnCooldownUntil: 0,
+    desiredRoles: {},
+    roleOrder: ['CombatMelee', 'CombatArcher', 'CombatMedic'],
+    minReady: 1,
+    targetId: null,
+    targetAt: 0,
+    anchor: null,
+    anchorAt: 0,
+    rally: null,
+    lastSpawnTick: 0,
+    lastSpawnRole: null,
+    suppressed: false
+  };
+}
+
+function _memberKeyForRole(role) {
+  if (!role) return 'other';
+  if (MEMBER_ROLE_KEYS[role]) return MEMBER_ROLE_KEYS[role];
+  var lower = ('' + role).toLowerCase();
+  if (lower.indexOf('melee') !== -1) return 'melee';
+  if (lower.indexOf('archer') !== -1 || lower.indexOf('range') !== -1) return 'archer';
+  if (lower.indexOf('medic') !== -1 || lower.indexOf('heal') !== -1) return 'medic';
+  if (lower.indexOf('dismant') !== -1) return 'dismantler';
+  return 'other';
+}
+
+function _ensureMemberBuckets(bucket) {
+  if (!bucket.members || typeof bucket.members !== 'object') {
+    bucket.members = { melee: [], archer: [], medic: [], dismantler: [], other: [] };
+  }
+  if (!bucket.members.melee) bucket.members.melee = [];
+  if (!bucket.members.archer) bucket.members.archer = [];
+  if (!bucket.members.medic) bucket.members.medic = [];
+  if (!bucket.members.dismantler) bucket.members.dismantler = [];
+  if (!bucket.members.other) bucket.members.other = [];
+}
+
+function _updateMemberAggregates(bucket) {
+  _ensureMemberBuckets(bucket);
+  var roster = bucket.memberRecords || {};
+  var melee = [];
+  var archer = [];
+  var medic = [];
+  var dismantler = [];
+  var other = [];
+  for (var name in roster) {
+    if (!Object.prototype.hasOwnProperty.call(roster, name)) continue;
+    var rec = roster[name];
+    if (!rec) continue;
+    var key = _memberKeyForRole(rec.role);
+    if (key === 'melee') melee.push(name);
+    else if (key === 'archer') archer.push(name);
+    else if (key === 'medic') medic.push(name);
+    else if (key === 'dismantler') dismantler.push(name);
+    else other.push(name);
+  }
+  bucket.members.melee = melee;
+  bucket.members.archer = archer;
+  bucket.members.medic = medic;
+  bucket.members.dismantler = dismantler;
+  bucket.members.other = other;
+}
+
+function _normalizeSquadRecord(bucket, id) {
+  if (!bucket || typeof bucket !== 'object') {
+    bucket = _createSquadRecord(id);
+  }
+  if (!bucket.callsign) bucket.callsign = id || 'Alpha';
+  if (!bucket.memberRecords || typeof bucket.memberRecords !== 'object') {
+    bucket.memberRecords = {};
+  }
+  if (!bucket.desiredRoles || typeof bucket.desiredRoles !== 'object') {
+    bucket.desiredRoles = {};
+  }
+  if (!Array.isArray(bucket.roleOrder) || !bucket.roleOrder.length) {
+    bucket.roleOrder = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
+  }
+  if (typeof bucket.minReady !== 'number' || bucket.minReady < 1) {
+    bucket.minReady = 1;
+  }
+  if (!bucket.members || typeof bucket.members !== 'object') {
+    bucket.members = { melee: [], archer: [], medic: [], dismantler: [], other: [] };
+  } else {
+    _ensureMemberBuckets(bucket);
+  }
+  if (!bucket.state) bucket.state = SQUAD_STATE_ASSEMBLING;
+  if (typeof bucket.createdAt !== 'number') bucket.createdAt = Game.time || 0;
+  if (typeof bucket.lastActive !== 'number') bucket.lastActive = Game.time || bucket.createdAt;
+  if (typeof bucket.lastPlanTick !== 'number') bucket.lastPlanTick = 0;
+  if (typeof bucket.spawnCooldownUntil !== 'number') bucket.spawnCooldownUntil = 0;
+  if (typeof bucket.targetAt !== 'number') bucket.targetAt = 0;
+  if (typeof bucket.anchorAt !== 'number') bucket.anchorAt = 0;
+  _updateMemberAggregates(bucket);
+  return bucket;
+}
+
+function _migrateSquadRegistry(registry) {
+  for (var key in registry) {
+    if (!Object.prototype.hasOwnProperty.call(registry, key)) continue;
+    var entry = registry[key];
+    if (!entry || typeof entry !== 'object') {
+      registry[key] = _createSquadRecord(key);
+      continue;
+    }
+    if (entry.members && !entry.memberRecords && !Array.isArray(entry.members)) {
+      entry.memberRecords = entry.members;
+      entry.members = null;
+    }
+    if (!entry.memberRecords || typeof entry.memberRecords !== 'object') {
+      entry.memberRecords = {};
+    }
+    _normalizeSquadRecord(entry, key);
+  }
+}
+
+function _ensureSquadRegistry() {
+  if (!Memory.squads || typeof Memory.squads !== 'object') {
+    Memory.squads = {};
+  }
+  var registry = Memory.squads;
+  if (!Memory.__squadRegistryVersion || Memory.__squadRegistryVersion < SQUAD_REGISTRY_VERSION) {
+    _migrateSquadRegistry(registry);
+    Memory.__squadRegistryVersion = SQUAD_REGISTRY_VERSION;
+  }
+  return registry;
+}
+
+function _trimMemberRecords(bucket) {
+  var roster = bucket.memberRecords || {};
+  var changed = false;
+  for (var name in roster) {
+    if (!Object.prototype.hasOwnProperty.call(roster, name)) continue;
+    if (!Game.creeps[name]) {
+      delete roster[name];
+      changed = true;
+    }
+  }
+  if (changed) {
+    _updateMemberAggregates(bucket);
+  }
+  return changed;
+}
+
+function _computeSquadSnapshot(registry) {
+  registry = registry || _ensureSquadRegistry();
+  var callsigns = _callsignList();
+  var activeCount = 0;
+  var countsByColony = {};
+  var byTarget = {};
+  var freeCallsigns = [];
+  for (var i = 0; i < callsigns.length; i++) {
+    var call = callsigns[i];
+    var record = registry[call];
+    if (!record) {
+      freeCallsigns.push(call);
+      continue;
+    }
+    record = _normalizeSquadRecord(record, call);
+    var state = record.state || SQUAD_STATE_ASSEMBLING;
+    if (state === SQUAD_STATE_DISBANDED) {
+      freeCallsigns.push(call);
+      continue;
+    }
+    if (state === SQUAD_STATE_ASSEMBLING || state === SQUAD_STATE_ACTIVE || state === SQUAD_STATE_RETREATING) {
+      activeCount += 1;
+      if (record.colony) {
+        countsByColony[record.colony] = (countsByColony[record.colony] || 0) + 1;
+      }
+      if (record.targetRoom) {
+        byTarget[record.targetRoom] = call;
+      }
+    } else {
+      freeCallsigns.push(call);
+    }
+  }
+  return {
+    registry: registry,
+    callsigns: callsigns,
+    maxGlobal: _maxGlobalSquads(),
+    maxPerColony: _maxSquadsPerColony(),
+    activeCount: activeCount,
+    countsByColony: countsByColony,
+    byTarget: byTarget,
+    freeCallsigns: freeCallsigns
+  };
+}
+
+function _hasFlagForCallsign(callsign) {
+  var mem = _flagMem();
+  for (var name in mem.bindings) {
+    if (!Object.prototype.hasOwnProperty.call(mem.bindings, name)) continue;
+    if (_flagDeriveSquadId(name) === callsign) {
+      if (Game.flags[name]) return true;
+    }
+  }
+  if (Game.flags) {
+    for (var fname in Game.flags) {
+      if (!Object.prototype.hasOwnProperty.call(Game.flags, fname)) continue;
+      if (_flagDeriveSquadId(fname) === callsign) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function _reserveCallsign(targetRoom, colony, options) {
+  var registry = _ensureSquadRegistry();
+  var snapshot = _computeSquadSnapshot(registry);
+  if (targetRoom && snapshot.byTarget[targetRoom]) {
+    var existing = snapshot.byTarget[targetRoom];
+    var record = registry[existing];
+    record = _normalizeSquadRecord(record, existing);
+    if (colony && !record.colony) record.colony = colony;
+    if (options && options.flagName) record.flagName = options.flagName;
+    return { callsign: existing, record: record, reused: true, snapshot: snapshot };
+  }
+  if (snapshot.activeCount >= snapshot.maxGlobal) {
+    return null;
+  }
+  if (colony && snapshot.countsByColony[colony] >= snapshot.maxPerColony) {
+    return null;
+  }
+  var free = snapshot.freeCallsigns || [];
+  if (!free.length) {
+    return null;
+  }
+  var call = free[0];
+  var bucket = registry[call];
+  if (!bucket) {
+    bucket = _createSquadRecord(call);
+    registry[call] = bucket;
+  }
+  bucket = _normalizeSquadRecord(bucket, call);
+  bucket.state = SQUAD_STATE_ASSEMBLING;
+  if (targetRoom) bucket.targetRoom = targetRoom;
+  if (typeof bucket.targetAt !== 'number') bucket.targetAt = 0;
+  if (targetRoom && (!bucket.targetAt || bucket.targetRoom !== targetRoom)) {
+    bucket.targetAt = Game.time || 0;
+  }
+  if (colony) bucket.colony = colony;
+  bucket.createdAt = bucket.createdAt || (Game.time || 0);
+  bucket.lastActive = Game.time || bucket.lastActive || bucket.createdAt;
+  if (options && options.flagName) {
+    bucket.flagName = options.flagName;
+  }
+  bucket.suppressed = false;
+  return { callsign: call, record: bucket, reused: false, snapshot: snapshot };
+}
+
+function _unlinkFlagBindings(callsign) {
+  var mem = _flagMem();
+  for (var name in mem.bindings) {
+    if (!Object.prototype.hasOwnProperty.call(mem.bindings, name)) continue;
+    if (_flagDeriveSquadId(name) === callsign) {
+      delete mem.bindings[name];
+      if (mem.manual && mem.manual[name]) {
+        delete mem.manual[name];
+      }
+      _flagRemoveFlag(name);
+    }
+  }
+}
+
+function _releaseCallsign(callsign, options) {
+  if (!callsign) return false;
+  var registry = _ensureSquadRegistry();
+  if (!registry[callsign]) {
+    return false;
+  }
+  _unlinkFlagBindings(callsign);
+  if (options && options.keepRecord) {
+    var record = _normalizeSquadRecord(registry[callsign], callsign);
+    record.state = SQUAD_STATE_DISBANDED;
+    record.colony = null;
+    record.targetRoom = null;
+    record.flagName = null;
+    record.memberRecords = {};
+    _updateMemberAggregates(record);
+    record.lastActive = Game.time || record.lastActive || 0;
+    return true;
+  }
+  delete registry[callsign];
+  return true;
+}
+
+function _noteSquadPlan(callsign, data) {
+  if (!callsign) return;
+  var registry = _ensureSquadRegistry();
+  var record = registry[callsign];
+  if (!record) {
+    record = _createSquadRecord(callsign);
+    registry[callsign] = record;
+  }
+  record = _normalizeSquadRecord(record, callsign);
+  record.lastPlanTick = Game.time || 0;
+  record.state = record.state === SQUAD_STATE_DISBANDED ? SQUAD_STATE_ASSEMBLING : record.state;
+  if (data) {
+    if (data.targetRoom) record.targetRoom = data.targetRoom;
+    if (data.colony) record.colony = data.colony;
+    if (data.flagName) record.flagName = data.flagName;
+  }
+  if (!record.createdAt) record.createdAt = Game.time || 0;
+  if (!record.lastActive) record.lastActive = Game.time || record.createdAt;
+}
+
+function _noteSpawnResult(callsign, outcome, context) {
+  if (!callsign) return;
+  var registry = _ensureSquadRegistry();
+  var record = registry[callsign];
+  if (!record) return;
+  record = _normalizeSquadRecord(record, callsign);
+  if (context && context.role) {
+    record.lastSpawnRole = context.role;
+  }
+  record.lastSpawnTick = Game.time || record.lastSpawnTick || 0;
+  if (outcome === 'spawned') {
+    record.state = SQUAD_STATE_ASSEMBLING;
+    record.lastActive = Game.time || record.lastActive || record.createdAt;
+  } else if (outcome === 'unaffordable') {
+    record.unaffordableAt = Game.time || 0;
+  } else if (outcome === 'failed') {
+    record.failedAt = Game.time || 0;
+  }
+}
+
+function _maintainSquadRegistry(options) {
+  var registry = _ensureSquadRegistry();
+  var now = Game.time || 0;
+  var released = [];
+  for (var key in registry) {
+    if (!Object.prototype.hasOwnProperty.call(registry, key)) continue;
+    var record = registry[key];
+    record = _normalizeSquadRecord(record, key);
+    _trimMemberRecords(record);
+    var living = 0;
+    var roster = record.memberRecords || {};
+    for (var name in roster) {
+      if (!Object.prototype.hasOwnProperty.call(roster, name)) continue;
+      if (Game.creeps[name]) living += 1;
+    }
+    if (living > 0) {
+      record.state = SQUAD_STATE_ACTIVE;
+      record.lastActive = now;
+    }
+    var flagPresent = _hasFlagForCallsign(key);
+    var assemblingTooLong = (record.state === SQUAD_STATE_ASSEMBLING && living === 0 && now - (record.lastPlanTick || record.createdAt || now) > SQUAD_ASSEMBLING_TIMEOUT);
+    var staleNoFlag = (!flagPresent && living === 0 && (now - (record.lastActive || record.createdAt || now) > 100));
+    if (assemblingTooLong || staleNoFlag) {
+      _releaseCallsign(key, options && options.keepRecords ? { keepRecord: true } : null);
+      if (!(options && options.keepRecords)) {
+        delete registry[key];
+      }
+      released.push(key);
+    }
+  }
+  return released;
+}
 
 function _flagMem() {
   if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {}, manual: {} };
@@ -323,6 +773,14 @@ function ensureSquadFlags(options) {
   var cfg = SQUAD_FLAG_CFG;
   var manual = mem.manual;
 
+  _maintainSquadRegistry({ keepRecords: true });
+
+  var snapshot = _computeSquadSnapshot();
+  var capReached = snapshot.activeCount >= snapshot.maxGlobal;
+  if (capReached) {
+    mem.capSuppressedAt = tick;
+  }
+
   var rooms = _flagRoomsWithNonScoutCreeps();
   for (var r = 0; r < rooms.length; r++) {
     var rn = rooms[r];
@@ -361,9 +819,21 @@ function ensureSquadFlags(options) {
       mem.bindings[fname] = flag.pos.roomName;
       manual[fname] = true;
       _flagDebug('[TaskSquad] Manual bind: ' + fname + ' -> ' + flag.pos.roomName);
+      var callManual = _flagDeriveSquadId(fname);
+      var bucketManual = _ensureSquadBucket(callManual);
+      bucketManual.flagName = fname;
+      bucketManual.targetRoom = flag.pos.roomName;
+      bucketManual.targetAt = tick;
+      bucketManual.lastActive = tick;
     } else if (manual[fname] && currentBinding !== flag.pos.roomName) {
       mem.bindings[fname] = flag.pos.roomName;
       _flagDebug('[TaskSquad] Manual rebalance: ' + fname + ' -> ' + flag.pos.roomName);
+      var manualCallsign = _flagDeriveSquadId(fname);
+      var manualBucket = _ensureSquadBucket(manualCallsign);
+      manualBucket.flagName = fname;
+      manualBucket.targetRoom = flag.pos.roomName;
+      manualBucket.targetAt = tick;
+      manualBucket.lastActive = tick;
     }
   }
 
@@ -384,6 +854,7 @@ function ensureSquadFlags(options) {
         _flagRemoveFlag(fname);
         delete mem.bindings[fname];
         if (manual && manual[fname]) delete manual[fname];
+        _releaseCallsign(_flagDeriveSquadId(fname));
         keep = false;
       }
     }
@@ -392,6 +863,12 @@ function ensureSquadFlags(options) {
         ? new RoomPosition(rrec.lastPos.x, rrec.lastPos.y, rrec.lastPos.roomName)
         : new RoomPosition(25, 25, boundRoom);
       _flagEnsureFlagAt(fname, pos);
+      var call = _flagDeriveSquadId(fname);
+      var bucket = _ensureSquadBucket(call);
+      bucket.flagName = fname;
+      bucket.targetRoom = boundRoom;
+      bucket.targetAt = tick;
+      bucket.lastActive = tick;
     }
   }
 
@@ -425,6 +902,10 @@ function ensureSquadFlags(options) {
       continue;
     }
 
+    if (capReached) {
+      break;
+    }
+
     var pick = candidates.shift();
     if (!pick) break;
 
@@ -435,6 +916,26 @@ function ensureSquadFlags(options) {
       ? new RoomPosition(rec3.lastPos.x, rec3.lastPos.y, rec3.lastPos.roomName)
       : new RoomPosition(25, 25, pick.rn);
     _flagEnsureFlagAt(fname, placePos);
+
+    var callAssign = _flagDeriveSquadId(fname);
+    var reserve = _reserveCallsign(pick.rn, null, { flagName: fname });
+    if (!reserve) {
+      mem.bindings[fname] = null;
+      _flagRemoveFlag(fname);
+      if (!mem.capLog || tick - (mem.capLog | 0) > 50) {
+        mem.capLog = tick;
+        if (squadLog && squadLog.info) {
+          squadLog.info('[TaskSquad] CAP_REACHED - unable to allocate callsign for ' + pick.rn);
+        }
+      }
+      capReached = true;
+      break;
+    }
+    var assignedBucket = _ensureSquadBucket(callAssign);
+    assignedBucket.flagName = fname;
+    assignedBucket.targetRoom = pick.rn;
+    assignedBucket.targetAt = tick;
+    assignedBucket.lastActive = tick;
   }
 
   for (var fName in Game.flags) {
@@ -465,18 +966,13 @@ function getActiveSquads(options) {
   var ownedRooms = (options && options.ownedRooms) || [];
   var out = [];
 
-  if (!Memory.squads) Memory.squads = {};
-
   for (var nameIdx = 0; nameIdx < SQUAD_FLAG_CFG.names.length; nameIdx++) {
     var fname = SQUAD_FLAG_CFG.names[nameIdx];
     var boundRoom = mem.bindings[fname];
     if (!boundRoom) continue;
 
     var squadId = _flagDeriveSquadId(fname);
-    var bucket = Memory.squads[squadId];
-    if (!bucket) {
-      bucket = Memory.squads[squadId] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
-    }
+    var bucket = _ensureSquadBucket(squadId);
 
     var rec = mem.rooms[boundRoom];
     var flag = Game.flags[fname];
@@ -484,11 +980,16 @@ function getActiveSquads(options) {
     if (rallyPos) {
       bucket.rally = { x: rallyPos.x, y: rallyPos.y, roomName: rallyPos.roomName };
     }
+    bucket.flagName = fname;
     bucket.targetRoom = boundRoom;
+    bucket.targetAt = Game.time;
     bucket.home = _flagPickHomeRoom(boundRoom, ownedRooms, bucket.home);
+    bucket.colony = bucket.home;
     bucket.lastIntelTick = Game.time;
     bucket.lastIntelScore = rec && typeof rec.lastScore === 'number' ? rec.lastScore : 0;
     bucket.lastIntelDetails = rec && rec.lastDetails ? rec.lastDetails : null;
+    bucket.state = bucket.state === SQUAD_STATE_DISBANDED ? SQUAD_STATE_ASSEMBLING : bucket.state;
+    bucket.lastActive = Game.time || bucket.lastActive || bucket.createdAt || 0;
 
     out.push({
       squadId: squadId,
@@ -498,7 +999,8 @@ function getActiveSquads(options) {
       threatScore: bucket.lastIntelScore || 0,
       details: bucket.lastIntelDetails || null,
       homeRoom: bucket.home,
-      flag: flag
+      flag: flag,
+      state: bucket.state
     });
   }
 
@@ -689,13 +1191,23 @@ var TaskSquad = (function () {
   }
 
   function _ensureSquadBucket(id) {
-    if (!Memory.squads) Memory.squads = {};
-    if (!Memory.squads[id]) Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
-    var bucket = Memory.squads[id];
-    if (!bucket.members) bucket.members = {};
-    if (!bucket.desiredRoles) bucket.desiredRoles = {};
-    if (!bucket.roleOrder || !bucket.roleOrder.length) bucket.roleOrder = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
-    if (!bucket.minReady || bucket.minReady < 1) bucket.minReady = 1;
+    var callsign = id || 'Alpha';
+    var registry = _ensureSquadRegistry();
+    var bucket = registry[callsign];
+    if (!bucket) {
+      bucket = _createSquadRecord(callsign);
+      registry[callsign] = bucket;
+    }
+    bucket = _normalizeSquadRecord(bucket, callsign);
+    if (bucket.desiredRoles && typeof bucket.desiredRoles !== 'object') {
+      bucket.desiredRoles = {};
+    }
+    if (!Array.isArray(bucket.roleOrder) || !bucket.roleOrder.length) {
+      bucket.roleOrder = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
+    }
+    if (typeof bucket.minReady !== 'number' || bucket.minReady < 1) {
+      bucket.minReady = 1;
+    }
     if (bucket.leader === undefined) bucket.leader = null;
     if (bucket.leaderPri === undefined) bucket.leaderPri = null;
     return bucket;
@@ -708,16 +1220,17 @@ var TaskSquad = (function () {
   }
 
   function _cleanupMembers(bucket, id) {
-    if (!bucket || !bucket.members) return;
-    for (var name in bucket.members) {
-      if (!_hasOwn(bucket.members, name)) continue;
-      var rec = bucket.members[name];
+    if (!bucket) return;
+    var roster = bucket.memberRecords || {};
+    for (var name in roster) {
+      if (!_hasOwn(roster, name)) continue;
+      var rec = roster[name];
       if (!rec) {
-        delete bucket.members[name];
+        delete roster[name];
         continue;
       }
       if (!Game.creeps[name]) {
-        delete bucket.members[name];
+        delete roster[name];
         continue;
       }
       if (rec.updated && Game.time - rec.updated > MEMBER_STALE_TICKS) {
@@ -725,21 +1238,24 @@ var TaskSquad = (function () {
         if (c && c.my) {
           rec.updated = Game.time;
         } else {
-          delete bucket.members[name];
+          delete roster[name];
         }
       }
     }
-    if (bucket.leader && (!bucket.members[bucket.leader] || !Game.creeps[bucket.leader])) {
+    if (bucket.leader && (!roster[bucket.leader] || !Game.creeps[bucket.leader])) {
       bucket.leader = null;
       bucket.leaderPri = null;
     }
+    _updateMemberAggregates(bucket);
     if (id) _refreshLeader(bucket, id);
   }
 
   function _refreshLeader(bucket, id, candidateName) {
     if (!bucket) return;
 
-    if (bucket.leader && (!bucket.members[bucket.leader] || !Game.creeps[bucket.leader])) {
+    var roster = bucket.memberRecords || {};
+
+    if (bucket.leader && (!roster[bucket.leader] || !Game.creeps[bucket.leader])) {
       bucket.leader = null;
       bucket.leaderPri = null;
     }
@@ -1054,9 +1570,10 @@ var TaskSquad = (function () {
 
     _cleanupMembers(bucket, id);
 
-    var entry = bucket.members[creepName];
+    var roster = bucket.memberRecords || (bucket.memberRecords = {});
+    var entry = roster[creepName];
     if (!entry) {
-      entry = bucket.members[creepName] = { role: role || 'unknown', rallied: false };
+      entry = roster[creepName] = { role: role || 'unknown', rallied: false };
     }
     if (role) entry.role = role;
     entry.updated = Game.time;
@@ -1085,6 +1602,9 @@ var TaskSquad = (function () {
       entry.ralliedAt = Game.time;
     }
 
+    bucket.state = SQUAD_STATE_ACTIVE;
+    bucket.lastActive = Game.time || bucket.lastActive || bucket.createdAt || 0;
+    _updateMemberAggregates(bucket);
     _refreshLeader(bucket, id, creepName);
   }
 
@@ -1097,9 +1617,10 @@ var TaskSquad = (function () {
     var counts = {};
     var totalRallied = 0;
 
-    for (var name in bucket.members) {
-      if (!_hasOwn(bucket.members, name)) continue;
-      var rec = bucket.members[name];
+    var roster = bucket.memberRecords || {};
+    for (var name in roster) {
+      if (!_hasOwn(roster, name)) continue;
+      var rec = roster[name];
       if (!rec) continue;
       var live = Game.creeps[name];
       if (!live || !live.my) continue;
@@ -1150,6 +1671,13 @@ var TaskSquad = (function () {
   API.noteFriendlyFireAvoid = noteFriendlyFireAvoid;
   API.ensureSquadFlags = ensureSquadFlags;
   API.getActiveSquads = getActiveSquads;
+  API.ensureSquadRecord = _ensureSquadBucket;
+  API.reserveCallsign = _reserveCallsign;
+  API.releaseCallsign = _releaseCallsign;
+  API.getSquadRegistrySnapshot = _computeSquadSnapshot;
+  API.maintainSquadRegistry = _maintainSquadRegistry;
+  API.noteSquadPlan = _noteSquadPlan;
+  API.noteSpawnResult = _noteSpawnResult;
 
   return API;
 })();
@@ -1160,3 +1688,10 @@ module.exports.friendlyUsernames = friendlyUsernames;
 module.exports.noteFriendlyFireAvoid = noteFriendlyFireAvoid;
 module.exports.ensureSquadFlags = ensureSquadFlags;
 module.exports.getActiveSquads = getActiveSquads;
+module.exports.ensureSquadRecord = _ensureSquadBucket;
+module.exports.reserveCallsign = _reserveCallsign;
+module.exports.releaseCallsign = _releaseCallsign;
+module.exports.getSquadRegistrySnapshot = _computeSquadSnapshot;
+module.exports.maintainSquadRegistry = _maintainSquadRegistry;
+module.exports.noteSquadPlan = _noteSquadPlan;
+module.exports.noteSpawnResult = _noteSpawnResult;
