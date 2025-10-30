@@ -9,6 +9,21 @@ var TaskCombatArcher = require('Task.CombatArcher');
 var TaskCombatMelee = require('Task.CombatMelee');
 var TaskCombatMedic = require('Task.CombatMedic');
 
+/*
+Test Script (Combat Squad Cap Validation):
+1. Set `CoreConfig.settings.Combat.MAX_ACTIVE_SQUADS_GLOBAL = 1` and ensure the callsign list includes at least Alpha and Bravo.
+2. Place multiple Squad flags (or remote attack targets) so that more than one squad is requested.
+   - Observe the console for `CAP_REACHED` logs and confirm only one callsign (Alpha) is allocated while others wait.
+3. Use `BeeDebug.listSquads()` to view the active registry. Expect output similar to:
+   Callsign | State | Target | Colony | Members | Age | LastActive
+   Alpha | assembling | W2N1 | W1N1 | melee:1, medic:1 | age 12 | idle 0
+4. Remove the squad flag or eliminate the active squad. After creeps die, watch `BeeDebug.listSquads()` until Alpha disappears or is marked available.
+5. Add a new flag to trigger another squad; confirm the next available callsign (e.g., Bravo) or a re-used Alpha is assigned.
+6. Configure a squad body that exceeds a room's energy capacity. Verify logs report the plan as unaffordable, the plan clears, and worker roles continue spawning normally.
+7. Create multiple flags for the same target room. Confirm only one squad per target is generated (deduped in the registry).
+8. While running, call `BeeDebug.releaseSquad("Alpha")` to manually free a callsign and confirm the log reflects the release.
+*/
+
 var BeeHiveSettings = CoreConfig.settings['BeeHiveMind'];
 var getEconomySettings = (typeof CoreConfig.getEconomySettings === 'function')
   ? CoreConfig.getEconomySettings
@@ -1208,6 +1223,12 @@ function prepareTickCaches() {
 
   cache.tick = tick;
 
+  if (TaskSquad && typeof TaskSquad.maintainSquadRegistry === 'function') {
+    try {
+      TaskSquad.maintainSquadRegistry({ keepRecords: true });
+    } catch (maintainErr) {}
+  }
+
   var ownedRooms = [];
   var roomsMap = Object.create(null);
   for (var roomName in Game.rooms) {
@@ -1382,6 +1403,30 @@ function prepareTickCaches() {
   }
   cache.remotesByHome = remotesByHome;
 
+  if (TaskSquad && typeof TaskSquad.getSquadRegistrySnapshot === 'function') {
+    try {
+      cache.squadRegistry = TaskSquad.getSquadRegistrySnapshot();
+    } catch (snapshotErr) {
+      cache.squadRegistry = {
+        maxGlobal: 0,
+        maxPerColony: 1,
+        activeCount: 0,
+        countsByColony: Object.create(null),
+        byTarget: Object.create(null),
+        freeCallsigns: []
+      };
+    }
+  } else {
+    cache.squadRegistry = {
+      maxGlobal: 0,
+      maxPerColony: 1,
+      activeCount: 0,
+      countsByColony: Object.create(null),
+      byTarget: Object.create(null),
+      freeCallsigns: []
+    };
+  }
+
   return cache;
 }
 
@@ -1455,16 +1500,27 @@ function determineBuilderFailureReason(available, capacity) {
 
 function ensureSquadMemoryRecord(squadId) {
   var id = squadId || 'Alpha';
+  if (TaskSquad && typeof TaskSquad.ensureSquadRecord === 'function') {
+    try {
+      return TaskSquad.ensureSquadRecord(id);
+    } catch (squadErr) {}
+  }
   if (!Memory.squads) Memory.squads = {};
   if (!Memory.squads[id]) {
-    Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
+    Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0, desiredRoles: {}, roleOrder: ['CombatMelee', 'CombatArcher', 'CombatMedic'], minReady: 1, memberRecords: {}, members: { melee: [], archer: [], medic: [], dismantler: [], other: [] }, state: 'assembling', createdAt: Game.time || 0, lastActive: Game.time || 0 };
   }
   var bucket = Memory.squads[id];
   if (!bucket.desiredRoles) bucket.desiredRoles = {};
   if (!bucket.roleOrder || !bucket.roleOrder.length) bucket.roleOrder = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
   if (!bucket.minReady || bucket.minReady < 1) bucket.minReady = 1;
-  if (!bucket.members) bucket.members = bucket.members || {};
+  if (!bucket.memberRecords) bucket.memberRecords = bucket.members || {};
+  if (!bucket.members || typeof bucket.members !== 'object') {
+    bucket.members = { melee: [], archer: [], medic: [], dismantler: [], other: [] };
+  }
   if (typeof bucket.spawnCooldownUntil !== 'number') bucket.spawnCooldownUntil = 0;
+  if (!bucket.state) bucket.state = 'assembling';
+  if (typeof bucket.createdAt !== 'number') bucket.createdAt = Game.time || 0;
+  if (typeof bucket.lastActive !== 'number') bucket.lastActive = Game.time || bucket.createdAt;
   return bucket;
 }
 
@@ -1519,6 +1575,7 @@ function deriveSquadDesiredRoles(intel, bucket) {
   var melee = 1;
   var medic = 1;
   var archer = 0;
+  var dismantler = 0;
 
   if (details.hasRanged || score >= 10) {
     archer = 1;
@@ -1526,12 +1583,16 @@ function deriveSquadDesiredRoles(intel, bucket) {
   if (details.hasHostileTower || score >= 18) {
     melee = 2;
     medic = Math.max(medic, 2);
+    dismantler = Math.max(dismantler, 1);
   }
   if (details.hasHeal) {
     medic = Math.max(medic, 2);
   }
   if (score >= 22 || (details.hasRanged && details.hasHostileTower)) {
     archer = Math.max(archer, 2);
+  }
+  if (details.hasHostileSpawn || details.hasHostileTower) {
+    dismantler = Math.max(dismantler, 1);
   }
 
   var desired = Object.create(null);
@@ -1540,6 +1601,9 @@ function deriveSquadDesiredRoles(intel, bucket) {
   if (archer > 0) {
     desired.CombatArcher = archer;
   }
+  if (dismantler > 0) {
+    desired.Dismantler = dismantler;
+  }
 
   bucket.desiredRoles = desired;
   var order = ['CombatMelee'];
@@ -1547,9 +1611,12 @@ function deriveSquadDesiredRoles(intel, bucket) {
     order.push('CombatArcher');
   }
   order.push('CombatMedic');
+  if (dismantler > 0) {
+    order.push('Dismantler');
+  }
   bucket.roleOrder = order;
 
-  var total = melee + medic + (archer > 0 ? archer : 0);
+  var total = melee + medic + (archer > 0 ? archer : 0) + (dismantler > 0 ? dismantler : 0);
   bucket.minReady = total > 0 ? total : 1;
 
   return desired;
@@ -1579,9 +1646,40 @@ function buildSquadSpawnPlans(cache) {
   }
 
   var roomsOwned = (cache && cache.roomsOwned) || [];
+  var registrySnapshot = (cache && cache.squadRegistry) || null;
+  if ((!registrySnapshot || typeof registrySnapshot !== 'object') && TaskSquad && typeof TaskSquad.getSquadRegistrySnapshot === 'function') {
+    try {
+      registrySnapshot = TaskSquad.getSquadRegistrySnapshot();
+    } catch (snapshotErr) {
+      registrySnapshot = null;
+    }
+  }
+  if (!registrySnapshot || typeof registrySnapshot !== 'object') {
+    registrySnapshot = {
+      maxGlobal: 0,
+      maxPerColony: 1,
+      activeCount: 0,
+      countsByColony: Object.create(null),
+      byTarget: Object.create(null),
+      freeCallsigns: []
+    };
+  }
+  cache.squadRegistry = registrySnapshot;
+
+  var capLogStore = GLOBAL_CACHE.squadCapLog || (GLOBAL_CACHE.squadCapLog = Object.create(null));
+  function noteCapLog(key, message) {
+    if (!shouldLogThrottled(capLogStore, key, 50)) return;
+    if (hiveLog && typeof hiveLog.info === 'function') {
+      hiveLog.info(message);
+    } else {
+      console.log(message);
+    }
+  }
+
   var active = TaskSquad.getActiveSquads({ ownedRooms: roomsOwned }) || [];
   var intelQueue = [];
   var seenTargets = Object.create(null);
+  var suppressedTargets = Object.create(null);
 
   for (var i = 0; i < active.length; i++) {
     var intel = active[i];
@@ -1652,6 +1750,11 @@ function buildSquadSpawnPlans(cache) {
     if (!intel) continue;
     var id = intel.squadId || 'Alpha';
     var bucket = ensureSquadMemoryRecord(id);
+    var desired;
+    var census;
+    var nextRole;
+    var totalNeeded;
+    var key;
     if (intel.rallyPos) {
       bucket.rally = { x: intel.rallyPos.x, y: intel.rallyPos.y, roomName: intel.rallyPos.roomName };
     }
@@ -1665,12 +1768,77 @@ function buildSquadSpawnPlans(cache) {
       continue;
     }
 
-    var desired = deriveSquadDesiredRoles(intel, bucket);
-    var census = gatherSquadCensus(id);
-    var nextRole = selectNextSquadRole(bucket, desired, census.counts);
+    var home = bucket.home || chooseHomeRoom(intel.targetRoom, roomsOwned, null);
+    if (!home && roomsOwned.length) {
+      home = roomsOwned[0].name;
+    }
+    if (!home) {
+      continue;
+    }
 
-    var totalNeeded = 0;
-    var key;
+    var isExisting = !!(registrySnapshot.byTarget && registrySnapshot.byTarget[intel.targetRoom]);
+    var colonyCount = (registrySnapshot.countsByColony && registrySnapshot.countsByColony[home]) || 0;
+    if (!isExisting) {
+      if (registrySnapshot.maxGlobal && registrySnapshot.activeCount >= registrySnapshot.maxGlobal) {
+        if (!suppressedTargets[intel.targetRoom]) {
+          noteCapLog('global', '🛡️[Squad] CAP_REACHED global target=' + intel.targetRoom + ' home=' + home);
+          suppressedTargets[intel.targetRoom] = true;
+        }
+        continue;
+      }
+      if (registrySnapshot.maxPerColony && registrySnapshot.maxPerColony > 0 && colonyCount >= registrySnapshot.maxPerColony) {
+        var suppressKey = home + ':' + intel.targetRoom;
+        if (!suppressedTargets[suppressKey]) {
+          noteCapLog('colony:' + home, '🛡️[Squad] CAP_REACHED colony=' + home + ' target=' + intel.targetRoom);
+          suppressedTargets[suppressKey] = true;
+        }
+        continue;
+      }
+    }
+
+    var reservation = null;
+    if (TaskSquad && typeof TaskSquad.reserveCallsign === 'function') {
+      try {
+        reservation = TaskSquad.reserveCallsign(intel.targetRoom, home, { flagName: intel.flagName });
+      } catch (reserveErr) {
+        reservation = null;
+      }
+    }
+    if (!reservation) {
+      if (!isExisting && !suppressedTargets[intel.targetRoom]) {
+        noteCapLog('reserve:' + intel.targetRoom, '🛡️[Squad] CAP_REACHED reserve target=' + intel.targetRoom + ' home=' + home);
+        suppressedTargets[intel.targetRoom] = true;
+      }
+      continue;
+    }
+
+    id = reservation.callsign || id;
+    intel.squadId = id;
+    bucket = reservation.record || ensureSquadMemoryRecord(id);
+    bucket.home = home;
+    bucket.colony = home;
+    bucket.targetRoom = intel.targetRoom;
+    bucket.flagName = intel.flagName || bucket.flagName;
+    if (TaskSquad && typeof TaskSquad.noteSquadPlan === 'function') {
+      try {
+        TaskSquad.noteSquadPlan(id, { targetRoom: intel.targetRoom, colony: home, flagName: intel.flagName });
+      } catch (noteErr) {}
+    }
+    if (TaskSquad && typeof TaskSquad.getSquadRegistrySnapshot === 'function') {
+      try {
+        registrySnapshot = TaskSquad.getSquadRegistrySnapshot();
+      } catch (snapshotRefreshErr) {}
+    }
+
+    if (bucket.spawnCooldownUntil && bucket.spawnCooldownUntil > Game.time) {
+      continue;
+    }
+
+    desired = deriveSquadDesiredRoles(intel, bucket);
+    census = gatherSquadCensus(id);
+    nextRole = selectNextSquadRole(bucket, desired, census.counts);
+
+    totalNeeded = 0;
     for (key in desired) {
       if (!hasOwn(desired, key)) continue;
       totalNeeded += desired[key] || 0;
@@ -1680,14 +1848,6 @@ function buildSquadSpawnPlans(cache) {
     }
 
     if (!nextRole) {
-      continue;
-    }
-
-    var home = bucket.home || chooseHomeRoom(intel.targetRoom, roomsOwned, null);
-    if (!home && roomsOwned.length) {
-      home = roomsOwned[0].name;
-    }
-    if (!home) {
       continue;
     }
 
@@ -1777,8 +1937,11 @@ function trySpawnSquadMember(spawner, plan) {
     var economyState = economyStates[room.name];
     if (economyState && !economyState.allowCombat && !manualOverride) {
       // Spawn is intentionally idled until the economy is back online.
-      debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=waiting reason=economy');
-      return 'waiting';
+      debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=defer reason=economy');
+      if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+        try { TaskSquad.noteSpawnResult(plan.squadId, 'defer', { role: plan.role, reason: 'economy' }); } catch (econErr) {}
+      }
+      return 'defer';
     }
   }
 
@@ -1939,7 +2102,10 @@ function trySpawnSquadMember(spawner, plan) {
 
     if (!bestBody.length || bestCost <= 0) {
       debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=drop reason=no-body');
-      return 'skip';
+      if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+        try { TaskSquad.noteSpawnResult(plan.squadId, 'unaffordable', { role: plan.role, reason: 'no-body' }); } catch (noteNoBody2) {}
+      }
+      return 'unaffordable';
     }
     body = bestBody;
     cost = bestCost;
@@ -1959,7 +2125,10 @@ function trySpawnSquadMember(spawner, plan) {
       initialTierIndex = affordableTier.index;
     } else {
       debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=drop reason=overcap cost=' + cost + ' cap=' + capacity);
-      return 'skip';
+      if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+        try { TaskSquad.noteSpawnResult(plan.squadId, 'unaffordable', { role: plan.role, reason: 'overcap' }); } catch (noteOvercap) {}
+      }
+      return 'unaffordable';
     }
   }
 
@@ -1987,20 +2156,29 @@ function trySpawnSquadMember(spawner, plan) {
 
   if (!body.length) {
     logDecision('drop', 'reason=no-body');
-    return 'skip';
+    if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+      try { TaskSquad.noteSpawnResult(plan.squadId, 'unaffordable', { role: plan.role, reason: 'no-body' }); } catch (noteNoBody) {}
+    }
+    return 'unaffordable';
   }
 
   if (cost > available) {
-    logDecision('waiting', 'reason=energy');
-    return 'waiting';
+    logDecision('defer', 'reason=energy');
+    if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+      try { TaskSquad.noteSpawnResult(plan.squadId, 'defer', { role: plan.role, reason: 'energy' }); } catch (noteEnergy) {}
+    }
+    return 'defer';
   }
 
   var cpuThreshold = (ECON_CFG && typeof ECON_CFG.CPU_MIN_BUCKET === 'number')
     ? ECON_CFG.CPU_MIN_BUCKET
     : 500;
   if (!isCpuBucketHealthy(cpuThreshold)) {
-    logDecision('waiting', 'reason=cpu');
-    return 'waiting';
+    logDecision('defer', 'reason=cpu');
+    if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+      try { TaskSquad.noteSpawnResult(plan.squadId, 'defer', { role: plan.role, reason: 'cpu' }); } catch (noteCpu) {}
+    }
+    return 'defer';
   }
 
   var homeRoom = plan.homeRoom || room.name;
@@ -2035,15 +2213,24 @@ function trySpawnSquadMember(spawner, plan) {
       bucket.minReady = plan.totalNeeded;
     }
     hiveLog.info('🛡️[Squad ' + plan.squadId + '] Spawning ' + plan.role + ' @ RCL' + ((room.controller && room.controller.level) || 0) + ' (cost ~' + cost + ')');
+    if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+      try { TaskSquad.noteSpawnResult(plan.squadId, 'spawned', { role: plan.role }); } catch (noteSpawn) {}
+    }
     return 'spawned';
   }
 
   if (result === ERR_NOT_ENOUGH_ENERGY) {
-    logDecision('waiting', 'reason=spawn-energy');
-    return 'waiting';
+    logDecision('defer', 'reason=spawn-energy');
+    if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+      try { TaskSquad.noteSpawnResult(plan.squadId, 'defer', { role: plan.role, reason: 'spawn-energy' }); } catch (noteSpawnEnergy) {}
+    }
+    return 'defer';
   }
 
   logDecision('error', 'code=' + result);
+  if (TaskSquad && typeof TaskSquad.noteSpawnResult === 'function') {
+    try { TaskSquad.noteSpawnResult(plan.squadId, 'failed', { role: plan.role, reason: 'spawn-error', code: result }); } catch (noteFail) {}
+  }
   return 'failed';
 }
 
@@ -2302,18 +2489,18 @@ var BeeHiveMind = {
             roomSpawned[room.name] = true;
             continue;
           }
-          if (planOutcome === 'waiting') {
-            debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (currentPlan.squadId || '?') + ':' + currentPlan.role + ' waiting (workers still eligible this tick).');
-            continue;
-          }
-          if (planOutcome === 'skip') {
-            // Drop impossible plans for a while so they stop hogging the spawn slot.
+          if (planOutcome === 'waiting' || planOutcome === 'defer') {
+            debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (currentPlan.squadId || '?') + ':' + currentPlan.role + ' deferred (workers still eligible this tick).');
+            // Do not continue; allow worker roles to spawn this tick.
+          } else if (planOutcome === 'unaffordable') {
             planQueue.shift();
             var skipBucket = ensureSquadMemoryRecord(currentPlan.squadId);
-            skipBucket.spawnCooldownUntil = Game.time + 50;
+            skipBucket.spawnCooldownUntil = Game.time + 200;
+            skipBucket.home = null;
+            if (skipBucket.colony !== undefined) skipBucket.colony = null;
+            hiveLog.info('🛡️[Squad ' + (currentPlan.squadId || '?') + '] dropped plan for ' + currentPlan.role + ' due to affordability constraints @ ' + room.name);
             continue;
-          }
-          if (planOutcome === 'failed') {
+          } else if (planOutcome === 'failed') {
             // Back off briefly after an unexpected failure so other roles can spawn.
             planQueue.shift();
             var planBucket = ensureSquadMemoryRecord(currentPlan.squadId);
