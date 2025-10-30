@@ -1,5 +1,5 @@
 var CoreConfig = require('core.config');
-var CoreSpawn = require('core.spawn');
+var TaskSpawn = require('Task.Spawn');
 
 var Logger = require('core.logger');
 var TaskCourier = require('Task.Courier');
@@ -604,39 +604,121 @@ function queenBody(carryCount, moveCount) {
   return body;
 }
 
-var QUEEN_BODY_TIERS = [
-  queenBody(22, 22),
-  queenBody(21, 21),
-  queenBody(20, 20),
-  queenBody(19, 19),
-  queenBody(18, 18),
-  queenBody(17, 17),
-  queenBody(16, 16),
-  queenBody(15, 15),
-  queenBody(14, 14),
-  queenBody(13, 13),
-  queenBody(12, 12),
-  queenBody(11, 11),
-  queenBody(10, 10),
-  queenBody(9, 9),
-  queenBody(8, 8),
-  queenBody(7, 7),
-  queenBody(6, 6),
-  queenBody(5, 5),
-  queenBody(4, 4),
-  queenBody(3, 3),
-  queenBody(2, 2),
-  queenBody(1, 1)
-];
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
+      continue;
+    }
+    copy[key] = context[key];
+  }
+  return copy;
+}
 
-module.exports.BODY_TIERS = QUEEN_BODY_TIERS.map(function (tier) { return tier.slice(); });
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(QUEEN_BODY_TIERS, energy);
+function buildFallbackQueenTiers() {
+  var tiers = [];
+  var count;
+  for (count = 22; count >= 1; count--) {
+    tiers.push(queenBody(count, count));
+  }
+  return tiers;
+}
+
+function getRegisteredQueenTiers() {
+  if (TaskSpawn && typeof TaskSpawn.getTierList === 'function') {
+    var list = TaskSpawn.getTierList('queen');
+    if (Array.isArray(list) && list.length) {
+      return list.map(function (entry) {
+        return Array.isArray(entry.parts) ? entry.parts.slice() : [];
+      });
+    }
+  }
+  return buildFallbackQueenTiers();
+}
+
+function costOfBody(body) {
+  if (!Array.isArray(body)) {
+    return 0;
+  }
+  var sum = 0;
+  for (var i = 0; i < body.length; i++) {
+    sum += BODYPART_COST[body[i]] || 0;
+  }
+  return sum;
+}
+
+function legacyPickLargestAffordable(tiers, energy) {
+  if (!Array.isArray(tiers)) {
+    return [];
+  }
+  var limit = (typeof energy === 'number' && energy >= 0) ? energy : 0;
+  for (var i = 0; i < tiers.length; i++) {
+    var body = tiers[i];
+    if (!Array.isArray(body) || !body.length) {
+      continue;
+    }
+    if (costOfBody(body) <= limit) {
+      return body.slice();
+    }
+  }
+  return [];
+}
+
+module.exports.BODY_TIERS = getRegisteredQueenTiers();
+
+module.exports.getSpawnBody = function (energyOrRoom, roomOrContext, maybeContext) {
+  var room = null;
+  var context = {};
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
+    }
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
+  }
+
+  var spawnModule = TaskSpawn;
+  if (spawnModule && typeof spawnModule.getBodyFor === 'function') {
+    var info = spawnModule.getBodyFor('queen', room, context) || {};
+    if (info && Array.isArray(info.parts) && info.parts.length) {
+      return info.parts.slice();
+    }
+  }
+
+  var available = 0;
+  if (typeof energyOrRoom === 'number') {
+    available = energyOrRoom;
+  } else if (context && typeof context.availableEnergy === 'number') {
+    available = context.availableEnergy;
+  } else if (room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+
+  return legacyPickLargestAffordable(module.exports.BODY_TIERS, available);
 };
+
 module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var energy = context && typeof context.availableEnergy === 'number' ? context.availableEnergy : 0;
-  var body = module.exports.getSpawnBody(energy, room, context);
+  var context = cloneSpawnContext(ctx);
+  var spawnModule = TaskSpawn;
+  var body = [];
+  if (spawnModule && typeof spawnModule.getBodyFor === 'function') {
+    var info = spawnModule.getBodyFor('queen', room, context) || {};
+    if (info && Array.isArray(info.parts) && info.parts.length) {
+      body = info.parts.slice();
+    }
+  }
+  if (!body.length) {
+    if (context.availableEnergy == null && room && typeof room.energyAvailable === 'number') {
+      context.availableEnergy = room.energyAvailable;
+    }
+    body = module.exports.getSpawnBody(room, context);
+  }
   return {
     body: body,
     namePrefix: 'queen',

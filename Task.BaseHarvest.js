@@ -1,6 +1,5 @@
 var Logger = require('core.logger');
 var Traveler = require('Traveler');
-var CoreSpawn = require('core.spawn');
 
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var harvestLog = Logger.createLogger('Task.BaseHarvest', LOG_LEVEL.DEBUG);
@@ -640,21 +639,7 @@ var HARVESTER_BODY_TIERS = [
 ];
 
 module.exports.BODY_TIERS = HARVESTER_BODY_TIERS;
-
-function countBodyPart(body, partType) {
-  if (!Array.isArray(body) || !body.length) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    if (body[i] === partType) {
-      total++;
-    }
-  }
-  return total;
-}
-
-function cloneBody(body) {
-  return Array.isArray(body) ? body.slice() : [];
-}
+module.exports.resolveHarvesterConfig = resolveHarvesterConfig;
 
 function resolveHarvesterConfig() {
   var cfg = (global && global.__beeHarvesterConfig && typeof global.__beeHarvesterConfig === 'object')
@@ -666,173 +651,48 @@ function resolveHarvesterConfig() {
   return { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
 }
 
-function resolveHarvesterIntel(room, context) {
-  if (context) {
-    if (context.harvesterIntel && typeof context.harvesterIntel === 'object') {
-      return context.harvesterIntel;
-    }
-    if (context.intel && typeof context.intel === 'object') {
-      return context.intel;
-    }
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
   }
-  if (!room || !room.name) {
-    return null;
-  }
-  var cache = global && global.__BHM_CACHE;
-  if (!cache || !cache.harvesterIntelByRoom) {
-    return null;
-  }
-  return cache.harvesterIntelByRoom[room.name] || null;
-}
-
-function selectBodyForEnergy(energy, tiers, maxWork) {
-  if (!tiers || !tiers.length) return [];
-  var limit = (typeof maxWork === 'number' && maxWork > 0) ? maxWork : null;
-  var cap = (typeof energy === 'number' && energy > 0) ? energy : 0;
-  for (var i = 0; i < tiers.length; i++) {
-    var body = tiers[i];
-    if (!body || !body.length) {
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
       continue;
     }
-    if (limit && countBodyPart(body, WORK) > limit) {
-      continue;
-    }
-    var cost = CoreSpawn.costOfBody(body);
-    if (cost > 0 && cost <= cap) {
-      return body;
-    }
+    copy[key] = context[key];
   }
-  return [];
+  return copy;
 }
 
-function resolveAvailableEnergy(energy, room, context) {
-  if (typeof energy === 'number') {
-    return energy;
-  }
-  if (context && typeof context.availableEnergy === 'number') {
-    return context.availableEnergy;
-  }
-  if (room && typeof room.energyAvailable === 'number') {
-    return room.energyAvailable;
-  }
-  return 0;
-}
+module.exports.getSpawnBody = function (energyOrRoom, roomOrContext, maybeContext) {
+  var spawnModule = require('Task.Spawn');
+  var room = null;
+  var context = {};
 
-function resolveCapacityEnergy(room, context, available) {
-  if (context && typeof context.capacityEnergy === 'number') {
-    return context.capacityEnergy;
-  }
-  if (room && typeof room.energyCapacityAvailable === 'number') {
-    return room.energyCapacityAvailable;
-  }
-  return available;
-}
-
-function getNumber(value, fallback) {
-  return (typeof value === 'number') ? value : fallback;
-}
-
-function selectCapacityBody(tiers, capacity, maxWork) {
-  if (!tiers || !tiers.length) return [];
-  var limit = (typeof maxWork === 'number' && maxWork > 0) ? maxWork : null;
-  var cap = (typeof capacity === 'number' && capacity > 0) ? capacity : 0;
-  for (var i = 0; i < tiers.length; i++) {
-    var body = tiers[i];
-    if (!body || !body.length) {
-      continue;
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
     }
-    if (limit && countBodyPart(body, WORK) > limit) {
-      continue;
+    if (context.capacityEnergy == null) {
+      context.capacityEnergy = energyOrRoom;
     }
-    var cost = CoreSpawn.costOfBody(body);
-    if (cost > 0 && cost <= cap) {
-      return body;
-    }
-  }
-  return [];
-}
-
-function getSpawnBody(energy, room, context) {
-  var available = resolveAvailableEnergy(energy, room, context);
-  var capacity = resolveCapacityEnergy(room, context, available);
-  var tiers = HARVESTER_BODY_TIERS;
-  var config = resolveHarvesterConfig();
-  var maxWork = (config && typeof config.MAX_WORK === 'number') ? config.MAX_WORK : null;
-  var targetBody = selectCapacityBody(tiers, capacity, maxWork);
-  var fallbackBody = selectBodyForEnergy(available, tiers, maxWork);
-  var targetCost = CoreSpawn.costOfBody(targetBody);
-  var fallbackCost = CoreSpawn.costOfBody(fallbackBody);
-
-  var intel = resolveHarvesterIntel(room, context) || null;
-  var desired = getNumber((context && context.limit), null);
-  if (desired === null && intel) {
-    desired = getNumber(intel.desiredCount, 1);
-  }
-  if (desired === null) {
-    desired = 1;
-  }
-  var coverage = getNumber((context && context.current), null);
-  if (coverage === null && intel) {
-    coverage = getNumber(intel.coverage, 0);
-  }
-  if (coverage === null) {
-    coverage = 0;
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
   }
 
-  if (coverage < desired) {
-    var canAffordTarget = targetBody.length && targetCost > 0 && available >= targetCost;
-    var chosenBody = canAffordTarget ? targetBody : fallbackBody;
-    var chosenCost = canAffordTarget ? targetCost : fallbackCost;
-    if (chosenBody.length && chosenCost > 0 && available >= chosenCost) {
-      return cloneBody(chosenBody);
-    }
-    return [];
-  }
-
-  var active = intel && typeof intel.active === 'number' ? intel.active : 0;
-  if (active <= 0) {
-    return [];
-  }
-
-  var renewalTtl = (config && typeof config.RENEWAL_TTL === 'number') ? config.RENEWAL_TTL : 150;
-  var lowestTtl = (intel && typeof intel.lowestTtl === 'number') ? intel.lowestTtl : null;
-  if (lowestTtl === null || lowestTtl > renewalTtl) {
-    return [];
-  }
-
-  var hatching = intel && typeof intel.hatching === 'number' ? intel.hatching : 0;
-  if (hatching > 0) {
-    return [];
-  }
-
-  if (targetBody.length && targetCost > 0 && available >= targetCost) {
-    return cloneBody(targetBody);
-  }
-
-  var highestCost = intel && typeof intel.highestCost === 'number' ? intel.highestCost : 0;
-  var canUpgrade = targetCost > highestCost;
-
-  if (!canUpgrade && fallbackBody.length && fallbackCost > 0 && available >= fallbackCost && fallbackCost === targetCost) {
-    return cloneBody(fallbackBody);
-  }
-
-  var emergencyTtl = (config && typeof config.EMERGENCY_TTL === 'number') ? config.EMERGENCY_TTL : 50;
-  if (lowestTtl <= emergencyTtl && fallbackBody.length && fallbackCost > 0 && available >= fallbackCost) {
-    return cloneBody(fallbackBody);
-  }
-
-  if (!canUpgrade && targetBody.length && targetCost > 0 && available >= targetCost) {
-    return cloneBody(targetBody);
-  }
-
-  return [];
-}
-
-module.exports.getSpawnBody = getSpawnBody;
+  var info = spawnModule.getBodyFor('baseharvest', room, context) || {};
+  var parts = Array.isArray(info.parts) ? info.parts.slice() : [];
+  return parts;
+};
 
 module.exports.getSpawnSpec = function (room, context) {
-  var available = resolveAvailableEnergy(null, room, context);
-  var body = getSpawnBody(available, room, context);
+  var spawnModule = require('Task.Spawn');
+  var info = spawnModule.getBodyFor('baseharvest', room, context) || {};
+  var body = Array.isArray(info.parts) ? info.parts.slice() : [];
   return {
     body: body,
     namePrefix: 'baseharvest',

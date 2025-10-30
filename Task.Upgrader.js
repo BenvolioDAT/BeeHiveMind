@@ -1,5 +1,6 @@
 var CoreConfig = require('core.config');
 var CoreSpawn = require('core.spawn');
+var TaskSpawn = require('Task.Spawn');
 
 var Traveler = null;
 try {
@@ -290,7 +291,38 @@ function upgraderBody(workCount, carryCount, moveCount) {
   return body;
 }
 
-var UPGRADER_BODY_TIERS = [
+function loadUpgraderTiersFromSpec() {
+  if (!TaskSpawn || !TaskSpawn.TASK_SPECS) {
+    return null;
+  }
+  var spec = TaskSpawn.TASK_SPECS.upgrader;
+  if (!spec || !Array.isArray(spec.tiers)) {
+    return null;
+  }
+  var tiers = [];
+  for (var i = 0; i < spec.tiers.length; i++) {
+    var tier = spec.tiers[i];
+    if (!tier || !Array.isArray(tier.parts)) {
+      continue;
+    }
+    tiers.push(tier.parts.slice());
+  }
+  return tiers.length ? tiers : null;
+}
+
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) continue;
+    copy[key] = context[key];
+  }
+  return copy;
+}
+
+var UPGRADER_BODY_TIERS = loadUpgraderTiersFromSpec() || [
   upgraderBody(8, 8, 8),
   upgraderBody(8, 7, 7),
   upgraderBody(8, 6, 6),
@@ -309,13 +341,71 @@ var UPGRADER_BODY_TIERS = [
 ];
 
 module.exports.BODY_TIERS = UPGRADER_BODY_TIERS.map(function (tier) { return tier.slice(); });
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(UPGRADER_BODY_TIERS, energy);
+module.exports.getSpawnBody = function (energyOrRoom, roomOrContext, maybeContext) {
+  var room = null;
+  var context = {};
+
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
+    }
+    if (context.capacityEnergy == null) {
+      context.capacityEnergy = energyOrRoom;
+    }
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
+  }
+
+  var info = TaskSpawn && typeof TaskSpawn.getBodyFor === 'function'
+    ? TaskSpawn.getBodyFor('upgrader', room, context)
+    : null;
+  var parts = info && Array.isArray(info.parts) ? info.parts.slice() : null;
+  var rationale = info && info.rationale;
+  if (parts && parts.length) {
+    return parts;
+  }
+  if (rationale === 'economy-suppressed') {
+    return [];
+  }
+
+  var energy = 0;
+  if (typeof energyOrRoom === 'number') {
+    energy = energyOrRoom;
+  } else if (context && typeof context.availableEnergy === 'number') {
+    energy = context.availableEnergy;
+  } else if (room && typeof room.energyAvailable === 'number') {
+    energy = room.energyAvailable;
+  }
+  var fallback = CoreSpawn.pickLargestAffordable(UPGRADER_BODY_TIERS, energy);
+  return Array.isArray(fallback) ? fallback.slice() : [];
 };
+
 module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var energy = context.availableEnergy;
-  var body = module.exports.getSpawnBody(energy, room, context);
+  var info = TaskSpawn && typeof TaskSpawn.getBodyFor === 'function'
+    ? TaskSpawn.getBodyFor('upgrader', room, ctx)
+    : null;
+  var body = info && Array.isArray(info.parts) ? info.parts.slice() : null;
+  var rationale = info && info.rationale;
+  if (!body || !body.length) {
+    if (rationale === 'economy-suppressed') {
+      return {
+        body: [],
+        namePrefix: 'upgrader',
+        memory: { role: 'Worker_Bee', task: 'upgrader', home: room && room.name }
+      };
+    }
+    var energy = 0;
+    if (ctx && typeof ctx.availableEnergy === 'number') {
+      energy = ctx.availableEnergy;
+    } else if (room && typeof room.energyAvailable === 'number') {
+      energy = room.energyAvailable;
+    }
+    var fallback = CoreSpawn.pickLargestAffordable(UPGRADER_BODY_TIERS, energy);
+    body = Array.isArray(fallback) ? fallback.slice() : [];
+  }
   return {
     body: body,
     namePrefix: 'upgrader',

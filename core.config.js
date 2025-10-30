@@ -6,6 +6,69 @@ var LOG_LEVEL = Object.freeze({
 
 var settings = module.exports.settings || (module.exports.settings = {});
 
+if (!settings.Spawn) {
+  settings.Spawn = {
+    USE_CENTRAL: true,
+    LOG_PARITY_CHECKS: true,
+    NAME_PREFIX: 'Bee',
+    ROLE_OVERRIDES: {
+      baseharvest: false,
+      courier: false,
+      queen: false,
+      builder: false,
+      upgrader: false,
+      repair: false,
+      scout: true,
+      trucker: false,
+      claimer: false,
+      dismantler: false,
+      CombatMelee: false,
+      CombatArcher: false,
+      CombatMedic: false,
+      'luna.remoteMiner': false,
+      'luna.remoteHauler': false,
+      'luna.reserver': false
+    }
+  };
+} else {
+  if (typeof settings.Spawn.USE_CENTRAL !== 'boolean') {
+    settings.Spawn.USE_CENTRAL = true;
+  }
+  if (typeof settings.Spawn.LOG_PARITY_CHECKS !== 'boolean') {
+    settings.Spawn.LOG_PARITY_CHECKS = true;
+  }
+  if (typeof settings.Spawn.NAME_PREFIX !== 'string') {
+    settings.Spawn.NAME_PREFIX = 'Bee';
+  }
+  if (!settings.Spawn.ROLE_OVERRIDES || typeof settings.Spawn.ROLE_OVERRIDES !== 'object') {
+    settings.Spawn.ROLE_OVERRIDES = {};
+  }
+  var spawnRoleDefaults = {
+    baseharvest: false,
+    courier: false,
+    queen: false,
+    builder: false,
+    upgrader: false,
+    repair: false,
+    scout: true,
+    trucker: false,
+    claimer: false,
+    dismantler: false,
+    CombatMelee: false,
+    CombatArcher: false,
+    CombatMedic: false,
+    'luna.remoteMiner': false,
+    'luna.remoteHauler': false,
+    'luna.reserver': false
+  };
+  for (var roleKey in spawnRoleDefaults) {
+    if (!Object.prototype.hasOwnProperty.call(spawnRoleDefaults, roleKey)) continue;
+    if (typeof settings.Spawn.ROLE_OVERRIDES[roleKey] !== 'boolean') {
+      settings.Spawn.ROLE_OVERRIDES[roleKey] = spawnRoleDefaults[roleKey];
+    }
+  }
+}
+
 settings.logging = settings.logging || Object.freeze({
   /** Default log level applied on boot. */
   defaultLevel: LOG_LEVEL.NONE

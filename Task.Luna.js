@@ -29,6 +29,18 @@ try {
   TaskClaimer = null;
 }
 
+var TaskSpawn = null;
+try {
+  TaskSpawn = require('Task.Spawn');
+} catch (spawnErr) {
+  TaskSpawn = null;
+}
+
+var SpawnSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Spawn) || {};
+var CENTRAL_SPAWN_ENABLED = !!(SpawnSettings && SpawnSettings.USE_CENTRAL);
+var SPAWN_ROLE_OVERRIDES = (SpawnSettings && SpawnSettings.ROLE_OVERRIDES) || {};
+var CENTRAL_REMOTE_MINER_ENABLED = !!(CENTRAL_SPAWN_ENABLED && SPAWN_ROLE_OVERRIDES['luna.remoteMiner']);
+
 var TaskLunaSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.TaskLuna) || {};
 var CONFIG = {
   maxHarvestersPerSource: (typeof TaskLunaSettings.maxHarvestersPerSource === 'number') ? TaskLunaSettings.maxHarvestersPerSource : 1,
@@ -1333,6 +1345,101 @@ function getRemoteBodyTiers(remoteType) {
   return tiers;
 }
 
+function cloneContextObject(source) {
+  if (!source || typeof source !== 'object') return {};
+  var copy = {};
+  for (var key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    copy[key] = source[key];
+  }
+  return copy;
+}
+
+function createRemoteMinerSpawnContext(room, plan, baseContext, available, capacity) {
+  var contextCopy = cloneContextObject(baseContext);
+  if (room) {
+    contextCopy.room = room;
+  } else if (baseContext && baseContext.room) {
+    contextCopy.room = baseContext.room;
+  }
+  if (!contextCopy.plan && plan) {
+    contextCopy.plan = plan;
+  }
+  if (!contextCopy.remote && baseContext && baseContext.remote) {
+    contextCopy.remote = baseContext.remote;
+  }
+  contextCopy.availableEnergy = available;
+  contextCopy.capacityEnergy = capacity;
+  var resolvedRole = (plan && plan.remoteRole) || (plan && plan.type) || (baseContext && baseContext.remoteRole) || ROLE_MINER;
+  contextCopy.remoteRole = resolvedRole;
+  if (!contextCopy.remoteRoom) {
+    if (baseContext && typeof baseContext.remoteRoom === 'string') {
+      contextCopy.remoteRoom = baseContext.remoteRoom;
+    } else if (plan && typeof plan.remote === 'string') {
+      contextCopy.remoteRoom = plan.remote;
+    } else if (typeof contextCopy.remote === 'string') {
+      contextCopy.remoteRoom = contextCopy.remote;
+    }
+  }
+  if (contextCopy.limit == null) {
+    if (baseContext && baseContext.limit != null) {
+      contextCopy.limit = baseContext.limit;
+    } else if (plan && plan.desired != null) {
+      contextCopy.limit = plan.desired;
+    } else if (plan && plan.limit != null) {
+      contextCopy.limit = plan.limit;
+    }
+  }
+  if (contextCopy.current == null) {
+    if (baseContext && baseContext.current != null) {
+      contextCopy.current = baseContext.current;
+    } else if (plan && plan.actual && plan.type && plan.actual[plan.type] != null) {
+      contextCopy.current = plan.actual[plan.type];
+    }
+  }
+  if (!contextCopy.seatId && plan && plan.seatId) {
+    contextCopy.seatId = plan.seatId;
+  }
+  if (!contextCopy.sourceId && plan && plan.seatId) {
+    contextCopy.sourceId = plan.seatId;
+  }
+  if (!contextCopy.request || typeof contextCopy.request !== 'object') {
+    contextCopy.request = {};
+  }
+  var req = contextCopy.request;
+  if (req.remoteRole == null) {
+    if (plan && plan.remoteRole != null) {
+      req.remoteRole = plan.remoteRole;
+    } else if (plan && plan.type != null) {
+      req.remoteRole = plan.type;
+    }
+  }
+  if (req.remoteRoom == null && plan && plan.remote) {
+    req.remoteRoom = plan.remote;
+  }
+  if (req.targetRoom == null && plan && plan.remote) {
+    req.targetRoom = plan.remote;
+  }
+  if (req.sourceId == null && plan && plan.seatId) {
+    req.sourceId = plan.seatId;
+  }
+  if (req.seatId == null && plan && plan.seatId) {
+    req.seatId = plan.seatId;
+  }
+  if (room && room.name) {
+    if (!contextCopy.home) {
+      contextCopy.home = room.name;
+    }
+    if (!req.home) {
+      req.home = room.name;
+    }
+  }
+  if (contextCopy.remoteRoom && !req.remoteRoom) {
+    req.remoteRoom = contextCopy.remoteRoom;
+  }
+  return contextCopy;
+}
+
 function selectRemoteBody(remoteType, energy, context) {
   var mod = getRemoteRoleModule(remoteType);
   if (!mod || typeof mod.getSpawnBody !== 'function') {
@@ -1378,6 +1485,50 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity, context) {
     result.minCost = CoreSpawn.costOfBody(Array.isArray(lastEntry.body) ? lastEntry.body : lastEntry) || 0;
   }
 
+  if (CENTRAL_REMOTE_MINER_ENABLED && taskKey === 'remoteMiner' && TaskSpawn && typeof TaskSpawn.getBodyFor === 'function') {
+    var room = context && context.room ? context.room : null;
+    var plan = context && context.plan ? context.plan : null;
+    var workingCtx = createRemoteMinerSpawnContext(room, plan, context, available, capacity);
+    var workingSelection = TaskSpawn.getBodyFor('luna.remoteMiner', room, workingCtx);
+    var workingBody = (workingSelection && Array.isArray(workingSelection.parts)) ? cloneBody(workingSelection.parts) : [];
+    var workingCost = (workingSelection && typeof workingSelection.cost === 'number') ? workingSelection.cost : CoreSpawn.costOfBody(workingBody);
+    if ((!workingBody.length || workingCost > available) && tierInfo.availableBody.length) {
+      workingBody = cloneBody(tierInfo.availableBody);
+      workingCost = tierInfo.availableCost;
+    }
+    if ((!workingBody.length || workingCost > available) && tiers.length) {
+      var minerFallback = tiers[tiers.length - 1];
+      workingBody = cloneBody(Array.isArray(minerFallback.body) ? minerFallback.body : minerFallback);
+      workingCost = CoreSpawn.costOfBody(workingBody);
+    }
+
+    var idealCtx = createRemoteMinerSpawnContext(room, plan, context, capacity, capacity);
+    var idealSelection = TaskSpawn.getBodyFor('luna.remoteMiner', room, idealCtx);
+    var idealBody = (idealSelection && Array.isArray(idealSelection.parts)) ? cloneBody(idealSelection.parts) : [];
+    var idealCost = (idealSelection && typeof idealSelection.cost === 'number') ? idealSelection.cost : CoreSpawn.costOfBody(idealBody);
+    if ((!idealBody.length || idealCost > capacity) && tierInfo.capacityBody.length) {
+      idealBody = cloneBody(tierInfo.capacityBody);
+      idealCost = tierInfo.capacityCost;
+    }
+    if ((!idealBody.length || idealCost > capacity) && tiers.length) {
+      var lastTier = tiers[tiers.length - 1];
+      idealBody = cloneBody(Array.isArray(lastTier.body) ? lastTier.body : lastTier);
+      idealCost = CoreSpawn.costOfBody(idealBody);
+    }
+
+    result.body = workingBody;
+    result.cost = workingCost;
+    result.idealBody = idealBody;
+    result.idealCost = idealCost;
+
+    if (!result.minCost && tiers.length) {
+      var tail = tiers[tiers.length - 1];
+      result.minCost = CoreSpawn.costOfBody(Array.isArray(tail.body) ? tail.body : tail) || 0;
+    }
+
+    return result;
+  }
+
   var evalContext = context || {};
   evalContext.capacity = capacity;
   evalContext.available = available;
@@ -1389,8 +1540,8 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity, context) {
     idealCost = tierInfo.capacityCost;
   }
   if (!idealBody.length && tiers.length) {
-    var lastTier = tiers[tiers.length - 1];
-    idealBody = cloneBody(Array.isArray(lastTier.body) ? lastTier.body : lastTier);
+    var lastTierFallback = tiers[tiers.length - 1];
+    idealBody = cloneBody(Array.isArray(lastTierFallback.body) ? lastTierFallback.body : lastTierFallback);
     idealCost = CoreSpawn.costOfBody(idealBody);
   }
   result.idealBody = idealBody;
@@ -1411,8 +1562,8 @@ function evaluateRemoteBodyPlan(remoteType, available, capacity, context) {
   result.cost = workingCost;
 
   if (!result.minCost && tiers.length) {
-    var tail = tiers[tiers.length - 1];
-    result.minCost = CoreSpawn.costOfBody(Array.isArray(tail.body) ? tail.body : tail) || 0;
+    var tailTier = tiers[tiers.length - 1];
+    result.minCost = CoreSpawn.costOfBody(Array.isArray(tailTier.body) ? tailTier.body : tailTier) || 0;
   }
 
   return result;
@@ -1602,8 +1753,21 @@ function spawnFromPlan(spawn, plan) {
       limit: plan.desired || plan.limit || null,
       current: plan.actual && plan.remoteRole ? plan.actual[plan.remoteRole] : null
     };
-    var fallback = evaluateRemoteBodyPlan(plan.remoteRole || plan.type, available, capacity, fallbackContext);
-    if (fallback.body.length && fallback.cost > 0 && fallback.cost <= available) {
+    var fallback = null;
+    var useCentral = CENTRAL_REMOTE_MINER_ENABLED && TaskSpawn && typeof TaskSpawn.getBodyFor === 'function' && (plan.remoteRole === ROLE_MINER || plan.type === ROLE_MINER);
+    if (useCentral) {
+      var spawnCtx = createRemoteMinerSpawnContext(room, plan, fallbackContext, available, capacity);
+      var centralSelection = TaskSpawn.getBodyFor('luna.remoteMiner', room, spawnCtx);
+      if (centralSelection && Array.isArray(centralSelection.parts) && centralSelection.parts.length && centralSelection.cost > 0 && centralSelection.cost <= available) {
+        body = centralSelection.parts.slice();
+        cost = centralSelection.cost;
+      } else {
+        fallback = evaluateRemoteBodyPlan(plan.remoteRole || plan.type, available, capacity, fallbackContext);
+      }
+    } else {
+      fallback = evaluateRemoteBodyPlan(plan.remoteRole || plan.type, available, capacity, fallbackContext);
+    }
+    if (fallback && fallback.body.length && fallback.cost > 0 && fallback.cost <= available) {
       body = fallback.body.slice();
       cost = fallback.cost;
     }

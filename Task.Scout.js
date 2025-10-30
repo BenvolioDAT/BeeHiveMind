@@ -1,5 +1,7 @@
 var TaskSquad = require('Task.Squad');
 var Traveler = require('Traveler');
+var TaskSpawn = require('Task.Spawn');
+var CoreConfig = require('core.config');
 
 // ---------- Tunables ----------
 var EXPLORE_RADIUS     = 5;      // max linear distance (rooms) from home
@@ -25,6 +27,34 @@ IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LAB] = true;
 IMPORTANT_FOREIGN_STRUCTURES[STRUCTURE_LINK] = true;
 
 var _cachedUsername = null;
+var LEGACY_SCOUT_BODY = [MOVE];
+
+function loadScoutTiersFromSpec() {
+  var spawnModule = TaskSpawn || require('Task.Spawn');
+  if (!spawnModule || typeof spawnModule.getTierList !== 'function') {
+    return null;
+  }
+  var tiers = null;
+  try {
+    tiers = spawnModule.getTierList('scout') || null;
+  } catch (err) {
+    tiers = null;
+  }
+  if (!Array.isArray(tiers) || !tiers.length) {
+    return null;
+  }
+  var copies = [];
+  for (var i = 0; i < tiers.length; i++) {
+    var tier = tiers[i];
+    if (!tier || !Array.isArray(tier.parts)) {
+      continue;
+    }
+    copies.push(tier.parts.slice());
+  }
+  return copies.length ? copies : null;
+}
+
+var SCOUT_BODY_TIERS = loadScoutTiersFromSpec() || [LEGACY_SCOUT_BODY.slice()];
 
 function isValidRoomName(name) {
   if (typeof name !== 'string') return false;
@@ -862,11 +892,127 @@ var TaskScout = {
   }
 };
 
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
+      continue;
+    }
+    copy[key] = context[key];
+  }
+  return copy;
+}
+
+function costOfBody(parts) {
+  if (!Array.isArray(parts) || !parts.length) {
+    return 0;
+  }
+  var sum = 0;
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i];
+    var cost = (BODYPART_COST && typeof BODYPART_COST[part] === 'number') ? BODYPART_COST[part] : 0;
+    sum += cost;
+  }
+  return sum;
+}
+
+function bodiesEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) {
+    return false;
+  }
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function resolveRoomName(room, ctx) {
+  if (room && room.name) {
+    return room.name;
+  }
+  if (ctx && ctx.room && ctx.room.name) {
+    return ctx.room.name;
+  }
+  if (ctx && typeof ctx.roomName === 'string') {
+    return ctx.roomName;
+  }
+  return 'unknown';
+}
+
+function getLegacyScoutBody() {
+  if (Array.isArray(SCOUT_BODY_TIERS) && SCOUT_BODY_TIERS.length) {
+    return SCOUT_BODY_TIERS[0].slice();
+  }
+  return LEGACY_SCOUT_BODY.slice();
+}
+
+function getScoutBodyParts(room, ctx) {
+  var spawnSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Spawn) || null;
+  var roleOverrides = (spawnSettings && spawnSettings.ROLE_OVERRIDES) || null;
+  var centralEnabled = !!(spawnSettings && spawnSettings.USE_CENTRAL && roleOverrides && roleOverrides.scout);
+  var legacyBody = getLegacyScoutBody();
+
+  var spawnModule = TaskSpawn || require('Task.Spawn');
+  var info = null;
+
+  if (centralEnabled && spawnModule && typeof spawnModule.getBodyFor === 'function') {
+    try {
+      info = spawnModule.getBodyFor('scout', room, ctx) || null;
+    } catch (err) {
+      info = null;
+    }
+  }
+
+  var parts = info && Array.isArray(info.parts) ? info.parts.slice() : null;
+
+  if (parts && parts.length) {
+    if (spawnSettings && spawnSettings.LOG_PARITY_CHECKS && typeof console !== 'undefined' && console && typeof console.log === 'function') {
+      var centralCost = (typeof info.cost === 'number') ? info.cost : costOfBody(parts);
+      var legacyCost = costOfBody(legacyBody);
+      var tierValue = (typeof info.tier === 'number') ? info.tier : 0;
+      var status = bodiesEqual(legacyBody, parts) ? 'OK' : 'DIFF';
+      var roomName = resolveRoomName(room, ctx);
+      console.log('[SPAWN-PARITY] role=scout room=' + roomName + ' legacyCost=' + legacyCost + ' centralCost=' + centralCost + ' tier=' + tierValue + ' ' + status);
+    }
+    return parts;
+  }
+
+  return legacyBody;
+}
+
 module.exports = TaskScout;
-module.exports.BODY_TIERS = [ [MOVE] ];
-module.exports.getSpawnBody = function () {
-  return [MOVE];
+module.exports.BODY_TIERS = SCOUT_BODY_TIERS.map(function (tier) { return tier.slice(); });
+module.exports.getSpawnBody = function (roomOrEnergy, maybeRoom, maybeContext) {
+  var room = null;
+  var context = {};
+
+  if (typeof roomOrEnergy === 'number') {
+    room = maybeRoom || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = roomOrEnergy;
+    }
+  } else {
+    room = roomOrEnergy || null;
+    context = cloneSpawnContext(maybeRoom);
+  }
+
+  return getScoutBodyParts(room, context);
 };
 module.exports.getSpawnSpec = function (room, ctx) {
-  return { body: [MOVE], namePrefix: 'scout', memory: { role: 'Worker_Bee', task: 'scout', home: room.name } };
+  var context = cloneSpawnContext(ctx);
+  var body = getScoutBodyParts(room, context);
+  return {
+    body: body,
+    namePrefix: 'scout',
+    memory: { role: 'Worker_Bee', task: 'scout', home: room && room.name }
+  };
 };
