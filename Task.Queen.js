@@ -1,4 +1,3 @@
-
 var BeeToolbox = require('BeeToolbox');
 
 // ============================
@@ -37,12 +36,7 @@ function withdrawFrom(creep, target, res) {
   }
   return rc;
 }
-function transferTo(creep, target, res) {
-  res = res || RESOURCE_ENERGY;
-  var rc = creep.transfer(target, res);
-  if (rc === ERR_NOT_IN_RANGE) go(creep, target);
-  return rc;
-}
+// NOTE: transferTo is overridden below after PIB helpers are defined.
 function _nearest(pos, arr) {
   var best = null, bestD = 1e9;
   for (var i = 0; i < arr.length; i++) {
@@ -67,22 +61,154 @@ function _reservedFor(structId) {
   var map = _qrMap();
   return map[structId] || 0;
 }
+
+// ============================
+// Predictive Intent Buffer (PIB) – multi-tick "I'm headed there" holds
+// rooms -> fills[targetId][creepName] = { res, amount, untilTick }
+// ============================
+function _pibRoot() {
+  // Reset the root once per tick but keep prior room maps
+  var root = Memory._PIB;
+  if (!root || root.tick !== Game.time) {
+    Memory._PIB = { tick: Game.time, rooms: root && root.rooms ? root.rooms : {} };
+  }
+  return Memory._PIB;
+}
+
+function _pibRoom(roomName) {
+  var root = _pibRoot();
+  var rooms = root.rooms;
+  if (!rooms[roomName]) rooms[roomName] = { fills: {} };
+  return rooms[roomName];
+}
+
+// Sum active (unexpired) reservations for a target+resource
+function _pibSumReserved(roomName, targetId, resourceType) {
+  resourceType = resourceType || RESOURCE_ENERGY;
+  var R = _pibRoom(roomName);
+  var byCreep = (R.fills[targetId] || {});
+  var total = 0;
+  for (var cname in byCreep) {
+    if (!byCreep.hasOwnProperty(cname)) continue;
+    var rec = byCreep[cname];
+    if (!rec || rec.res !== resourceType) continue;
+    if (rec.untilTick > Game.time) total += (rec.amount | 0);
+    else {
+      // prune expired
+      delete byCreep[cname];
+    }
+  }
+  if (Object.keys(byCreep).length === 0) delete R.fills[targetId];
+  return total;
+}
+
+// Upsert a fill intent for (creep -> target) with ETA-based expiry
+function _pibReserveFill(creep, target, amount, resourceType) {
+  if (!creep || !target || !amount) return 0;
+  resourceType = resourceType || RESOURCE_ENERGY;
+
+  var roomName = (creep.room && creep.room.name) || (target.pos && target.pos.roomName);
+  if (!roomName) return 0;
+
+  var R = _pibRoom(roomName);
+  if (!R.fills[target.id]) R.fills[target.id] = {};
+
+  var dist = 0;
+  try { dist = creep.pos.getRangeTo(target); } catch (e) { dist = 5; }
+  // ETA fudge: distance + 1 (handoff) + min floor
+  var eta = Math.max(2, (dist | 0) + 1);
+
+  R.fills[target.id][creep.name] = {
+    res: resourceType,
+    amount: amount | 0,
+    untilTick: Game.time + eta
+  };
+  return amount | 0;
+}
+
+// Clear the creep's intent for a specific target (after transfer or if invalid)
+function _pibReleaseFill(creep, target, resourceType) {
+  if (!creep || !target) return;
+  resourceType = resourceType || RESOURCE_ENERGY;
+
+  var roomName = (creep.room && creep.room.name) || (target.pos && target.pos.roomName);
+  if (!roomName) return;
+
+  var R = _pibRoom(roomName);
+  var map = R.fills[target.id];
+  if (map && map[creep.name]) delete map[creep.name];
+  if (map && Object.keys(map).length === 0) delete R.fills[target.id];
+}
+
+// ============================
+// PIB-aware free capacity check
+// ============================
 function _effectiveFree(struct, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
-  var free = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
-  return Math.max(0, free - _reservedFor(struct.id));
+
+  // What the structure *physically* can take right now
+  var freeNow = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
+
+  // Subtract same-tick queen reservations (your existing buffer)
+  var sameTickReserved = _reservedFor(struct.id) | 0;
+
+  // Subtract multi-tick predictive reservations (others already en route)
+  var roomName = (struct.pos && struct.pos.roomName) || (struct.room && struct.room.name);
+  var pibReserved = 0;
+  if (roomName) pibReserved = _pibSumReserved(roomName, struct.id, resourceType) | 0;
+
+  return Math.max(0, freeNow - sameTickReserved - pibReserved);
 }
+
+// ============================
 // Reserve up to `amount` for this creep; returns amount actually reserved
+// (Records both same-tick queen reservation AND multi-tick PIB intent.)
+// ============================
 function reserveFill(creep, target, amount, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
+
   var map = _qrMap();
   var free = _effectiveFree(target, resourceType);
   var want = Math.max(0, Math.min(amount, free));
+
   if (want > 0) {
+    // Per-tick map (existing behavior)
     map[target.id] = (map[target.id] || 0) + want;
-    creep.memory.qTargetId = target.id; // sticky
+
+    // Sticky assignment (existing)
+    creep.memory.qTargetId = target.id;
+
+    // NEW: multi-tick predictive reservation so others avoid retargeting it
+    _pibReserveFill(creep, target, want, resourceType);
   }
   return want;
+}
+
+// ============================
+// transferTo override – release PIB on success/full/most errors
+// ============================
+function transferTo(creep, target, res) {
+  res = res || RESOURCE_ENERGY;
+  var rc = creep.transfer(target, res);
+
+  if (rc === ERR_NOT_IN_RANGE) {
+    go(creep, target);
+    return rc;
+  }
+
+  if (rc === OK) {
+    // We delivered: clear our predictive reservation for this target
+    _pibReleaseFill(creep, target, res);
+  } else if (rc === ERR_FULL) {
+    // Target filled before we arrived; release our intent so we can retarget
+    _pibReleaseFill(creep, target, res);
+    creep.memory.qTargetId = null;
+  } else if (rc !== OK && rc !== ERR_TIRED && rc !== ERR_BUSY) {
+    // On hard errors (invalid/ownership/etc.), release so we don't stick
+    _pibReleaseFill(creep, target, res);
+    creep.memory.qTargetId = null;
+  }
+  return rc;
 }
 
 // ============================
@@ -118,11 +244,11 @@ function _qCache(room) {
   var towersNeed = room.find(FIND_STRUCTURES, {
     filter: function (s) {
       if (s.structureType !== STRUCTURE_TOWER || !s.store) return false;
-      
+
       var used = (s.store.getUsedCapacity(RESOURCE_ENERGY) | 0);
       var cap = (s.store.getCapacity(RESOURCE_ENERGY) | 0);
       if (cap <= 0) return false;
-      
+
       var fillPct = used / cap; // 0.0 .. 1.0
       return fillPct <= REFILL_AT_OR_BELOW; // true = needs refill
       //return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
