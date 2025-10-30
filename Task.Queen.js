@@ -1,649 +1,303 @@
-var CoreConfig = require('core.config');
-var CoreSpawn = require('core.spawn');
+// role.TaskQueen.cpu.es5.js
+// ES5-safe, CPU-lean Queen:
+// - Per-room, once-per-tick cache of needy structures / containers / links
+// - Prefers range checks over pathing; high reusePath for moves
+// - Per-tick fill reservations to avoid double-filling
+// - Sticky targets to reduce indecision
 
-var Logger = require('core.logger');
-var TaskCourier = require('Task.Courier');
+'use strict';
 
-var LOG_LEVEL = Logger.LOG_LEVEL;
-var queenLog = Logger.createLogger('Task.Queen', LOG_LEVEL.DEBUG);
+var BeeToolbox = require('BeeToolbox');
 
-var QueenSettings = CoreConfig.settings['Task.Queen'];
-
-var MODE_COLLECT = 'collect';
-var MODE_FEED = 'feed';
-var ENABLE_COURIER_FALLBACK = QueenSettings.ENABLE_COURIER_FALLBACK;
-
-var Traveler = null;
-try {
-  Traveler = require('Traveler');
-} catch (travelerError) {
-  Traveler = null;
+// ============================
+// Movement / Utils
+// ============================
+function go(creep, dest, range) {
+  range = (range != null) ? range : 1;
+  var reuse = 30; // higher reuse to cut pathing CPU
+  if (BeeToolbox && BeeToolbox.BeeTravel) {
+    try { BeeToolbox.BeeTravel(creep, dest, { range: range, reusePath: reuse }); return; } catch (e) {}
+  }
+  if (creep.pos.getRangeTo(dest) > range) creep.moveTo(dest, { reusePath: reuse, maxOps: 2000 });
 }
-
-var DEFAULT_TRAVEL_RANGE = QueenSettings.DEFAULT_TRAVEL_RANGE;
-var DEFAULT_TRAVEL_REUSE = QueenSettings.DEFAULT_TRAVEL_REUSE;
-var DEFAULT_TRAVEL_STUCK = QueenSettings.DEFAULT_TRAVEL_STUCK;
-var DEFAULT_TRAVEL_REPATH = QueenSettings.DEFAULT_TRAVEL_REPATH;
-var DEFAULT_TRAVEL_MAX_OPS = QueenSettings.DEFAULT_TRAVEL_MAX_OPS;
-var DEFAULT_TOWER_REFILL_THRESHOLD = QueenSettings.DEFAULT_TOWER_REFILL_THRESHOLD;
-
-var ROOM_CACHE_KEY = '__queenRoomEnergy';
-var THROTTLE_CACHE_KEY = '__queenLogThrottle';
-
-function getGlobalCache(key, fallback) {
-  if (!global[key]) {
-    global[key] = fallback;
-  }
-  return global[key];
+function firstSpawn(room) {
+  var ss = room.find(FIND_MY_SPAWNS);
+  return ss.length ? ss[0] : null;
 }
-
-function shouldLogThrottled(store, key, interval) {
-  if (!store || !key) {
-    return true;
-  }
-  var now = Game.time | 0;
-  var last = store[key] || 0;
-  if (interval > 0 && now - last < interval) {
-    return false;
-  }
-  store[key] = now;
-  return true;
+function isContainerNearSource(structure) {
+  return structure.pos.findInRange(FIND_SOURCES, 2).length > 0;
 }
-
-function isValidRoomName(name) {
-  if (typeof name !== 'string') {
-    return false;
-  }
-  return /^[WE]\d+[NS]\d+$/.test(name);
+function harvestFromClosest(creep) {
+  var srcs = creep.room.find(FIND_SOURCES_ACTIVE);
+  if (!srcs.length) return ERR_NOT_FOUND;
+  var best = _nearest(creep.pos, srcs);
+  var rc = creep.harvest(best);
+  if (rc === ERR_NOT_IN_RANGE) go(creep, best);
+  return rc;
 }
-
-function resolveRoomName(room) {
-  if (!room) {
-    return null;
+function withdrawFrom(creep, target, res) {
+  res = res || RESOURCE_ENERGY;
+  var rc = creep.withdraw(target, res);
+  if (rc === ERR_NOT_IN_RANGE) { go(creep, target); return rc; }
+  if (rc === OK) {
+    creep.memory.qLastWithdrawId = target.id;
+    creep.memory.qLastWithdrawAt = Game.time;
   }
-  if (typeof room === 'string') {
-    return isValidRoomName(room) ? room : null;
-  }
-  if (room.name && isValidRoomName(room.name)) {
-    return room.name;
-  }
-  return null;
+  return rc;
 }
-
-function travelTo(creep, destination, options) {
-  if (!creep || !destination) {
-    return ERR_INVALID_ARGS;
-  }
-  var targetPos = destination.pos || destination;
-  if (!targetPos || typeof targetPos.x !== 'number' || typeof targetPos.y !== 'number') {
-    return ERR_INVALID_ARGS;
-  }
-  var config = options || {};
-  var travelOptions = {
-    range: config.range != null ? config.range : DEFAULT_TRAVEL_RANGE,
-    reusePath: config.reusePath != null ? config.reusePath : DEFAULT_TRAVEL_REUSE,
-    ignoreCreeps: config.ignoreCreeps === true,
-    stuckValue: config.stuckValue != null ? config.stuckValue : DEFAULT_TRAVEL_STUCK,
-    repath: config.repath != null ? config.repath : DEFAULT_TRAVEL_REPATH,
-    maxOps: config.maxOps != null ? config.maxOps : DEFAULT_TRAVEL_MAX_OPS
-  };
-  if (typeof creep.travelTo === 'function') {
-    return creep.travelTo(targetPos, travelOptions);
-  }
-  if (Traveler && typeof Traveler.travelTo === 'function') {
-    return Traveler.travelTo(creep, targetPos, travelOptions);
-  }
-  if (typeof creep.moveTo === 'function') {
-    return creep.moveTo(targetPos, travelOptions);
-  }
-  return ERR_INVALID_ARGS;
+function transferTo(creep, target, res) {
+  res = res || RESOURCE_ENERGY;
+  var rc = creep.transfer(target, res);
+  if (rc === ERR_NOT_IN_RANGE) go(creep, target);
+  return rc;
 }
-
-function buildEnergyProfile(room) {
-  var profile = {
-    room: room,
-    dropped: [],
-    droppedLarge: [],
-    tombstones: [],
-    ruins: [],
-    sourceContainers: [],
-    sideContainers: [],
-    sideContainersAvailable: [],
-    spawnsNeeding: [],
-    extensionsNeeding: [],
-    towersNeeding: [],
-    linksNeeding: [],
-    storage: room ? room.storage : null,
-    terminal: room ? room.terminal : null
-  };
-  if (!room) {
-    return profile;
-  }
-
-  var dropped = room.find(FIND_DROPPED_RESOURCES, {
-    filter: function (resource) {
-      return resource.resourceType === RESOURCE_ENERGY && resource.amount > 0;
-    }
-  });
-  var i;
-  for (i = 0; i < dropped.length; i++) {
-    var drop = dropped[i];
-    profile.dropped.push(drop);
-    if (drop.amount >= 150) {
-      profile.droppedLarge.push(drop);
-    }
-  }
-
-  profile.tombstones = room.find(FIND_TOMBSTONES, {
-    filter: function (stone) {
-      return stone.store && (stone.store[RESOURCE_ENERGY] | 0) > 0;
-    }
-  });
-
-  profile.ruins = room.find(FIND_RUINS, {
-    filter: function (ruin) {
-      return ruin.store && (ruin.store[RESOURCE_ENERGY] | 0) > 0;
-    }
-  });
-
-  var containers = room.find(FIND_STRUCTURES, {
-    filter: function (structure) {
-      return structure.structureType === STRUCTURE_CONTAINER;
-    }
-  });
-  for (i = 0; i < containers.length; i++) {
-    var container = containers[i];
-    var stored = container.store ? (container.store[RESOURCE_ENERGY] | 0) : 0;
-    if (container.pos.findInRange(FIND_SOURCES, 1).length > 0) {
-      if (stored > 0) {
-        profile.sourceContainers.push(container);
-      }
-    } else {
-      if (stored > 0) {
-        profile.sideContainers.push(container);
-      }
-      if (container.store && (container.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
-        profile.sideContainersAvailable.push(container);
-      }
-    }
-  }
-
-  var structures = room.find(FIND_MY_STRUCTURES);
-  for (i = 0; i < structures.length; i++) {
-    var structure = structures[i];
-    if (structure.structureType === STRUCTURE_SPAWN) {
-      if ((structure.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
-        profile.spawnsNeeding.push(structure);
-      }
-    } else if (structure.structureType === STRUCTURE_EXTENSION) {
-      if ((structure.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
-        profile.extensionsNeeding.push(structure);
-      }
-    } else if (structure.structureType === STRUCTURE_TOWER) {
-      var used = (structure.store.getUsedCapacity(RESOURCE_ENERGY) | 0);
-      var capacity = (structure.store.getCapacity(RESOURCE_ENERGY) | 0);
-      if (capacity > 0 && used <= capacity * DEFAULT_TOWER_REFILL_THRESHOLD) {
-        profile.towersNeeding.push(structure);
-      }
-    } else if (structure.structureType === STRUCTURE_LINK) {
-      if ((structure.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
-        profile.linksNeeding.push(structure);
-      }
-    }
-  }
-
-  return profile;
-}
-
-function getRoomEnergyProfile(room) {
-  var cache = getGlobalCache(ROOM_CACHE_KEY, { tick: -1, rooms: {} });
-  if (!room) {
-    return buildEnergyProfile(null);
-  }
-  if (cache.tick !== Game.time) {
-    cache.tick = Game.time;
-    cache.rooms = {};
-  }
-  var cached = cache.rooms[room.name];
-  if (cached && cached.scannedAt === Game.time) {
-    return cached.profile;
-  }
-  var profile = buildEnergyProfile(room);
-  cache.rooms[room.name] = { scannedAt: Game.time, profile: profile };
-  return profile;
-}
-
-function sortByStoredEnergyDescending(list) {
-  list.sort(function (a, b) {
-    var aEnergy = a.store ? (a.store[RESOURCE_ENERGY] | 0) : 0;
-    var bEnergy = b.store ? (b.store[RESOURCE_ENERGY] | 0) : 0;
-    return bEnergy - aEnergy;
-  });
-}
-
-function sortDroppedDescending(list) {
-  list.sort(function (a, b) {
-    return b.amount - a.amount;
-  });
-}
-
-function nearestNeedingEnergy(creep, list) {
-  var best = null;
-  var bestRange = Infinity;
-  for (var i = 0; i < list.length; i++) {
-    var structure = list[i];
-    if (!structure) {
-      continue;
-    }
-    var free = structure.store ? (structure.store.getFreeCapacity(RESOURCE_ENERGY) | 0) : 0;
-    if (free <= 0) {
-      continue;
-    }
-    var range = creep.pos.getRangeTo(structure);
-    if (range < bestRange) {
-      bestRange = range;
-      best = structure;
-    }
+function _nearest(pos, arr) {
+  var best = null, bestD = 1e9;
+  for (var i = 0; i < arr.length; i++) {
+    var o = arr[i]; if (!o) continue;
+    var d = pos.getRangeTo(o);
+    if (d < bestD) { bestD = d; best = o; }
   }
   return best;
 }
 
-function selectEnergyPickupTarget(creep, options) {
-  if (!creep || !creep.room) {
-    return null;
+// ============================
+// Per-tick Queen fill reservations (ES5-safe)
+// structureId -> reserved energy amount (auto-reset each tick)
+// ============================
+function _qrMap() {
+  if (!Memory._queenRes || Memory._queenRes.tick !== Game.time) {
+    Memory._queenRes = { tick: Game.time, map: {} };
   }
-  var config = options || {};
-  var minAmount = config.minAmount != null ? config.minAmount : 50;
-  var profile = getRoomEnergyProfile(creep.room);
-
-  if (profile.tombstones.length > 0) {
-    sortByStoredEnergyDescending(profile.tombstones);
-    return { target: profile.tombstones[0], action: 'withdraw' };
+  return Memory._queenRes.map;
+}
+function _reservedFor(structId) {
+  var map = _qrMap();
+  return map[structId] || 0;
+}
+function _effectiveFree(struct, resourceType) {
+  resourceType = resourceType || RESOURCE_ENERGY;
+  var free = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
+  return Math.max(0, free - _reservedFor(struct.id));
+}
+// Reserve up to `amount` for this creep; returns amount actually reserved
+function reserveFill(creep, target, amount, resourceType) {
+  resourceType = resourceType || RESOURCE_ENERGY;
+  var map = _qrMap();
+  var free = _effectiveFree(target, resourceType);
+  var want = Math.max(0, Math.min(amount, free));
+  if (want > 0) {
+    map[target.id] = (map[target.id] || 0) + want;
+    creep.memory.qTargetId = target.id; // sticky
   }
-  if (profile.ruins.length > 0) {
-    sortByStoredEnergyDescending(profile.ruins);
-    return { target: profile.ruins[0], action: 'withdraw' };
-  }
-
-  if (config.allowDropped !== false) {
-    if (profile.droppedLarge.length > 0) {
-      sortDroppedDescending(profile.droppedLarge);
-      return { target: profile.droppedLarge[0], action: 'pickup' };
-    }
-    if (profile.dropped.length > 0 && minAmount <= 0) {
-      sortDroppedDescending(profile.dropped);
-      return { target: profile.dropped[0], action: 'pickup' };
-    }
-  }
-
-  if (config.allowStorage !== false) {
-    if (profile.storage && (profile.storage.store[RESOURCE_ENERGY] | 0) >= minAmount) {
-      return { target: profile.storage, action: 'withdraw' };
-    }
-    if (profile.terminal && (profile.terminal.store[RESOURCE_ENERGY] | 0) >= minAmount) {
-      return { target: profile.terminal, action: 'withdraw' };
-    }
-  } 
-   
-  if (profile.sourceContainers.length > 0) {
-    sortByStoredEnergyDescending(profile.sourceContainers);
-    if ((profile.sourceContainers[0].store[RESOURCE_ENERGY] | 0) >= minAmount) {
-      return { target: profile.sourceContainers[0], action: 'withdraw' };
-    }
-  }
-
-  if (profile.sideContainers.length > 0) {
-    sortByStoredEnergyDescending(profile.sideContainers);
-    if ((profile.sideContainers[0].store[RESOURCE_ENERGY] | 0) >= minAmount) {
-      return { target: profile.sideContainers[0], action: 'withdraw' };
-    }
-  }
-
-  if (profile.dropped.length > 0) {
-    sortDroppedDescending(profile.dropped);
-    return { target: profile.dropped[0], action: 'pickup' };
-  }
-
-  return null;
+  return want;
 }
 
-function selectEnergyDepositStructure(creep, options) {
-  if (!creep || !creep.room) {
-    return null;
-  }
-  var config = options || {};
-  var profile = getRoomEnergyProfile(creep.room);
-  var includeTowers = config.includeTowers !== false;
-  var includeLinks = config.includeLinks === true;
-  var includeStorage = config.includeStorage !== false;
-  var includeTerminal = config.includeTerminal === true;
+// ============================
+// Per-room, once-per-tick cache
+// ============================
+if (!global.__QUEEN) global.__QUEEN = { tick: -1, byRoom: {} };
 
-  var spawnTargets = [];
-  var i;
-  for (i = 0; i < profile.spawnsNeeding.length; i++) {
-    spawnTargets.push(profile.spawnsNeeding[i]);
-  }
-  for (i = 0; i < profile.extensionsNeeding.length; i++) {
-    spawnTargets.push(profile.extensionsNeeding[i]);
-  }
-  var closestPriority = nearestNeedingEnergy(creep, spawnTargets);
-  if (closestPriority) {
-    return closestPriority;
+function _qCache(room) {
+  var G = global.__QUEEN;
+  if (G.tick !== Game.time) { G.tick = Game.time; G.byRoom = {}; }
+  var R = G.byRoom[room.name];
+  if (R) return R;
+
+  var sp = firstSpawn(room);
+  var linkNearSpawn = null;
+  if (sp) {
+    linkNearSpawn = sp.pos.findClosestByRange(FIND_STRUCTURES, {
+      filter: function (st) { return st.structureType === STRUCTURE_LINK; }
+    });
   }
 
-  if (includeTowers && profile.towersNeeding.length > 0) {
-    var tower = nearestNeedingEnergy(creep, profile.towersNeeding);
-    if (tower) {
-      return tower;
+  // Spawns + extensions needing energy
+  var extSpawnNeed = room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      if (!s.store) return false;
+      if (s.structureType !== STRUCTURE_EXTENSION && s.structureType !== STRUCTURE_SPAWN) return false;
+      return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
     }
-  }
-
-  if (includeLinks && profile.linksNeeding.length > 0) {
-    var link = nearestNeedingEnergy(creep, profile.linksNeeding);
-    if (link) {
-      return link;
-    }
-  }
-
-  if (includeStorage && profile.storage) {
-    if ((profile.storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
-      return profile.storage;
-    }
-  }
-
-  if (includeTerminal && profile.terminal) {
-    if ((profile.terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) {
-      return profile.terminal;
-    }
-  }
-
-  if (profile.sideContainersAvailable.length > 0) {
-    var container = nearestNeedingEnergy(creep, profile.sideContainersAvailable);
-    if (container) {
-      return container;
-    }
-  }
-
-  return null;
-}
-
-function getQueenSettings(room) {
-  var base = global.__beeEconomyConfig || null;
-  if (!base) {
-    base = {
-      queen: {
-        allowCourierFallback: true
-      }
-    };
-    global.__beeEconomyConfig = base;
-  }
-  var queenCfg = base.queen || {};
-  var allowFallback = (typeof queenCfg.allowCourierFallback === 'boolean') ? queenCfg.allowCourierFallback : true;
-
-  var roomName = resolveRoomName(room);
-  var override = null;
-  if (room && room.memory && room.memory.econ && room.memory.econ.queen) {
-    override = room.memory.econ.queen;
-  } else if (roomName && Memory && Memory.rooms && Memory.rooms[roomName] && Memory.rooms[roomName].econ && Memory.rooms[roomName].econ.queen) {
-    override = Memory.rooms[roomName].econ.queen;
-  }
-  if (override && typeof override.allowCourierFallback === 'boolean') {
-    allowFallback = override.allowCourierFallback;
-  }
-
-  return { allowCourierFallback: allowFallback };
-}
-
-/**
- * ensureMode maintains the collect/feed state machine for the queen.
- * Input: creep (Creep).
- * Output: active mode string.
- * Side-effects: writes creep.memory.mode.
- */
-function ensureMode(creep) {
-  if (!creep.memory) {
-    return MODE_COLLECT;
-  }
-  var stored = creep.store ? (creep.store[RESOURCE_ENERGY] | 0) : 0;
-  var capacity = creep.store ? (creep.store.getCapacity(RESOURCE_ENERGY) | 0) : 0;
-  if (stored === 0) {
-    creep.memory.mode = MODE_COLLECT;
-  } else if (stored >= capacity) {
-    creep.memory.mode = MODE_FEED;
-  } else if (!creep.memory.mode) {
-    creep.memory.mode = MODE_COLLECT;
-  }
-  return creep.memory.mode;
-}
-
-/**
- * pickCollectionTarget chooses where the queen should gather energy.
- * Input: creep (Creep).
- * Output: { target, action } or null when no source exists.
- * Side-effects: stores pickup metadata on memory for reuse.
- */
-function pickCollectionTarget(creep) {
-  var selection = selectEnergyPickupTarget(creep, {
-    minAmount: 100,
-    allowStorage: true,
-    allowDropped: true
   });
-  if (!selection) {
-    if (creep.memory) {
-      creep.memory.pickupId = null;
-      creep.memory.pickupAction = null;
+  var REFILL_AT_OR_BELOW = 0.70;
+
+  // Towers needing energy
+  var towersNeed = room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      if (s.structureType !== STRUCTURE_TOWER || !s.store) return false;
+      
+      var used = (s.store.getUsedCapacity(RESOURCE_ENERGY) | 0);
+      var cap = (s.store.getCapacity(RESOURCE_ENERGY) | 0);
+      if (cap <= 0) return false;
+      
+      var fillPct = used / cap; // 0.0 .. 1.0
+      return fillPct <= REFILL_AT_OR_BELOW; // true = needs refill
+      //return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
     }
-    return null;
-  }
-  if (creep.memory) {
-    creep.memory.pickupId = selection.target.id;
-    creep.memory.pickupAction = selection.action;
-  }
-  return selection;
-}
-
-/**
- * collectEnergy handles the gathering behaviour for the queen.
- * Input: creep (Creep).
- * Output: boolean, true when an action was attempted.
- * Side-effects: withdraws or picks up energy.
- */
-function collectEnergy(creep) {
-  var targetId = creep.memory && creep.memory.pickupId;
-  var action = creep.memory && creep.memory.pickupAction;
-  var target = targetId ? Game.getObjectById(targetId) : null;
-
-  if (!target) {
-    var selection = pickCollectionTarget(creep);
-    if (!selection) {
-      return false;
-    }
-    target = selection.target;
-    action = selection.action;
-  }
-
-  var range = creep.pos.getRangeTo(target);
-  if (range > 1) {
-    travelTo(creep, target, { range: 1, reusePath: 15 });
-    return true;
-  }
-
-  var result = ERR_INVALID_ARGS;
-  if (action === 'withdraw') {
-    result = creep.withdraw(target, RESOURCE_ENERGY);
-  } else if (action === 'pickup') {
-    result = creep.pickup(target);
-  }
-
-  if (result === OK && creep.memory) {
-    creep.memory.mode = MODE_FEED;
-    creep.memory.pickupId = null;
-    creep.memory.pickupAction = null;
-  } else if (result === ERR_INVALID_TARGET || result === ERR_NOT_ENOUGH_RESOURCES) {
-    creep.memory.pickupId = null;
-    creep.memory.pickupAction = null;
-  }
-  return true;
-}
-
-/**
- * pickFeedTarget chooses the best destination for delivery mode.
- * Input: creep (Creep).
- * Output: structure or null.
- * Side-effects: updates creep.memory.dropoffId.
- */
-function pickFeedTarget(creep) {
-  var target = selectEnergyDepositStructure(creep, {
-    includeStorage: true,
-    includeTowers: true,
-    includeLinks: true,
-    includeTerminal: false
   });
-  if (!target && creep.room && creep.room.storage) {
-    target = creep.room.storage;
-  }
-  if (creep.memory) {
-    creep.memory.dropoffId = target ? target.id : null;
-  }
-  return target;
-}
 
-/**
- * feedStructures deposits energy and, when no direct targets exist, optionally
- * falls back to courier-style helper actions.
- * Input: creep (Creep).
- * Output: boolean indicating whether an action occurred.
- * Side-effects: transfers energy or performs courier helper actions.
- */
-function feedStructures(creep) {
-  var targetId = creep.memory && creep.memory.dropoffId;
-  var target = targetId ? Game.getObjectById(targetId) : null;
-  if (!target) {
-    target = pickFeedTarget(creep);
-  }
+  // Terminal/storage needing energy (rare, but keep)
+  var terminalNeed = (room.terminal && room.terminal.store &&
+                      (room.terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) ? room.terminal : null;
+  var storageNeed  = (room.storage && room.storage.store &&
+                      (room.storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) ? room.storage : null;
 
-  if (target) {
-    var range = creep.pos.getRangeTo(target);
-    if (range > 1) {
-      travelTo(creep, target, { range: 1, reusePath: 10 });
-      return true;
+  // Storage with energy (for withdraw)
+  var storageHasEnergy = (room.storage && (room.storage.store[RESOURCE_ENERGY] | 0) > 0) ? room.storage : null;
+
+  // Side containers (non-source) with energy for withdraw
+  var sideContainers = room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER &&
+             !isContainerNearSource(s) &&
+             s.store && (s.store.getUsedCapacity(RESOURCE_ENERGY) | 0) > 0;
     }
-    var result = creep.transfer(target, RESOURCE_ENERGY);
-    if (result === OK && creep.memory) {
-      creep.memory.dropoffId = null;
-    } else if (result === ERR_FULL || result === ERR_INVALID_TARGET) {
-      creep.memory.dropoffId = null;
+  });
+
+  // Source containers exist?
+  var hasSourceContainers = room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER &&
+             s.pos.findInRange(FIND_SOURCES, 1).length > 0;
     }
-    return true;
-  }
+  }).length > 0;
 
-  var econSettings = getQueenSettings(creep && creep.room);
-  var allowFallback = ENABLE_COURIER_FALLBACK;
-  if (econSettings && typeof econSettings.allowCourierFallback === 'boolean') {
-    allowFallback = econSettings.allowCourierFallback;
-  }
-  if (allowFallback && TaskCourier && typeof TaskCourier.runAsHelpers === 'function') {
-    var courierResult = TaskCourier.runAsHelpers(creep, { preferDeliverFirst: true });
-    if (courierResult) {
-      return true;
-    }
-  }
-
-  if (creep.room && creep.room.storage) {
-    travelTo(creep, creep.room.storage, { range: 2, maxRooms: 1, reusePath: 20 });
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * run executes the queen behaviour each tick.
- * Input: creep (Creep).
- * Output: none.
- * Side-effects: movement, withdraw, transfer, and optional courier helper intents.
- */
-function runQueen(creep) {
-  if (!creep) {
-    return;
-  }
-  if (creep.memory && creep.memory.task !== 'queen') {
-    creep.memory.task = 'queen';
-  }
-
-  var mode = ensureMode(creep);
-  if (mode === MODE_COLLECT) {
-    if (!collectEnergy(creep)) {
-      var throttleCache = getGlobalCache(THROTTLE_CACHE_KEY, Object.create(null));
-      if (Logger.shouldLog(LOG_LEVEL.DEBUG) && shouldLogThrottled(throttleCache, creep.id || creep.name, 5)) {
-        queenLog.debug('Queen', creep.name, 'found no energy source in', creep.room && creep.room.name);
-      }
-    }
-  } else {
-    feedStructures(creep);
-  }
-
-  if (creep.memory && (creep.store[RESOURCE_ENERGY] | 0) === 0 && creep.memory.mode === MODE_FEED) {
-    creep.memory.mode = MODE_COLLECT;
-  }
-}
-
-module.exports = {
-  run: runQueen
-};
-
-function queenBody(carryCount, moveCount) {
-  var body = [];
-  var i;
-  for (i = 0; i < carryCount; i++) {
-    body.push(CARRY);
-  }
-  for (i = 0; i < moveCount; i++) {
-    body.push(MOVE);
-  }
-  return body;
-}
-
-var QUEEN_BODY_TIERS = [
-  queenBody(22, 22),
-  queenBody(21, 21),
-  queenBody(20, 20),
-  queenBody(19, 19),
-  queenBody(18, 18),
-  queenBody(17, 17),
-  queenBody(16, 16),
-  queenBody(15, 15),
-  queenBody(14, 14),
-  queenBody(13, 13),
-  queenBody(12, 12),
-  queenBody(11, 11),
-  queenBody(10, 10),
-  queenBody(9, 9),
-  queenBody(8, 8),
-  queenBody(7, 7),
-  queenBody(6, 6),
-  queenBody(5, 5),
-  queenBody(4, 4),
-  queenBody(3, 3),
-  queenBody(2, 2),
-  queenBody(1, 1)
-];
-
-module.exports.BODY_TIERS = QUEEN_BODY_TIERS.map(function (tier) { return tier.slice(); });
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(QUEEN_BODY_TIERS, energy);
-};
-module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var energy = context && typeof context.availableEnergy === 'number' ? context.availableEnergy : 0;
-  var body = module.exports.getSpawnBody(energy, room, context);
-  return {
-    body: body,
-    namePrefix: 'queen',
-    memory: {
-      role: 'Worker_Bee',
-      task: 'queen',
-      home: room && room.name
-    }
+  R = {
+    spawn: sp,
+    linkNearSpawn: linkNearSpawn,
+    extSpawnNeed: extSpawnNeed,
+    towersNeed: towersNeed,
+    terminalNeed: terminalNeed,
+    storageNeed: storageNeed,
+    storageHasEnergy: storageHasEnergy,
+    sideContainers: sideContainers,
+    hasSourceContainers: hasSourceContainers
   };
+  G.byRoom[room.name] = R;
+  return R;
+}
+
+// ============================
+// Main
+// ============================
+var TaskQueen = {
+  run: function (creep) {
+    var room = creep.room;
+    var cache = _qCache(room);
+
+    // BOOTSTRAP (before first source-containers exist)
+    if (!cache.hasSourceContainers) {
+      // Build first EXT/CONTAINER if present
+      var site = creep.pos.findClosestByRange(FIND_CONSTRUCTION_SITES, {
+        filter: function (s) {
+          return s.structureType === STRUCTURE_EXTENSION ||
+                 s.structureType === STRUCTURE_CONTAINER;
+        }
+      });
+      if (site) {
+        if ((creep.store[RESOURCE_ENERGY] | 0) === 0) {
+          // Withdraw from spawn if room is topped up, else harvest
+          var sp = _nearest(creep.pos, room.find(FIND_MY_SPAWNS));
+          if (sp && sp.store && (sp.store[RESOURCE_ENERGY] | 0) >= 50 &&
+              room.energyAvailable === room.energyCapacityAvailable) {
+            withdrawFrom(creep, sp);
+          } else {
+            harvestFromClosest(creep);
+          }
+        } else {
+          var b = creep.build(site);
+          if (b === ERR_NOT_IN_RANGE) go(creep, site);
+        }
+        return;
+      }
+      // Micro-courier: scoop close drops & feed spawn/extension
+      var drop = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
+        filter: function (r) { return r.resourceType === RESOURCE_ENERGY; }
+      });
+      if (drop && creep.store.getFreeCapacity() > 0) {
+        if (creep.pickup(drop) === ERR_NOT_IN_RANGE) go(creep, drop);
+        return;
+      }
+      var needyEarly = creep.pos.findClosestByRange(FIND_MY_STRUCTURES, {
+        filter: function (s) {
+          return (s.structureType === STRUCTURE_SPAWN ||
+                  s.structureType === STRUCTURE_EXTENSION) &&
+                 s.store && (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
+        }
+      });
+      if (needyEarly && (creep.store[RESOURCE_ENERGY] | 0) > 0) {
+        transferTo(creep, needyEarly); return;
+      }
+      // Fall through to normal
+    }
+
+    // NORMAL PHASE
+    var carrying = (creep.store.getUsedCapacity(RESOURCE_ENERGY) | 0) > 0;
+
+    if (carrying) {
+      var carryAmt = creep.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
+
+      // Try sticky target first
+      if (creep.memory.qTargetId) {
+        var sticky = Game.getObjectById(creep.memory.qTargetId);
+        if (sticky && _effectiveFree(sticky, RESOURCE_ENERGY) > 0) {
+          if (reserveFill(creep, sticky, carryAmt, RESOURCE_ENERGY) > 0) {
+            transferTo(creep, sticky); return;
+          }
+        } else {
+          creep.memory.qTargetId = null;
+        }
+      }
+
+      // Helper: pick nearest among candidates that still have effective free
+      function pickNeedy(cands) {
+        var ok = [];
+        for (var i = 0; i < cands.length; i++) {
+          var s = cands[i];
+          if (s && _effectiveFree(s, RESOURCE_ENERGY) > 0) ok.push(s);
+        }
+        return ok.length ? _nearest(creep.pos, ok) : null;
+      }
+
+      // Order: EXT/SPAWN -> TOWER -> LINK(spawn) -> TERMINAL -> STORAGE
+      var target =
+        pickNeedy(cache.extSpawnNeed) ||
+        pickNeedy(cache.towersNeed)   ||
+        (cache.linkNearSpawn && _effectiveFree(cache.linkNearSpawn, RESOURCE_ENERGY) > 0 ? cache.linkNearSpawn : null) ||
+        ((cache.terminalNeed && cache.terminalNeed.id !== creep.memory.qLastWithdrawId &&
+          _effectiveFree(cache.terminalNeed, RESOURCE_ENERGY) > 0) ? cache.terminalNeed : null) ||
+        ((cache.storageNeed  && cache.storageNeed.id  !== creep.memory.qLastWithdrawId &&
+          _effectiveFree(cache.storageNeed,  RESOURCE_ENERGY) > 0) ? cache.storageNeed  : null);
+
+      if (target) {
+        if (reserveFill(creep, target, carryAmt, RESOURCE_ENERGY) > 0) {
+          transferTo(creep, target); return;
+        }
+        // reservation lost? we'll re-pick next tick
+      }
+
+      // Soft idle near spawn/controller
+      var anchor = cache.spawn || room.controller || creep.pos;
+      go(creep, (anchor.pos || anchor), 2);
+      return;
+    }
+
+    // Refill: STORAGE -> side CONTAINERS -> DROPS -> harvest
+    if (cache.storageHasEnergy) { withdrawFrom(creep, cache.storageHasEnergy); return; }
+
+    if (cache.sideContainers.length) {
+      var side = _nearest(creep.pos, cache.sideContainers);
+      if (side) { withdrawFrom(creep, side); return; }
+    }
+
+    var drop2 = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
+      filter: function (r) { return r.resourceType === RESOURCE_ENERGY; }
+    });
+    if (drop2) { if (creep.pickup(drop2) === ERR_NOT_IN_RANGE) go(creep, drop2); return; }
+
+    harvestFromClosest(creep);
+  }
 };
+
+module.exports = TaskQueen;

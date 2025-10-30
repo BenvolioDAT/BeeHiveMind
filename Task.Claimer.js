@@ -1,13 +1,12 @@
-var Traveler = require('Traveler');
-var CoreSpawn = require('core.spawn');
+// Task.Claimer.js
+// Handles: claim | reserve | attack controllers.
+// creep.memory:
+//   claimerMode: 'claim' | 'reserve' | 'attack' (default: 'reserve')
+//   targetRoom: 'E12S34' (preferred) or use flags named 'Claim'/'Reserve'/'Attack'
 
-function travel(creep, target, options) {
-  var opts = options || {};
-  if (Traveler && typeof Traveler.travelTo === 'function') {
-    return Traveler.travelTo(creep, target, opts);
-  }
-  return creep.moveTo(target, opts);
-}
+'use strict';
+
+var BeeToolbox = require('BeeToolbox');
 
 var CONFIG = {
   defaultMode: 'reserve',
@@ -117,18 +116,7 @@ function releaseRoomLock(rn, creep) {
   if (L.creep === creep.name) delete Memory.reserveLocks[rn];
 }
 
-// Cache reserve target list per tick so every claimer reuses the same scan work.
-if (!global.__CLAIMER_CACHE) {
-  global.__CLAIMER_CACHE = { tick: -1, reserveTargets: [] };
-}
-
 function gatherReserveTargets() {
-  var cache = global.__CLAIMER_CACHE;
-  if (cache.tick === Game.time) {
-    // Return a shallow copy so callers cannot mutate the shared cache.
-    return cache.reserveTargets.slice();
-  }
-
   var set = {};
   for (var fname in Game.flags) {
     if (fname === 'Reserve' || fname.indexOf('Reserve:') === 0) {
@@ -138,35 +126,16 @@ function gatherReserveTargets() {
   }
   for (var cname in Game.creeps) {
     var c = Game.creeps[cname];
-    var mem = c && c.memory;
-    if (!mem) continue;
-
-    // FIX: Remote reservers spawned by Luna tag their specialty in task/remoteRole, so check all fields instead of just role.
-    var isReserveSpecialist = false;
-    if (mem.role && RESERVE_CONFIG.scanRoleNames.indexOf(mem.role) !== -1) {
-      isReserveSpecialist = true;
+    if (!c.memory || !c.memory.role) continue;
+    if (RESERVE_CONFIG.scanRoleNames.indexOf(c.memory.role) !== -1) {
+      var rn = c.memory.remoteRoom || c.memory.targetRoom || c.memory.targetRoomName;
+      if (rn) set[rn] = true;
     }
-    if (!isReserveSpecialist && mem.task && RESERVE_CONFIG.scanRoleNames.indexOf(mem.task) !== -1) {
-      isReserveSpecialist = true;
-    }
-    if (!isReserveSpecialist && mem.remoteRole) {
-      var remoteRole = String(mem.remoteRole).toLowerCase();
-      for (var idx = 0; idx < RESERVE_CONFIG.scanRoleNames.length; idx++) {
-        var entry = String(RESERVE_CONFIG.scanRoleNames[idx]).toLowerCase();
-        if (entry === remoteRole) { isReserveSpecialist = true; break; }
-      }
-    }
-    if (!isReserveSpecialist) continue;
-
-    var rn = mem.remoteRoom || mem.targetRoom || mem.targetRoomName || mem.remote;
-    if (rn) set[rn] = true;
   }
   var out = [];
   for (var rn in set) out.push(rn);
   if (out.length > RESERVE_CONFIG.maxTargets) out.length = RESERVE_CONFIG.maxTargets;
-  cache.tick = Game.time;
-  cache.reserveTargets = out.slice();
-  return cache.reserveTargets.slice();
+  return out;
 }
 
 // Cache reservation intel we see
@@ -240,7 +209,11 @@ function resolveTargetRoom(creep) {
 function moveToRoom(creep, roomName) {
   if (creep.pos.roomName !== roomName) {
     var dest = new RoomPosition(25, 25, roomName);
-    travel(creep, dest, { range: 20, reusePath: CONFIG.reusePath });
+    if (BeeToolbox && BeeToolbox.BeeTravel) {
+      BeeToolbox.BeeTravel(creep, dest, { range: 20, reusePath: CONFIG.reusePath });
+    } else {
+      creep.moveTo(dest, { reusePath: CONFIG.reusePath, range: 20 });
+    }
     return false;
   }
   return true;
@@ -267,7 +240,8 @@ function signIfWanted(creep, controller) {
     }
     var res = creep.signController(controller, creep.memory.signText);
     if (res === ERR_NOT_IN_RANGE) {
-      travel(creep, controller);
+      if (BeeToolbox && BeeToolbox.BeeTravel) BeeToolbox.BeeTravel(creep, controller);
+      else creep.moveTo(controller);
     } else if (res === OK) {
       delete creep.memory.signText; // clear so next time it picks fresh
     }
@@ -304,13 +278,13 @@ function doClaim(creep, controller) {
   }
   if (controller.owner && !controller.my) {
     var r = creep.attackController(controller);
-    if (r === ERR_NOT_IN_RANGE) return travel(creep, controller);
+    if (r === ERR_NOT_IN_RANGE) return BeeToolbox.BeeTravel(creep, controller);
     creep.say('⚔ atkCtl');
     return;
   }
   var res = creep.claimController(controller);
   if (res === ERR_NOT_IN_RANGE) {
-    travel(creep, controller);
+    BeeToolbox.BeeTravel(creep, controller);
   } else if (res === OK) {
     creep.say('👑 mine');
     signIfWanted(creep, controller);
@@ -327,13 +301,13 @@ function doReserve(creep, controller) {
   if (!controller) { creep.say('❓no ctl'); return; }
   if (controller.reservation && controller.reservation.username !== creep.owner.username) {
     var r = creep.attackController(controller);
-    if (r === ERR_NOT_IN_RANGE) return travel(creep, controller);
+    if (r === ERR_NOT_IN_RANGE) return BeeToolbox.BeeTravel(creep, controller);
     creep.say('🪓 deres');
     return;
   }
   var res = creep.reserveController(controller);
   if (res === ERR_NOT_IN_RANGE) {
-    travel(creep, controller);
+    BeeToolbox.BeeTravel(creep, controller);
   } else if (res === OK) {
     creep.say('📌 +res');
   } else {
@@ -346,7 +320,7 @@ function doAttack(creep, controller) {
   if (!controller) { creep.say('❓no ctl'); return; }
   var r = creep.attackController(controller);
   if (r === ERR_NOT_IN_RANGE) {
-    travel(creep, controller);
+    BeeToolbox.BeeTravel(creep, controller);
   } else if (r === OK) {
     creep.say('🪓 atkCtl');
   } else {
@@ -419,40 +393,3 @@ var TaskClaimer = {
 };
 
 module.exports = TaskClaimer;
-
-var CLAIMER_BODY_TIERS = [
-  [
-    CLAIM, CLAIM,
-    MOVE, MOVE
-  ],
-  [
-    CLAIM,
-    MOVE
-  ]
-];
-
-module.exports.BODY_TIERS = CLAIMER_BODY_TIERS.map(function (tier) {
-  return tier.slice();
-});
-
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(CLAIMER_BODY_TIERS, energy);
-};
-
-module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var available = (typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
-  if (available === null && room && typeof room.energyAvailable === 'number') {
-    available = room.energyAvailable;
-  }
-  var body = module.exports.getSpawnBody(available, room, context);
-  return {
-    body: body,
-    namePrefix: 'Claimer',
-    memory: {
-      role: 'Worker_Bee',
-      task: 'Claimer',
-      home: room && room.name
-    }
-  };
-};

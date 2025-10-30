@@ -1,713 +1,700 @@
-var BuilderPlanner = require('Task.Builder.Planner');
-var CoreSpawn = require('core.spawn');
-try { require('Traveler'); } catch (e) {}
+// role.TaskBuilder.cpu.es5.js
+// ES5-safe, CPU-lean Builder with per-tick site caching, anti-stuck movement,
+// friendly swaps, per-site reservations, correct fallback, and "true lock":
+// once a builder picks a site, it stays on it until completion.
+// + Visuals: gold line to destination, marker + label, path dots (low-CPU).
+// + On-path preference: favors road sites that lie along the current route,
+//   and lightly penalizes building targets sitting in swamp tiles.
+//
+// Traveler-first movement (BeeToolbox.BeeTravel or creep.travelTo), with graceful fallbacks.
 
-var HAS_OWN = Object.prototype.hasOwnProperty;
+'use strict';
 
-function hasOwn(obj, key) {
-  return !!(obj && HAS_OWN.call(obj, key));
-}
+var BeeToolbox = require('BeeToolbox');
+try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists if Traveler.js is in your codebase
 
-function isValidRoomName(name) {
-  if (typeof name !== 'string') return false;
-  return /^[WE]\d+[NS]\d+$/.test(name);
-}
+// =============================
+// Tunables
+// =============================
+var BUILDERS_PER_SITE_CAP = 1;   // allow up to N builders per site per tick
+var IDLE_NEAR_SITE_RANGE  = 2;   // where to wait if no reservation available
+var LOCK_STUCK_GRACE_TICKS = 50; // if we truly cannot reach the locked site for this long, drop lock
 
-function safeLinearDistance(a, b, allowInexact) {
-  if (!isValidRoomName(a) || !isValidRoomName(b)) {
-    return 9999;
-  }
-  if (!Game || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') {
-    return 9999;
-  }
-  return Game.map.getRoomLinearDistance(a, b, allowInexact);
-}
+// Prefer building road sites that lie along our current path in-room
+var ONPATH_CFG = {
+  enable: true,
+  steps: 25,      // how many steps of our path to consider
+  radius: 1,      // corridor half-width in tiles around the path
+  roadBonus: 3,   // weight bonus if a road site lies in the corridor
+  swampPenalty: 1 // subtract from weight if target tile is swamp (non-road)
+};
 
-var _constructionCache = global.__taskBuilderConstructionCache ||
-  (global.__taskBuilderConstructionCache = { tick: -1, list: [], byRoom: {}, counts: {} });
+// =============================
+// Visuals (ES5-safe, low-CPU)
+// =============================
+var VIS = {
+  enabled: true,
+  drawPathDots: false,  // Traveler handles path; dots disabled to save CPU
+  drawLineToDest: true,
+  drawDestMarker: true,
+  maxDots: 10,
+  color: '#ffd700',
+  opacity: 0.5,
+  labelEveryTicks: 3
+};
 
-function constructionSiteCache() {
-  var tick = Game.time | 0;
-  if (_constructionCache.tick === tick) {
-    return _constructionCache;
-  }
-  _constructionCache.tick = tick;
-  _constructionCache.list = [];
-  _constructionCache.byRoom = {};
-  _constructionCache.counts = {};
+// -----------------------------
+// Global, per-tick builder cache
+// -----------------------------
+if (!global.__BUI) global.__BUI = { tick: -1, byRoom: {}, rooms: [], bestByRoom: {} };
+
+function _prepareBuilderSites() {
+  var G = global.__BUI;
+  if (G.tick === Game.time) return G;
+
+  var byRoom = {};
+  var rooms = [];
+  var bestByRoom = {};
+
   for (var id in Game.constructionSites) {
-    if (!hasOwn(Game.constructionSites, id)) continue;
-    var site = Game.constructionSites[id];
-    if (!site || !site.my) continue;
-    _constructionCache.list.push(site);
-    if (site.pos && site.pos.roomName) {
-      var roomName = site.pos.roomName;
-      if (!_constructionCache.byRoom[roomName]) {
-        _constructionCache.byRoom[roomName] = [];
-        _constructionCache.counts[roomName] = 0;
-      }
-      _constructionCache.byRoom[roomName].push(site);
-      _constructionCache.counts[roomName] += 1;
+    if (!Game.constructionSites.hasOwnProperty(id)) continue;
+    var s = Game.constructionSites[id];
+    var rn = s.pos.roomName;
+    if (!byRoom[rn]) { byRoom[rn] = []; rooms.push(rn); }
+    byRoom[rn].push(s);
+  }
+
+  var weights = TaskBuilder.siteWeights;
+  for (var r = 0; r < rooms.length; r++) {
+    var rn2 = rooms[r];
+    var list = byRoom[rn2];
+    var best = null, bestW = -1, bestD = 1e9;
+    var center = new RoomPosition(25, 25, rn2);
+    for (var i = 0; i < list.length; i++) {
+      var site = list[i];
+      var w = (weights && weights[site.structureType]) || 0;
+      var d = (site.pos.roomName === rn2) ? site.pos.getRangeTo(center) : 999;
+      if (w > bestW || (w === bestW && d < bestD)) { best = site; bestW = w; bestD = d; }
     }
+    bestByRoom[rn2] = best;
   }
-  return _constructionCache;
+
+  G.tick = Game.time;
+  G.byRoom = byRoom;
+  G.rooms = rooms;
+  G.bestByRoom = bestByRoom;
+  return G;
 }
 
-var ENERGY_MIN_BUILD = 10;
-var TTL_STRAND_BUFFER = 15;
-
-if (!global.__BUILDER_CACHE) {
-  global.__BUILDER_CACHE = { tick: -1, sitesByRoom: {}, siteArray: [] };
-}
-
-// Cache plan indexes per room per tick to reduce repeated computation.
-if (!global.__PLAN_INDEX_CACHE) {
-  global.__PLAN_INDEX_CACHE = {};
-}
-
-// Cache energy search results briefly to avoid repeated scans.
-if (!global.__BUILDER_ENERGY_CACHE) {
-  global.__BUILDER_ENERGY_CACHE = {};
-}
-
-// Cache hub positions per room per tick for idle movement.
-if (!global.__BUILDER_HUB_CACHE) {
-  global.__BUILDER_HUB_CACHE = {};
-}
-
-// Ensure the shared soft lock memory container exists before use.
-function _ensureLockMemory() {
-  if (!Memory._buildLocks) {
-    Memory._buildLocks = {};
-  }
-  return Memory._buildLocks;
-}
-
-function _getHomeName(creep) {
+// -----------------------------
+// Small helpers (ES5-safe)
+// -----------------------------
+function ensureHome(creep) {
   if (creep.memory.home) return creep.memory.home;
-  var nearest = null;
-  var best = 9999;
-  for (var name in Game.spawns) {
-    if (!hasOwn(Game.spawns, name)) continue;
-    var sp = Game.spawns[name];
-    if (!sp) continue;
-    var dist = safeLinearDistance(creep.pos.roomName, sp.pos.roomName);
-    if (dist < best) {
-      best = dist;
-      nearest = sp.pos.roomName;
+  var keys = Object.keys(Game.spawns);
+  if (keys.length) {
+    var best = Game.spawns[keys[0]];
+    var bestD = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName);
+    for (var i = 1; i < keys.length; i++) {
+      var sp = Game.spawns[keys[i]];
+      var d  = Game.map.getRoomLinearDistance(creep.pos.roomName, sp.pos.roomName);
+      if (d < bestD) { best = sp; bestD = d; }
     }
+    creep.memory.home = best.pos.roomName;
+  } else {
+    creep.memory.home = creep.pos.roomName;
   }
-  if (!nearest) nearest = creep.pos.roomName;
-  creep.memory.home = nearest;
-  return nearest;
+  return creep.memory.home;
 }
 
-function _gatherSitesOnce() {
-  var cache = global.__BUILDER_CACHE;
-  if (cache.tick === Game.time) return cache;
-  cache.tick = Game.time;
-  cache.sitesByRoom = {};
-  cache.siteArray = [];
-  var siteCache = constructionSiteCache();
-  var byRoom = siteCache.byRoom || {};
-  var list = siteCache.list || [];
-  cache.siteArray = list.slice();
-  for (var roomName in byRoom) {
-    if (!hasOwn(byRoom, roomName)) continue;
-    var roomSites = byRoom[roomName];
-    cache.sitesByRoom[roomName] = Array.isArray(roomSites) ? roomSites.slice() : [];
+function getHomeAnchorPos(homeName) {
+  var room = Game.rooms[homeName];
+  if (room) {
+    if (room.storage) return room.storage.pos;
+    var sp = room.find(FIND_MY_SPAWNS);
+    if (sp.length) return sp[0].pos;
+    if (room.controller && room.controller.my) return room.controller.pos;
   }
-  return cache;
+  return new RoomPosition(25, 25, homeName);
 }
 
-function _planIndex(plan) {
-  var index = {};
-  if (!plan) return index;
-  for (var i = 0; i < plan.structures.length; i++) {
-    var task = plan.structures[i];
-    var key = task.type + ':' + task.pos.x + ':' + task.pos.y;
-    index[key] = task;
+function _nearest(pos, arr) {
+  var best = null, bestD = 1e9;
+  for (var i = 0; i < arr.length; i++) {
+    var o = arr[i]; if (!o) continue;
+    var d = pos.getRangeTo(o);
+    if (d < bestD) { bestD = d; best = o; }
   }
-  for (var roadKey in plan.roads) {
-    if (!hasOwn(plan.roads, roadKey)) continue;
-    var edge = plan.roads[roadKey];
-    if (!edge || !edge.path) continue;
-    for (var p = 0; p < edge.path.length; p++) {
-      var step = edge.path[p];
-      var rKey = STRUCTURE_ROAD + ':' + step.x + ':' + step.y;
-      if (!index[rKey]) {
-        index[rKey] = {
-          key: roadKey,
-          type: STRUCTURE_ROAD,
-          pos: step,
-          category: edge.category === 'critical' ? 'road-critical' : 'road',
-          rcl: edge.category === 'critical' ? 2 : 4
-        };
-      }
+  return best;
+}
+
+function findWithdrawTargetInRoom(room) {
+  if (!room) return null;
+  if (room.storage && (room.storage.store[RESOURCE_ENERGY] | 0) > 0) return room.storage;
+  if (room.terminal && (room.terminal.store[RESOURCE_ENERGY] | 0) > 0) return room.terminal;
+
+  var cand = room.find(FIND_STRUCTURES, {
+    filter: function(s) {
+      if (!s.store) return false;
+      if (s.structureType !== STRUCTURE_CONTAINER && s.structureType !== STRUCTURE_LINK) return false;
+      return (s.store[RESOURCE_ENERGY] | 0) > 0;
     }
-  }
-  return index;
+  });
+  return cand.length ? _nearest(new RoomPosition(25, 25, room.name), cand) : null;
 }
 
-// Retrieve a cached plan index for the room if available this tick.
-function _getPlanIndexCached(roomName, plan) {
-  if (!roomName) return {};
-  var cache = global.__PLAN_INDEX_CACHE;
-  var entry = cache[roomName];
-  if (entry && entry.tick === Game.time) {
-    return entry.index;
-  }
-  var index = _planIndex(plan);
-  cache[roomName] = { tick: Game.time, index: index };
-  return index;
+// -------- Anti-stuck & movement --------
+function _edgeSafe(pos) { return pos.x > 1 && pos.x < 48 && pos.y > 1 && pos.y < 48; }
+
+function _recordStuck(creep) {
+  var m = creep.memory._stk || { x: -1, y: -1, t: 0 };
+  if (creep.pos.x === m.x && creep.pos.y === m.y) m.t = (m.t | 0) + 1;
+  else { m.x = creep.pos.x; m.y = creep.pos.y; m.t = 0; }
+  creep.memory._stk = m;
+  return m.t | 0;
 }
 
-function _isRoadTask(item) {
-  if (!item) return false;
-  if (item.structureType && item.structureType === STRUCTURE_ROAD) return true;
-  if (item.type && item.type === STRUCTURE_ROAD) return true;
-  if (item.category === 'road' || item.category === 'road-critical') return true;
+function _lateralNudge(creep) {
+  var dirs = [TOP, TOP_RIGHT, RIGHT, BOTTOM_RIGHT, BOTTOM, BOTTOM_LEFT, LEFT, TOP_LEFT];
+  var dxs = [-1, 0, 1, 1, 1, 0, -1, -1];
+  var dys = [-1, -1, -1, 0, 1, 1, 1, 0];
+  for (var i = 0; i < 8; i++) {
+    var d = dirs[i];
+    var nx = creep.pos.x + dxs[i], ny = creep.pos.y + dys[i];
+    if (nx < 1 || nx > 48 || ny < 1 || ny > 48) continue;
+    var terr = creep.room.getTerrain().get(nx, ny);
+    if (terr === TERRAIN_MASK_WALL) continue;
+    var occ = creep.room.lookForAt(LOOK_CREEPS, nx, ny);
+    if (occ && occ.length) continue;
+    creep.move(d);
+    break;
+  }
+}
+
+// ---- Friendly swap helpers ----
+function _posInDir(pos, dir) {
+  var map = {
+    1: {dx: 0,  dy: -1}, 2: {dx: 1,  dy: -1}, 3: {dx: 1,  dy: 0}, 4: {dx: 1,  dy: 1},
+    5: {dx: 0,  dy: 1},  6: {dx: -1, dy: 1},  7: {dx: -1, dy: 0}, 8: {dx: -1, dy: -1}
+  };
+  var off = map[dir]; if (!off) return new RoomPosition(pos.x, pos.y, pos.roomName);
+  return new RoomPosition(pos.x + off.dx, pos.y + off.dy, pos.roomName);
+}
+
+function _tryFriendlySwap(creep, dir) {
+  if (!dir) return false;
+  var np = _posInDir(creep.pos, dir);
+  if (np.x < 0 || np.x > 49 || np.y < 0 || np.y > 49) return false;
+
+  var blockers = creep.room.lookForAt(LOOK_CREEPS, np);
+  if (!blockers || !blockers.length) return false;
+  var mate = null;
+  for (var i = 0; i < blockers.length; i++) { if (blockers[i].my) { mate = blockers[i]; break; } }
+  if (!mate) return false;
+
+  var meLoad = creep.store ? creep.store.getUsedCapacity(RESOURCE_ENERGY) : 0;
+  var maLoad = mate.store ? mate.store.getUsedCapacity(RESOURCE_ENERGY) : 0;
+
+  var iGo = false;
+  if (meLoad < maLoad) iGo = true;
+  else if (meLoad === maLoad) {
+    var meFat = creep.fatigue | 0, maFat = mate.fatigue | 0;
+    if (meFat < maFat) iGo = true;
+    else if (meFat === maFat) iGo = (creep.ticksToLive | 0) < (mate.ticksToLive | 0);
+  }
+
+  if (iGo) {
+    var back = dir + 4; if (back > 8) back -= 8;
+    var ok = mate.move(back);
+    if (ok === OK) { creep.move(dir); return true; }
+  }
   return false;
 }
 
-function _priorityForSite(site, planIndex) {
-  if (!site) return -1;
-  var key = site.structureType + ':' + site.pos.x + ':' + site.pos.y;
-  var task = planIndex[key];
-  if (task) {
-    if (task.type === STRUCTURE_STORAGE) return 120;
-    if (task.type === STRUCTURE_SPAWN) return 118;
-    if (task.category === 'extension' && task.group === 'extA') return 114;
-    if (task.category === 'extension' && task.group === 'extB') return 113;
-    if (task.category === 'extension' && task.group === 'extC') return 111;
-    if (task.category === 'extension' && task.group === 'extD') return 109;
-    if (task.type === STRUCTURE_TOWER) {
-      // Acceptance test: After storage exists in RCL4+, extensions outrank towers until the block finishes.
-      return 108;
-    }
-    if (task.category === 'road-critical' || task.category === 'road') return 1;
-    if (task.category === 'container') return 106;
-    if (task.category === 'link') return 104;
-    if (task.category === 'hub') return 80;
-  }
-  if (site.structureType === STRUCTURE_ROAD) return 1;
-  if (site.structureType === STRUCTURE_CONTAINER) return 60;
-  if (site.structureType === STRUCTURE_EXTENSION) return 70;
-  return 10;
+// ---- Per-site reservation (limit builders/site/tick) ----
+if (!global.__SITE_RES) global.__SITE_RES = { tick: -1, slots: {} };
+function _reserveSite(siteId, cap) {
+  var R = global.__SITE_RES;
+  if (R.tick !== Game.time) { R.tick = Game.time; R.slots = {}; }
+  var used = R.slots[siteId] | 0;
+  if (used >= (cap | 0)) return false;
+  R.slots[siteId] = used + 1;
+  return true;
 }
 
-// Cache hub lookups for the room each tick to avoid recomputation while idle.
-function _getCachedHub(homeRoom) {
-  if (!homeRoom) return null;
-  var roomName = homeRoom.name;
-  var entry = global.__BUILDER_HUB_CACHE[roomName];
-  if (entry && entry.tick === Game.time) {
-    return entry.hub;
-  }
-  var hub = BuilderPlanner.computeHub(homeRoom);
-  global.__BUILDER_HUB_CACHE[roomName] = { tick: Game.time, hub: hub };
-  return hub;
+// ========== Visual helpers ==========
+function _asPos(dest) { return dest && dest.pos ? dest.pos : dest; }
+
+function _drawMove(creep, dest, path, tag) {
+  if (!VIS.enabled) return;
+  try {
+    var p = _asPos(dest);
+    if (!p || !p.roomName) return;
+
+    var v = new RoomVisual(p.roomName);
+
+    if (VIS.drawDestMarker) {
+      v.circle(p.x, p.y, {
+        radius: 0.35, fill: 'transparent',
+        stroke: VIS.color, strokeWidth: 0.12, opacity: VIS.opacity
+      });
+      if ((Game.time % VIS.labelEveryTicks) === 0 && tag) {
+        v.text(tag, p.x, p.y - 0.6, {
+          font: 0.6, color: '#ffffff', background: '#000000',
+          backgroundPadding: 0.03, opacity: 0.9
+        });
+      }
+    }
+
+    if (VIS.drawLineToDest && creep.pos.roomName === p.roomName) {
+      v.line(creep.pos.x, creep.pos.y, p.x, p.y, {
+        color: VIS.color, width: 0.05, opacity: VIS.opacity * 0.9
+      });
+    }
+
+    if (VIS.drawPathDots && path && path.length) {
+      var limit = Math.min(VIS.maxDots | 0, path.length | 0);
+      for (var i = 0; i < limit; i++) {
+        var s = path[i];
+        v.circle(s.x, s.y, { radius: 0.14, fill: VIS.color, opacity: 0.75 });
+      }
+    }
+  } catch (e) { /* visuals are best-effort; ignore */ }
 }
 
-function _getEnergySource(creep, homeRoom, forceRefresh) {
-  // Resolve home room safely
-  if (!homeRoom) {
-    var homeName = _getHomeName(creep);
-    homeRoom = Game.rooms[homeName];
+// ========== Traveler-first mover with visuals ==========
+function go(creep, dest, opts) {
+  if (!dest) return;
+  opts = opts || {};
+  var range = (opts.range != null) ? opts.range : 1;
+
+  var stuck = _recordStuck(creep);
+  var baseReuse = (opts.reusePath != null) ? opts.reusePath : 35;
+  if (range <= 3) baseReuse = Math.min(baseReuse, 10);
+  if (stuck >= 2) baseReuse = Math.min(baseReuse, 5);
+
+  if (!_edgeSafe(creep.pos)) { _lateralNudge(creep); }
+
+  var vTag = opts.vTag || (opts.range === 3 ? '🔨 build' : '➡');
+  _drawMove(creep, dest, null, vTag);
+
+  // Traveler/BeeTravel preferred
+  var tOpts = {
+    range: range,
+    reusePath: baseReuse,
+    ignoreCreeps: true,   // Traveler’s traffic manager will handle creeps
+    stuckValue: 2,        // consider stuck quickly to repath
+    repath: 0.05,         // small chance to refresh path
+    maxOps: 6000
+  };
+  if (BeeToolbox && BeeToolbox.roomCallback) tOpts.roomCallback = BeeToolbox.roomCallback;
+
+  try {
+    if (BeeToolbox && BeeToolbox.BeeTravel) {
+      BeeToolbox.BeeTravel(creep, (dest.pos || dest), tOpts);
+      return;
+    }
+    if (typeof creep.travelTo === 'function') {
+      creep.travelTo((dest.pos || dest), tOpts);
+      return;
+    }
+  } catch (e) {
+    // fall through to classic moveTo
   }
 
-  // If no visible room, bail (can't scan drops/ruins without vision)
-  if (!homeRoom) return null;
+  // Classic moveTo fallback
+  var ignoreCreeps = (stuck >= 2) ? false : true;
+  var moveRes = creep.moveTo(dest, {
+    range: range,
+    reusePath: baseReuse,
+    ignoreCreeps: ignoreCreeps,
+    maxOps: (stuck >= 3) ? 3000 : 1800,
+    plainCost: 2, swampCost: 6,
+    visualizePathStyle: {}
+  });
 
-  var roomName = homeRoom.name;
-  var roomCache = global.__BUILDER_ENERGY_CACHE;
-  var entry = roomCache[roomName];
-  var needsRefresh = forceRefresh || !entry || (Game.time - entry.tick >= 3);
+  // Optional friendly swap if we know our intended direction
+  if (moveRes !== OK && moveRes !== ERR_TIRED && creep.fatigue === 0) {
+    var dir = creep.pos.getDirectionTo(_asPos(dest));
+    _tryFriendlySwap(creep, dir);
+  }
+}
 
-  // Refresh the cached energy targets if stale or forced.
-  if (needsRefresh) {
-    entry = {
-      tick: Game.time,
-      drops: homeRoom.find(FIND_DROPPED_RESOURCES, {
-        filter: function (r) {
-          return r.resourceType === RESOURCE_ENERGY;
+// -----------------------------
+// NEW: Lock helpers
+// -----------------------------
+function _lockToSite(creep, site) {
+  creep.memory.tBuildId = site.id;
+  creep.memory.tBuildPos = { x: site.pos.x, y: site.pos.y, roomName: site.pos.roomName, type: site.structureType };
+  creep.memory.tLockSince = Game.time | 0;
+  creep.memory.tLockStuck = 0;
+}
+function _clearLock(creep) {
+  delete creep.memory.tBuildId;
+  delete creep.memory.tBuildPos;
+  delete creep.memory.tLockSince;
+  delete creep.memory.tLockStuck;
+}
+function _getLockedSite(creep) {
+  var id = creep.memory.tBuildId;
+  if (!id) return null;
+  return Game.constructionSites[id] || null;
+}
+function _gotoLock(creep) {
+  var p = creep.memory.tBuildPos;
+  if (!p) return false;
+  var pos = new RoomPosition(p.x, p.y, p.roomName);
+  go(creep, pos, { range: 3, vTag: '🔒 seek' });
+  return true;
+}
+
+// -----------------------------
+// NEW: On-path helpers
+// -----------------------------
+function _pathCorridorToward(creep, goalPos, steps, radius) {
+  if (!ONPATH_CFG.enable) return null;
+  if (!goalPos || goalPos.roomName !== creep.pos.roomName) return null; // in-room only
+  var path = creep.pos.findPathTo(goalPos, {
+    ignoreCreeps: true, range: 1, maxOps: 1500, plainCost: 2, swampCost: 6
+  });
+  if (!path || !path.length) return null;
+
+  var map = {};
+  var n = Math.min(steps | 0, path.length | 0);
+  for (var i = 0; i < n; i++) {
+    var s = path[i];
+    for (var dx = -radius; dx <= radius; dx++) {
+      for (var dy = -radius; dy <= radius; dy++) {
+        var x = s.x + dx, y = s.y + dy;
+        if (x < 0 || x > 49 || y < 0 || y > 49) continue;
+        map[x + '_' + y + '_' + creep.pos.roomName] = 1;
+      }
+    }
+  }
+  return map;
+}
+
+function _computeLocalCorridor(creep, localList) {
+  if (!ONPATH_CFG.enable || !localList || !localList.length) return null;
+
+  var goal = null, bestD = 1e9;
+
+  // Prefer the nearest road site in-room
+  for (var i = 0; i < localList.length; i++) {
+    var s = localList[i];
+    if (s.structureType !== STRUCTURE_ROAD) continue;
+    if (s.pos.roomName !== creep.pos.roomName) continue;
+    var d = creep.pos.getRangeTo(s.pos);
+    if (d < bestD) { bestD = d; goal = s.pos; }
+  }
+
+  // Fallback: nearest site of any type in-room
+  if (!goal) {
+    bestD = 1e9;
+    for (var j = 0; j < localList.length; j++) {
+      var t = localList[j];
+      if (t.pos.roomName !== creep.pos.roomName) continue;
+      var d2 = creep.pos.getRangeTo(t.pos);
+      if (d2 < bestD) { bestD = d2; goal = t.pos; }
+    }
+  }
+
+  if (!goal) return null;
+  return _pathCorridorToward(creep, goal, ONPATH_CFG.steps, ONPATH_CFG.radius);
+}
+
+// -----------------------------
+// Choose the best reservable site with optional on-path bias
+// -----------------------------
+function _pickReservableSite(creep, list, cap, weights, opts) {
+  if (!list || !list.length) return null;
+  opts = opts || {};
+  var tried = {};
+  var terr = creep.room ? creep.room.getTerrain() : null;
+
+  for (var attempt = 0; attempt < list.length; attempt++) {
+    var best = null, bestScore = -1, bestIdx = -1, bestDist = 1e9;
+
+    for (var i = 0; i < list.length; i++) {
+      if (tried[i]) continue;
+      var s = list[i];
+
+      // base weight (your structure priority)
+      var score = (weights && weights[s.structureType]) || 0;
+
+      // on-path road bonus (same-room corridor only)
+      if (opts.corridorMap && s.structureType === STRUCTURE_ROAD) {
+        var key = s.pos.x + '_' + s.pos.y + '_' + s.pos.roomName;
+        if (opts.corridorMap[key]) score += (opts.roadBonus | 0);
+      }
+
+      // light swamp penalty for non-road targets
+      if (opts.swampPenalty && terr && s.pos.roomName === creep.pos.roomName) {
+        if (s.structureType !== STRUCTURE_ROAD &&
+            terr.get(s.pos.x, s.pos.y) === TERRAIN_MASK_SWAMP) {
+          score -= (opts.swampPenalty | 0);
         }
-      }),
-      tombs: homeRoom.find(FIND_TOMBSTONES),
-      ruins: homeRoom.find(FIND_RUINS),
-      conts: homeRoom.find(FIND_STRUCTURES, {
-        filter: function (s) {
-          return s.structureType === STRUCTURE_CONTAINER || s.structureType === STRUCTURE_LINK;
-        }
-      }),
-      storage: homeRoom.storage || null,
-      terminal: homeRoom.terminal || null,
-      spawns: homeRoom.find(FIND_MY_SPAWNS)
-    };
-    roomCache[roomName] = entry;
-  }
+      }
 
-  // 1️⃣ Dropped energy first (closest first)
-  var validDrops = [];
-  for (var i = 0; i < entry.drops.length; i++) {
-    var drop = entry.drops[i];
-    if (drop && drop.amount >= 50 && drop.resourceType === RESOURCE_ENERGY) {
-      validDrops.push(drop);
+      var d = creep.pos.getRangeTo(s.pos);
+      if (score > bestScore || (score === bestScore && d < bestDist)) {
+        best = s; bestScore = score; bestIdx = i; bestDist = d;
+      }
     }
-  }
-  if (validDrops.length) {
-    var nearestDrop = creep.pos.findClosestByRange(validDrops);
-    if (nearestDrop) return nearestDrop;
-  }
 
-  // 2️⃣ Tombstones with energy
-  var validTombs = [];
-  for (var j = 0; j < entry.tombs.length; j++) {
-    var tomb = entry.tombs[j];
-    if (tomb && tomb.store && (tomb.store[RESOURCE_ENERGY] | 0) > 0) {
-      validTombs.push(tomb);
-    }
+    if (!best) break;
+    tried[bestIdx] = true;
+    if (_reserveSite(best.id, cap)) return best;
   }
-  if (validTombs.length) {
-    var nearestTomb = creep.pos.findClosestByRange(validTombs);
-    if (nearestTomb) return nearestTomb;
-  }
-
-  // 3️⃣ Ruins with energy
-  var validRuins = [];
-  for (var k = 0; k < entry.ruins.length; k++) {
-    var ruin = entry.ruins[k];
-    if (ruin && ruin.store && (ruin.store[RESOURCE_ENERGY] | 0) > 0) {
-      validRuins.push(ruin);
-    }
-  }
-  if (validRuins.length) {
-    var nearestRuin = creep.pos.findClosestByRange(validRuins);
-    if (nearestRuin) return nearestRuin;
-  }
-
-  // 4️⃣ Containers or links with energy
-  var validContainers = [];
-  for (var m = 0; m < entry.conts.length; m++) {
-    var cont = entry.conts[m];
-    if (!cont) continue;
-    var stored = 0;
-    if (cont.store) {
-      stored = cont.store[RESOURCE_ENERGY] | 0;
-    } else if (cont.energy) {
-      stored = cont.energy;
-    }
-    if (stored > 0) {
-      validContainers.push(cont);
-    }
-  }
-  if (validContainers.length) {
-    var nearestCont = creep.pos.findClosestByRange(validContainers);
-    if (nearestCont) return nearestCont;
-  }
-
-  // 5️⃣ Storage, then terminal
-  if (entry.storage && entry.storage.store && (entry.storage.store[RESOURCE_ENERGY] | 0) > 0) {
-    return entry.storage;
-  }
-  if (entry.terminal && entry.terminal.store && (entry.terminal.store[RESOURCE_ENERGY] | 0) > 5000) {
-    return entry.terminal;
-  }
-
-  // 6️⃣ Fallback: spawn with energy
-  for (var n = 0; n < entry.spawns.length; n++) {
-    var spawn = entry.spawns[n];
-    if (spawn && spawn.store && (spawn.store[RESOURCE_ENERGY] | 0) > 0) {
-      return spawn;
-    }
-  }
-
   return null;
 }
 
-
-
-// Withdraw energy with a quick retry if the target is unexpectedly empty.
-function _withdraw(creep, target, retried) {
-  if (!target) return false;
-
-  // Handle dropped energy first
-  if (target.resourceType === RESOURCE_ENERGY) {
-    if (creep.pos.isNearTo(target)) {
-      if (target.amount > 0) {
-        return creep.pickup(target) === OK;
-      }
-      if (!retried) {
-        var refreshRoom = Game.rooms[_getHomeName(creep)];
-        var newSrc = _getEnergySource(creep, refreshRoom, true);
-        if (newSrc && newSrc.id !== target.id) {
-          return _withdraw(creep, newSrc, true);
-        }
-      }
-      return false;
-    } else {
-      creep.travelTo(target, { range: 1, maxRooms: 1 });
-      return false;
-    }
-  }
-
-  // Handle structures and ruins/tombstones
-  if (creep.pos.isNearTo(target)) {
-    var available = 0;
-    if (target.store) {
-      available = target.store[RESOURCE_ENERGY] | 0;
-    } else if (target.energy) {
-      available = target.energy;
-    }
-    if (available > 0) {
-      return creep.withdraw(target, RESOURCE_ENERGY) === OK;
-    }
-    if (!retried) {
-      var refreshRoom2 = Game.rooms[_getHomeName(creep)];
-      var retrySource = _getEnergySource(creep, refreshRoom2, true);
-      if (retrySource && retrySource.id !== target.id) {
-        return _withdraw(creep, retrySource, true);
-      }
-    }
-  } else {
-    creep.travelTo(target, { range: 1, maxRooms: 1 });
-  }
-
-  return false;
-}
-
-
-// Drop expired locks and orphan entries to keep the shared table clean.
-function _cleanupBuildLocks() {
-  var locks = _ensureLockMemory();
-  for (var id in locks) {
-    if (!hasOwn(locks, id)) continue;
-    var lock = locks[id];
-    if (!lock || lock.until < Game.time) {
-      delete locks[id];
-    }
-  }
-}
-
-// Remove a lock association for the creep and optionally from global memory.
-function _releaseLock(creep, siteId, keepGlobal) {
-  var id = siteId;
-  if (siteId && siteId.id) {
-    id = siteId.id;
-  }
-  if (id && !keepGlobal) {
-    var locks = _ensureLockMemory();
-    if (locks[id]) {
-      delete locks[id];
-    }
-  }
-  delete creep.memory.buildSiteId;
-  delete creep.memory.lockTime;
-  delete creep.memory.lastProgress;
-}
-
-// Refresh the lock timer so teammates know this creep is still active.
-function _refreshBuildLock(creep, site) {
-  if (!site) return;
-  var locks = _ensureLockMemory();
-  var lock = locks[site.id];
-  if (lock && lock.name === creep.name) {
-    lock.until = Game.time + 20;
-  }
-}
-
-function _getLockedSite(creep) {
-  var id = creep.memory.buildSiteId;
-  if (!id) return null;
-  var locks = Memory._buildLocks;
-  if (locks && locks[id]) {
-    var lock = locks[id];
-    if (lock.name && lock.name !== creep.name && lock.until >= Game.time) {
-      _releaseLock(creep, id, true);
-      return null;
-    }
-    if (lock.until < Game.time) {
-      delete locks[id];
-    }
-  }
-  var site = Game.getObjectById(id);
-  if (!site || !site.my) {
-    _releaseLock(creep, id, false);
-    return null;
-  }
-  return site;
-}
-
-function _lockSite(creep, site) {
-  if (!site) return;
-  var locks = _ensureLockMemory();
-  locks[site.id] = { name: creep.name, until: Game.time + 20 };
-  creep.memory.buildSiteId = site.id;
-  creep.memory.lockTime = Game.time;
-  creep.memory.lastProgress = site.progress || 0;
-}
-
-function _shouldAbandon(creep, site) {
-  if (!site) return false;
-  if (!creep.ticksToLive) return false;
-  var distance = creep.pos.getRangeTo(site.pos);
-  if (creep.ticksToLive < distance + TTL_STRAND_BUFFER) {
-    return true;
-  }
-  return false;
-}
-
-function _chooseSite(creep, planIndex) {
-  var cache = _gatherSitesOnce();
-  var homeName = _getHomeName(creep);
-  var sites = cache.sitesByRoom[homeName] || [];
-  if (!sites.length) {
-    sites = cache.siteArray;
-  }
-  var bestNonRoad = null;
-  var bestNonRoadScore = -1;
-  var bestRoad = null;
-  var bestRoadScore = -1;
-  var fallback = null;
-  var fallbackScore = -1;
-  var fallbackDist = 999;
-  var lowTTL = creep.ticksToLive && creep.ticksToLive < 250;
-  for (var i = 0; i < sites.length; i++) {
-    var site = sites[i];
-    if (!site || !site.my) continue;
-    var lock = Memory._buildLocks && Memory._buildLocks[site.id];
-    if (lock && lock.name && lock.name !== creep.name && lock.until >= Game.time) continue;
-    var key = site.structureType + ':' + site.pos.x + ':' + site.pos.y;
-    var task = planIndex[key];
-    var isRoad = _isRoadTask(task) || _isRoadTask(site);
-    var score = _priorityForSite(site, planIndex);
-    if (score < 0) continue;
-    if (_wouldStrand(creep, site)) continue;
-    var dist = creep.pos.getRangeTo(site.pos);
-    var far = site.pos.roomName !== creep.pos.roomName || dist > 25;
-    var progress = site.progress || 0;
-    if (lowTTL && far) {
-      if (score > fallbackScore || (score === fallbackScore && dist < fallbackDist)) {
-        fallback = site;
-        fallbackScore = score;
-        fallbackDist = dist;
-      }
-      continue;
-    }
-    if (isRoad) {
-      if (score > bestRoadScore) {
-        bestRoad = site;
-        bestRoadScore = score;
-      } else if (score === bestRoadScore) {
-        var bestRoadProgress = bestRoad ? (bestRoad.progress || 0) : -1;
-        if (progress > bestRoadProgress) {
-          bestRoad = site;
-          bestRoadScore = score;
-        } else if (progress === bestRoadProgress) {
-          var curRoadDist = bestRoad ? creep.pos.getRangeTo(bestRoad.pos) : 999;
-          if (dist < curRoadDist) {
-            bestRoad = site;
-            bestRoadScore = score;
-          }
-        }
-      }
-      continue;
-    }
-    if (score > bestNonRoadScore) {
-      bestNonRoad = site;
-      bestNonRoadScore = score;
-    } else if (score === bestNonRoadScore) {
-      var bestProgress = bestNonRoad ? (bestNonRoad.progress || 0) : -1;
-      if (progress > bestProgress) {
-        bestNonRoad = site;
-        bestNonRoadScore = score;
-      } else if (progress === bestProgress) {
-        var curDist = bestNonRoad ? creep.pos.getRangeTo(bestNonRoad.pos) : 999;
-        if (dist < curDist) {
-          bestNonRoad = site;
-          bestNonRoadScore = score;
-        }
-      }
-    }
-  }
-  if (bestNonRoad) return bestNonRoad;
-  if (bestRoad) return bestRoad;
-  if (lowTTL) {
-    return null;
-  }
-  return fallback;
-}
-
-function _wouldStrand(creep, site) {
-  if (!site || !creep.ticksToLive) return false;
-  if (site.pos.roomName !== creep.pos.roomName && creep.ticksToLive < 300) return true;
-  var dist = creep.pos.getRangeTo(site.pos);
-  var base = dist * 2 + TTL_STRAND_BUFFER;
-  var room = Game.rooms[site.pos.roomName];
-  if (room) {
-    var terrain = room.getTerrain();
-    var hasRough = false;
-    var dx = site.pos.x - creep.pos.x;
-    var dy = site.pos.y - creep.pos.y;
-    var steps = Math.max(Math.abs(dx), Math.abs(dy));
-    if (steps > 0) {
-      var sample = Math.min(steps, 10);
-      for (var i = 1; i <= sample; i++) {
-        var ix = creep.pos.x + Math.round(dx * i / sample);
-        var iy = creep.pos.y + Math.round(dy * i / sample);
-        if (ix < 0 || ix > 49 || iy < 0 || iy > 49) {
-          continue;
-        }
-        if (terrain.get(ix, iy) === TERRAIN_MASK_SWAMP) {
-          hasRough = true;
-          break;
-        }
-      }
-    }
-    if (!hasRough) {
-      var sx = site.pos.x;
-      var sy = site.pos.y;
-      for (var ox = -1; ox <= 1 && !hasRough; ox++) {
-        for (var oy = -1; oy <= 1; oy++) {
-          var tx = sx + ox;
-          var ty = sy + oy;
-          if (tx < 0 || tx > 49 || ty < 0 || ty > 49) {
-            continue;
-          }
-          if (terrain.get(tx, ty) === TERRAIN_MASK_SWAMP) {
-            hasRough = true;
-            break;
-          }
-        }
-      }
-    }
-    var lowRoads = false;
-    if (room.lookForAtArea) {
-      var top = Math.max(0, site.pos.y - 2);
-      var left = Math.max(0, site.pos.x - 2);
-      var bottom = Math.min(49, site.pos.y + 2);
-      var right = Math.min(49, site.pos.x + 2);
-      var area = room.lookForAtArea(LOOK_STRUCTURES, top, left, bottom, right, true);
-      var roadCount = 0;
-      for (var a = 0; a < area.length; a++) {
-        var struct = area[a].structure;
-        if (struct && struct.structureType === STRUCTURE_ROAD) {
-          roadCount++;
-          if (roadCount >= 3) {
-            break;
-          }
-        }
-      }
-      if (roadCount < 3) {
-        lowRoads = true;
-      }
-    }
-    if (hasRough || lowRoads) {
-      base = Math.ceil(base * 1.5);
-    }
-  }
-  return creep.ticksToLive < base;
-}
-
-function _build(creep, site) {
-  if (!site) return;
-  if (creep.pos.inRangeTo(site, 3)) {
-    creep.build(site);
-  } else {
-    creep.travelTo(site, { range: 3, maxRooms: 1, reusePath: 10 });
-  }
-  _refreshBuildLock(creep, site);
-  var progress = site.progress || 0;
-  if (creep.memory.lastProgress === undefined || progress > creep.memory.lastProgress) {
-    creep.memory.lastProgress = progress;
-    creep.memory.lockTime = Game.time;
-  }
-}
-
+// -----------------------------
+// TaskBuilder module
+// -----------------------------
 var TaskBuilder = {
-  run: function (creep) {
-    if (!creep || !creep.my) return;
-    _cleanupBuildLocks();
-    var homeName = _getHomeName(creep);
-    var homeRoom = Game.rooms[homeName];
-    var plan = homeRoom ? BuilderPlanner.plan(homeRoom) : null;
-    var planIndex = _getPlanIndexCached(homeName, plan);
+  structureLimits: { 'tower': 6, 'extension': 60, 'container': 1, 'rampart': 2, 'road': 20 },
 
-    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) < ENERGY_MIN_BUILD) {
-      var src = _getEnergySource(creep, homeRoom);
-      if (src) {
-        _withdraw(creep, src);
+  siteWeights: { 'tower': 5, 'container': 4, 'extension': 3, 'rampart': 2, 'road': 1 },
+
+  structurePlacements: [ /* paste your existing placements here */ ],
+
+  run: function (creep) {
+    // Toggle build state (lock persists across refuels)
+    if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) creep.memory.building = false;
+    if (!creep.memory.building && creep.store.getFreeCapacity() === 0) creep.memory.building = true;
+
+    // If we have a lock but the site is actually gone (completed/removed), clear it.
+    var locked = _getLockedSite(creep);
+    if (!locked && creep.memory.tBuildId) {
+      var lp = creep.memory.tBuildPos;
+      if (lp && Game.rooms[lp.roomName]) {
+        var hereSites = Game.rooms[lp.roomName].lookForAt(LOOK_CONSTRUCTION_SITES, lp.x, lp.y);
+        if (!hereSites || !hereSites.length) { _clearLock(creep); }
+      }
+    }
+
+    if (creep.memory.building) {
+      // ---- BUILD PHASE ----
+      var C = _prepareBuilderSites();
+      var here = creep.pos.roomName;
+      var weights = TaskBuilder.siteWeights;
+
+      // (A) Honor lock first
+      locked = _getLockedSite(creep); // re-fetch
+      if (creep.memory.tBuildId && locked) {
+        if (_reserveSite(locked.id, BUILDERS_PER_SITE_CAP)) {
+          if (creep.pos.inRangeTo(locked.pos, 3)) {
+            var br = creep.build(locked);
+            if (br === ERR_NOT_IN_RANGE) { go(creep, locked, { range: 3, vTag: '🔒 build' }); }
+            else if (br === ERR_INVALID_TARGET) { _clearLock(creep); }
+          } else {
+            go(creep, locked, { range: 3, vTag: '🔒 build' });
+          }
+          return;
+        } else {
+          go(creep, locked.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 wait🔒' });
+          return;
+        }
+      } else if (creep.memory.tBuildId && !locked) {
+        var oldStuck = creep.memory.tLockStuck | 0;
+        creep.memory.tLockStuck = oldStuck + 1;
+        if (oldStuck > LOCK_STUCK_GRACE_TICKS) {
+          _clearLock(creep);
+        } else if (_gotoLock(creep)) {
+          return;
+        } else {
+          _clearLock(creep);
+        }
+      }
+
+      // (B) No lock: select with reservation + on-path bias, then lock
+      var localList = C.byRoom[here] || [];
+      if (localList.length) {
+        var corridor = _computeLocalCorridor(creep, localList);
+        var site = _pickReservableSite(
+          creep, localList, BUILDERS_PER_SITE_CAP, weights,
+          { corridorMap: corridor, roadBonus: ONPATH_CFG.roadBonus, swampPenalty: ONPATH_CFG.swampPenalty }
+        );
+        if (site) {
+          _lockToSite(creep, site);
+
+          if (creep.pos.inRangeTo(site.pos, 3)) {
+            var r = creep.build(site);
+            if (r === ERR_NOT_IN_RANGE) { go(creep, site, { range: 3, vTag: '🔒 build' }); }
+            else if (r === ERR_INVALID_TARGET) { _clearLock(creep); }
+          } else {
+            go(creep, site, { range: 3, vTag: '🔒 build' });
+          }
+          return;
+        } else {
+          var bestLocal = C.bestByRoom[here];
+          if (bestLocal) { go(creep, bestLocal.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
+        }
+      }
+
+      // (C) Go to nearest room that has sites
+      if (C.rooms.length) {
+        var nearestRoom = null, bestDist = 1e9;
+        for (var r2 = 0; r2 < C.rooms.length; r2++) {
+          var rn = C.rooms[r2];
+          var dist = Game.map.getRoomLinearDistance(here, rn);
+          if (dist < bestDist) { bestDist = dist; nearestRoom = rn; }
+        }
+
+        if (nearestRoom === here) {
+          var bestHere = C.bestByRoom[here];
+          if (bestHere) { go(creep, bestHere.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
+        } else {
+          if (Game.rooms[nearestRoom]) {
+            var bestSite = C.bestByRoom[nearestRoom];
+            if (bestSite) {
+              if (_reserveSite(bestSite.id, BUILDERS_PER_SITE_CAP)) {
+                _lockToSite(creep, bestSite);
+
+                if (creep.pos.inRangeTo(bestSite.pos, 3)) {
+                  var r3 = creep.build(bestSite);
+                  if (r3 === ERR_NOT_IN_RANGE) go(creep, bestSite, { range: 3, vTag: '🔒 build' });
+                  else if (r3 === ERR_INVALID_TARGET) _clearLock(creep);
+                } else {
+                  go(creep, bestSite, { range: 3, vTag: '🔒 build' });
+                }
+                return;
+              } else {
+                go(creep, bestSite.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return;
+              }
+            } else {
+              go(creep, new RoomPosition(25, 25, nearestRoom), { range: 20, vTag: '🧭 center' }); return;
+            }
+          } else {
+            go(creep, new RoomPosition(25, 25, nearestRoom), { range: 20, vTag: '🧭 center' }); return;
+          }
+        }
+      }
+
+      // (D) No sites anywhere: dump energy / recycle
+      if (C.rooms.length === 0) {
+        if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+          var sink = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+            filter: function(s) {
+              if (!s.store || (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) <= 0) return false;
+              return (s.structureType === STRUCTURE_STORAGE  ||
+                      s.structureType === STRUCTURE_TERMINAL ||
+                      s.structureType === STRUCTURE_SPAWN    ||
+                      s.structureType === STRUCTURE_EXTENSION||
+                      s.structureType === STRUCTURE_TOWER    ||
+                      s.structureType === STRUCTURE_CONTAINER||
+                      s.structureType === STRUCTURE_LINK);
+            }
+          });
+          if (sink) {
+            if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) go(creep, sink, { range: 1, vTag: '📦 drop' });
+            return;
+          }
+        }
+        var spawn = creep.pos.findClosestByRange(FIND_MY_SPAWNS);
+        if (spawn) { if (creep.pos.getRangeTo(spawn) > 1) go(creep, spawn, { range: 1, vTag: '♻ recycle' }); else spawn.recycleCreep(creep); }
+        else creep.suicide();
         return;
       }
+
+      var bestFallback = C.bestByRoom[here];
+      if (bestFallback) { go(creep, bestFallback.pos, { range: IDLE_NEAR_SITE_RANGE, vTag: '🕒 idle' }); return; }
+      go(creep, getHomeAnchorPos(ensureHome(creep)), { range: 2, vTag: '🏠 home' }); return;
+
+    } else {
+      // ---- REFUEL PHASE ----
+      // NOTE: we do NOT clear the lock when refueling; we’ll resume the same site.
+      var homeName = ensureHome(creep);
+
+      var src = findWithdrawTargetInRoom(creep.room);
+      if (src) {
+        var r1 = creep.withdraw(src, RESOURCE_ENERGY);
+        if (r1 === ERR_NOT_IN_RANGE) go(creep, src, { range: 1, vTag: '⛽ refuel' });
+        return;
+      }
+
+      if (creep.pos.roomName !== homeName) { go(creep, getHomeAnchorPos(homeName), { range: 1, vTag: '🏠 home' }); return; }
+
+      src = findWithdrawTargetInRoom(creep.room);
+      if (src) {
+        var r2 = creep.withdraw(src, RESOURCE_ENERGY);
+        if (r2 === ERR_NOT_IN_RANGE) go(creep, src, { range: 1, vTag: '⛽ refuel' });
+        return;
+      }
+
+      var source = creep.pos.findClosestByRange(FIND_SOURCES_ACTIVE);
+      if (source) { var r3 = creep.harvest(source); if (r3 === ERR_NOT_IN_RANGE) go(creep, source, { vTag: '⛏ harvest' }); return; }
+
+      go(creep, getHomeAnchorPos(homeName), { range: 2, vTag: '🏠 home' }); return;
+    }
+  },
+
+  // ——— Utilities kept for compatibility ———
+  ensureSites: function(room) {
+    if (!room || !room.controller || !room.controller.my) return;
+    var spawns = room.find(FIND_MY_SPAWNS);
+    if (!spawns.length) return;
+    var center = spawns[0].pos;
+
+    var MAX_SITES_PER_TICK = 5;
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+    var mem = Memory.rooms[room.name];
+
+    var next = mem.nextPlanTick || 0;
+    if (Game.time < next) return;
+
+    var builtCounts = {};
+    var structs = room.find(FIND_STRUCTURES);
+    for (var i1 = 0; i1 < structs.length; i1++) {
+      var st = structs[i1].structureType;
+      builtCounts[st] = (builtCounts[st] | 0) + 1;
+    }
+    var siteCounts = {};
+    var sitesExisting = room.find(FIND_CONSTRUCTION_SITES);
+    for (var j1 = 0; j1 < sitesExisting.length; j1++) {
+      var st2 = sitesExisting[j1].structureType;
+      siteCounts[st2] = (siteCounts[st2] | 0) + 1;
     }
 
-    var current = _getLockedSite(creep);
-    if (current) {
-      if (_shouldAbandon(creep, current)) {
-        _releaseLock(creep, current, false);
-        current = null;
-      } else if (creep.memory.lockTime && Game.time - creep.memory.lockTime > 50) {
-        var stuckProgress = current.progress || 0;
-        if (creep.memory.lastProgress !== undefined && stuckProgress <= creep.memory.lastProgress) {
-          _releaseLock(creep, current, false);
-          current = null;
-        }
-      }
-      if (current && creep.memory.lastProgress === undefined) {
-        creep.memory.lastProgress = current.progress || 0;
-      }
+    var rcl = room.controller.level;
+    var placed = 0;
+
+    for (var i = 0; i < TaskBuilder.structurePlacements.length; i++) {
+      if (placed >= MAX_SITES_PER_TICK) break;
+
+      var p = TaskBuilder.structurePlacements[i];
+      var tx = center.x + p.x, ty = center.y + p.y;
+      if (tx < 0 || tx > 49 || ty < 0 || ty > 49) continue;
+
+      var target = new RoomPosition(tx, ty, room.name);
+      if (target.lookFor(LOOK_STRUCTURES).length > 0) continue;
+      if (target.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
+
+      var type = p.type;
+      var rclLimit = (CONTROLLER_STRUCTURES[type] && CONTROLLER_STRUCTURES[type][rcl] != null)
+                      ? CONTROLLER_STRUCTURES[type][rcl] : Infinity;
+      var softLimit = (TaskBuilder.structureLimits && TaskBuilder.structureLimits[type] != null)
+                      ? TaskBuilder.structureLimits[type] : Infinity;
+      var allowed = Math.min(rclLimit, softLimit);
+
+      var have = ((builtCounts[type] | 0) + (siteCounts[type] | 0));
+      if (have >= allowed) continue;
+
+      var terr = room.getTerrain().get(target.x, target.y);
+      if (terr === TERRAIN_MASK_WALL) continue;
+
+      var res = room.createConstructionSite(target, type);
+      if (res === OK) { placed++; siteCounts[type] = (siteCounts[type] | 0) + 1; }
     }
 
-    if (!current) {
-      current = _chooseSite(creep, planIndex);
-      if (current) {
-        _lockSite(creep, current);
-      }
-    }
+    mem.nextPlanTick = Game.time + (placed ? 10 : 25);
+  },
 
-    if (!current) {
-      if (homeRoom) {
-        var hub = _getCachedHub(homeRoom);
-        if (hub) creep.travelTo(hub, { range: 2, maxRooms: 1 });
-      }
-      return;
-    }
-
-    _build(creep, current);
-  }
+  buildPredefinedStructures: function (creep) { /* unchanged */ },
+  buildStructures: function (creep, targetPosition, structureType) { /* unchanged */ },
+  countStructures: function (room, structureType) { /* unchanged */ }
 };
 
 module.exports = TaskBuilder;
-function builderBody(workCount, carryCount, moveCount) {
-  var body = [];
-  for (var w = 0; w < workCount; w++) body.push(WORK);
-  for (var c = 0; c < carryCount; c++) body.push(CARRY);
-  for (var m = 0; m < moveCount; m++) body.push(MOVE);
-  return body;
-}
-
-var BUILDER_BODY_TIERS = [
-  builderBody(6, 12, 18),
-  builderBody(4, 8, 12),
-  builderBody(3, 6, 9),
-  builderBody(2, 4, 6),
-  builderBody(2, 2, 4),
-  builderBody(1, 2, 3),
-  builderBody(1, 1, 2),
-  builderBody(1, 1, 1)
-];
-
-module.exports.BODY_TIERS = BUILDER_BODY_TIERS.map(function (tier) { return tier.slice(); });
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(BUILDER_BODY_TIERS, energy);
-};
-module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var energy = context.availableEnergy;
-  var body = module.exports.getSpawnBody(energy, room, context);
-  return {
-    body: body,
-    namePrefix: 'builder',
-    memory: { role: 'Worker_Bee', task: 'builder', home: room && room.name }
-  };
-};

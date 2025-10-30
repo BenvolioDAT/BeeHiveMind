@@ -1,845 +1,373 @@
-var Logger = require('core.logger');
-var Traveler = require('Traveler');
-var CoreSpawn = require('core.spawn');
+// TaskBaseHarvest.js — queued handoff + conflict-safe miner
+var BeeToolbox = require('BeeToolbox');
 
-var LOG_LEVEL = Logger.LOG_LEVEL;
-var harvestLog = Logger.createLogger('Task.BaseHarvest', LOG_LEVEL.DEBUG);
+/** =========================
+ *  Config knobs
+ *  ========================= */
+var CONFIG = {
+  maxHarvestersPerSource: 1,   // 1 = strict single-seat miners (best w/ container)
+  avoidTicksAfterYield: 20,    // loser avoids yielded source for this many ticks
+  handoffTtl: 120,             // if incumbent's TTL <= this, allow queueing
+  queueRange: 1,               // park within this range when queueing (1 = adjacent)
+  travelReuse: 12              // reusePath hint for travel helper (if used internally)
+};
 
-var HARVEST_RANGE = 1;
-var REASSIGN_INTERVAL = 50;
-var CONTAINER_REPAIR_THRESHOLD = 0.5;
-var REPAIR_POWER_PER_WORK = 100;
+/** =========================
+ *  Small utils
+ *  ========================= */
 
-/**
- * ensureAssignment resolves or acquires a source seat for the creep.
- * Input: creep (Creep).
- * Output: assignment info (object) or null when no source is available.
- * Side-effects: may update creep memory when a new source is selected.
- * Reasoning: centralizes seat acquisition and reuse across ticks.
- */
-function ensureAssignment(creep) {
-  var assignment = getHarvestAssignmentInfo(creep);
-  if (assignment && assignment.source) {
-    return assignment;
-  }
-  assignment = assignHarvestSource(creep);
-  if (!assignment || !assignment.source) {
-    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-      harvestLog.debug('No source assignment found for', creep.name);
-    }
-    return null;
-  }
-  return assignment;
+// Terrain walkability check (no walls, inside bounds)
+function isWalkable(pos) {
+  if (!pos || !pos.roomName) return false;
+  if (pos.x <= 0 || pos.x >= 49 || pos.y <= 0 || pos.y >= 49) return false;
+  var t = new Room.Terrain(pos.roomName);
+  return t.get(pos.x, pos.y) !== TERRAIN_MASK_WALL;
 }
 
-/**
- * shouldReassign decides whether the creep should attempt to find a new source.
- * Input: creep (Creep), assignment (object from ensureAssignment).
- * Output: boolean.
- * Side-effects: none.
- * Reasoning: prevents miners from standing idle if their source disappears.
- */
-function shouldReassign(creep, assignment) {
-  if (!assignment || !assignment.source) {
-    return true;
+// Is the tile occupied by *another* friendly creep?
+function isTileOccupiedByAlly(pos, myName) {
+  var creeps = pos.lookFor(LOOK_CREEPS);
+  for (var i = 0; i < creeps.length; i++) {
+    var c = creeps[i];
+    if (c.my && c.name !== myName) return true;
   }
-  if (Game.time % REASSIGN_INTERVAL !== 0) {
-    return false;
+  return false;
+}
+
+// Is the tile occupied by ANY creep (ally or not), excluding me?
+function isTileOccupiedByAnyCreep(pos, myName) {
+  var creeps = pos.lookFor(LOOK_CREEPS);
+  for (var i = 0; i < creeps.length; i++) {
+    var c = creeps[i];
+    if (!c) continue;
+    if (!myName || c.name !== myName) return true;
   }
-  if (!assignment.source.room) {
-    return false;
+  return false;
+}
+
+// Count how many walkable seats around a pos (8-neighborhood)
+function countWalkableSeatsAround(pos) {
+  var seats = 0;
+  var t = new Room.Terrain(pos.roomName);
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var x = pos.x + dx, y = pos.y + dy;
+      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
+      if (t.get(x, y) !== TERRAIN_MASK_WALL) seats++;
+    }
   }
-  if (assignment.source.energy > 0) {
-    return false;
+  return seats;
+}
+
+// Find any container in range 1 of the source
+function getAdjacentContainerForSource(source) {
+  var arr = source.pos.findInRange(FIND_STRUCTURES, 1, {
+    filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
+  });
+  return (arr && arr.length) ? arr[0] : null;
+}
+
+// Prefer container tile as the "seat". Else pick a deterministic adjacent tile.
+function getPreferredSeatPos(source) {
+  var cont = getAdjacentContainerForSource(source);
+  if (cont) return cont.pos;
+
+  // No container: choose a stable walkable tile (sorted by y then x)
+  var candidates = [];
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var p = new RoomPosition(source.pos.x + dx, source.pos.y + dy, source.pos.roomName);
+      if (isWalkable(p)) candidates.push(p);
+    }
   }
-  if (assignment.source.ticksToRegeneration && assignment.source.ticksToRegeneration > 30) {
+  if (!candidates.length) return null;
+  candidates.sort(function(a, b) { return (a.y - b.y) || (a.x - b.x); });
+  return candidates[0];
+}
+
+// Any friendly harvesters currently assigned to this source (live only)
+function getIncumbents(roomName, sourceId, excludeName) {
+  var out = [];
+  for (var name in Game.creeps) {
+    var c = Game.creeps[name];
+    if (!c || !c.my) continue;
+    if (excludeName && name === excludeName) continue;
+    if (c.memory && c.memory.task === 'baseharvest' &&
+        c.memory.assignedSource === sourceId &&
+        c.room && c.room.name === roomName) {
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+// Count assigned harvesters (live)
+function countAssignedHarvesters(roomName, sourceId) {
+  return getIncumbents(roomName, sourceId, null).length;
+}
+
+/** =========================
+ *  Conflict / yield logic
+ *  ========================= */
+
+// Adjacent conflict resolver: stable winner by name; loser yields & avoids briefly.
+function resolveSourceConflict(creep, source) {
+  var neighbors = source.pos.findInRange(FIND_MY_CREEPS, 1, {
+    filter: function(c) {
+      return c.name !== creep.name &&
+             c.memory.task === 'baseharvest' &&
+             c.memory.assignedSource === source.id;
+    }
+  });
+
+  if (neighbors.length === 0) return false;
+
+  // If I'm effectively the only assigned miner left (others died), don't yield.
+  if (countAssignedHarvesters(creep.room.name, source.id) <= 1) return false;
+
+  var all = neighbors.concat([creep]);
+  var winner = all[0];
+  for (var i = 1; i < all.length; i++) {
+    if (all[i].name < winner.name) winner = all[i];
+  }
+
+  if (winner.name !== creep.name) {
+    creep.memory._avoidSourceId = source.id;
+    creep.memory._avoidUntil    = Game.time + CONFIG.avoidTicksAfterYield;
+    creep.memory.assignedSource = null;
+    creep.memory._reassignCooldown = Game.time + 5;
+    creep.memory.waitingForSeat = false;
+    creep.say('yield 🐝');
     return true;
   }
   return false;
 }
 
-/**
- * moveToSeat positions the creep on the reserved seat position.
- * Input: creep (Creep), assignment (object).
- * Output: true when movement was issued.
- * Side-effects: issues movement intent via Traveler (https://docs.screeps.com/api/#Creep.move).
- * Reasoning: keeps miners seated on optimal tiles, enabling container usage.
- */
-function moveToSeat(creep, assignment) {
-  if (!assignment || !assignment.seatPos) {
-    return false;
+/** =========================
+ *  Queue / handoff logic
+ *  ========================= */
+
+// Return true if we should queue: source is at capacity but an incumbent is expiring soon.
+function shouldQueueForSource(creep, source, seats, used) {
+  if (used < seats) return false; // not full
+  var inc = getIncumbents(creep.room.name, source.id, creep.name);
+  for (var i = 0; i < inc.length; i++) {
+    var t = inc[i].ticksToLive;
+    // ticksToLive can be undefined briefly; treat as not expiring
+    if (typeof t === 'number' && t <= CONFIG.handoffTtl) return true;
   }
-  if (creep.pos.isEqualTo(assignment.seatPos)) {
-    return false;
-  }
-  rememberSeatPosition(creep, assignment.seatPos);
-  travelTo(creep, assignment.seatPos, { range: 0, reusePath: 25 });
-  return true;
+  return false;
 }
 
-/**
- * maintainContainer builds or repairs the container below the harvester.
- * Input: creep (Creep), assignment (object).
- * Output: none.
- * Side-effects: may build or repair using Creep APIs (https://docs.screeps.com/api/#Creep.build / repair).
- * Reasoning: ensures the economic pipeline keeps working without manual babysitting.
- */
-function maintainContainer(creep, assignment) {
-  if (!assignment || !assignment.seatPos) {
-    return;
-  }
-  ensureSourceContainer(creep, assignment);
-  if (!assignment.container) {
-    return;
-  }
-  if (!creep.pos.isEqualTo(assignment.seatPos)) {
-    return;
-  }
-  if (!assignment.container.hits || !assignment.container.hitsMax) {
-    return;
-  }
-  var hitsRatio = assignment.container.hits / assignment.container.hitsMax;
-  if (hitsRatio >= CONTAINER_REPAIR_THRESHOLD) {
-    return;
-  }
-  if (!creep.store || (creep.store[RESOURCE_ENERGY] | 0) < REPAIR_POWER_PER_WORK) {
-    return;
-  }
-  creep.repair(assignment.container);
-}
-
-/**
- * handleEnergyOverflow deposits or drops energy when the creep cannot harvest more.
- * Input: creep (Creep), assignment (object).
- * Output: none.
- * Side-effects: may transfer to container or drop energy on ground (https://docs.screeps.com/api/#Creep.transfer).
- * Reasoning: avoids wasted work parts when the container is full.
- */
-function handleEnergyOverflow(creep, assignment) {
-  if (!creep.store) {
-    return;
-  }
-  var carried = creep.store[RESOURCE_ENERGY] | 0;
-  if (carried <= 0) {
-    return;
-  }
-  if (assignment && assignment.container && assignment.container.store) {
-    var free = assignment.container.store.getFreeCapacity(RESOURCE_ENERGY) | 0;
-    if (free > 0) {
-      creep.transfer(assignment.container, RESOURCE_ENERGY);
-      return;
-    }
-  }
-  if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
-    creep.drop(RESOURCE_ENERGY);
-  }
-}
-
-/**
- * run executes the harvester behaviour each tick.
- * Input: creep (Creep).
- * Output: none.
- * Side-effects: harvests energy, builds/repairs containers, issues movement intents.
- */
-function runBaseHarvest(creep) {
-  if (!creep) {
-    return;
-  }
-  if (creep.memory && creep.memory.task !== 'baseharvest') {
-    creep.memory.task = 'baseharvest';
-  }
-
-  var assignment = ensureAssignment(creep);
-  if (!assignment) {
-    releaseHarvestAssignment(creep);
-    creep.say('NoSrc');
-    return;
-  }
-
-  if (shouldReassign(creep, assignment)) {
-    releaseHarvestAssignment(creep);
-    assignment = ensureAssignment(creep);
-    if (!assignment) {
-      creep.say('NoSrc');
-      return;
-    }
-  }
-
-  if (moveToSeat(creep, assignment)) {
-    return;
-  }
-
-  maintainContainer(creep, assignment);
-
-  var source = assignment.source;
-  if (!source) {
-    releaseHarvestAssignment(creep);
-    return;
-  }
-
-  var result = creep.harvest(source);
-  if (result === ERR_NOT_IN_RANGE) {
-    travelTo(creep, source.pos, { range: HARVEST_RANGE, reusePath: 15 });
-    return;
-  }
-
-  handleEnergyOverflow(creep, assignment);
-}
-
-// ---------------------------------------------------------------------------
-// 🔁 Traveler helper logic
-// ---------------------------------------------------------------------------
-
-function travelTo(creep, destination, options) {
-  if (!creep || !destination) {
-    return ERR_INVALID_ARGS;
-  }
-  var targetPos = destination.pos || destination;
-  if (!targetPos || typeof targetPos.x !== 'number' || typeof targetPos.y !== 'number') {
-    return ERR_INVALID_ARGS;
-  }
-  var config = options || {};
-  var travelOptions = {
-    range: config.range != null ? config.range : 1,
-    reusePath: config.reusePath != null ? config.reusePath : 15,
-    ignoreCreeps: config.ignoreCreeps === true,
-    stuckValue: config.stuckValue != null ? config.stuckValue : 2,
-    repath: config.repath != null ? config.repath : 0.1,
-    maxOps: config.maxOps != null ? config.maxOps : 4000
-  };
-  if (typeof creep.travelTo === 'function') {
-    return creep.travelTo(targetPos, travelOptions);
-  }
-  if (Traveler && typeof Traveler.travelTo === 'function') {
-    return Traveler.travelTo(creep, targetPos, travelOptions);
-  }
-  if (typeof creep.moveTo === 'function') {
-    return creep.moveTo(targetPos, travelOptions);
-  }
-  return ERR_INVALID_ARGS;
-}
-
-// ---------------------------------------------------------------------------
-// 🪑 Seat memory helpers
-// ---------------------------------------------------------------------------
-
-var SEAT_MEMORY_KEY = 'seat';
-var SEAT_ASSIGNMENT_LIMIT = 1;
-var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
-
-var _harvestSeatCache = global.__beeHarvestSeatCache || (global.__beeHarvestSeatCache = {
-  tick: -1,
-  rooms: {}
-});
-
-function rememberSeatPosition(creep, seatPosition) {
-  _writeSeatMemoryInternal(creep, seatPosition);
-}
-
-function releaseHarvestAssignment(creep) {
-  if (!creep || !creep.memory) {
-    return;
-  }
-  delete creep.memory.assignedSource;
-  delete creep.memory.assignedContainer;
-  _clearSeatMemoryInternal(creep);
-}
-
-function assignHarvestSource(creep) {
-  if (!creep) {
-    return null;
-  }
-  var targetRoomName = null;
-  var seat = _readSeatMemoryInternal(creep);
-  if (seat) {
-    targetRoomName = seat.roomName;
-  } else if (creep.memory && creep.memory.targetRoom) {
-    targetRoomName = creep.memory.targetRoom;
-  } else if (creep.memory && creep.memory.homeRoom) {
-    targetRoomName = creep.memory.homeRoom;
-  } else if (creep.room) {
-    targetRoomName = creep.room.name;
-  }
-  if (!targetRoomName) {
-    return null;
-  }
-  var room = Game.rooms[targetRoomName] || creep.room;
-  if (!room) {
-    return null;
-  }
-  var bucket = _ensureHarvestRoomBucket(room.name);
-  var bestInfo = null;
-  var bestLoad = Infinity;
-  var sourceId;
-  for (sourceId in bucket.sourceInfo) {
-    if (!Object.prototype.hasOwnProperty.call(bucket.sourceInfo, sourceId)) {
-      continue;
-    }
-    var info = bucket.sourceInfo[sourceId];
-    if (!info || !info.source) {
-      continue;
-    }
-    var assigned = bucket.assignmentCounts[sourceId] || 0;
-    if (assigned >= info.seatCount) {
-      continue;
-    }
-    if (!bestInfo || assigned < bestLoad) {
-      bestInfo = info;
-      bestLoad = assigned;
-    }
-  }
-  if (!bestInfo) {
-    return null;
-  }
-  _recordHarvestAssignment(room.name, bestInfo.source.id);
-  _writeSeatMemoryInternal(creep, bestInfo.seatPos);
-  if (creep.memory) {
-    creep.memory.assignedSource = bestInfo.source.id;
-    if (bestInfo.container) {
-      creep.memory.assignedContainer = bestInfo.container.id;
-    } else {
-      delete creep.memory.assignedContainer;
-    }
-  }
-  return bestInfo;
-}
-
-function getHarvestAssignmentInfo(creep) {
-  if (!creep || !creep.memory || !creep.memory.assignedSource) {
-    return null;
-  }
-  var seatPos = _readSeatMemoryInternal(creep);
-  var source = Game.getObjectById(creep.memory.assignedSource);
-  var roomName = null;
-  if (seatPos) {
-    roomName = seatPos.roomName;
-  } else if (source && source.pos && source.pos.roomName) {
-    roomName = source.pos.roomName;
-  } else if (creep.memory.homeRoom) {
-    roomName = creep.memory.homeRoom;
-  }
-  var info = null;
-  if (roomName) {
-    var bucket = _ensureHarvestRoomBucket(roomName);
-    info = bucket.sourceInfo[creep.memory.assignedSource] || null;
-  }
-  var container = null;
-  if (info && info.container) {
-    container = info.container;
-  } else if (creep.memory.assignedContainer) {
-    container = Game.getObjectById(creep.memory.assignedContainer);
-  }
-  var seatPosition = seatPos;
-  if (!seatPosition && info && info.seatPos) {
-    seatPosition = info.seatPos;
-  }
-  return {
-    source: source,
-    container: container,
-    seatPos: seatPosition,
-    roomName: roomName,
-    seatCount: info ? info.seatCount : SEAT_ASSIGNMENT_LIMIT
-  };
-}
-
-function ensureSourceContainer(creep, assignmentInfo) {
-  if (!creep || !assignmentInfo || !assignmentInfo.seatPos) {
-    return;
-  }
-  var seatPos = assignmentInfo.seatPos;
-  var structures = seatPos.lookFor(LOOK_STRUCTURES);
-  var i;
-  for (i = 0; i < structures.length; i++) {
-    if (structures[i].structureType === STRUCTURE_CONTAINER) {
-      assignmentInfo.container = structures[i];
-      return;
-    }
-  }
-  var sites = seatPos.lookFor(LOOK_CONSTRUCTION_SITES);
-  var containerSite = null;
-  for (i = 0; i < sites.length; i++) {
-    if (sites[i].structureType === STRUCTURE_CONTAINER) {
-      containerSite = sites[i];
-      break;
-    }
-  }
-  if (containerSite) {
-    if (creep.pos.isEqualTo(seatPos) && creep.store && (creep.store[RESOURCE_ENERGY] | 0) > 0) {
-      creep.build(containerSite);
-    }
-    return;
-  }
-  if (assignmentInfo.container) {
-    return;
-  }
-  if (Game.time % SOURCE_CONTAINER_SCAN_INTERVAL !== 0) {
-    return;
-  }
-  if (!creep.room || creep.room.name !== seatPos.roomName) {
-    return;
-  }
-  creep.room.createConstructionSite(seatPos, STRUCTURE_CONTAINER);
-}
-
-function _writeSeatMemoryInternal(creep, pos) {
-  if (!creep || !creep.memory) {
-    return;
-  }
-  var value = _serializeSeatPosition(pos);
-  if (value) {
-    creep.memory[SEAT_MEMORY_KEY] = value;
-  } else {
-    delete creep.memory[SEAT_MEMORY_KEY];
-  }
-}
-
-function _clearSeatMemoryInternal(creep) {
-  if (!creep || !creep.memory) {
-    return;
-  }
-  delete creep.memory[SEAT_MEMORY_KEY];
-}
-
-function _readSeatMemoryInternal(creep) {
-  if (!creep || !creep.memory) {
-    return null;
-  }
-  return _deserializeSeatPosition(creep.memory[SEAT_MEMORY_KEY]);
-}
-
-function _serializeSeatPosition(pos) {
-  if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number' || !pos.roomName) {
-    return null;
-  }
-  return pos.roomName + ':' + pos.x + ':' + pos.y;
-}
-
-function _deserializeSeatPosition(serialized) {
-  if (!serialized || typeof serialized !== 'string') {
-    return null;
-  }
-  var parts = serialized.split(':');
-  if (parts.length !== 3) {
-    return null;
-  }
-  var x = parseInt(parts[1], 10);
-  var y = parseInt(parts[2], 10);
-  if (isNaN(x) || isNaN(y)) {
-    return null;
-  }
-  return new RoomPosition(x, y, parts[0]);
-}
-
-function _ensureHarvestRoomBucket(roomName) {
-  _refreshHarvestAssignments();
-  var bucket = _harvestSeatCache.rooms[roomName];
-  if (!bucket) {
-    bucket = {
-      sourceInfo: {},
-      assignmentCounts: {},
-      seats: {},
-      scannedSourcesAt: -1
-    };
-    _harvestSeatCache.rooms[roomName] = bucket;
-  }
-  if (bucket.scannedSourcesAt === Game.time) {
-    return bucket;
-  }
-  var room = Game.rooms[roomName];
-  if (!room) {
-    return bucket;
-  }
-  var sources = room.find(FIND_SOURCES);
-  var i;
-  for (i = 0; i < sources.length; i++) {
-    var source = sources[i];
-    var container = _findAdjacentContainer(source);
-    var seatPos = _findSeatPosition(source);
-    var seatCount = container ? 1 : _countWalkableSeats(source.pos);
-    if (seatCount > SEAT_ASSIGNMENT_LIMIT) {
-      seatCount = SEAT_ASSIGNMENT_LIMIT;
-    }
-    if (seatCount <= 0) {
-      seatCount = 1;
-    }
-    bucket.sourceInfo[source.id] = {
-      source: source,
-      container: container,
-      seatPos: seatPos,
-      seatCount: seatCount
-    };
-    if (!bucket.assignmentCounts[source.id]) {
-      bucket.assignmentCounts[source.id] = 0;
-    }
-    if (seatPos) {
-      bucket.seats[source.id] = seatPos;
-    }
-  }
-  bucket.scannedSourcesAt = Game.time;
-  return bucket;
-}
-
-function _recordHarvestAssignment(roomName, sourceId) {
-  if (!roomName || !sourceId) {
-    return;
-  }
-  var bucket = _ensureHarvestRoomBucket(roomName);
-  if (!bucket.assignmentCounts[sourceId]) {
-    bucket.assignmentCounts[sourceId] = 0;
-  }
-  bucket.assignmentCounts[sourceId]++;
-}
-
-function _refreshHarvestAssignments() {
-  if (_harvestSeatCache.tick === Game.time) {
-    return;
-  }
-  _harvestSeatCache.tick = Game.time;
-  _harvestSeatCache.rooms = {};
-  var name;
-  for (name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) {
-      continue;
-    }
-    var creep = Game.creeps[name];
-    if (!creep || !creep.memory || creep.memory.task !== 'baseharvest') {
-      continue;
-    }
-    var sourceId = creep.memory.assignedSource;
-    if (!sourceId) {
-      continue;
-    }
-    var seatPos = _readSeatMemoryInternal(creep);
-    var roomName = null;
-    if (seatPos) {
-      roomName = seatPos.roomName;
-    } else if (creep.room && creep.room.name) {
-      roomName = creep.room.name;
-    } else if (creep.memory && creep.memory.homeRoom) {
-      roomName = creep.memory.homeRoom;
-    }
-    if (!roomName) {
-      continue;
-    }
-    var bucket = _harvestSeatCache.rooms[roomName];
-    if (!bucket) {
-      bucket = {
-        sourceInfo: {},
-        assignmentCounts: {},
-        seats: {},
-        scannedSourcesAt: -1
-      };
-      _harvestSeatCache.rooms[roomName] = bucket;
-    }
-    if (!bucket.assignmentCounts[sourceId]) {
-      bucket.assignmentCounts[sourceId] = 0;
-    }
-    bucket.assignmentCounts[sourceId]++;
-  }
-}
-
-function _countWalkableSeats(pos) {
-  if (!pos || !pos.roomName) {
-    return 0;
-  }
-  var terrain = new Room.Terrain(pos.roomName);
-  var total = 0;
-  var dx;
-  var dy;
-  for (dx = -1; dx <= 1; dx++) {
-    for (dy = -1; dy <= 1; dy++) {
-      if (dx === 0 && dy === 0) {
-        continue;
-      }
-      var x = pos.x + dx;
-      var y = pos.y + dy;
-      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) {
-        continue;
-      }
-      if (terrain.get(x, y) !== TERRAIN_MASK_WALL) {
-        total++;
-      }
-    }
-  }
-  return total;
-}
-
-function _findAdjacentContainer(source) {
-  if (!source || !source.pos) {
-    return null;
-  }
-  var nearby = source.pos.findInRange(FIND_STRUCTURES, 1, {
-    filter: function (structure) {
-      return structure.structureType === STRUCTURE_CONTAINER;
-    }
-  });
-  if (!nearby || nearby.length === 0) {
-    return null;
-  }
-  return nearby[0];
-}
-
-function _findSeatPosition(source) {
-  if (!source || !source.pos) {
-    return null;
-  }
-  var container = _findAdjacentContainer(source);
-  if (container) {
-    return container.pos;
-  }
-  var terrain = new Room.Terrain(source.pos.roomName);
-  var best = null;
-  var dx;
-  var dy;
-  for (dx = -1; dx <= 1; dx++) {
-    for (dy = -1; dy <= 1; dy++) {
-      if (dx === 0 && dy === 0) {
-        continue;
-      }
-      var x = source.pos.x + dx;
-      var y = source.pos.y + dy;
-      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) {
-        continue;
-      }
-      if (terrain.get(x, y) === TERRAIN_MASK_WALL) {
-        continue;
-      }
-      var candidate = new RoomPosition(x, y, source.pos.roomName);
-      if (!best) {
-        best = candidate;
-        continue;
-      }
-      if (candidate.y < best.y || (candidate.y === best.y && candidate.x < best.x)) {
-        best = candidate;
-      }
+// Pick a queue spot near the seat (not on the seat), walkable & (ideally) unoccupied.
+function findQueueSpotNearSeat(seatPos, myName) {
+  var best = null, bestScore = -Infinity;
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var p = new RoomPosition(seatPos.x + dx, seatPos.y + dy, seatPos.roomName);
+      if (!isWalkable(p)) continue;
+      // Prefer currently unoccupied tiles
+      var occupied = isTileOccupiedByAlly(p, myName);
+      var score = occupied ? -10 : 0;
+      // Slight bias for lower y/x for determinism
+      score += (-p.y * 0.01) + (-p.x * 0.001);
+      if (score > bestScore) { bestScore = score; best = p; }
     }
   }
   return best;
 }
 
-module.exports = {
-  run: runBaseHarvest
+/** =========================
+ *  Source assignment
+ *  ========================= */
+
+function assignSource(creep) {
+  if (creep.spawning) return;
+
+  // Respect short cooldown to avoid thrash after we yielded
+  if (creep.memory._reassignCooldown && Game.time < creep.memory._reassignCooldown) {
+    return creep.memory.assignedSource || null;
+  }
+
+  // Keep current assignment if any
+  if (creep.memory.assignedSource) return creep.memory.assignedSource;
+
+  var sources = creep.room.find(FIND_SOURCES);
+  if (!sources || !sources.length) return null;
+
+  var best = null;
+  var bestScore = -Infinity;
+  var bestWillQueue = false;
+
+  for (var i = 0; i < sources.length; i++) {
+    var s = sources[i];
+
+    // Avoid the source we just yielded from for a short window
+    if (creep.memory._avoidSourceId === s.id &&
+        creep.memory._avoidUntil &&
+        Game.time < creep.memory._avoidUntil) {
+      continue;
+    }
+
+    var seatPos = getPreferredSeatPos(s);
+    if (!seatPos) continue; // no usable seat
+
+    // Effective capacity: container implies 1 seat (strict miner seat)
+    var seats = getAdjacentContainerForSource(s) ? 1 : countWalkableSeatsAround(s.pos);
+    if (CONFIG.maxHarvestersPerSource > 0) {
+      seats = Math.min(seats, CONFIG.maxHarvestersPerSource);
+    }
+
+    var used = countAssignedHarvesters(creep.room.name, s.id);
+    var free = seats - used;
+    var willQueue = false;
+
+    // If full, consider queueing only if an incumbent is expiring soon
+    if (free <= 0) {
+      if (!shouldQueueForSource(creep, s, seats, used)) continue;
+      willQueue = true;
+    }
+
+    // Score: prefer free seats strongly; then proximity to the seat
+    var range = creep.pos.getRangeTo(seatPos);
+    var score = (free > 0 ? 1000 : 0) - range;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = { source: s, seatPos: seatPos };
+      bestWillQueue = willQueue;
+    }
+  }
+
+  if (!best) return null;
+
+  // Lock assignment and remember if we're starting as queued
+  creep.memory.assignedSource = best.source.id;
+  creep.memory.seatX = best.seatPos.x;
+  creep.memory.seatY = best.seatPos.y;
+  creep.memory.seatRoom = best.seatPos.roomName;
+  creep.memory.waitingForSeat = !!bestWillQueue;
+
+  return best.source.id;
+}
+
+/** =========================
+ *  Offload helper (when full)
+ *  ========================= */
+
+function getContainerAtOrAdjacent(pos) {
+  // Same tile first
+  var here = pos.lookFor(LOOK_STRUCTURES);
+  for (var i = 0; i < here.length; i++) {
+    if (here[i].structureType === STRUCTURE_CONTAINER) return here[i];
+  }
+  // Adjacent
+  var around = pos.findInRange(FIND_STRUCTURES, 1, {
+    filter: function(s) { return s.structureType === STRUCTURE_CONTAINER; }
+  });
+  return (around && around.length) ? around[0] : null;
+}
+
+/** =========================
+ *  Main role
+ *  ========================= */
+
+var TaskBaseHarvest = {
+  run: function(creep) {
+    // (0) Simple state flip based on store
+    if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
+      creep.memory.harvesting = true;
+    }
+    if (creep.memory.harvesting && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+      creep.memory.harvesting = false;
+    }
+
+    // (1) Harvesting phase
+    if (creep.memory.harvesting) {
+      var sid = assignSource(creep);
+      if (!sid) return;
+
+      var source = Game.getObjectById(sid);
+      if (!source) { creep.memory.assignedSource = null; creep.memory.waitingForSeat = false; return; }
+
+      // Resolve local conflicts if we are in the scrum
+      if (resolveSourceConflict(creep, source)) return;
+
+      // Preferred seat position (rebuild if memory room mismatch)
+      var seatPos = (creep.memory.seatRoom === creep.room.name)
+        ? new RoomPosition(creep.memory.seatX, creep.memory.seatY, creep.memory.seatRoom)
+        : getPreferredSeatPos(source);
+
+      // Capacity math
+      var seats = getAdjacentContainerForSource(source) ? 1 : countWalkableSeatsAround(source.pos);
+      if (CONFIG.maxHarvestersPerSource > 0) seats = Math.min(seats, CONFIG.maxHarvestersPerSource);
+      var used  = countAssignedHarvesters(creep.room.name, source.id);
+
+      // Promote out of queue ASAP if capacity exists now
+      if (used < seats) {
+        creep.memory.waitingForSeat = false;
+      }
+
+      // Seat occupancy: any creep (ally or not) blocks the exact tile unless it's me
+      var seatBlocked = isTileOccupiedByAnyCreep(seatPos, creep.name) && !creep.pos.isEqualTo(seatPos);
+
+      // Decide whether to queue this tick
+      var shouldQueue = (seatBlocked || creep.memory.waitingForSeat) && used >= seats && shouldQueueForSource(creep, source, seats, used);
+
+      if (shouldQueue) {
+        // Park near seat (not on it)
+        var queueSpot = findQueueSpotNearSeat(seatPos, creep.name) || seatPos;
+        creep.memory.waitingForSeat = true;
+
+        if (!creep.pos.isEqualTo(queueSpot)) {
+          // Use numeric range for your BeeTravel variant
+          BeeToolbox.BeeTravel(creep, queueSpot, 0);
+          return;
+        }
+
+        // If we can reach the source from here (range 1), go ahead and harvest while waiting
+        if (creep.pos.getRangeTo(source) <= 1) creep.harvest(source);
+
+        // If the seat frees up OR capacity opens, take it now
+        if (!isTileOccupiedByAnyCreep(seatPos, creep.name) || countAssignedHarvesters(creep.room.name, source.id) < seats) {
+          BeeToolbox.BeeTravel(creep, seatPos, 0);
+          creep.memory.waitingForSeat = false;
+        }
+        return;
+      }
+
+      // NO QUEUE: seat free or capacity available → go sit or harvest
+      if (!creep.pos.isEqualTo(seatPos)) {
+        BeeToolbox.BeeTravel(creep, seatPos, 0);
+        return;
+      }
+      creep.memory.waitingForSeat = false;
+      creep.harvest(source);
+      return;
+    }
+
+    // (2) Not harvesting (full): offload
+    if (creep.store.getFreeCapacity() === 0) {
+      var cont = getContainerAtOrAdjacent(creep.pos);
+      if (cont) {
+        var tr = creep.transfer(cont, RESOURCE_ENERGY);
+        if (tr === ERR_NOT_IN_RANGE) {
+          BeeToolbox.BeeTravel(creep, cont.pos || cont, 1);
+        }
+        return;
+      }
+    }
+
+    // (3) If no couriers exist, dump to ground as last resort
+    var couriers = _.filter(Game.creeps, function(c){ return c.memory.task === 'courier'; });
+    if (couriers.length === 0 && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      creep.drop(RESOURCE_ENERGY);
+      return;
+    }
+  }
 };
 
-function createHarvesterBody(work, carry, move) {
-  var body = [];
-  var i;
-  for (i = 0; i < work; i++) body.push(WORK);
-  for (i = 0; i < carry; i++) body.push(CARRY);
-  for (i = 0; i < move; i++) body.push(MOVE);
-  return body;
-}
-
-var HARVESTER_BODY_TIERS = [
-  createHarvesterBody(6, 0, 5),
-  createHarvesterBody(5, 0, 5),
-  createHarvesterBody(4, 0, 4),
-  createHarvesterBody(3, 0, 3),
-  createHarvesterBody(2, 0, 2),
-  createHarvesterBody(1, 0, 1)
-];
-
-module.exports.BODY_TIERS = HARVESTER_BODY_TIERS;
-
-function countBodyPart(body, partType) {
-  if (!Array.isArray(body) || !body.length) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    if (body[i] === partType) {
-      total++;
-    }
-  }
-  return total;
-}
-
-function cloneBody(body) {
-  return Array.isArray(body) ? body.slice() : [];
-}
-
-function resolveHarvesterConfig() {
-  var cfg = (global && global.__beeHarvesterConfig && typeof global.__beeHarvesterConfig === 'object')
-    ? global.__beeHarvesterConfig
-    : null;
-  if (cfg) {
-    return cfg;
-  }
-  return { MAX_WORK: 6, RENEWAL_TTL: 150, EMERGENCY_TTL: 50 };
-}
-
-function resolveHarvesterIntel(room, context) {
-  if (context) {
-    if (context.harvesterIntel && typeof context.harvesterIntel === 'object') {
-      return context.harvesterIntel;
-    }
-    if (context.intel && typeof context.intel === 'object') {
-      return context.intel;
-    }
-  }
-  if (!room || !room.name) {
-    return null;
-  }
-  var cache = global && global.__BHM_CACHE;
-  if (!cache || !cache.harvesterIntelByRoom) {
-    return null;
-  }
-  return cache.harvesterIntelByRoom[room.name] || null;
-}
-
-function selectBodyForEnergy(energy, tiers, maxWork) {
-  if (!tiers || !tiers.length) return [];
-  var limit = (typeof maxWork === 'number' && maxWork > 0) ? maxWork : null;
-  var cap = (typeof energy === 'number' && energy > 0) ? energy : 0;
-  for (var i = 0; i < tiers.length; i++) {
-    var body = tiers[i];
-    if (!body || !body.length) {
-      continue;
-    }
-    if (limit && countBodyPart(body, WORK) > limit) {
-      continue;
-    }
-    var cost = CoreSpawn.costOfBody(body);
-    if (cost > 0 && cost <= cap) {
-      return body;
-    }
-  }
-  return [];
-}
-
-function resolveAvailableEnergy(energy, room, context) {
-  if (typeof energy === 'number') {
-    return energy;
-  }
-  if (context && typeof context.availableEnergy === 'number') {
-    return context.availableEnergy;
-  }
-  if (room && typeof room.energyAvailable === 'number') {
-    return room.energyAvailable;
-  }
-  return 0;
-}
-
-function resolveCapacityEnergy(room, context, available) {
-  if (context && typeof context.capacityEnergy === 'number') {
-    return context.capacityEnergy;
-  }
-  if (room && typeof room.energyCapacityAvailable === 'number') {
-    return room.energyCapacityAvailable;
-  }
-  return available;
-}
-
-function getNumber(value, fallback) {
-  return (typeof value === 'number') ? value : fallback;
-}
-
-function selectCapacityBody(tiers, capacity, maxWork) {
-  if (!tiers || !tiers.length) return [];
-  var limit = (typeof maxWork === 'number' && maxWork > 0) ? maxWork : null;
-  var cap = (typeof capacity === 'number' && capacity > 0) ? capacity : 0;
-  for (var i = 0; i < tiers.length; i++) {
-    var body = tiers[i];
-    if (!body || !body.length) {
-      continue;
-    }
-    if (limit && countBodyPart(body, WORK) > limit) {
-      continue;
-    }
-    var cost = CoreSpawn.costOfBody(body);
-    if (cost > 0 && cost <= cap) {
-      return body;
-    }
-  }
-  return [];
-}
-
-function getSpawnBody(energy, room, context) {
-  var available = resolveAvailableEnergy(energy, room, context);
-  var capacity = resolveCapacityEnergy(room, context, available);
-  var tiers = HARVESTER_BODY_TIERS;
-  var config = resolveHarvesterConfig();
-  var maxWork = (config && typeof config.MAX_WORK === 'number') ? config.MAX_WORK : null;
-  var targetBody = selectCapacityBody(tiers, capacity, maxWork);
-  var fallbackBody = selectBodyForEnergy(available, tiers, maxWork);
-  var targetCost = CoreSpawn.costOfBody(targetBody);
-  var fallbackCost = CoreSpawn.costOfBody(fallbackBody);
-
-  var intel = resolveHarvesterIntel(room, context) || null;
-  var desired = getNumber((context && context.limit), null);
-  if (desired === null && intel) {
-    desired = getNumber(intel.desiredCount, 1);
-  }
-  if (desired === null) {
-    desired = 1;
-  }
-  var coverage = getNumber((context && context.current), null);
-  if (coverage === null && intel) {
-    coverage = getNumber(intel.coverage, 0);
-  }
-  if (coverage === null) {
-    coverage = 0;
-  }
-
-  if (coverage < desired) {
-    var canAffordTarget = targetBody.length && targetCost > 0 && available >= targetCost;
-    var chosenBody = canAffordTarget ? targetBody : fallbackBody;
-    var chosenCost = canAffordTarget ? targetCost : fallbackCost;
-    if (chosenBody.length && chosenCost > 0 && available >= chosenCost) {
-      return cloneBody(chosenBody);
-    }
-    return [];
-  }
-
-  var active = intel && typeof intel.active === 'number' ? intel.active : 0;
-  if (active <= 0) {
-    return [];
-  }
-
-  var renewalTtl = (config && typeof config.RENEWAL_TTL === 'number') ? config.RENEWAL_TTL : 150;
-  var lowestTtl = (intel && typeof intel.lowestTtl === 'number') ? intel.lowestTtl : null;
-  if (lowestTtl === null || lowestTtl > renewalTtl) {
-    return [];
-  }
-
-  var hatching = intel && typeof intel.hatching === 'number' ? intel.hatching : 0;
-  if (hatching > 0) {
-    return [];
-  }
-
-  if (targetBody.length && targetCost > 0 && available >= targetCost) {
-    return cloneBody(targetBody);
-  }
-
-  var highestCost = intel && typeof intel.highestCost === 'number' ? intel.highestCost : 0;
-  var canUpgrade = targetCost > highestCost;
-
-  if (!canUpgrade && fallbackBody.length && fallbackCost > 0 && available >= fallbackCost && fallbackCost === targetCost) {
-    return cloneBody(fallbackBody);
-  }
-
-  var emergencyTtl = (config && typeof config.EMERGENCY_TTL === 'number') ? config.EMERGENCY_TTL : 50;
-  if (lowestTtl <= emergencyTtl && fallbackBody.length && fallbackCost > 0 && available >= fallbackCost) {
-    return cloneBody(fallbackBody);
-  }
-
-  if (!canUpgrade && targetBody.length && targetCost > 0 && available >= targetCost) {
-    return cloneBody(targetBody);
-  }
-
-  return [];
-}
-
-module.exports.getSpawnBody = getSpawnBody;
-
-module.exports.getSpawnSpec = function (room, context) {
-  var available = resolveAvailableEnergy(null, room, context);
-  var body = getSpawnBody(available, room, context);
-  return {
-    body: body,
-    namePrefix: 'baseharvest',
-    memory: {
-      role: 'Worker_Bee',
-      task: 'baseharvest',
-      home: room && room.name
-    }
-  };
-};
+module.exports = TaskBaseHarvest;

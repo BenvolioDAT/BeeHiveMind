@@ -1,6 +1,11 @@
-var hasOwn = function (obj, prop) {
-  return Object.prototype.hasOwnProperty.call(obj, prop);
-};
+// role.LinkManager.cpu.es5.js
+// ES5-safe, CPU-lean link manager
+// - Works per owned room (not per spawn)
+// - Caches sender/receiver link IDs in Memory (rescan every N ticks or if invalid)
+// - Sender: closest to storage (else spawn); Receiver: closest to controller
+// - Ensures sender !== receiver, skips if low energy / no free capacity
+
+'use strict';
 
 var roleLinkManager = {
   run: function () {
@@ -11,7 +16,7 @@ var roleLinkManager = {
 
     // Iterate owned rooms
     for (var rn in Game.rooms) {
-      if (!hasOwn(Game.rooms, rn)) continue;
+      if (!Game.rooms.hasOwnProperty(rn)) continue;
       var room = Game.rooms[rn];
       if (!room.controller || !room.controller.my) continue;
 

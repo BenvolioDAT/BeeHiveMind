@@ -1,35 +1,8 @@
-var CoreConfig = require('core.config');
-var TaskSquad = null;
-try {
-  TaskSquad = require('Task.Squad');
-} catch (error) {
-  TaskSquad = null;
-}
-
-var towerSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Tower) || {};
-var REPAIR_ENERGY_MIN_DEFAULT = (typeof towerSettings.REPAIR_ENERGY_MIN === 'number')
-  ? towerSettings.REPAIR_ENERGY_MIN
-  : 400;
-
-function isAllyUsername(username) {
-  if (!username) return false;
-  if (TaskSquad && typeof TaskSquad.isAlly === 'function') {
-    return TaskSquad.isAlly(username);
-  }
-  return false;
-}
-
-function isEnemyUsername(username, myUsername) {
-  if (!username) return false;
-  if (isAllyUsername(username)) return false;
-  if (myUsername && username === myUsername) return false;
-  return true;
-}
-
-function isEnemyCreep(creep, myUsername) {
-  if (!creep || !creep.owner) return false;
-  return isEnemyUsername(creep.owner.username, myUsername);
-}
+// Coordinated tower logic:
+// - Attack hostiles first
+// - Repairs: split targets across towers (no double-repair)
+// - Short per-tower lock so they don't ping-pong targets every tick
+// - If only one repair target, only one tower repairs it
 
 module.exports = {
   run: function () {
@@ -41,7 +14,6 @@ module.exports = {
 
     var room = spawn.room;
     var roomName = room.name;
-    var myUsername = (spawn.owner && spawn.owner.username) || null;
 
     // Ensure room memory
     if (!Memory.rooms) Memory.rooms = {};
@@ -63,15 +35,18 @@ module.exports = {
     if (!towers || !towers.length) return;
 
     // ========== 1) Hostile handling (always first) ==========
-    var hostiles = room.find(FIND_HOSTILE_CREEPS, {
-      filter: function (creep) { return isEnemyCreep(creep, myUsername); }
-    });
+    var hostilePresent = false;
+    for (var h = 0; h < towers.length; h++) {
+      var tChk = towers[h];
+      var nearestHostile = tChk.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+      if (nearestHostile) { hostilePresent = true; break; }
+    }
 
-    if (hostiles.length) {
+    if (hostilePresent) {
       // Everyone shoots their nearest baddie
       for (var a = 0; a < towers.length; a++) {
         var at = towers[a];
-        var foe = at.pos.findClosestByRange(hostiles);
+        var foe = at.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
         if (foe) at.attack(foe);
       }
       return; // done this tick
@@ -109,7 +84,7 @@ module.exports = {
     var usedTargetIds = {};
 
     // Energy threshold per tower to allow repairs (tune as you like)
-    var REPAIR_ENERGY_MIN = REPAIR_ENERGY_MIN_DEFAULT;
+    var REPAIR_ENERGY_MIN = 400;
 
     // Helper: claim next available target for a tower (no duplicates this tick)
     function pickTargetForTower(tw) {
