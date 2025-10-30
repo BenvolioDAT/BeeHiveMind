@@ -79,11 +79,13 @@ const CONFIGS = {
     // Budget scout/seed — starter road + container drop
     B(2, 4, 6),    // 600 energy, 12 parts, 200 carry
     // Emergency mini — drops a container + token road
-    B(2, 2, 4)     // 400 energy, 8 parts, 100 carry
+    B(2, 2, 4),     // 400 energy, 8 parts, 100 carry
+    B(1,1,1),
   ],
   upgrader: [
     //B(4,1,5), 
     B(2,1,3),
+    B(1,1,1),
   ],
   repair: [
     B(5,2,7), 

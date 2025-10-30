@@ -1,4 +1,3 @@
-
 var BeeToolbox = require('BeeToolbox');
 
 // -----------------------------
@@ -10,6 +9,7 @@ var DROPPED_ALONG_ROUTE_R = 2;    // opportunistic pickup radius
 var DROPPED_BIG_MIN = 150;        // big dropped energy threshold
 var CONTAINER_MIN = 50;           // ignore tiny trickles in containers
 var GRAVE_SCAN_COOLDOWN = 20;     // room-level cooldown for tombstone/ruin scans
+var TOWER_REFILL_AT_OR_BELOW = 0.70; // refill towers when <= 70% energy
 
 // -----------------------------
 // Per-tick room cache
@@ -73,34 +73,28 @@ function _idsToObjects(ids) {
 }
 
 // -----------------------------
-// Small helpers (ES5-safe)
-// -----------------------------
-// -----------------------------
-// Movement helper (Traveler-first)
+// Movement + tiny utils (ES5-safe)
 // -----------------------------
 function go(creep, dest, range, reuse) {
   range = (range != null) ? range : 1;
   reuse = (reuse != null) ? reuse : 40; // higher reuse to cut pathing CPU
 
-  // Traveler always preferred
+  // Traveler first (preferred)
   if (creep.travelTo) {
     var tOpts = {
       range: range,
       reusePath: reuse,
-      ignoreCreeps: false,   // let Traveler traffic manager do its thing
+      ignoreCreeps: false,
       stuckValue: 2,
       repath: 0.05,
       maxOps: 4000
     };
-    // Allow BeeToolbox to inject a custom roomCallback if it exists
-    if (BeeToolbox && BeeToolbox.roomCallback) {
-      tOpts.roomCallback = BeeToolbox.roomCallback;
-    }
+    if (BeeToolbox && BeeToolbox.roomCallback) tOpts.roomCallback = BeeToolbox.roomCallback;
     creep.travelTo((dest.pos || dest), tOpts);
     return;
   }
 
-  // Fallback — only if Traveler somehow missing
+  // Fallback
   if (creep.pos.getRangeTo(dest) > range) {
     creep.moveTo(dest, { reusePath: reuse, maxOps: 2000 });
   }
@@ -121,30 +115,167 @@ function _closestByRange(pos, arr) {
   return best;
 }
 
-function _selectDropoffTarget(creep) {
-  var room = creep.room;
-  // Prefer storage, then terminal
-  if (room.storage && ((room.storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0)) return room.storage;
-  if (room.terminal && ((room.terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0)) return room.terminal;
-
-  // Then nearest non-source container with free capacity (no pathing)
-  var rc = _roomCache(room);
-  var others = _idsToObjects(rc.otherIds);
-  var candidates = [];
-  for (var i = 0; i < others.length; i++) {
-    var s = others[i];
-    if ((s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) candidates.push(s);
+// -----------------------------
+// PIB + same-tick reservations (shared global memory)
+// Goal: avoid fighting the Queen or other Couriers
+// -----------------------------
+function _qrMap() {
+  // Reuse the same structure the Queen uses:
+  // Memory._queenRes = { tick, map: {targetId: amount} }
+  if (!Memory._queenRes || Memory._queenRes.tick !== Game.time) {
+    Memory._queenRes = { tick: Game.time, map: {} };
   }
-  if (candidates.length) return _closestByRange(creep.pos, candidates);
-
-  return null;
+  return Memory._queenRes.map;
 }
 
-function _clearlyBetter(best, current) {
-  var be = (best && best.store && best.store[RESOURCE_ENERGY]) || 0;
-  var ce = (current && current.store && current.store[RESOURCE_ENERGY]) || 0;
-  // Switch if 25% more or +200 absolute
-  return be >= ce * 1.25 || (be - ce) >= 200;
+function _reservedFor(structId) {
+  var map = _qrMap();
+  return map[structId] || 0;
+}
+
+function _pibSumReserved(roomName, targetId, resourceType) {
+  resourceType = resourceType || RESOURCE_ENERGY;
+  var root = Memory._PIB;
+  if (!root || root.tick == null || !root.rooms) return 0;
+  var R = root.rooms[roomName];
+  if (!R || !R.fills) return 0;
+  var byCreep = R.fills[targetId] || {};
+  var total = 0;
+  for (var cname in byCreep) {
+    if (!byCreep.hasOwnProperty(cname)) continue;
+    var rec = byCreep[cname];
+    if (!rec || rec.res !== resourceType) continue;
+    if (rec.untilTick > Game.time) total += (rec.amount | 0);
+  }
+  return total;
+}
+
+function _pibRoom(roomName) {
+  var root = Memory._PIB;
+  if (!root || root.tick !== Game.time) {
+    Memory._PIB = { tick: Game.time, rooms: root && root.rooms ? root.rooms : {} };
+    root = Memory._PIB;
+  }
+  if (!root.rooms[roomName]) root.rooms[roomName] = { fills: {} };
+  return root.rooms[roomName];
+}
+
+function _pibReserveFill(creep, target, amount, resourceType) {
+  if (!creep || !target || !amount) return 0;
+  resourceType = resourceType || RESOURCE_ENERGY;
+  var roomName = (target.pos && target.pos.roomName) || (creep.room && creep.room.name);
+  if (!roomName) return 0;
+
+  var R = _pibRoom(roomName);
+  if (!R.fills[target.id]) R.fills[target.id] = {};
+
+  var dist = 0;
+  try { dist = creep.pos.getRangeTo(target); } catch (e) { dist = 5; }
+  var eta = Math.max(2, (dist | 0) + 1);
+
+  R.fills[target.id][creep.name] = {
+    res: resourceType,
+    amount: amount | 0,
+    untilTick: Game.time + eta
+  };
+  return amount | 0;
+}
+
+function _pibReleaseFill(creep, target, resourceType) {
+  if (!creep || !target) return;
+  resourceType = resourceType || RESOURCE_ENERGY;
+  var roomName = (target.pos && target.pos.roomName) || (creep.room && creep.room.name);
+  if (!roomName) return;
+
+  var root = Memory._PIB;
+  if (!root || !root.rooms) return;
+  var R = root.rooms[roomName];
+  if (!R || !R.fills) return;
+  var map = R.fills[target.id];
+  if (map && map[creep.name]) delete map[creep.name];
+  if (map && Object.keys(map).length === 0) delete R.fills[target.id];
+}
+
+// Effective free capacity that *respects* Queen/Courier reservations
+function _effectiveFree(struct, resourceType) {
+  resourceType = resourceType || RESOURCE_ENERGY;
+  var freeNow = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
+  var sameTick = _reservedFor(struct.id) | 0;
+  var roomName = (struct.pos && struct.pos.roomName) || (struct.room && struct.room.name);
+  var pib = roomName ? (_pibSumReserved(roomName, struct.id, resourceType) | 0) : 0;
+  return Math.max(0, freeNow - sameTick - pib);
+}
+
+// Reserve up to `amount` for this creep (same-tick + PIB)
+function reserveFill(creep, target, amount, resourceType) {
+  resourceType = resourceType || RESOURCE_ENERGY;
+  var map = _qrMap();
+  var free = _effectiveFree(target, resourceType);
+  var want = Math.max(0, Math.min(amount | 0, free | 0));
+  if (want > 0) {
+    map[target.id] = (map[target.id] || 0) + want;
+    creep.memory.dropoffId = target.id;
+    _pibReserveFill(creep, target, want, resourceType);
+  }
+  return want;
+}
+
+// Transfer wrapper that releases PIB intent properly
+function transferTo(creep, target, res) {
+  res = res || RESOURCE_ENERGY;
+  var rc = creep.transfer(target, res);
+
+  if (rc === ERR_NOT_IN_RANGE) { go(creep, target, 1, 40); return rc; }
+
+  if (rc === OK) {
+    _pibReleaseFill(creep, target, res);
+  } else if (rc === ERR_FULL) {
+    _pibReleaseFill(creep, target, res);
+    creep.memory.dropoffId = null;
+  } else if (rc !== OK && rc !== ERR_TIRED && rc !== ERR_BUSY) {
+    _pibReleaseFill(creep, target, res);
+    creep.memory.dropoffId = null;
+  }
+  return rc;
+}
+
+// -----------------------------
+// Targeting helpers for DELIVERY
+// Priority: Spawns/Extensions -> Towers -> Storage (terminal excluded)
+// All checks use _effectiveFree to avoid Queen
+// -----------------------------
+function _pickSpawnExt(creep) {
+  var list = creep.room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      if (!s.store) return false;
+      var t = s.structureType;
+      if (t !== STRUCTURE_SPAWN && t !== STRUCTURE_EXTENSION) return false;
+      return _effectiveFree(s, RESOURCE_ENERGY) > 0;
+    }
+  });
+  return list.length ? _closestByRange(creep.pos, list) : null;
+}
+
+function _pickTower(creep) {
+  var list = creep.room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      if (s.structureType !== STRUCTURE_TOWER || !s.store) return false;
+      var used = (s.store.getUsedCapacity(RESOURCE_ENERGY) | 0);
+      var cap  = (s.store.getCapacity(RESOURCE_ENERGY) | 0);
+      if (cap <= 0) return false;
+      var pct = used / cap;
+      if (pct > TOWER_REFILL_AT_OR_BELOW) return false; // only if low enough
+      return _effectiveFree(s, RESOURCE_ENERGY) > 0;
+    }
+  });
+  return list.length ? _closestByRange(creep.pos, list) : null;
+}
+
+function _pickStorage(creep) {
+  var st = creep.room.storage;
+  if (!st || !st.store) return null;
+  if (_effectiveFree(st, RESOURCE_ENERGY) <= 0) return null;
+  return st;
 }
 
 // -----------------------------
@@ -277,26 +408,43 @@ var TaskCourier = {
   },
 
   // -----------------------------
-  // Delivery
+  // Delivery (PIB-aware, avoids Queen conflicts)
   // -----------------------------
   deliverEnergy: function (creep) {
-    // Sticky dropoff (don’t re-select every tick)
+    var carryAmt = (creep.store.getUsedCapacity(RESOURCE_ENERGY) | 0);
+    if (carryAmt <= 0) { creep.memory.transferring = false; creep.memory.dropoffId = null; return; }
+
+    // Sticky dropoff if still valid and has effective free
     var target = Game.getObjectById(creep.memory.dropoffId);
-    if (!target || ((target.store && (target.store.getFreeCapacity(RESOURCE_ENERGY) | 0) === 0))) {
-      target = _selectDropoffTarget(creep);
-      creep.memory.dropoffId = target ? target.id : null;
-    }
-    if (!target) {
-      var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS);
-      if (anchor && !creep.pos.inRangeTo(anchor, 3)) go(creep, anchor, 3, 40);
-      return;
+    if (!target || _effectiveFree(target, RESOURCE_ENERGY) <= 0) {
+      // Priority 1: spawns & extensions
+      target = _pickSpawnExt(creep);
+      // Priority 2: towers (below threshold)
+      if (!target) target = _pickTower(creep);
+      // Priority 3: storage (last choice)
+      if (!target) target = _pickStorage(creep);
+
+      // If nothing at all, idle near anchor
+      if (!target) {
+        var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS);
+        if (anchor && !creep.pos.inRangeTo(anchor, 3)) go(creep, anchor, 3, 40);
+        return;
+      }
+      creep.memory.dropoffId = target.id;
     }
 
-    var tr = creep.transfer(target, RESOURCE_ENERGY);
-    if (tr === ERR_NOT_IN_RANGE) { go(creep, target, 1, 40); return; }
-    if (tr === OK && (creep.store[RESOURCE_ENERGY] | 0) === 0) {
-      creep.memory.transferring = false;
-      creep.memory.dropoffId = null; // free to choose best next time
+    // Reserve and deliver (so other Couriers/Queen avoid this target)
+    var reserved = reserveFill(creep, target, carryAmt, RESOURCE_ENERGY);
+    if (reserved > 0) {
+      var tr = transferTo(creep, target, RESOURCE_ENERGY);
+      if (tr === OK && (creep.store[RESOURCE_ENERGY] | 0) === 0) {
+        creep.memory.transferring = false;
+        creep.memory.dropoffId = null;
+      }
+      // If out of range or not OK, we moved or cleared reservation above.
+    } else {
+      // Couldn’t reserve (no effective free). Clear sticky and try again next tick.
+      creep.memory.dropoffId = null;
     }
   }
 };

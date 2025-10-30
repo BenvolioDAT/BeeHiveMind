@@ -12,7 +12,7 @@ const settings = Object.freeze({
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */
-    enabled: true,
+    enabled: false,
     /** Minimum bucket value before attempting pixel generation. */
     bucketThreshold: 9900,
     /** Optional modulus so pixels are generated every N ticks. */
