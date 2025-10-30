@@ -1,4 +1,5 @@
 var CoreConfig = require('core.config');
+var TaskSpawn = require('Task.Spawn');
 
 // Task.Trucker.js
 var Traveler = null;
@@ -6,13 +7,6 @@ try {
   Traveler = require('Traveler');
 } catch (error) {
   Traveler = null;
-}
-
-var TaskCourier = null;
-try {
-  TaskCourier = require('Task.Courier');
-} catch (error) {
-  TaskCourier = null;
 }
 
 var TaskTruckerSettings = CoreConfig.settings['Task.Trucker'];
@@ -484,15 +478,55 @@ function getDepositTargets(room, resourceType) {
 }
 
 module.exports = TaskTrucker;
-module.exports.getSpawnBody = function (energy) {
-  if (TaskCourier && typeof TaskCourier.getSpawnBody === 'function') {
-    return TaskCourier.getSpawnBody(energy);
+
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) continue;
+    copy[key] = context[key];
+  }
+  return copy;
+}
+
+module.exports.getSpawnBody = function (energyOrRoom, roomOrContext, maybeContext) {
+  var spawnModule = TaskSpawn || require('Task.Spawn');
+  var room = null;
+  var context = {};
+
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
+    }
+    if (context.capacityEnergy == null) {
+      context.capacityEnergy = energyOrRoom;
+    }
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
+  }
+
+  var info = spawnModule && typeof spawnModule.getBodyFor === 'function'
+    ? spawnModule.getBodyFor('trucker', room, context)
+    : null;
+  if (info && Array.isArray(info.parts) && info.parts.length) {
+    return info.parts.slice();
   }
   return [];
 };
+
 module.exports.getSpawnSpec = function (room, ctx) {
-  var available = (ctx && typeof ctx.availableEnergy === 'number') ? ctx.availableEnergy : ((room && room.energyAvailable) || 0);
-  var body = module.exports.getSpawnBody(available, room, ctx);
+  var spawnModule = TaskSpawn || require('Task.Spawn');
+  var context = cloneSpawnContext(ctx);
+  var info = spawnModule && typeof spawnModule.getBodyFor === 'function'
+    ? spawnModule.getBodyFor('trucker', room, context)
+    : null;
+  var body = info && Array.isArray(info.parts) ? info.parts.slice() : [];
+
   return {
     body: body,
     namePrefix: 'trucker',

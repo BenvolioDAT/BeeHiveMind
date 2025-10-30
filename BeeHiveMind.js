@@ -1786,6 +1786,9 @@ function trySpawnSquadMember(spawner, plan) {
     ? CoreSpawn.availableEnergy(spawner)
     : (room.energyAvailable || 0);
   var capacity = room.energyCapacityAvailable || available;
+  var spawnSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Spawn) || {};
+  var useCentralSpawn = !!spawnSettings.USE_CENTRAL;
+  var roleOverrides = (spawnSettings && spawnSettings.ROLE_OVERRIDES) || null;
   var roleMod = _tryRequireTask(plan.role);
   var context = {
     plan: plan,
@@ -1794,34 +1797,155 @@ function trySpawnSquadMember(spawner, plan) {
     room: room,
     requestedEnergy: available
   };
-  var body = (roleMod && typeof roleMod.getSpawnBody === 'function')
-    ? roleMod.getSpawnBody(available, room, context) || []
-    : [];
-  var cost = CoreSpawn.costOfBody(body);
   var tiers = (roleMod && Array.isArray(roleMod.BODY_TIERS)) ? roleMod.BODY_TIERS : null;
-  var initialTierIndex = _findSquadTierIndex(tiers, body);
+  var body = [];
+  var cost = 0;
+  var initialTierIndex = -1;
+
+  function loadCentralTiers(module, roleKey) {
+    if (!module || !roleKey) {
+      return null;
+    }
+    var tierParts = [];
+    if (typeof module.getTierList === 'function') {
+      var list = null;
+      try {
+        list = module.getTierList(roleKey);
+      } catch (err) {
+        list = null;
+      }
+      if (Array.isArray(list)) {
+        for (var idx = 0; idx < list.length; idx++) {
+          var entry = list[idx];
+          if (!entry) continue;
+          if (Array.isArray(entry.parts)) {
+            tierParts.push(entry.parts.slice());
+          } else if (Array.isArray(entry)) {
+            tierParts.push(entry.slice());
+          }
+        }
+      }
+    }
+    if (!tierParts.length && module.TASK_SPECS && module.TASK_SPECS[roleKey] && Array.isArray(module.TASK_SPECS[roleKey].tiers)) {
+      var specTiers = module.TASK_SPECS[roleKey].tiers;
+      for (var i = 0; i < specTiers.length; i++) {
+        var specTier = specTiers[i];
+        if (specTier && Array.isArray(specTier.parts)) {
+          tierParts.push(specTier.parts.slice());
+        }
+      }
+    }
+    return tierParts.length ? tierParts : null;
+  }
+
+  var TaskSpawn = null;
+  var centralRoleKey = null;
+  if (useCentralSpawn && roleOverrides) {
+    if (plan.role === 'CombatMelee' && roleOverrides.CombatMelee) {
+      centralRoleKey = 'CombatMelee';
+    } else if (plan.role === 'CombatArcher' && roleOverrides.CombatArcher) {
+      centralRoleKey = 'CombatArcher';
+    } else if (plan.role === 'CombatMedic' && roleOverrides.CombatMedic) {
+      centralRoleKey = 'CombatMedic';
+    }
+  }
+  if (centralRoleKey) {
+    TaskSpawn = tryRequire('Task.Spawn');
+    if (TaskSpawn && typeof TaskSpawn.getBodyFor === 'function') {
+      var centralInfo = null;
+      try {
+        centralInfo = TaskSpawn.getBodyFor(centralRoleKey, room, context);
+      } catch (centralErr) {
+        centralInfo = null;
+      }
+      if (centralInfo && Array.isArray(centralInfo.parts) && centralInfo.parts.length) {
+        body = centralInfo.parts.slice();
+        cost = (typeof centralInfo.cost === 'number') ? centralInfo.cost : CoreSpawn.costOfBody(body);
+        if (typeof centralInfo.tier === 'number' && centralInfo.tier > 0) {
+          initialTierIndex = centralInfo.tier - 1;
+        }
+        if ((!Array.isArray(tiers) || !tiers.length)) {
+          var centralTiers = loadCentralTiers(TaskSpawn, centralRoleKey);
+          if (centralTiers && centralTiers.length) {
+            tiers = centralTiers;
+          }
+        }
+      }
+    }
+  }
+
+  if (!body.length) {
+    body = (roleMod && typeof roleMod.getSpawnBody === 'function')
+      ? roleMod.getSpawnBody(available, room, context) || []
+      : [];
+    cost = CoreSpawn.costOfBody(body);
+    if (!Array.isArray(tiers) || !tiers.length) {
+      tiers = (roleMod && Array.isArray(roleMod.BODY_TIERS)) ? roleMod.BODY_TIERS : null;
+    }
+    initialTierIndex = _findSquadTierIndex(tiers, body);
+  } else {
+    if (cost <= 0) {
+      cost = CoreSpawn.costOfBody(body);
+    }
+    if ((!Array.isArray(tiers) || !tiers.length) && roleMod && Array.isArray(roleMod.BODY_TIERS)) {
+      tiers = roleMod.BODY_TIERS;
+    }
+    if (initialTierIndex === -1) {
+      initialTierIndex = _findSquadTierIndex(tiers, body);
+    }
+  }
   var downshiftFromIndex = -1;
 
   if (!body.length || cost <= 0) {
     // Check the best possible body at full capacity to decide if the plan is ever viable.
     var capacityContext = {
       plan: plan,
-      availableEnergy: available,
+      availableEnergy: capacity,
       capacityEnergy: capacity,
       room: room,
       requestedEnergy: capacity
     };
-    var bestBody = (roleMod && typeof roleMod.getSpawnBody === 'function')
-      ? roleMod.getSpawnBody(capacity, room, capacityContext) || []
-      : [];
-    var bestCost = CoreSpawn.costOfBody(bestBody);
+    var bestBody = [];
+    var bestCost = 0;
+
+    if (TaskSpawn && typeof TaskSpawn.getBodyFor === 'function' && centralRoleKey) {
+      var centralCapacityInfo = null;
+      try {
+        centralCapacityInfo = TaskSpawn.getBodyFor(centralRoleKey, room, capacityContext);
+      } catch (centralCapacityErr) {
+        centralCapacityInfo = null;
+      }
+      if (centralCapacityInfo && Array.isArray(centralCapacityInfo.parts) && centralCapacityInfo.parts.length) {
+        bestBody = centralCapacityInfo.parts.slice();
+        bestCost = (typeof centralCapacityInfo.cost === 'number') ? centralCapacityInfo.cost : CoreSpawn.costOfBody(bestBody);
+        if (typeof centralCapacityInfo.tier === 'number' && centralCapacityInfo.tier > 0) {
+          initialTierIndex = centralCapacityInfo.tier - 1;
+        }
+        if ((!Array.isArray(tiers) || !tiers.length)) {
+          var capacityTiers = loadCentralTiers(TaskSpawn, centralRoleKey);
+          if (capacityTiers && capacityTiers.length) {
+            tiers = capacityTiers;
+          }
+        }
+      }
+    }
+
+    if (!bestBody.length) {
+      bestBody = (roleMod && typeof roleMod.getSpawnBody === 'function')
+        ? roleMod.getSpawnBody(capacity, room, capacityContext) || []
+        : [];
+      bestCost = CoreSpawn.costOfBody(bestBody);
+    }
+
     if (!bestBody.length || bestCost <= 0) {
       debugSquadLog('[SquadSpawn] ' + room.name + ' ' + (plan.squadId || '?') + ':' + plan.role + ' decision=drop reason=no-body');
       return 'skip';
     }
     body = bestBody;
     cost = bestCost;
-    initialTierIndex = _findSquadTierIndex(tiers, body);
+    if (initialTierIndex === -1) {
+      initialTierIndex = _findSquadTierIndex(tiers, body);
+    }
   }
 
   if (cost > capacity) {

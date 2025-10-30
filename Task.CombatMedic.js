@@ -7,6 +7,7 @@ try {
   Traveler = null;
 }
 var CoreSpawn = require('core.spawn');
+var TaskSpawn = require('Task.Spawn');
 
 var CONFIG = {
   followRange: 1,          // how close we try to stay to buddy
@@ -452,7 +453,45 @@ var TaskCombatMedic = {
 
 module.exports = TaskCombatMedic;
 
-var COMBAT_MEDIC_BODY_TIERS = [
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) continue;
+    copy[key] = context[key];
+  }
+  return copy;
+}
+
+function loadCombatMedicTiersFromSpec() {
+  if (!TaskSpawn || typeof TaskSpawn.getTierList !== 'function') {
+    return null;
+  }
+  var list;
+  try {
+    list = TaskSpawn.getTierList('CombatMedic');
+  } catch (err) {
+    list = null;
+  }
+  if (!Array.isArray(list) || !list.length) {
+    return null;
+  }
+  var tiers = [];
+  for (var i = 0; i < list.length; i++) {
+    var entry = list[i];
+    if (!entry) continue;
+    if (Array.isArray(entry.parts)) {
+      tiers.push(entry.parts.slice());
+    } else if (Array.isArray(entry)) {
+      tiers.push(entry.slice());
+    }
+  }
+  return tiers.length ? tiers : null;
+}
+
+var FALLBACK_COMBAT_MEDIC_BODY_TIERS = [
   [
     MOVE, MOVE,
     HEAL, HEAL
@@ -463,21 +502,94 @@ var COMBAT_MEDIC_BODY_TIERS = [
   ]
 ];
 
+var COMBAT_MEDIC_BODY_TIERS = loadCombatMedicTiersFromSpec() || FALLBACK_COMBAT_MEDIC_BODY_TIERS.map(function (tier) {
+  return tier.slice();
+});
+
 module.exports.BODY_TIERS = COMBAT_MEDIC_BODY_TIERS.map(function (tier) {
   return tier.slice();
 });
 
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(COMBAT_MEDIC_BODY_TIERS, energy);
+module.exports.getTierList = function () {
+  if (TaskSpawn && typeof TaskSpawn.getTierList === 'function') {
+    try {
+      var central = TaskSpawn.getTierList('CombatMedic');
+      if (Array.isArray(central) && central.length) {
+        return central;
+      }
+    } catch (err) {
+      // fall back to local list
+    }
+  }
+  var fallback = [];
+  for (var i = 0; i < COMBAT_MEDIC_BODY_TIERS.length; i++) {
+    var parts = COMBAT_MEDIC_BODY_TIERS[i];
+    if (!Array.isArray(parts)) continue;
+    fallback.push({
+      parts: parts.slice(),
+      cost: CoreSpawn.costOfBody(parts),
+      tier: i + 1,
+      label: 'T' + (i + 1)
+    });
+  }
+  return fallback;
+};
+
+module.exports.getSpawnBody = function (energyOrRoom, roomOrContext, maybeContext) {
+  var room = null;
+  var context = {};
+
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
+    }
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
+  }
+
+  if (TaskSpawn && typeof TaskSpawn.getBodyFor === 'function') {
+    try {
+      var info = TaskSpawn.getBodyFor('CombatMedic', room, context) || {};
+      if (info && Array.isArray(info.parts) && info.parts.length) {
+        COMBAT_MEDIC_BODY_TIERS = loadCombatMedicTiersFromSpec() || COMBAT_MEDIC_BODY_TIERS;
+        module.exports.BODY_TIERS = COMBAT_MEDIC_BODY_TIERS.map(function (tier) { return tier.slice(); });
+        return info.parts.slice();
+      }
+    } catch (err) {
+      // fall back to local tiers
+    }
+  }
+
+  var available = context.availableEnergy;
+  if (available == null && room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+  if (available == null && typeof energyOrRoom === 'number') {
+    available = energyOrRoom;
+  }
+  var fallback = CoreSpawn.pickLargestAffordable(COMBAT_MEDIC_BODY_TIERS, available || 0);
+  return Array.isArray(fallback) ? fallback.slice() : [];
 };
 
 module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var available = (typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
-  if (available === null && room && typeof room.energyAvailable === 'number') {
-    available = room.energyAvailable;
+  var context = cloneSpawnContext(ctx);
+  var info = null;
+
+  if (TaskSpawn && typeof TaskSpawn.getBodyFor === 'function') {
+    try {
+      info = TaskSpawn.getBodyFor('CombatMedic', room, context) || null;
+    } catch (err) {
+      info = null;
+    }
   }
-  var body = module.exports.getSpawnBody(available, room, context);
+
+  var body = (info && Array.isArray(info.parts) && info.parts.length)
+    ? info.parts.slice()
+    : module.exports.getSpawnBody(room, context);
+
   return {
     body: body,
     namePrefix: 'CombatMedic',

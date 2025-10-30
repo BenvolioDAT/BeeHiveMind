@@ -1,7 +1,7 @@
 var CoreConfig = require('core.config');
-var CoreSpawn = require('core.spawn');
 var Logger = require('core.logger');
 var Traveler = require('Traveler');
+var TaskSpawn = require('Task.Spawn');
 
 var CourierSettings = (CoreConfig && CoreConfig.settings && CoreConfig.settings.Courier) || {};
 var DEFAULT_TRAVEL_REUSE = (typeof CourierSettings.travelReuse === 'number') ? CourierSettings.travelReuse : 15;
@@ -24,39 +24,100 @@ function createCarryMove(carryCount, moveCount) {
   return body;
 }
 
-var BODY_TIERS = [
-  createCarryMove(30, 15),
-  createCarryMove(23, 23),
-  createCarryMove(22, 22),
-  createCarryMove(21, 21),
-  createCarryMove(20, 20),
-  createCarryMove(19, 19),
-  createCarryMove(18, 18),
-  createCarryMove(17, 17),
-  createCarryMove(16, 16),
-  createCarryMove(15, 15),
-  createCarryMove(14, 14),
-  createCarryMove(13, 13),
-  createCarryMove(12, 12),
-  createCarryMove(11, 11),
-  createCarryMove(10, 10),
-  createCarryMove(9, 9),
-  createCarryMove(8, 8),
-  createCarryMove(7, 7),
-  createCarryMove(6, 6),
-  createCarryMove(5, 5),
-  createCarryMove(4, 4),
-  createCarryMove(3, 3),
-  createCarryMove(2, 2),
-  createCarryMove(1, 1)
-];
+var LEGACY_COURIER_BODY_TIERS = (function () {
+  var tiers = [];
+  tiers.push(createCarryMove(30, 15));
+  tiers.push(createCarryMove(23, 23));
+  for (var c = 22; c >= 1; c--) {
+    tiers.push(createCarryMove(c, c));
+  }
+  return tiers;
+}());
 
-function pickLargestAffordable(tiers, energyAvailable) {
-  return CoreSpawn.pickLargestAffordable(tiers, energyAvailable);
+function getRegisteredCourierTiers() {
+  if (TaskSpawn && typeof TaskSpawn.getTierList === 'function') {
+    var list = TaskSpawn.getTierList('courier');
+    if (Array.isArray(list) && list.length) {
+      return list.map(function (entry) {
+        return Array.isArray(entry.parts) ? entry.parts.slice() : [];
+      });
+    }
+  }
+  return LEGACY_COURIER_BODY_TIERS.map(function (body) { return body.slice(); });
 }
 
-function getSpawnBody(energy, room, context) {
-  return pickLargestAffordable(BODY_TIERS, energy);
+var BODY_TIERS = getRegisteredCourierTiers();
+
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
+      continue;
+    }
+    copy[key] = context[key];
+  }
+  return copy;
+}
+
+function costOfBody(body) {
+  if (!Array.isArray(body)) {
+    return 0;
+  }
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODYPART_COST[body[i]] || 0;
+  }
+  return total;
+}
+
+function getSpawnBody(energyOrRoom, roomOrContext, maybeContext) {
+  var spawnModule = TaskSpawn;
+  var room = null;
+  var context = {};
+
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
+    }
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
+  }
+
+  if (spawnModule && typeof spawnModule.getBodyFor === 'function') {
+    var info = spawnModule.getBodyFor('courier', room, context) || {};
+    if (info && Array.isArray(info.parts) && info.parts.length) {
+      return info.parts.slice();
+    }
+  }
+
+  var available = context.availableEnergy;
+  if (available == null && room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+  if (available == null && typeof energyOrRoom === 'number') {
+    available = energyOrRoom;
+  }
+  if (available == null) {
+    available = 0;
+  }
+  var tiers = getRegisteredCourierTiers();
+  var limit = (typeof available === 'number' && available >= 0) ? available : 0;
+  for (var i = 0; i < tiers.length; i++) {
+    var candidate = tiers[i];
+    if (!Array.isArray(candidate) || !candidate.length) {
+      continue;
+    }
+    if (costOfBody(candidate) <= limit) {
+      return candidate.slice();
+    }
+  }
+  return [];
 }
 
 function getSpawnSpec(room, ctx) {

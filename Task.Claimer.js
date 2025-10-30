@@ -1,5 +1,6 @@
 var Traveler = require('Traveler');
 var CoreSpawn = require('core.spawn');
+var TaskSpawn = require('Task.Spawn');
 
 function travel(creep, target, options) {
   var opts = options || {};
@@ -420,7 +421,40 @@ var TaskClaimer = {
 
 module.exports = TaskClaimer;
 
-var CLAIMER_BODY_TIERS = [
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
+      continue;
+    }
+    copy[key] = context[key];
+  }
+  return copy;
+}
+
+function loadClaimerTiersFromSpec() {
+  if (!TaskSpawn || typeof TaskSpawn.getTierList !== 'function') {
+    return null;
+  }
+  var tiers = TaskSpawn.getTierList('claimer');
+  if (!Array.isArray(tiers) || !tiers.length) {
+    return null;
+  }
+  var copies = [];
+  for (var i = 0; i < tiers.length; i++) {
+    var tier = tiers[i];
+    if (!tier || !Array.isArray(tier.parts)) {
+      continue;
+    }
+    copies.push(tier.parts.slice());
+  }
+  return copies.length ? copies : null;
+}
+
+var CLAIMER_BODY_TIERS = loadClaimerTiersFromSpec() || [
   [
     CLAIM, CLAIM,
     MOVE, MOVE
@@ -435,17 +469,57 @@ module.exports.BODY_TIERS = CLAIMER_BODY_TIERS.map(function (tier) {
   return tier.slice();
 });
 
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(CLAIMER_BODY_TIERS, energy);
+module.exports.getSpawnBody = function (energyOrRoom, roomOrContext, maybeContext) {
+  var spawnModule = TaskSpawn;
+  var room = null;
+  var context = {};
+
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
+    }
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
+  }
+
+  if (spawnModule && typeof spawnModule.getBodyFor === 'function') {
+    var info = spawnModule.getBodyFor('claimer', room, context) || {};
+    if (info && Array.isArray(info.parts) && info.parts.length) {
+      return info.parts.slice();
+    }
+  }
+
+  var available = context.availableEnergy;
+  if (available == null && room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+  if (available == null && typeof energyOrRoom === 'number') {
+    available = energyOrRoom;
+  }
+  if (available == null) {
+    available = 0;
+  }
+  var fallback = CoreSpawn.pickLargestAffordable(CLAIMER_BODY_TIERS, available);
+  return Array.isArray(fallback) ? fallback.slice() : [];
 };
 
 module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var available = (typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
-  if (available === null && room && typeof room.energyAvailable === 'number') {
-    available = room.energyAvailable;
+  var context = cloneSpawnContext(ctx);
+  var info = TaskSpawn && typeof TaskSpawn.getBodyFor === 'function'
+    ? TaskSpawn.getBodyFor('claimer', room, context)
+    : null;
+  var body = info && Array.isArray(info.parts) ? info.parts.slice() : null;
+  if (!body || !body.length) {
+    var available = (context && typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
+    if (available === null && room && typeof room.energyAvailable === 'number') {
+      available = room.energyAvailable;
+    }
+    var fallback = CoreSpawn.pickLargestAffordable(CLAIMER_BODY_TIERS, available || 0);
+    body = Array.isArray(fallback) ? fallback.slice() : [];
   }
-  var body = module.exports.getSpawnBody(available, room, context);
   return {
     body: body,
     namePrefix: 'Claimer',

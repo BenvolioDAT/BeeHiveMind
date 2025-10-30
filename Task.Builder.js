@@ -1,5 +1,6 @@
 var BuilderPlanner = require('Task.Builder.Planner');
 var CoreSpawn = require('core.spawn');
+var TaskSpawn = require('Task.Spawn');
 try { require('Traveler'); } catch (e) {}
 
 var HAS_OWN = Object.prototype.hasOwnProperty;
@@ -686,7 +687,26 @@ function builderBody(workCount, carryCount, moveCount) {
   return body;
 }
 
-var BUILDER_BODY_TIERS = [
+function loadBuilderTiersFromSpec() {
+  if (!TaskSpawn || !TaskSpawn.TASK_SPECS) {
+    return null;
+  }
+  var spec = TaskSpawn.TASK_SPECS.builder;
+  if (!spec || !Array.isArray(spec.tiers)) {
+    return null;
+  }
+  var tiers = [];
+  for (var i = 0; i < spec.tiers.length; i++) {
+    var tier = spec.tiers[i];
+    if (!tier || !Array.isArray(tier.parts)) {
+      continue;
+    }
+    tiers.push(tier.parts.slice());
+  }
+  return tiers.length ? tiers : null;
+}
+
+var BUILDER_BODY_TIERS = loadBuilderTiersFromSpec() || [
   builderBody(6, 12, 18),
   builderBody(4, 8, 12),
   builderBody(3, 6, 9),
@@ -697,14 +717,67 @@ var BUILDER_BODY_TIERS = [
   builderBody(1, 1, 1)
 ];
 
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) continue;
+    copy[key] = context[key];
+  }
+  return copy;
+}
+
 module.exports.BODY_TIERS = BUILDER_BODY_TIERS.map(function (tier) { return tier.slice(); });
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(BUILDER_BODY_TIERS, energy);
+module.exports.getSpawnBody = function (energyOrRoom, roomOrContext, maybeContext) {
+  var spawnModule = TaskSpawn || require('Task.Spawn');
+  var room = null;
+  var context = {};
+
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
+    }
+    if (context.capacityEnergy == null) {
+      context.capacityEnergy = energyOrRoom;
+    }
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
+  }
+
+  var info = spawnModule && typeof spawnModule.getBodyFor === 'function'
+    ? spawnModule.getBodyFor('builder', room, context)
+    : null;
+  var parts = info && Array.isArray(info.parts) ? info.parts.slice() : null;
+  if (parts && parts.length) {
+    return parts;
+  }
+
+  var energy = 0;
+  if (typeof energyOrRoom === 'number') {
+    energy = energyOrRoom;
+  } else if (context && typeof context.availableEnergy === 'number') {
+    energy = context.availableEnergy;
+  }
+  var fallback = CoreSpawn.pickLargestAffordable(BUILDER_BODY_TIERS, energy);
+  return Array.isArray(fallback) ? fallback.slice() : [];
 };
+
 module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var energy = context.availableEnergy;
-  var body = module.exports.getSpawnBody(energy, room, context);
+  var spawnModule = TaskSpawn || require('Task.Spawn');
+  var info = spawnModule && typeof spawnModule.getBodyFor === 'function'
+    ? spawnModule.getBodyFor('builder', room, ctx)
+    : null;
+  var body = info && Array.isArray(info.parts) ? info.parts.slice() : null;
+  if (!body || !body.length) {
+    var energy = ctx && typeof ctx.availableEnergy === 'number' ? ctx.availableEnergy : (room && room.energyAvailable) || 0;
+    var fallback = CoreSpawn.pickLargestAffordable(BUILDER_BODY_TIERS, energy);
+    body = Array.isArray(fallback) ? fallback.slice() : [];
+  }
   return {
     body: body,
     namePrefix: 'builder',

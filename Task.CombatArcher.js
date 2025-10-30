@@ -6,6 +6,7 @@ try {
 }
 var TaskSquad = require('Task.Squad');
 var CoreSpawn = require('core.spawn');
+var TaskSpawn = require('Task.Spawn');
 
 var _cachedUsername = null;
 
@@ -430,7 +431,7 @@ var TaskCombatArcher = {
 
 module.exports = TaskCombatArcher;
 
-var COMBAT_ARCHER_BODY_TIERS = [
+var FALLBACK_COMBAT_ARCHER_BODY_TIERS = [
   [
     TOUGH, TOUGH,
     RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK, RANGED_ATTACK,
@@ -443,21 +444,174 @@ var COMBAT_ARCHER_BODY_TIERS = [
   ]
 ];
 
-module.exports.BODY_TIERS = COMBAT_ARCHER_BODY_TIERS.map(function (tier) {
+module.exports.BODY_TIERS = FALLBACK_COMBAT_ARCHER_BODY_TIERS.map(function (tier) {
   return tier.slice();
 });
 
-module.exports.getSpawnBody = function (energy) {
-  return CoreSpawn.pickLargestAffordable(COMBAT_ARCHER_BODY_TIERS, energy);
+function cloneSpawnContext(context) {
+  if (!context || typeof context !== 'object') {
+    return {};
+  }
+  var copy = {};
+  for (var key in context) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
+      continue;
+    }
+    copy[key] = context[key];
+  }
+  return copy;
+}
+
+function getCentralArcherTierParts() {
+  var tiers = [];
+  if (TaskSpawn) {
+    if (typeof TaskSpawn.getTierList === 'function') {
+      try {
+        var tierList = TaskSpawn.getTierList('CombatArcher');
+        if (Array.isArray(tierList)) {
+          for (var i = 0; i < tierList.length; i++) {
+            var entry = tierList[i];
+            if (!entry) continue;
+            if (Array.isArray(entry.parts)) {
+              tiers.push(entry.parts.slice());
+            } else if (Array.isArray(entry)) {
+              tiers.push(entry.slice());
+            }
+          }
+        }
+      } catch (tierErr) {
+        tiers = [];
+      }
+    }
+    if (!tiers.length && TaskSpawn.TASK_SPECS && TaskSpawn.TASK_SPECS.CombatArcher && Array.isArray(TaskSpawn.TASK_SPECS.CombatArcher.tiers)) {
+      var specTiers = TaskSpawn.TASK_SPECS.CombatArcher.tiers;
+      for (var j = 0; j < specTiers.length; j++) {
+        var specTier = specTiers[j];
+        if (specTier && Array.isArray(specTier.parts)) {
+          tiers.push(specTier.parts.slice());
+        }
+      }
+    }
+  }
+  return tiers.length ? tiers : null;
+}
+
+function refreshArcherBodyTiers() {
+  var central = getCentralArcherTierParts();
+  var bodies = central && central.length
+    ? central
+    : FALLBACK_COMBAT_ARCHER_BODY_TIERS.map(function (tier) { return tier.slice(); });
+  module.exports.BODY_TIERS = bodies.map(function (tier) { return tier.slice(); });
+  return module.exports.BODY_TIERS;
+}
+
+function getActiveArcherTierList() {
+  if (TaskSpawn && typeof TaskSpawn.getTierList === 'function') {
+    try {
+      var centralList = TaskSpawn.getTierList('CombatArcher');
+      if (Array.isArray(centralList) && centralList.length) {
+        return centralList.map(function (entry, index) {
+          if (!entry) {
+            return entry;
+          }
+          if (Array.isArray(entry.parts)) {
+            var tierIndex = (typeof entry.tier === 'number' && entry.tier > 0) ? entry.tier : (index + 1);
+            return {
+              parts: entry.parts.slice(),
+              cost: (typeof entry.cost === 'number') ? entry.cost : CoreSpawn.costOfBody(entry.parts),
+              tier: tierIndex,
+              label: entry.label || ('T' + tierIndex)
+            };
+          }
+          if (Array.isArray(entry)) {
+            return {
+              parts: entry.slice(),
+              cost: CoreSpawn.costOfBody(entry),
+              tier: index + 1,
+              label: 'T' + (index + 1)
+            };
+          }
+          return entry;
+        });
+      }
+    } catch (listErr) {
+      // fall through to fallback list
+    }
+  }
+
+  var bodies = refreshArcherBodyTiers();
+  var fallbackList = [];
+  for (var i = 0; i < bodies.length; i++) {
+    var parts = bodies[i];
+    fallbackList.push({
+      parts: parts.slice(),
+      cost: CoreSpawn.costOfBody(parts),
+      tier: i + 1,
+      label: 'T' + (i + 1)
+    });
+  }
+  return fallbackList;
+}
+
+module.exports.getTierList = function () {
+  return getActiveArcherTierList();
+};
+
+module.exports.getSpawnBody = function (energyOrRoom, roomOrContext, maybeContext) {
+  var room = null;
+  var context = {};
+
+  if (typeof energyOrRoom === 'number') {
+    room = roomOrContext || null;
+    context = cloneSpawnContext(maybeContext);
+    if (context.availableEnergy == null) {
+      context.availableEnergy = energyOrRoom;
+    }
+  } else {
+    room = energyOrRoom || null;
+    context = cloneSpawnContext(roomOrContext);
+  }
+
+  if (TaskSpawn && typeof TaskSpawn.getBodyFor === 'function') {
+    try {
+      var info = TaskSpawn.getBodyFor('CombatArcher', room, context) || {};
+      if (info && Array.isArray(info.parts) && info.parts.length) {
+        refreshArcherBodyTiers();
+        return info.parts.slice();
+      }
+    } catch (err) {
+      // fall back to local tiers
+    }
+  }
+
+  var available = context.availableEnergy;
+  if (available == null && room && typeof room.energyAvailable === 'number') {
+    available = room.energyAvailable;
+  }
+  if (available == null && typeof energyOrRoom === 'number') {
+    available = energyOrRoom;
+  }
+  var tiers = refreshArcherBodyTiers();
+  var fallback = CoreSpawn.pickLargestAffordable(tiers, available);
+  return Array.isArray(fallback) ? fallback.slice() : [];
 };
 
 module.exports.getSpawnSpec = function (room, ctx) {
-  var context = ctx || {};
-  var available = (typeof context.availableEnergy === 'number') ? context.availableEnergy : null;
-  if (available === null && room && typeof room.energyAvailable === 'number') {
-    available = room.energyAvailable;
+  var context = cloneSpawnContext(ctx);
+  var info = null;
+
+  if (TaskSpawn && typeof TaskSpawn.getBodyFor === 'function') {
+    try {
+      info = TaskSpawn.getBodyFor('CombatArcher', room, context) || null;
+    } catch (err) {
+      info = null;
+    }
   }
-  var body = module.exports.getSpawnBody(available, room, context);
+
+  var body = (info && Array.isArray(info.parts) && info.parts.length)
+    ? info.parts.slice()
+    : module.exports.getSpawnBody(room, context);
+
   return {
     body: body,
     namePrefix: 'CombatArcher',
