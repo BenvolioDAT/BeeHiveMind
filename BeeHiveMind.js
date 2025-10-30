@@ -1,12 +1,3 @@
-// BeeHiveMind.cpu.es5.js
-// ES5-safe, CPU-minded hive brain:
-// - One-pass per-tick caches (rooms, spawns, creeps, roleCounts, siteCounts)
-// - TradeEnergy.runAll() once per tick (not per room)
-// - Spawning loops only spawns (no nested rooms×spawns×creeps hurricanes)
-// - NeedBuilder() uses cached global construction sites (no per-remote .find())
-// - Room/road planners still run per-room, but your versions are already tick-gated
-
-'use strict';
 
 var CoreLogger = require('core.logger');
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;

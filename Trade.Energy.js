@@ -1,6 +1,3 @@
-// Trade.Energy.v2.1.js
-// Purpose: Sell excess ENERGY via the Market from a room's Terminal.
-// Tone: novice-friendly (verbose comments, clear steps).
 
 const CFG = {
   KEEP_ENERGY_STORAGE: 600000,   // don't touch storage below this

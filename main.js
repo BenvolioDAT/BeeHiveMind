@@ -1,4 +1,3 @@
-"use strict";
 
 const CoreConfig = require('core.config');
 const Logger = require('core.logger');

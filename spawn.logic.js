@@ -1,19 +1,4 @@
-"use strict";
 
-// spawn.logic.js — cleaner, same behavior
-// --------------------------------------------------------
-// Purpose: Pick creep bodies by role/task from predefined configs,
-//          spawn creeps with consistent names and memory,
-//          and do it in a clean, beginner-friendly way.
-//
-// Notes for beginners:
-// - In Screeps, body parts are strings like 'work', 'carry', 'move'.
-// - BODYPART_COST is a global map: { move:50, work:100, carry:50, ... }.
-// - We choose the *largest* body config that fits available energy.
-// - Logging is gated by LOG_LEVEL; turn to DEBUG to see details.
-// --------------------------------------------------------
-
-// ---------- Logging ----------
 const Logger = require('core.logger');
 const LOG_LEVEL = Logger.LOG_LEVEL;
 const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);

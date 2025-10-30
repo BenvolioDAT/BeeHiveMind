@@ -1,8 +1,3 @@
-// Planner.Room.es5.cpu.js
-// Single source of truth for room/base planning & construction site placement
-// ES5-safe + CPU-minded: per-tick scans, zero-allocation placement, RCL-aware limits, staggered.
-
-'use strict';
 
 var CFG = Object.freeze({
   maxSitesPerTick: 5,            // gentle drip; global cap is 100

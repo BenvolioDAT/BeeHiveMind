@@ -1,8 +1,3 @@
-// Coordinated tower logic:
-// - Attack hostiles first
-// - Repairs: split targets across towers (no double-repair)
-// - Short per-tower lock so they don't ping-pong targets every tick
-// - If only one repair target, only one tower repairs it
 
 module.exports = {
   run: function () {

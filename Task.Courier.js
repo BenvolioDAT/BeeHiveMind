@@ -1,15 +1,3 @@
-// Task.Courier.cpu.es5.js
-// Dynamic picker (no static container assignment), CPU-trimmed & ES5-safe.
-//
-// Key savings:
-// - Per-room, once-per-tick cache of containers & "best" source container
-// - Avoid PathFinder: prefer findInRange / findClosestByRange over findClosestByPath
-// - Sticky targets + cooldowns to prevent thrashing
-// - Limited scans for tombstones/ruins only when needed
-//
-// Optional dep: BeeToolbox.BeeTravel(creep, target, {range, reusePath})
-
-'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 

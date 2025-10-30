@@ -1,5 +1,3 @@
-// Task.Dismantler.js — siege with Invader Core handling (ES5-safe)
-'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 

@@ -1,9 +1,3 @@
-// SquadFlagManager.es5.js (sticky version)
-// Places SquadAlpha/Bravo/Charlie/Delta on threatened rooms and KEEPS them
-// until we SEE the room and confirm the threat is gone for a grace period.
-// Only considers rooms with your non-scout creeps. ES5-safe.
-
-'use strict';
 
 var SquadFlagManager = (function () {
 

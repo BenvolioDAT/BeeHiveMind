@@ -1,4 +1,3 @@
-'use strict';
 
 const Logger = require('core.logger');
 const LOG_LEVEL = Logger.LOG_LEVEL;

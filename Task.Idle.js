@@ -1,6 +1,4 @@
 
-"use strict";
-
 const TaskSquad = require('./Task.Squad');
 
 const Taskidle = {

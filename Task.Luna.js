@@ -1,17 +1,3 @@
-// TaskLuna.clean.js
-// Luna harvester ("forager"): mines a remote source and hauls energy home.
-//
-// This revision:
-// - Stores count + owner per source in Memory.remoteAssignments[sourceId] = {count, owner, roomName, since}
-// - Creep memory always carries {sourceId, targetRoom}
-// - Duplicate resolver elects 1 winner (oldest _assignTick, then name), losers yield
-// - Removes stale owners when creeps die or retarget
-// - SOURCE FLAGS: create on source tile and prune when unused/locked (with grace TTL)
-// - NEW: CONTROLLER FLAGS: create a flag on the remote room's controller while the room is being worked;
-//        automatically remove it when there are no Luna creeps assigned/in that room.
-// - Legacy fallback hard-caps to REMOTE_RADIUS; ES5-safe; Traveler/BeeTravel for movement.
-
-'use strict';
 
 // ============================
 // Dependencies

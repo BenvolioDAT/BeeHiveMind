@@ -1,5 +1,3 @@
-// Task.CombatArcher.js — Stoic archer (no dancing) + DPS-first + safe kiting (ES5-safe)
-'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');

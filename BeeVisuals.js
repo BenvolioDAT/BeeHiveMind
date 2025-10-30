@@ -1,7 +1,3 @@
-// BeeVisuals.cpu.always.es5.js
-// ES5-safe visuals that draw EVERY TICK (no blinking), with light CPU hygiene.
-
-'use strict';
 
 var TaskBuilder = require('Task.Builder'); // guarded below
 var Logger = require('core.logger');

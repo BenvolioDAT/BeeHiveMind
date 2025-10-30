@@ -1,11 +1,3 @@
-// role.TaskQueen.cpu.es5.js
-// ES5-safe, CPU-lean Queen:
-// - Per-room, once-per-tick cache of needy structures / containers / links
-// - Prefers range checks over pathing; high reusePath for moves
-// - Per-tick fill reservations to avoid double-filling
-// - Sticky targets to reduce indecision
-
-'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 

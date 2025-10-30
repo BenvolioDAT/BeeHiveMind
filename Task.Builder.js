@@ -1,14 +1,3 @@
-// role.TaskBuilder.cpu.es5.js
-// ES5-safe, CPU-lean Builder with per-tick site caching, anti-stuck movement,
-// friendly swaps, per-site reservations, correct fallback, and "true lock":
-// once a builder picks a site, it stays on it until completion.
-// + Visuals: gold line to destination, marker + label, path dots (low-CPU).
-// + On-path preference: favors road sites that lie along the current route,
-//   and lightly penalizes building targets sitting in swamp tiles.
-//
-// Traveler-first movement (BeeToolbox.BeeTravel or creep.travelTo), with graceful fallbacks.
-
-'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists if Traveler.js is in your codebase

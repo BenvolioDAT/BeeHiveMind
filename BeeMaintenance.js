@@ -1,12 +1,3 @@
-// BeeMaintenance.cpu.es5.js
-// ES5-safe, CPU-lean maintenance utilities.
-// - Throttled memory cleanup (rooms/creeps/assignments)
-// - Deep compaction: remove empty sub-objects & delete truly-empty rooms
-// - Robust stale-room detection + grace window
-// - Cached, interval-based repair target list per room
-// - No ES6 syntax
-
-'use strict';
 
 var CoreConfig = require('core.config');
 var Logger = require('core.logger');

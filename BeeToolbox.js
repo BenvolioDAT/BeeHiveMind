@@ -1,7 +1,3 @@
-// BeeToolbox.js — ES5-safe helpers shared across roles/tasks
-// NOTE: Compatible with Screeps runtime (no arrow funcs, no const/let, no includes, etc.)
-
-'use strict';
 
 var Traveler = require('Traveler');
 var Logger = require('core.logger');

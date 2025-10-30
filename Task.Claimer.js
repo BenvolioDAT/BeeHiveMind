@@ -1,10 +1,3 @@
-// Task.Claimer.js
-// Handles: claim | reserve | attack controllers.
-// creep.memory:
-//   claimerMode: 'claim' | 'reserve' | 'attack' (default: 'reserve')
-//   targetRoom: 'E12S34' (preferred) or use flags named 'Claim'/'Reserve'/'Attack'
-
-'use strict';
 
 var BeeToolbox = require('BeeToolbox');
 

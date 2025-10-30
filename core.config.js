@@ -1,16 +1,3 @@
-'use strict';
-
-/**
- * Central configuration + constants for the BeeHiveMind Screeps AI.
- *
- * Keeping these definitions in one module ensures that every subsystem
- * references the same values and allows quick tweaking from a single place.
- *
- * Notes for Screeps:
- *  - Screeps' module cache is persistent between ticks. Exporting frozen
- *    objects protects the constants from accidental mutation during gameplay.
- *  - Avoid storing dynamic state in here; use Memory or global caches instead.
- */
 
 const LOG_LEVEL = Object.freeze({
   NONE: 0,

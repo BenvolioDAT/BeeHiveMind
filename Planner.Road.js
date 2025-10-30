@@ -1,11 +1,3 @@
-// Planner.Road.clean.refactor.cpu.js
-// CPU-minded, staged road planner for Screeps
-// - Builds a home-room logistics spine (spawn → storage) and spokes to sources (+ optional controller).
-// - Plans + drip-places ROAD sites to remote sources used by your remote-harvest creeps.
-// - Audits occasionally and relaunches placements if tiles decay.
-// Design goals: cut repeated work per tick; reuse path/state; avoid allocations in hot loops.
-
-'use strict';
 
 /** =========================
  *  Config (tweak here)
