@@ -290,20 +290,20 @@ var BeeHiveMind = {
       var room = spawner.room;
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
       var workerTaskLimits = {
-        baseharvest:   2,
-        builder:       NeedBuilder(room),
-        upgrader:      1,
-        repair:        0,
+        baseharvest:   2,      
         courier:       1,
-        queen:         2,
+        queen:         1,
+        upgrader:      1,
+        builder:       NeedBuilder(room),
         luna:          DetermineLunaQuota(room),
-        scout:         2,
+        repair:        0,
+        scout:         0,
         CombatArcher:  0,
         CombatMelee:   0,
         CombatMedic:   0,
         Dismantler:    0,
         Trucker:       0,
-        Claimer:       2,
+        Claimer:       0,
       };
 
       // find first underfilled task and try to spawn it
