@@ -80,55 +80,73 @@ var SquadFlagManager = (function () {
     return Math.abs(h) % mod;
   }
 
-  // Compute threat score + a representative position (anchor)
+  // PvE-only scoring: never score player structures; only Invader threats.
   function _scoreRoom(room) {
-    if (!room) return { score: 0, pos: null };
-
     var s = 0;
     var pos = null;
 
-    var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
-    var i, invCount = 0, otherCount = 0;
-
-    for (i = 0; i < hostiles.length; i++) {
-      var h = hostiles[i];
-      var inv = (h.owner && h.owner.username === 'Invader');
-      if (inv) invCount++;
-      else if (CFG.includeNonInvaderHostiles) otherCount++;
-    }
-
-    if (invCount > 0) {
-      s += invCount * CFG.score.invaderCreep;
-      if (!pos) {
-        for (i = 0; i < hostiles.length; i++) {
-          if (hostiles[i].owner && hostiles[i].owner.username === 'Invader') { pos = hostiles[i].pos; break; }
-        }
+    // --- Hard bail: if this is a player room, do NOT score it (no PvP) ---
+    var ctrl = room.controller;
+    if (ctrl) {
+      // Owned by someone else (not you), and not the NPC 'Invader' => bail
+      if (ctrl.owner && !ctrl.my && ctrl.owner.username !== 'Invader') {
+        return { score: 0, pos: null };
+      }
+      // Reserved by a player (not Invader) => bail
+      if (ctrl.reservation &&
+          ctrl.reservation.username &&
+          ctrl.reservation.username !== 'Invader') {
+        return { score: 0, pos: null };
       }
     }
-    if (otherCount > 0) {
-      s += otherCount * CFG.score.otherHostileCreep;
-      if (!pos && hostiles.length) pos = hostiles[0].pos;
-    }
 
-    var cores = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_INVADER_CORE; } }) || [];
-    if (cores.length) {
-      s += CFG.score.invaderCore;
+    // --- Score Invader Core (PvE objective) ---
+    var cores = room.find(FIND_STRUCTURES, {
+      filter: function (st) {
+        return st.structureType === STRUCTURE_INVADER_CORE;
+      }
+    });
+    if (cores.length > 0) {
+      s += cores.length * CFG.score.invaderCore; // e.g., +15 each
       if (!pos) pos = cores[0].pos;
     }
 
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_TOWER; } }) || [];
-    if (towers.length) {
-      s += towers.length * CFG.score.hostileTower;
-      if (!pos) pos = towers[0].pos;
+    // --- Score only INVADER hostile creeps (avoid PvP creeps) ---
+    var invaderCreeps = room.find(FIND_HOSTILE_CREEPS, {
+      filter: function (c) {
+        return c.owner && c.owner.username === 'Invader';
+      }
+    });
+    if (invaderCreeps.length > 0) {
+      s += invaderCreeps.length * CFG.score.invaderCreep; // e.g., +5 each
+      if (!pos) pos = invaderCreeps[0].pos;
     }
 
-    var spawns = room.find(FIND_HOSTILE_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_SPAWN; } }) || [];
-    if (spawns.length) {
-      s += spawns.length * CFG.score.hostileSpawn;
-      if (!pos) pos = spawns[0].pos;
+    // --- Score only INVADER towers (skip player towers entirely) ---
+    var invaderTowers = room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (st) {
+        return st.structureType === STRUCTURE_TOWER &&
+              st.owner && st.owner.username === 'Invader';
+      }
+    });
+    if (invaderTowers.length > 0) {
+      s += invaderTowers.length * CFG.score.hostileTower; // e.g., +10 each
+      if (!pos) pos = invaderTowers[0].pos;
     }
 
-    if (!pos) pos = new RoomPosition(25, 25, room.name);
+    // --- Score only INVADER spawns (skip player spawns entirely) ---
+    var invaderSpawns = room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (st) {
+        return st.structureType === STRUCTURE_SPAWN &&
+              st.owner && st.owner.username === 'Invader';
+      }
+    });
+    if (invaderSpawns.length > 0) {
+      s += invaderSpawns.length * CFG.score.hostileSpawn; // e.g., +6 each
+      if (!pos) pos = invaderSpawns[0].pos;
+    }
+
+    // Return total threat score and a representative position to drop a Squad* flag near
     return { score: s, pos: pos };
   }
 
