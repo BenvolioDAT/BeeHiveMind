@@ -296,7 +296,7 @@ var BeeHiveMind = {
         upgrader:      1,
         builder:       NeedBuilder(room),
         scout:         1,
-        luna:          DetermineLunaQuota(room),
+        luna:          4,//DetermineLunaQuota(room),
         repair:        0,
         CombatArcher:  0,
         CombatMelee:   0,
