@@ -1,3 +1,10 @@
+// Combat.Melee.js (ES5-safe)
+// Fixes included:
+//  - Pre-retarget to weak enemies is actually used
+//  - When adjacent, attack hostile *Invader* rampart covering target tile first
+//  - Door-bash only Invader ramparts (PvE-only), walls still valid
+//  - Edge penalty applies near edges (1/48), not literal edges which are excluded
+//  - Micro considers ranged attackers as threats too
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
@@ -33,14 +40,14 @@ var CombatMelee = {
     if (lowHp || this._inTowerDanger(creep.pos)) {
       this._flee(creep);
       var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
-      if (adjBad) creep.attack(adjBad);
+      if (adjBad && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(adjBad);
       return;
     }
 
     // (2) bodyguard: interpose for squishy squadmates
     if (this._guardSquadmate(creep)) {
       var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
-      if (hugger) creep.attack(hugger);
+      if (hugger && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(hugger);
       return;
     }
 
@@ -52,17 +59,40 @@ var CombatMelee = {
       return;
     }
 
+    // Opportunistic pre-retarget to weaklings in 1..2 (actually used now)
+    if (Game.time % 3 === 0) {
+      var weak = this._weakestIn1to2(creep);
+      if (weak && (weak.hits / weak.hitsMax) < 0.5) {
+        target = weak;
+      }
+    }
+
     // (4) approach & strike
     if (creep.pos.isNearTo(target)) {
-      // Explicit Invader Core handling: stand and swing
-      if (target.structureType && target.structureType === STRUCTURE_INVADER_CORE) {
-        creep.say('⚔ core!');
-        creep.attack(target);
+      // If target tile is protected by an Invader rampart, hit the cover first (PvE-only)
+      var coverList = target.pos.lookFor(LOOK_STRUCTURES);
+      var cover = null;
+      for (var ci = 0; ci < coverList.length; ci++) {
+        var st = coverList[ci];
+        if (st.structureType === STRUCTURE_RAMPART &&
+            st.owner && st.owner.username === 'Invader') {
+          cover = st; break;
+        }
+      }
+      if (cover && creep.getActiveBodyparts(ATTACK) > 0) {
+        creep.attack(cover);
         return;
       }
 
-      // Normal melee attack
-      creep.attack(target);
+      // Explicit Invader Core handling: stand and swing
+      if (target.structureType && target.structureType === STRUCTURE_INVADER_CORE) {
+        creep.say('⚔ core!');
+        if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
+        return;
+      }
+
+      // Normal melee attack (unshielded)
+      if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
 
       // Micro-step to a safer/better adjacent tile (avoid tower/edges/melee stacks)
       var better = this._bestAdjacentTile(creep, target);
@@ -73,11 +103,11 @@ var CombatMelee = {
       return;
     }
 
-    // (5) door bash if a blocking wall/rampart is the nearer path at range 1
+    // (5) door bash if a blocking wall/rampart is the nearer path at range 1 (Invader ramparts only)
     if (CONFIG.doorBash) {
       var blocker = this._blockingDoor(creep, target);
       if (blocker && creep.pos.isNearTo(blocker)) {
-        creep.attack(blocker);
+        if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(blocker);
         return;
       }
     }
@@ -85,15 +115,11 @@ var CombatMelee = {
     // (6) close in via Traveler-powered TaskSquad (polite traffic + swaps)
     TaskSquad.stepToward(creep, target.pos, 1);
 
-    // opportunistic hit if we brushed into melee
+    // Opportunistic hit if we brushed into melee with a creep
     var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1)[0];
-    if (adj) creep.attack(adj);
+    if (adj && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(adj);
 
-    // (7) occasional opportunistic retarget to weaklings in 1..2
-    if (Game.time % 3 === 0) {
-      var weak = this._weakestIn1to2(creep);
-      if (weak && (weak.hits / weak.hitsMax) < 0.5) target = weak;
-    }
+    // (7) (moved earlier) retarget already applied above
   },
 
   // --- heal self/squad if possible (keeps ES5 style, no double actions)
@@ -160,14 +186,22 @@ var CombatMelee = {
 
   _inTowerDanger: function (pos) {
     var room = Game.rooms[pos.roomName]; if (!room) return false;
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType === STRUCTURE_TOWER; } });
-    for (var i=0;i<towers.length;i++) if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){
+      return s.structureType === STRUCTURE_TOWER;
+    }});
+    for (var i=0;i<towers.length;i++) {
+      if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
+    }
     return false;
   },
 
   _bestAdjacentTile: function (creep, target) {
     var best = creep.pos, bestScore = 1e9, room = creep.room;
-    var threats = room ? room.find(FIND_HOSTILE_CREEPS, { filter: function (h){ return h.getActiveBodyparts(ATTACK)>0 && h.hits>0; } }) : [];
+    var threats = room ? room.find(FIND_HOSTILE_CREEPS, {
+      filter: function (h){
+        return (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0) && h.hits>0;
+      }
+    }) : [];
 
     for (var dx=-1; dx<=1; dx++) for (var dy=-1; dy<=1; dy++) {
       if (!dx && !dy) continue;
@@ -192,9 +226,13 @@ var CombatMelee = {
       if (impass) continue;
 
       var score=0;
+      // adjacent to melee or ranged threats
       for (i=0;i<threats.length;i++) if (threats[i].pos.getRangeTo(pos)<=1) score+=20;
+      // tower danger ring
       if (this._inTowerDanger(pos)) score+=50;
-      if (x===0||x===49||y===0||y===49) score+=CONFIG.edgePenalty;
+      // near-edge penalty (1 and 48 rows/cols)
+      if (x<=1 || x>=48 || y<=1 || y>=48) score += CONFIG.edgePenalty;
+      // roads are slightly preferred
       if (onRoad) score-=1;
 
       if (score<bestScore) { bestScore=score; best=pos; }
@@ -203,8 +241,12 @@ var CombatMelee = {
   },
 
   _blockingDoor: function (creep, target) {
+    // Only walls and INVADER ramparts count as bashable (PvE-only)
     var closeStructs = creep.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) {
-      return (s.structureType===STRUCTURE_RAMPART && !s.my) || s.structureType===STRUCTURE_WALL;
+      if (s.structureType === STRUCTURE_WALL) return true;
+      if (s.structureType === STRUCTURE_RAMPART &&
+          s.owner && s.owner.username === 'Invader') return true;
+      return false;
     }});
     if (!closeStructs.length) return null;
     var best = _.min(closeStructs, function (s){ return s.pos.getRangeTo(target); });
