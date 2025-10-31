@@ -9,7 +9,7 @@ try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 // Tunables
 // ============================
 // NOTE: REMOTE_RADIUS is measured in "room hops" from the home room.
-var REMOTE_RADIUS = 4;
+var REMOTE_RADIUS = 1;
 
 var MAX_PF_OPS    = 3000;
 var PLAIN_COST    = 2;
