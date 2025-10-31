@@ -14,7 +14,7 @@ const CFG = Object.freeze({
 
   // Placement behavior
   placeBudgetPerTick: 10,      // ROAD sites we attempt per tick across a path
-  globalCSiteSafetyLimit: 95,  // skip if near 100 cap
+  globalCSiteSafetyLimit: 20,  // skip if near 100 cap
   plannerTickModulo: 3,        // run ensureRemoteRoads only 1/modulo ticks (staggered by room)
 
   // Auditing: regular interval + tiny random chance to smooth load
@@ -26,7 +26,7 @@ const CFG = Object.freeze({
 
   // NEW: hard cap on how far (in room hops) we will plan remote roads from this home.
   // Set to 0 (or negative) to disable radius limiting.
-  maxRemoteRadius: 3
+  maxRemoteRadius: 1
 });
 
 /** =========================
