@@ -1,4 +1,3 @@
-
 // ============================
 // Dependencies
 // ============================
@@ -596,7 +595,8 @@ function pickRemoteSource(creep){
     return (a.cost-b.cost) || (a.lin-b.lin) || (a.id<b.id?-1:1);
   });
 
-  for (var k=0;k+candidates.length>k;k++){
+  // (Fixed loop condition)
+  for (var k=0; k<candidates.length; k++){
     var best=candidates[k];
     if (!tryClaimSourceForTick(creep, best.id)) continue;
 
@@ -674,6 +674,33 @@ function validateExclusiveSource(creep){
     return false;
   }
   return true;
+}
+
+// ============================
+// NEW: dump energy into build/upgrade when storage is full
+// ============================
+function tryBuildOrUpgrade(creep) {
+  // Need WORK to build/upgrade
+  var hasWork = (creep.getActiveBodyparts && creep.getActiveBodyparts(WORK)) | 0;
+  if (!hasWork) return false;
+
+  // Build any local construction site (nearest)
+  var site = creep.pos.findClosestByRange(FIND_CONSTRUCTION_SITES);
+  if (site) {
+    var br = creep.build(site);
+    if (br === ERR_NOT_IN_RANGE) go(creep, site, { range: 3, reusePath: 15 });
+    return true;
+  }
+
+  // Fallback: upgrade controller (if it's ours)
+  var ctrl = creep.room.controller;
+  if (ctrl && ctrl.my) {
+    var ur = creep.upgradeController(ctrl);
+    if (ur === ERR_NOT_IN_RANGE) go(creep, ctrl, { range: 3, reusePath: 15 });
+    return true;
+  }
+
+  return false;
 }
 
 // ============================
@@ -866,7 +893,7 @@ var TaskLuna = {
       var owner = maOwner(memAssign, sid);
       var cnt   = maCount(memAssign, sid);
       if (owner && owner !== creep.name) continue;           // taken
-      if (cnt >= MAX_LUNA_PER_SOURCE) continue;          // full
+      if (cnt >= MAX_LUNA_PER_SOURCE) continue;              // full
 
       if (creep.memory.sourceId===sid) sticky.push(sid);
       else if (!owner) free.push(sid);
@@ -885,22 +912,64 @@ var TaskLuna = {
     if (creep.memory.returning && creep.store.getUsedCapacity(RESOURCE_ENERGY)===0) creep.memory.returning=false;
   },
 
+  // UPDATED: includes build/upgrade fallback when all sinks are full
   returnToStorage: function(creep){
-    var homeName=getHomeName(creep);
-    if (creep.room.name !== homeName){ go(creep,new RoomPosition(25,25,homeName),{range:20,reusePath:20}); return; }
+    var homeName = getHomeName(creep);
 
-    var pri=creep.room.find(FIND_STRUCTURES,{filter:function(s){
-      return (s.structureType===STRUCTURE_EXTENSION || s.structureType===STRUCTURE_SPAWN) &&
-             s.store && s.store.getFreeCapacity(RESOURCE_ENERGY)>0; }});
-    if (pri.length){ var a=creep.pos.findClosestByPath(pri); if (a){ var rc=creep.transfer(a,RESOURCE_ENERGY); if (rc===ERR_NOT_IN_RANGE) go(creep,a); return; } }
+    // Go home first
+    if (creep.room.name !== homeName) {
+      go(creep, new RoomPosition(25, 25, homeName), { range: 20, reusePath: 20 });
+      return;
+    }
 
-    var stor=creep.room.storage;
-    if (stor && stor.store && stor.store.getFreeCapacity(RESOURCE_ENERGY)>0){ var rc2=creep.transfer(stor,RESOURCE_ENERGY); if (rc2===ERR_NOT_IN_RANGE) go(creep,stor); return; }
+    // Priority 1: Extensions/Spawns/Towers (keep base alive first)
+    var pri = creep.room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        if (!s.store) return false;
+        var t = s.structureType;
+        if (t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN && t !== STRUCTURE_TOWER) return false;
+        return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
+      }
+    });
+    if (pri.length) {
+      var a = creep.pos.findClosestByPath(pri);
+      if (a) {
+        var rc = creep.transfer(a, RESOURCE_ENERGY);
+        if (rc === ERR_NOT_IN_RANGE) go(creep, a);
+        return;
+      }
+    }
 
-    var conts=creep.room.find(FIND_STRUCTURES,{filter:function(s){ return s.structureType===STRUCTURE_CONTAINER && s.store && s.store.getFreeCapacity(RESOURCE_ENERGY)>0; }});
-    if (conts.length){ var b=creep.pos.findClosestByPath(conts); if (b){ var rc3=creep.transfer(b,RESOURCE_ENERGY); if (rc3===ERR_NOT_IN_RANGE) go(creep,b); return; } }
+    // Priority 2: Storage
+    var stor = creep.room.storage;
+    if (stor && stor.store && stor.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+      var rc2 = creep.transfer(stor, RESOURCE_ENERGY);
+      if (rc2 === ERR_NOT_IN_RANGE) go(creep, stor);
+      return;
+    }
 
-    var anchor=getAnchorPos(homeName); go(creep,anchor,{range:2});
+    // Priority 3: Any container with room
+    var conts = creep.room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        return s.structureType === STRUCTURE_CONTAINER &&
+               s.store && (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
+      }
+    });
+    if (conts.length) {
+      var b = creep.pos.findClosestByPath(conts);
+      if (b) {
+        var rc3 = creep.transfer(b, RESOURCE_ENERGY);
+        if (rc3 === ERR_NOT_IN_RANGE) go(creep, b);
+        return;
+      }
+    }
+
+    // NEW: Everything is full → build anything you can; else upgrade controller
+    if (tryBuildOrUpgrade(creep)) return;
+
+    // Nothing to do—idle politely at anchor
+    var anchor = getAnchorPos(homeName);
+    go(creep, anchor, { range: 2 });
   },
 
   harvestSource: function(creep){
