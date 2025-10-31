@@ -1,10 +1,10 @@
 
 var CFG = Object.freeze({
   maxSitesPerTick: 5,            // gentle drip; global cap is 100
-  csiteSafetyLimit: 10,          // stop early if we’re near the global cap
+  csiteSafetyLimit: 40,          // stop early if we’re near the global cap
   tickModulo: 2,                 // stagger planners across rooms; set to 1 to run every tick
   noPlacementCooldownPlaced: 4, // ticks to wait after we successfully place >=1 site
-  noPlacementCooldownNone: 25    // ticks to wait when nothing placed
+  noPlacementCooldownNone: 10    // ticks to wait when nothing placed
 });
 
 var RoomPlanner = {
