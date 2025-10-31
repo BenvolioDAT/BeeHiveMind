@@ -297,7 +297,7 @@ var BeeHiveMind = {
         builder:       NeedBuilder(room),
         luna:          DetermineLunaQuota(room),
         repair:        0,
-        scout:         0,
+        scout:         1,
         CombatArcher:  0,
         CombatMelee:   0,
         CombatMedic:   0,
