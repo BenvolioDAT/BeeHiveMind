@@ -293,7 +293,7 @@ var BeeHiveMind = {
         baseharvest:   2,      
         courier:       2,
         queen:         1,
-        upgrader:      1,
+        upgrader:      2,
         builder:       NeedBuilder(room),
         scout:         1,
         luna:          2,//DetermineLunaQuota(room),
