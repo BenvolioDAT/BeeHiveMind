@@ -39,6 +39,17 @@ var TaskSquad = (function () {
     'Dismantler': 1
   };
 
+  function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
+  function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
+  function _isPlayerControlledRoom(room) {
+    if (!room || !room.controller) return false;
+    var ctrl = room.controller;
+    if (ctrl.my) return false;
+    if (ctrl.owner && ctrl.owner.username !== 'Invader') return true;
+    if (ctrl.reservation && ctrl.reservation.username && ctrl.reservation.username !== 'Invader') return true;
+    return false;
+  }
+
   // -----------------------------
   // Per-tick move reservation map
   // -----------------------------
@@ -73,6 +84,12 @@ var TaskSquad = (function () {
 
     // Higher priority wins
     if ((priority|0) > (cur.pri|0)) {
+      roomMap[k] = { name: creep.name, pri: priority|0 };
+      return true;
+    }
+
+    // Tie-breaker: deterministic lexicographic preference to avoid deadlocks
+    if ((priority|0) === (cur.pri|0) && creep.name < cur.name) {
       roomMap[k] = { name: creep.name, pri: priority|0 };
       return true;
     }
@@ -126,19 +143,36 @@ var TaskSquad = (function () {
   function _chooseRoomTarget(me) {
     var room = me.room; if (!room) return null;
 
-    var hostiles = room.find(FIND_HOSTILE_CREEPS);
+    if (_isPlayerControlledRoom(room)) {
+      return null; // PvE acceptance: sharedTarget returns null in player rooms
+    }
+
+    // Acceptance: sharedTarget only returns Invader creeps/towers/spawns/cores/structures
+    var hostiles = room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
     if (hostiles && hostiles.length) {
       var scored = _.map(hostiles, function (h) { return { h: h, s: _scoreHostile(me, h) }; });
       var best = _.min(scored, 's');
       if (best && best.h) return best.h;
     }
 
-    var key = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
-      return s.structureType === STRUCTURE_TOWER || s.structureType === STRUCTURE_SPAWN;
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
+      return _isInvaderStruct(s) && s.structureType === STRUCTURE_TOWER;
     }});
-    if (key.length) return me.pos.findClosestByRange(key);
+    if (towers.length) return me.pos.findClosestByRange(towers);
 
-    var others = room.find(FIND_HOSTILE_STRUCTURES);
+    var spawns = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
+      return _isInvaderStruct(s) && s.structureType === STRUCTURE_SPAWN;
+    }});
+    if (spawns.length) return me.pos.findClosestByRange(spawns);
+
+    var cores = room.find(FIND_STRUCTURES, { filter: function (s) {
+      return s.structureType === STRUCTURE_INVADER_CORE;
+    }});
+    if (cores.length) return me.pos.findClosestByRange(cores);
+
+    var others = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
+      return _isInvaderStruct(s) && s.structureType !== STRUCTURE_TOWER && s.structureType !== STRUCTURE_SPAWN;
+    }});
     if (others.length) return me.pos.findClosestByRange(others);
 
     return null;
@@ -266,6 +300,17 @@ var TaskSquad = (function () {
     var needRange = (typeof range === 'number' ? range : 0);
     if (creep.pos.getRangeTo(tgtPos) <= needRange) return OK;
 
+    var mem = creep.memory = creep.memory || {};
+
+    if (typeof creep.travelTo !== 'function') {
+      var fallbackCode = creep.moveTo(tgtPos, { reusePath: 3, maxOps: 1000 });
+      if (fallbackCode === OK) {
+        mem._movedAt = Game.time;
+      }
+      mem._travBusy = 0; mem._travNoPath = 0;
+      return fallbackCode;
+    }
+
     var retData = {};
     var opts = {
       range: needRange,
@@ -280,7 +325,6 @@ var TaskSquad = (function () {
 
     // Ask Traveler to plan + possibly move
     var code = creep.travelTo(tgtPos, opts);
-
     var myPri = _rolePri(creep);
 
     // If a nextPos is planned, try to claim it. If we lose the reservation race to
@@ -291,21 +335,57 @@ var TaskSquad = (function () {
 
       // Re-check reservation after yield attempt
       if (!_reserveTile(creep, retData.nextPos, myPri)) {
-        // Could not reserve (someone more important got it) → do nothing this tick
+        mem._travNoPath = 0;
+        mem._travBusy = (mem._travBusy|0) + 1;
+        if (mem._travBusy >= 2) {
+          var busyFallback = creep.moveTo(tgtPos, { reusePath: 3, maxOps: 1000 });
+          if (busyFallback === OK) {
+            mem._movedAt = Game.time; // Acceptance: stamp only on successful moveTo fallback
+          }
+          mem._travBusy = 0; mem._travNoPath = 0;
+          return busyFallback;
+        }
         return ERR_BUSY;
       }
     }
 
-    // Mark that we issued movement this tick (helps yield logic)
-    creep.memory = creep.memory || {};
-    creep.memory._movedAt = Game.time;
+    if (code === OK) {
+      mem._movedAt = Game.time; // Acceptance: _movedAt only stamped on successful Traveler move
+      mem._travBusy = 0;
+      mem._travNoPath = 0;
+    } else if (code === ERR_BUSY) {
+      mem._travBusy = (mem._travBusy|0) + 1;
+      mem._travNoPath = 0;
+      if (mem._travBusy >= 2) {
+        var errBusyFallback = creep.moveTo(tgtPos, { reusePath: 3, maxOps: 1000 });
+        if (errBusyFallback === OK) {
+          mem._movedAt = Game.time;
+        }
+        mem._travBusy = 0; mem._travNoPath = 0;
+        return errBusyFallback;
+      }
+    } else if (code === ERR_NO_PATH) {
+      mem._travNoPath = (mem._travNoPath|0) + 1;
+      mem._travBusy = 0;
+      if (mem._travNoPath >= 2) {
+        var errNoPathFallback = creep.moveTo(tgtPos, { reusePath: 3, maxOps: 1000 });
+        if (errNoPathFallback === OK) {
+          mem._movedAt = Game.time;
+        }
+        mem._travBusy = 0; mem._travNoPath = 0;
+        return errNoPathFallback;
+      }
+    } else {
+      mem._travBusy = 0;
+      mem._travNoPath = 0;
+    }
 
     // Lightweight unstick (rare)
     var stuck = (creep.fatigue === 0 && creep.memory._lx === creep.pos.x && creep.memory._ly === creep.pos.y);
     if (stuck && creep.pos.getRangeTo(tgtPos) > needRange) {
       _unstickWiggle(creep, tgtPos);
     }
-    creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y;
+    mem._lx = creep.pos.x; mem._ly = creep.pos.y;
 
     return code;
   }

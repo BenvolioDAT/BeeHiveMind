@@ -4,6 +4,9 @@ var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+function _isInvaderCreep(obj) { return !!(obj && obj.owner && obj.owner.username === 'Invader'); }
+function _isInvaderStruct(obj) { return !!(obj && obj.owner && obj.owner.username === 'Invader'); }
+
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
 // to avoid expensive FIND_STRUCTURES work every few ticks.
@@ -456,11 +459,12 @@ var BeeToolbox = {
   // ---------------------------------------------------------------------------
 
   // Priorities: hostiles → invader core → prio structures → other structures → (no walls/ramparts unless blocking)
+  // Acceptance: BeeToolbox.findAttackTarget only returns Invader creeps/structures (PvE-only)
   findAttackTarget: function (creep) {
     if (!creep) return null;
 
     // 1) hostile creeps
-    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
+    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
     if (hostile) return hostile;
 
     // 2) invader core
@@ -479,7 +483,7 @@ var BeeToolbox = {
         for (var j = 0; j < structs.length; j++) {
           var s = structs[j];
           if (s.structureType === STRUCTURE_WALL) return s;
-          if (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic) return s;
+          if (s.structureType === STRUCTURE_RAMPART && _isInvaderStruct(s)) return s;
         }
       }
       return null;
@@ -498,7 +502,7 @@ var BeeToolbox = {
     prioTypes[STRUCTURE_EXTENSION] = true;
 
     var prio = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
-      filter: function (s) { return prioTypes[s.structureType] === true; }
+      filter: function (s) { return _isInvaderStruct(s) && prioTypes[s.structureType] === true; }
     });
     if (prio) {
       return firstBarrierOnPath(creep, prio) || prio;
@@ -507,9 +511,10 @@ var BeeToolbox = {
     // 4) any other hostile structure (not controller/walls/closed ramparts)
     var other = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
       filter: function (s) {
+        if (!_isInvaderStruct(s)) return false;
         if (s.structureType === STRUCTURE_CONTROLLER) return false;
         if (s.structureType === STRUCTURE_WALL) return false;
-        if (s.structureType === STRUCTURE_RAMPART && !s.my && !s.isPublic) return false;
+        if (s.structureType === STRUCTURE_RAMPART && _isInvaderStruct(s)) return false;
         return true;
       }
     });
