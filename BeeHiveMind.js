@@ -156,6 +156,7 @@ var BeeHiveMind = {
       BeeHiveMind.assignTask(creep); // idempotent when already set
       var roleName = creep.memory && creep.memory.role;
       var roleFn = map[roleName];
+      if (typeof roleFn !== 'function') roleFn = roleWorker_Bee.run;
       if (typeof roleFn === 'function') {
         try {
           roleFn(creep);
@@ -292,12 +293,12 @@ var BeeHiveMind = {
       // Quotas per task (cheap to compute per spawn; could memoize by room name if desired)
       var workerTaskLimits = {
         baseharvest:   2,      
-        courier:       2,
+        courier:       1,
         queen:         1,
-        upgrader:      2,
+        upgrader:      1,
         builder:       NeedBuilder(room),
-        scout:         1,
-        luna:          2,//DetermineLunaQuota(room),
+        scout:         0,
+        luna:          0,//DetermineLunaQuota(room),
         repair:        0,
         CombatArcher:  0,
         CombatMelee:   0,

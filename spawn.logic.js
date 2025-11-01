@@ -139,8 +139,10 @@ const CONFIGS = {
 
   // Combat
   CombatMelee: [
-    //TAM(6,6,12), 
-    TAM(4,4,8), 
+    TAM(6,6,12), 
+    TAM(4,4,8),
+    TAM(3,2,5),
+    TAM(3,1,4), 
     TAM(1,1,2),
   ],
   CombatArcher: [
@@ -155,8 +157,8 @@ const CONFIGS = {
     //MH(8,8), 
     //MH(6,6), 
    // MH(5,5), 
-    //MH(4,4), 
-    //MH(3,3), 
+    MH(4,4), 
+    MH(3,3), 
     MH(2,2), 
     MH(1,1),
   ],
@@ -378,11 +380,11 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   if (!Memory.squads) Memory.squads = {};
   if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
   const S = Memory.squads[squadId];
-  const COOLDOWN_TICKS = 3;                  // don’t spawn same-squad twice within 5 ticks
+  const COOLDOWN_TICKS = 1;                  // don’t spawn same-squad twice within 5 ticks
 
   function desiredLayout(score) {
     const threat = score | 0;
-    let melee = 1;
+    let melee = 2;
     let medic = 1;
     let archer = 0;
 
