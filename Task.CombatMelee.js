@@ -9,9 +9,14 @@
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
 
-function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
-function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
-// Acceptance: CombatMelee only targets Invader-owned creeps/structures (PvE-only enforcement)
+var isNPCHostileCreep = BeeToolbox && BeeToolbox.isNPCHostileCreep ? BeeToolbox.isNPCHostileCreep : function (c) {
+  return !!(c && c.owner && (c.owner.username === 'Invader' || c.owner.username === 'Source Keeper'));
+};
+
+var isNPCHostileStructure = BeeToolbox && BeeToolbox.isNPCHostileStructure ? BeeToolbox.isNPCHostileStructure : function (s) {
+  return !!(s && s.owner && (s.owner.username === 'Invader' || s.owner.username === 'Source Keeper'));
+};
+// Acceptance: CombatMelee only targets Invader/Source Keeper-owned creeps/structures (PvE-only enforcement)
 
 var CONFIG = {
   focusSticky: 15,
@@ -42,22 +47,30 @@ var CombatMelee = {
     // (1) emergency bail if low HP or in tower ring
     var lowHp = (creep.hits / creep.hitsMax) < CONFIG.fleeHpPct;
     if (lowHp || this._inTowerDanger(creep.pos)) {
+      this._debugCombat(creep, null, 'flee');
       this._flee(creep);
-      var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
+      var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: isNPCHostileCreep })[0];
       if (adjBad && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(adjBad);
       return;
     }
 
     // (2) bodyguard: interpose for squishy squadmates
     if (this._guardSquadmate(creep)) {
-      var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
+      var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: isNPCHostileCreep })[0];
       if (hugger && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(hugger);
       return;
     }
 
     // (3) squad shared target
     var target = TaskSquad.sharedTarget(creep);
+    if (target && target.owner && !(isNPCHostileCreep(target) || isNPCHostileStructure(target))) {
+      target = null;
+    }
     if (!target) {
+      target = this._findNPCTarget(creep);
+    }
+    if (!target) {
+      this._debugCombat(creep, null, 'no-npc-target');
       var anc = TaskSquad.getAnchor(creep);
       if (anc) this._moveSmart(creep, anc, 1);
       return;
@@ -71,14 +84,16 @@ var CombatMelee = {
       }
     }
 
+    this._debugCombat(creep, target, 'target');
+
     // (4) approach & strike
     if (creep.pos.isNearTo(target)) {
-      // If target tile is protected by an Invader rampart, hit the cover first (PvE-only)
+      // If target tile is protected by an NPC rampart, hit the cover first (PvE-only)
       var coverList = target.pos.lookFor(LOOK_STRUCTURES);
       var cover = null;
       for (var ci = 0; ci < coverList.length; ci++) {
         var st = coverList[ci];
-        if (st.structureType === STRUCTURE_RAMPART && _isInvaderStruct(st)) {
+        if (st.structureType === STRUCTURE_RAMPART && isNPCHostileStructure(st)) {
           cover = st; break;
         }
       }
@@ -119,7 +134,7 @@ var CombatMelee = {
     TaskSquad.stepToward(creep, target.pos, 1);
 
     // Opportunistic hit if we brushed into melee with a creep
-    var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
+    var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: isNPCHostileCreep })[0];
     if (adj && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(adj);
 
     // (7) (moved earlier) retarget already applied above
@@ -154,7 +169,7 @@ var CombatMelee = {
       var role = ally.memory.task || ally.memory.role || '';
       if (role !== 'CombatArcher' && role !== 'CombatMedic' && role !== 'Dismantler') return false;
       return ally.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {
-        filter: function (h){ return _isInvaderCreep(h) && h.getActiveBodyparts(ATTACK) > 0; }
+        filter: function (h){ return isNPCHostileCreep(h) && h.getActiveBodyparts(ATTACK) > 0; }
       }).length > 0;
     });
 
@@ -166,7 +181,7 @@ var CombatMelee = {
       // Try a same-squad friendly swap to put melee between buddy and threat
       if (TaskSquad.tryFriendlySwap && TaskSquad.tryFriendlySwap(creep, buddy.pos)) return true;
 
-      var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {filter: function (h){return _isInvaderCreep(h) && h.getActiveBodyparts(ATTACK)>0;}})[0];
+      var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {filter: function (h){return isNPCHostileCreep(h) && h.getActiveBodyparts(ATTACK)>0;}})[0];
       if (bad) {
         var best = this._bestAdjacentTile(creep, bad);
         if (best && creep.pos.getRangeTo(best) === 1) {
@@ -181,6 +196,45 @@ var CombatMelee = {
     return false;
   },
 
+  _findNPCTarget: function (creep) {
+    if (!creep) return null;
+
+    var target = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
+    if (!target && creep.room) {
+      var list = creep.room.find(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
+      if (list && list.length) {
+        target = creep.pos.findClosestByPath(list);
+      }
+    }
+    if (!target && creep.room) {
+      var structs = creep.room.find(FIND_HOSTILE_STRUCTURES, { filter: isNPCHostileStructure });
+      if (structs && structs.length) {
+        target = creep.pos.findClosestByRange(structs);
+      }
+    }
+    return target;
+  },
+
+  _debugCombat: function (creep, target, note) {
+    if (!Memory.debugCombat || !creep) return;
+    var parts = ['[COMBAT][Melee]', creep.name];
+    if (note) parts.push(note);
+    if (target) {
+      var owner = (target.owner && target.owner.username) || target.structureType || 'unknown';
+      parts.push('->');
+      parts.push(target.id);
+      parts.push('(' + owner + ')');
+      parts.push('rng');
+      parts.push(creep.pos.getRangeTo(target));
+    } else {
+      parts.push('no-target');
+    }
+    console.log(parts.join(' '));
+    if (target && creep.room && target.pos) {
+      new RoomVisual(creep.room.name).line(creep.pos, target.pos, { color: '#ff5500', opacity: 0.6 });
+    }
+  },
+
   // --- unified movement shim (Traveler via TaskSquad)
   _moveSmart: function (creep, targetPos, range) {
     if (!targetPos) return;
@@ -190,7 +244,7 @@ var CombatMelee = {
   _inTowerDanger: function (pos) {
     var room = Game.rooms[pos.roomName]; if (!room) return false;
     var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){
-      return _isInvaderStruct(s) && s.structureType === STRUCTURE_TOWER;
+      return isNPCHostileStructure(s) && s.structureType === STRUCTURE_TOWER;
     }});
     for (var i=0;i<towers.length;i++) {
       if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
@@ -202,7 +256,7 @@ var CombatMelee = {
     var best = creep.pos, bestScore = 1e9, room = creep.room;
     var threats = room ? room.find(FIND_HOSTILE_CREEPS, {
       filter: function (h){
-        return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0) && h.hits>0;
+        return isNPCHostileCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0) && h.hits>0;
       }
     }) : [];
 
@@ -247,7 +301,7 @@ var CombatMelee = {
     // Only walls and INVADER ramparts count as bashable (PvE-only)
     var closeStructs = creep.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) {
       if (s.structureType === STRUCTURE_WALL) return true;
-      if (s.structureType === STRUCTURE_RAMPART && _isInvaderStruct(s)) return true;
+      if (s.structureType === STRUCTURE_RAMPART && isNPCHostileStructure(s)) return true;
       return false;
     }});
     if (!closeStructs.length) return null;
@@ -259,7 +313,7 @@ var CombatMelee = {
   },
 
   _weakestIn1to2: function (creep) {
-    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 2, { filter: _isInvaderCreep });
+    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 2, { filter: isNPCHostileCreep });
     if (!xs.length) return null;
     return _.min(xs, function (c){ return c.hits / c.hitsMax; });
   },
@@ -269,7 +323,7 @@ var CombatMelee = {
     if (rally) {
       this._moveSmart(creep, rally.pos || rally, 1);
     } else {
-      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
       if (bad) {
         var dir = creep.pos.getDirectionTo(bad);
         var zero = (dir - 1 + 8) % 8;

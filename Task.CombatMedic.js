@@ -2,9 +2,14 @@
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
 
-function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
-function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
-// Acceptance: CombatMedic only reacts to Invader threats/towers (PvE-only enforcement)
+var isNPCHostileCreep = BeeToolbox && BeeToolbox.isNPCHostileCreep ? BeeToolbox.isNPCHostileCreep : function (c) {
+  return !!(c && c.owner && (c.owner.username === 'Invader' || c.owner.username === 'Source Keeper'));
+};
+
+var isNPCHostileStructure = BeeToolbox && BeeToolbox.isNPCHostileStructure ? BeeToolbox.isNPCHostileStructure : function (s) {
+  return !!(s && s.owner && (s.owner.username === 'Invader' || s.owner.username === 'Source Keeper'));
+};
+// Acceptance: CombatMedic only reacts to Invader/Source Keeper threats/towers (PvE-only enforcement)
 
 var CONFIG = {
   followRange: 1,          // how close we try to stay to buddy
@@ -128,10 +133,10 @@ var TaskCombatMedic = {
 
     // ---------- 3) flee logic (keep heals going) ----------
     var underHp = (creep.hits / creep.hitsMax) < CONFIG.fleePct;
-    var hostilesNear = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: function (h){ return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0); } });
+    var hostilesNear = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: function (h){ return isNPCHostileCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0); } });
     var needToFlee = underHp || (hostilesNear.length && this._inTowerDanger(creep.pos));
     if (needToFlee) {
-      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
       if (bad) {
         var flee = PathFinder.search(creep.pos, [{ pos: bad.pos, range: 4 }], { flee: true });
         if (!flee.incomplete && flee.path.length) {
@@ -154,7 +159,7 @@ var TaskCombatMedic = {
     // ---------- 4) follow buddy with safe spacing ----------
     var wantRange = CONFIG.followRange;
     var meleeThreat = creep.pos.findInRange(FIND_HOSTILE_CREEPS, CONFIG.avoidMeleeRange, {
-      filter: function (h){ return _isInvaderCreep(h) && h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
+      filter: function (h){ return isNPCHostileCreep(h) && h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
     }).length > 0;
 
     if (!creep.pos.inRangeTo(buddy, wantRange)) {
@@ -167,7 +172,7 @@ var TaskCombatMedic = {
     } else if (meleeThreat) {
       // small nudge away from closest melee if we're too close
       var hm = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
-        filter: function (h){ return _isInvaderCreep(h) && h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
+        filter: function (h){ return isNPCHostileCreep(h) && h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
       });
       if (hm && creep.pos.getRangeTo(hm) < CONFIG.avoidMeleeRange) {
         var dir = hm.pos.getDirectionTo(creep.pos); // step away
@@ -215,7 +220,7 @@ var TaskCombatMedic = {
   // Quick tower damage estimate (simple & cheap)
   _estimateTowerDamage: function (room, pos) {
     if (!room || !pos) return 0;
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return _isInvaderStruct(s) && s.structureType === STRUCTURE_TOWER; } });
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return isNPCHostileStructure(s) && s.structureType === STRUCTURE_TOWER; } });
     var total = 0;
     for (var i=0;i<towers.length;i++) {
       var d = towers[i].pos.getRangeTo(pos);
@@ -232,7 +237,7 @@ var TaskCombatMedic = {
 
   _inTowerDanger: function (pos) {
     var room = Game.rooms[pos.roomName]; if (!room) return false;
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return _isInvaderStruct(s) && s.structureType===STRUCTURE_TOWER; } });
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return isNPCHostileStructure(s) && s.structureType===STRUCTURE_TOWER; } });
     for (var i=0;i<towers.length;i++) {
       if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
     }

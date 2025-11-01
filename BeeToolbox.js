@@ -4,8 +4,16 @@ var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
-function _isInvaderCreep(obj) { return !!(obj && obj.owner && obj.owner.username === 'Invader'); }
-function _isInvaderStruct(obj) { return !!(obj && obj.owner && obj.owner.username === 'Invader'); }
+function isNPCHostileCreep(obj) {
+  return !!(obj && obj.owner && (obj.owner.username === 'Invader' || obj.owner.username === 'Source Keeper'));
+}
+
+function isNPCHostileStructure(obj) {
+  return !!(obj && obj.owner && (obj.owner.username === 'Invader' || obj.owner.username === 'Source Keeper'));
+}
+
+function _isInvaderCreep(obj) { return isNPCHostileCreep(obj); }
+function _isInvaderStruct(obj) { return isNPCHostileStructure(obj); }
 
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
@@ -612,5 +620,8 @@ var BeeToolbox = {
   }
 
 }; // end BeeToolbox
+
+BeeToolbox.isNPCHostileCreep = isNPCHostileCreep;
+BeeToolbox.isNPCHostileStructure = isNPCHostileStructure;
 
 module.exports = BeeToolbox;

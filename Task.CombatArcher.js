@@ -2,9 +2,14 @@
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
 
-function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
-function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
-// Acceptance: CombatArcher only reacts to Invader units/structures (PvE-only enforcement)
+var isNPCHostileCreep = BeeToolbox && BeeToolbox.isNPCHostileCreep ? BeeToolbox.isNPCHostileCreep : function (c) {
+  return !!(c && c.owner && (c.owner.username === 'Invader' || c.owner.username === 'Source Keeper'));
+};
+
+var isNPCHostileStructure = BeeToolbox && BeeToolbox.isNPCHostileStructure ? BeeToolbox.isNPCHostileStructure : function (s) {
+  return !!(s && s.owner && (s.owner.username === 'Invader' || s.owner.username === 'Source Keeper'));
+};
+// Acceptance: CombatArcher only reacts to Invader/Source Keeper units/structures (PvE-only enforcement)
 
 var CONFIG = {
   desiredRange: 2,          // ideal standoff distance
@@ -34,7 +39,14 @@ var TaskCombatArcher = {
 
     // (1) Acquire target or rally
     var target = TaskSquad.sharedTarget(creep);
+    if (target && target.owner && !(isNPCHostileCreep(target) || isNPCHostileStructure(target))) {
+      target = null;
+    }
     if (!target) {
+      target = this._findNPCTarget(creep);
+    }
+    if (!target) {
+      this._debugCombat(creep, null, 'no-npc-target');
       var anc = TaskSquad.getAnchor(creep) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
       if (anc) this._moveSmart(creep, anc, 0);
       this._shootOpportunistic(creep); // still shoot if anything in range
@@ -46,6 +58,8 @@ var TaskCombatArcher = {
     if (!mem.archer) mem.archer = {};
     var A = mem.archer;
 
+    var debugLogged = false;
+
     var tpos = target.pos;
     var tMoved = true;
     if (A.tX === tpos.x && A.tY === tpos.y && A.tR === tpos.roomName) {
@@ -56,15 +70,22 @@ var TaskCombatArcher = {
     // (3) Danger gates first
     var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
     var dangerAdj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h){
-      return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
+      return isNPCHostileCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
     }}).length > 0;
     var inTowerBad = this._inTowerDanger(creep.pos);
 
     if (lowHp || dangerAdj || inTowerBad) {
+      this._debugCombat(creep, target, 'flee');
+      debugLogged = true;
       this._flee(creep, this._threats(creep.room).concat([target]), 3);
       this._shootOpportunistic(creep); // still try to shoot after stepping
       A.movedAt = Game.time;
       return;
+    }
+
+    if (!debugLogged) {
+      this._debugCombat(creep, target, 'target');
+      debugLogged = true;
     }
 
     // (4) Combat first: fire before footwork
@@ -84,7 +105,7 @@ var TaskCombatArcher = {
     }
 
     // If we have a good shot and no extra need to adjust, also prefer holding in the band
-    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: _isInvaderCreep });
+    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: isNPCHostileCreep });
     if (hostilesIn3 && hostilesIn3.length && this._inHoldBand(range)) {
       return;
     }
@@ -105,7 +126,8 @@ var TaskCombatArcher = {
   // ---- Shooting policies ----
   _shootPrimary: function (creep, target) {
     // Mass if many, else single; else opportunistic at any hostile in 3
-    var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: _isInvaderCreep });
+    if (!creep || creep.getActiveBodyparts(RANGED_ATTACK) <= 0) return;
+    var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: isNPCHostileCreep });
     if (in3.length >= 3) { creep.rangedMassAttack(); return; }
     var range = creep.pos.getRangeTo(target);
     if (range <= 3) { creep.rangedAttack(target); return; }
@@ -113,8 +135,48 @@ var TaskCombatArcher = {
   },
 
   _shootOpportunistic: function (creep) {
-    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+    if (!creep || creep.getActiveBodyparts(RANGED_ATTACK) <= 0) return;
+    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
     if (closer && creep.pos.inRangeTo(closer, 3)) creep.rangedAttack(closer);
+  },
+
+  _findNPCTarget: function (creep) {
+    if (!creep) return null;
+
+    var target = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
+    if (!target && creep.room) {
+      var list = creep.room.find(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
+      if (list && list.length) {
+        target = creep.pos.findClosestByPath(list);
+      }
+    }
+    if (!target && creep.room) {
+      var structs = creep.room.find(FIND_HOSTILE_STRUCTURES, { filter: isNPCHostileStructure });
+      if (structs && structs.length) {
+        target = creep.pos.findClosestByRange(structs);
+      }
+    }
+    return target;
+  },
+
+  _debugCombat: function (creep, target, note) {
+    if (!Memory.debugCombat || !creep) return;
+    var parts = ['[COMBAT][Archer]', creep.name];
+    if (note) parts.push(note);
+    if (target) {
+      var owner = (target.owner && target.owner.username) || target.structureType || 'unknown';
+      parts.push('->');
+      parts.push(target.id);
+      parts.push('(' + owner + ')');
+      parts.push('rng');
+      parts.push(creep.pos.getRangeTo(target));
+    } else {
+      parts.push('no-target');
+    }
+    console.log(parts.join(' '));
+    if (target && creep.room && target.pos) {
+      new RoomVisual(creep.room.name).line(creep.pos, target.pos, { color: '#55aaff', opacity: 0.6 });
+    }
   },
 
   // ---- Helpers ----
@@ -128,15 +190,15 @@ var TaskCombatArcher = {
   _threats: function (room) {
     if (!room) return [];
     var creeps = room.find(FIND_HOSTILE_CREEPS, { filter: function (h){
-      return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
+      return isNPCHostileCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
     }});
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return _isInvaderStruct(s) && s.structureType===STRUCTURE_TOWER; } });
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return isNPCHostileStructure(s) && s.structureType===STRUCTURE_TOWER; } });
     return creeps.concat(towers);
   },
 
   _inTowerDanger: function (pos) {
     var room = Game.rooms[pos.roomName]; if (!room) return false;
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return _isInvaderStruct(s) && s.structureType===STRUCTURE_TOWER; } });
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return isNPCHostileStructure(s) && s.structureType===STRUCTURE_TOWER; } });
     for (var i=0;i<towers.length;i++) if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
     return false;
   },
@@ -167,7 +229,7 @@ var TaskCombatArcher = {
         }
       }
     } else {
-      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
       if (bad) {
         var dir = creep.pos.getDirectionTo(bad);
         var zero = (dir - 1 + 8) % 8;

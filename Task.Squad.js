@@ -2,6 +2,14 @@
 var BeeToolbox; try { BeeToolbox = require('BeeToolbox'); } catch (e) { BeeToolbox = null; }
 try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
 
+var isNPCHostileCreep = BeeToolbox && BeeToolbox.isNPCHostileCreep ? BeeToolbox.isNPCHostileCreep : function (c) {
+  return !!(c && c.owner && (c.owner.username === 'Invader' || c.owner.username === 'Source Keeper'));
+};
+
+var isNPCHostileStructure = BeeToolbox && BeeToolbox.isNPCHostileStructure ? BeeToolbox.isNPCHostileStructure : function (s) {
+  return !!(s && s.owner && (s.owner.username === 'Invader' || s.owner.username === 'Source Keeper'));
+};
+
 var TaskSquad = (function () {
   var API = {};
 
@@ -39,8 +47,6 @@ var TaskSquad = (function () {
     'Dismantler': 1
   };
 
-  function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
-  function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
   function _isPlayerControlledRoom(room) {
     if (!room || !room.controller) return false;
     var ctrl = room.controller;
@@ -112,6 +118,16 @@ var TaskSquad = (function () {
   }
   function _movedThisTick(creep) { return creep && creep.memory && creep.memory._movedAt === Game.time; }
 
+  function _isAllowedTarget(obj) {
+    if (!obj) return false;
+    if (obj.structureType && obj.structureType === STRUCTURE_INVADER_CORE) return true;
+    if (obj.owner && obj.owner.username) {
+      if (isNPCHostileCreep(obj)) return true;
+      if (isNPCHostileStructure(obj)) return true;
+    }
+    return false;
+  }
+
   function getSquadId(creep) {
     return (creep.memory && creep.memory.squadId) || 'Alpha';
   }
@@ -148,7 +164,7 @@ var TaskSquad = (function () {
     }
 
     // Acceptance: sharedTarget only returns Invader creeps/towers/spawns/cores/structures
-    var hostiles = room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+    var hostiles = room.find(FIND_HOSTILE_CREEPS, { filter: isNPCHostileCreep });
     if (hostiles && hostiles.length) {
       var scored = _.map(hostiles, function (h) { return { h: h, s: _scoreHostile(me, h) }; });
       var best = _.min(scored, 's');
@@ -156,12 +172,12 @@ var TaskSquad = (function () {
     }
 
     var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
-      return _isInvaderStruct(s) && s.structureType === STRUCTURE_TOWER;
+      return isNPCHostileStructure(s) && s.structureType === STRUCTURE_TOWER;
     }});
     if (towers.length) return me.pos.findClosestByRange(towers);
 
     var spawns = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
-      return _isInvaderStruct(s) && s.structureType === STRUCTURE_SPAWN;
+      return isNPCHostileStructure(s) && s.structureType === STRUCTURE_SPAWN;
     }});
     if (spawns.length) return me.pos.findClosestByRange(spawns);
 
@@ -171,7 +187,7 @@ var TaskSquad = (function () {
     if (cores.length) return me.pos.findClosestByRange(cores);
 
     var others = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
-      return _isInvaderStruct(s) && s.structureType !== STRUCTURE_TOWER && s.structureType !== STRUCTURE_SPAWN;
+      return isNPCHostileStructure(s) && s.structureType !== STRUCTURE_TOWER && s.structureType !== STRUCTURE_SPAWN;
     }});
     if (others.length) return me.pos.findClosestByRange(others);
 
@@ -184,7 +200,7 @@ var TaskSquad = (function () {
 
     if (S.targetId && Game.time - (S.targetAt || 0) <= TARGET_STICKY_TICKS) {
       var keep = Game.getObjectById(S.targetId);
-      if (_isGood(keep) && creep.pos.getRangeTo(keep) <= MAX_TARGET_RANGE) return keep;
+      if (_isGood(keep) && _isAllowedTarget(keep) && creep.pos.getRangeTo(keep) <= MAX_TARGET_RANGE) return keep;
     }
     var nxt = _chooseRoomTarget(creep);
     if (nxt) { S.targetId = nxt.id; S.targetAt = Game.time; return nxt; }
