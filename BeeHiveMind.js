@@ -12,6 +12,7 @@ var RoadPlanner     = require('Planner.Road');
 var TradeEnergy     = require('Trade.Energy');
 var TaskLuna        = require('Task.Luna');
 
+
 // Map role name -> run function (extend as you add roles)
 var creepRoles = {
   Worker_Bee: roleWorker_Bee.run
@@ -191,7 +192,7 @@ var BeeHiveMind = {
         var rn = list[i];
         remote += (C.roomSiteCounts[rn] | 0);
       }
-      return (local + remote) > 0 ? 2 : 0;
+      return (local + remote) > 0 ? 1 : 0;
     }
 
     function DetermineLunaQuota(room) {
