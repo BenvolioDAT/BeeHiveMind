@@ -128,6 +128,34 @@ function shouldLogIntel(room) {
   var lastScan = (r && r.intel && r.intel.lastScanAt) ? r.intel.lastScanAt : -Infinity;
   return (Game.time - lastScan) >= INTEL_INTERVAL;
 }
+function _getMyUsername(creep) {
+  if (creep && creep.owner && creep.owner.username) return creep.owner.username;
+  for (var name in Game.spawns) {
+    var sp = Game.spawns[name];
+    if (sp && sp.my && sp.owner && sp.owner.username) return sp.owner.username;
+  }
+  for (var r in Game.rooms) {
+    var rm = Game.rooms[r];
+    if (rm && rm.controller && rm.controller.my && rm.controller.owner && rm.controller.owner.username) {
+      return rm.controller.owner.username;
+    }
+  }
+  return null;
+}
+function _intelFor(roomName) {
+  if (!Memory.rooms) return null;
+  var mr = Memory.rooms[roomName];
+  return (mr && mr.intel) ? mr.intel : null;
+}
+function _shouldSkipPlayerRoom(roomName, creep) {
+  var intel = _intelFor(roomName);
+  if (!intel) return false;
+  var myName = _getMyUsername(creep);
+  if (intel.owner && intel.owner !== 'Invader' && intel.owner !== myName) return true;
+  if (intel.reservation && intel.reservation !== 'Invader' && intel.reservation !== myName) return true;
+  return false;
+}
+// Acceptance: Scout queues skip rooms owned/reserved by non-Invader players
 function seedSourcesFromVision(room) {
   if (!room) return;
   Memory.rooms = Memory.rooms || {};
@@ -355,7 +383,7 @@ function rebuildQueueAllRings(mem, creep) {
     var layer = getRingCached(home, r);
     for (var i = 0; i < layer.length; i++) {
       var rn = layer[i];
-      if (Game.map.getRoomLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn)) {
+      if (Game.map.getRoomLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn) && !_shouldSkipPlayerRoom(rn, creep)) {
         all.push(rn);
       }
     }
@@ -410,7 +438,8 @@ function rebuildQueueAllRings(mem, creep) {
       var rn2 = fb[i2];
       if (okRoomName(rn2) &&
           Game.map.getRoomLinearDistance(home, rn2) <= EXPLORE_RADIUS &&
-          !isBlockedRecently(rn2)) filt.push(rn2);
+          !isBlockedRecently(rn2) &&
+          !_shouldSkipPlayerRoom(rn2, creep)) filt.push(rn2);
     }
     queue = filt;
   }

@@ -1,6 +1,9 @@
 
 var BeeToolbox = require('BeeToolbox');
 
+function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
+// Acceptance: Dismantler only targets Invader-owned assets or neutral walls (PvE-only)
+
 var TaskDismantler = {
   run: function (creep) {
     if (creep.spawning) return;
@@ -17,9 +20,9 @@ var TaskDismantler = {
     if (!target) {
       // 1) High-priority threats first
       var towers = creep.room.find(FIND_HOSTILE_STRUCTURES, {
-        filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+        filter: function (s) { return _isInvaderStruct(s) && s.structureType === STRUCTURE_TOWER; }
       });
-      var spawns = creep.room.find(FIND_HOSTILE_SPAWNS);
+      var spawns = creep.room.find(FIND_HOSTILE_SPAWNS, { filter: _isInvaderStruct });
 
       // 2) Explicitly include Invader Cores
       var cores = creep.room.find(FIND_HOSTILE_STRUCTURES, {
@@ -30,6 +33,7 @@ var TaskDismantler = {
       var others = creep.room.find(FIND_HOSTILE_STRUCTURES, {
         filter: function (s) {
           if (s.hits === undefined) return false;
+          if (!_isInvaderStruct(s)) return false;
           // exclude types we don't want to waste time dismantling
           if (s.structureType === STRUCTURE_CONTROLLER) return false;
           if (s.structureType === STRUCTURE_ROAD)        return false;
@@ -56,7 +60,7 @@ var TaskDismantler = {
             var st = structs[j];
             if (st && st.structureType) {
               if (st.structureType === STRUCTURE_WALL) { target = st; break; }
-              if (st.structureType === STRUCTURE_RAMPART && !st.my) { target = st; break; }
+              if (st.structureType === STRUCTURE_RAMPART && _isInvaderStruct(st)) { target = st; break; }
             }
           }
           if (target.id === (st && st.id)) break;

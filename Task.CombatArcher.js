@@ -2,6 +2,10 @@
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
 
+function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
+function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
+// Acceptance: CombatArcher only reacts to Invader units/structures (PvE-only enforcement)
+
 var CONFIG = {
   desiredRange: 2,          // ideal standoff distance
   kiteIfAtOrBelow: 2,       // if target ≤ this range, back off
@@ -52,7 +56,7 @@ var TaskCombatArcher = {
     // (3) Danger gates first
     var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
     var dangerAdj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h){
-      return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0;
+      return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
     }}).length > 0;
     var inTowerBad = this._inTowerDanger(creep.pos);
 
@@ -80,7 +84,7 @@ var TaskCombatArcher = {
     }
 
     // If we have a good shot and no extra need to adjust, also prefer holding in the band
-    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
+    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: _isInvaderCreep });
     if (hostilesIn3 && hostilesIn3.length && this._inHoldBand(range)) {
       return;
     }
@@ -101,7 +105,7 @@ var TaskCombatArcher = {
   // ---- Shooting policies ----
   _shootPrimary: function (creep, target) {
     // Mass if many, else single; else opportunistic at any hostile in 3
-    var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3);
+    var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: _isInvaderCreep });
     if (in3.length >= 3) { creep.rangedMassAttack(); return; }
     var range = creep.pos.getRangeTo(target);
     if (range <= 3) { creep.rangedAttack(target); return; }
@@ -109,7 +113,7 @@ var TaskCombatArcher = {
   },
 
   _shootOpportunistic: function (creep) {
-    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
     if (closer && creep.pos.inRangeTo(closer, 3)) creep.rangedAttack(closer);
   },
 
@@ -124,15 +128,15 @@ var TaskCombatArcher = {
   _threats: function (room) {
     if (!room) return [];
     var creeps = room.find(FIND_HOSTILE_CREEPS, { filter: function (h){
-      return h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0;
+      return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
     }});
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType===STRUCTURE_TOWER; } });
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return _isInvaderStruct(s) && s.structureType===STRUCTURE_TOWER; } });
     return creeps.concat(towers);
   },
 
   _inTowerDanger: function (pos) {
     var room = Game.rooms[pos.roomName]; if (!room) return false;
-    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return s.structureType===STRUCTURE_TOWER; } });
+    var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return _isInvaderStruct(s) && s.structureType===STRUCTURE_TOWER; } });
     for (var i=0;i<towers.length;i++) if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
     return false;
   },
@@ -163,7 +167,7 @@ var TaskCombatArcher = {
         }
       }
     } else {
-      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
       if (bad) {
         var dir = creep.pos.getDirectionTo(bad);
         var zero = (dir - 1 + 8) % 8;
