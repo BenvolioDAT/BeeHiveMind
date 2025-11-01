@@ -8,7 +8,7 @@ const LOG_LEVEL = Object.freeze({
 const settings = Object.freeze({
   logging: Object.freeze({
     /** Default log level applied on boot. */
-    defaultLevel: LOG_LEVEL.DEBUG,
+    defaultLevel: LOG_LEVEL.BASIC,
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */

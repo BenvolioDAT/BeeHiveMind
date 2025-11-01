@@ -8,7 +8,7 @@ var CONFIG = {
   maxHarvestersPerSource: 1,   // 1 = strict single-seat miners (best w/ container)
   avoidTicksAfterYield: 20,    // loser avoids yielded source for this many ticks
   handoffTtl: 120,             // if incumbent's TTL <= this, allow queueing
-  queueRange: 1,               // park within this range when queueing (1 = adjacent)
+  queueRange: 2,               // park within this range when queueing (1 = adjacent)
   travelReuse: 12              // reusePath hint for travel helper (if used internally)
 };
 
