@@ -37,7 +37,7 @@ var CombatMelee = {
     }
 
     // quick self/buddy healing if we have HEAL
-    //this._auxHeal(creep);
+    this._auxHeal(creep);
 
     // (1) emergency bail if low HP or in tower ring
     var lowHp = (creep.hits / creep.hitsMax) < CONFIG.fleeHpPct;

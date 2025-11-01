@@ -313,22 +313,7 @@ var TaskQueen = {
                  s.structureType === STRUCTURE_CONTAINER;
         }
       });
-      if (site) {
-        if ((creep.store[RESOURCE_ENERGY] | 0) === 0) {
-          // Withdraw from spawn if room is topped up, else harvest
-          var sp = _nearest(creep.pos, room.find(FIND_MY_SPAWNS));
-          if (sp && sp.store && (sp.store[RESOURCE_ENERGY] | 0) >= 50 &&
-              room.energyAvailable === room.energyCapacityAvailable) {
-            withdrawFrom(creep, sp);
-          } else {
-            harvestFromClosest(creep);
-          }
-        } else {
-          var b = creep.build(site);
-          if (b === ERR_NOT_IN_RANGE) go(creep, site);
-        }
-        return;
-      }
+
       // Micro-courier: scoop close drops & feed spawn/extension
       var drop = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
         filter: function (r) { return r.resourceType === RESOURCE_ENERGY; }
