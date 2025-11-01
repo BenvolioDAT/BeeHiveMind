@@ -8,13 +8,13 @@ const LOG_LEVEL = Object.freeze({
 const settings = Object.freeze({
   logging: Object.freeze({
     /** Default log level applied on boot. */
-    defaultLevel: LOG_LEVEL.NONE,
+    defaultLevel: LOG_LEVEL.DEBUG,
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */
-    enabled: true,
+    enabled: false,
     /** Minimum bucket value before attempting pixel generation. */
-    bucketThreshold: 9900,
+    bucketThreshold: 9950,
     /** Optional modulus so pixels are generated every N ticks. */
     tickModulo: 5,
   }),
