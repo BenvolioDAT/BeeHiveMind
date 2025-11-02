@@ -1,7 +1,3 @@
-// Task.Queen – Energy courier & filler (ES5-safe) with SAY + DRAW breadcrumbs
-// Withdraw order: STORAGE -> SIDE CONTAINERS -> DROPPED -> HARVEST
-// Fill order:     EXT/SPAWN -> TOWER -> LINK(spawn) -> TERMINAL -> STORAGE
-
 var BeeToolbox = require('BeeToolbox');
 
 // ============================
@@ -10,7 +6,7 @@ var BeeToolbox = require('BeeToolbox');
 var CFG = Object.freeze({
   PATH_REUSE: 30,
   MAX_OPS: 2000,
-  TOWER_REFILL_PCT: 0.70,
+  TOWER_REFILL_PCT: 0.80,
   DEBUG_SAY: false,  // turn off to mute creep.say
   DEBUG_DRAW: true, // turn off to disable RoomVisual lines/text
   DRAW: {
