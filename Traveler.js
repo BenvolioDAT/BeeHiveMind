@@ -1,4 +1,8 @@
-
+/**
+ * To start using Traveler, require it in main.js:
+ * Example: var Traveler = require('Traveler.js');
+ */
+"use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Traveler {
     /**
@@ -569,8 +573,8 @@ const DEFAULT_MAXOPS = 20000;
 const DEFAULT_STUCK_VALUE = 2;
 const STATE_PREV_X = 0;
 const STATE_PREV_Y = 1;
-const STATE_STUCK = 4;
-const STATE_CPU = 2;
+const STATE_STUCK = 2;
+const STATE_CPU = 3;
 const STATE_DEST_X = 4;
 const STATE_DEST_Y = 5;
 const STATE_DEST_ROOMNAME = 6;
