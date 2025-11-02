@@ -1,19 +1,52 @@
+// Task.Courier – Energy hauler (ES5-safe) with SAY + DRAW breadcrumbs
+// Collect priority: Source CONTAINER -> big DROPS (en route) -> drops NEAR container -> GRAVES/RUINS -> misc DROPS -> STORAGE/TERMINAL
+// Deliver priority: SPAWNS/EXTENSIONS -> TOWERS (<= pct) -> STORAGE
+//
+// Shares PIB + same-tick reservation scheme with Queen to avoid target dogpiles.
+
 var BeeToolbox = require('BeeToolbox');
 
-// -----------------------------
+// ============================
 // Tunables
-// -----------------------------
-var RETARGET_COOLDOWN = 10;       // ticks before switching containers
-var DROPPED_NEAR_CONTAINER_R = 2; // near the source-container
-var DROPPED_ALONG_ROUTE_R = 2;    // opportunistic pickup radius
-var DROPPED_BIG_MIN = 150;        // big dropped energy threshold
-var CONTAINER_MIN = 50;           // ignore tiny trickles in containers
-var GRAVE_SCAN_COOLDOWN = 20;     // room-level cooldown for tombstone/ruin scans
-var TOWER_REFILL_AT_OR_BELOW = 0.70; // refill towers when <= 70% energy
+// ============================
+var CFG = Object.freeze({
+  // Pathing
+  PATH_REUSE: 40,
+  MAX_OPS_MOVE: 2000,
+  TRAVEL_MAX_OPS: 4000,
 
-// -----------------------------
+  // Targeting cadences
+  RETARGET_COOLDOWN: 10,          // ticks before switching pickup container
+  GRAVE_SCAN_COOLDOWN: 20,        // room-level cooldown for tombstone/ruin scans
+  BETTER_CONTAINER_DELTA: 150,    // how much more energy makes a source container "clearly better"
+
+  // Thresholds / radii
+  CONTAINER_MIN: 50,              // ignore tiny trickles in containers
+  DROPPED_BIG_MIN: 150,           // opportunistic pickup threshold
+  DROPPED_NEAR_CONTAINER_R: 2,    // radius around source container
+  DROPPED_ALONG_ROUTE_R: 2,       // radius around the creep while traveling
+
+  // Towers
+  TOWER_REFILL_AT_OR_BELOW: 0.70, // refill towers when <= 70%
+
+  // Debug UI
+  DEBUG_SAY: true,                // creep.say breadcrumbs
+  DEBUG_DRAW: true,               // RoomVisual lines + labels
+  DRAW: {
+    WD_COLOR: "#6ec1ff",          // withdraw lines
+    FILL_COLOR: "#6effa1",        // delivery lines
+    DROP_COLOR: "#ffe66e",        // dropped energy
+    GRAVE_COLOR: "#ffb0e0",       // tombstones/ruins
+    IDLE_COLOR: "#bfbfbf",        // idle
+    WIDTH: 0.12,
+    OPACITY: 0.45,
+    FONT: 0.6
+  }
+});
+
+// ============================
 // Per-tick room cache
-// -----------------------------
+// ============================
 if (!global.__COURIER) global.__COURIER = { tick: -1, rooms: {} };
 
 function _roomCache(room) {
@@ -25,14 +58,13 @@ function _roomCache(room) {
   var R = G.rooms[room.name];
   if (R) return R;
 
-  // Build fresh cache once per room this tick
   var containers = room.find(FIND_STRUCTURES, {
     filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
   });
 
-  var srcIds = [];         // container ids adjacent to sources
-  var otherIds = [];       // other container ids
-  var bestId = null;       // highest-energy source-adjacent container
+  var srcIds = [];
+  var otherIds = [];
+  var bestId = null;
   var bestEnergy = -1;
 
   for (var i = 0; i < containers.length; i++) {
@@ -52,12 +84,12 @@ function _roomCache(room) {
   }
 
   R = {
-    srcIds: srcIds,
-    otherIds: otherIds,
+    srcIds: srcIds,                 // ids of source-adjacent containers
+    otherIds: otherIds,             // ids of non-source containers (rarely used here)
     bestSrcId: bestId,
     bestSrcEnergy: bestEnergy,
-    nextGraveScanAt: (Game.time + 1), // can be pulled forward when needed
-    graves: [] // tombstones/ruins with energy (optional; lazily filled)
+    nextGraveScanAt: (Game.time + 1),
+    graves: []                      // tombstones/ruins with energy
   };
   G.rooms[room.name] = R;
   return R;
@@ -72,12 +104,12 @@ function _idsToObjects(ids) {
   return out;
 }
 
-// -----------------------------
+// ============================
 // Movement + tiny utils (ES5-safe)
-// -----------------------------
+// ============================
 function go(creep, dest, range, reuse) {
   range = (range != null) ? range : 1;
-  reuse = (reuse != null) ? reuse : 40; // higher reuse to cut pathing CPU
+  reuse = (reuse != null) ? reuse : CFG.PATH_REUSE;
 
   // Traveler first (preferred)
   if (creep.travelTo) {
@@ -87,7 +119,7 @@ function go(creep, dest, range, reuse) {
       ignoreCreeps: false,
       stuckValue: 2,
       repath: 0.05,
-      maxOps: 4000
+      maxOps: CFG.TRAVEL_MAX_OPS
     };
     if (BeeToolbox && BeeToolbox.roomCallback) tOpts.roomCallback = BeeToolbox.roomCallback;
     creep.travelTo((dest.pos || dest), tOpts);
@@ -96,13 +128,43 @@ function go(creep, dest, range, reuse) {
 
   // Fallback
   if (creep.pos.getRangeTo(dest) > range) {
-    creep.moveTo(dest, { reusePath: reuse, maxOps: 2000 });
+    creep.moveTo(dest, { reusePath: reuse, maxOps: CFG.MAX_OPS_MOVE });
   }
+}
+
+function debugSay(creep, msg) {
+  if (CFG.DEBUG_SAY) creep.say(msg, true);
+}
+
+function debugDraw(creep, target, color, label) {
+  if (!CFG.DEBUG_DRAW || !creep || !target) return;
+  var room = creep.room;
+  if (!room || !room.visual) return;
+
+  var tpos = target.pos || target.position;
+  if (!tpos || tpos.roomName !== room.name) return;
+
+  try {
+    room.visual.line(creep.pos, tpos, {
+      color: color,
+      width: CFG.DRAW.WIDTH,
+      opacity: CFG.DRAW.OPACITY,
+      lineStyle: "solid"
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
+        color: color,
+        opacity: CFG.DRAW.OPACITY,
+        font: CFG.DRAW.FONT,
+        align: "center"
+      });
+    }
+  } catch (e) {}
 }
 
 function isGoodContainer(c) {
   return c && c.structureType === STRUCTURE_CONTAINER &&
-         c.store && ((c.store[RESOURCE_ENERGY] | 0) >= CONTAINER_MIN);
+         c.store && ((c.store[RESOURCE_ENERGY] | 0) >= CFG.CONTAINER_MIN);
 }
 
 function _closestByRange(pos, arr) {
@@ -115,13 +177,20 @@ function _closestByRange(pos, arr) {
   return best;
 }
 
-// -----------------------------
-// PIB + same-tick reservations (shared global memory)
-// Goal: avoid fighting the Queen or other Couriers
-// -----------------------------
+function _energyOf(c) {
+  return (c && c.store && c.store[RESOURCE_ENERGY]) | 0;
+}
+
+function _clearlyBetter(a, b) {
+  var ae = _energyOf(a);
+  var be = _energyOf(b);
+  return ae > (be + CFG.BETTER_CONTAINER_DELTA);
+}
+
+// ============================
+// PIB + same-tick reservations (shared with Queen)
+// ============================
 function _qrMap() {
-  // Reuse the same structure the Queen uses:
-  // Memory._queenRes = { tick, map: {targetId: amount} }
   if (!Memory._queenRes || Memory._queenRes.tick !== Game.time) {
     Memory._queenRes = { tick: Game.time, map: {} };
   }
@@ -196,7 +265,7 @@ function _pibReleaseFill(creep, target, resourceType) {
   if (map && Object.keys(map).length === 0) delete R.fills[target.id];
 }
 
-// Effective free capacity that *respects* Queen/Courier reservations
+// Effective free capacity that respects reservations
 function _effectiveFree(struct, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
   var freeNow = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
@@ -225,7 +294,7 @@ function transferTo(creep, target, res) {
   res = res || RESOURCE_ENERGY;
   var rc = creep.transfer(target, res);
 
-  if (rc === ERR_NOT_IN_RANGE) { go(creep, target, 1, 40); return rc; }
+  if (rc === ERR_NOT_IN_RANGE) { go(creep, target, 1, CFG.PATH_REUSE); return rc; }
 
   if (rc === OK) {
     _pibReleaseFill(creep, target, res);
@@ -239,11 +308,9 @@ function transferTo(creep, target, res) {
   return rc;
 }
 
-// -----------------------------
+// ============================
 // Targeting helpers for DELIVERY
-// Priority: Spawns/Extensions -> Towers -> Storage (terminal excluded)
-// All checks use _effectiveFree to avoid Queen
-// -----------------------------
+// ============================
 function _pickSpawnExt(creep) {
   var list = creep.room.find(FIND_STRUCTURES, {
     filter: function (s) {
@@ -264,7 +331,7 @@ function _pickTower(creep) {
       var cap  = (s.store.getCapacity(RESOURCE_ENERGY) | 0);
       if (cap <= 0) return false;
       var pct = used / cap;
-      if (pct > TOWER_REFILL_AT_OR_BELOW) return false; // only if low enough
+      if (pct > CFG.TOWER_REFILL_AT_OR_BELOW) return false; // only if low enough
       return _effectiveFree(s, RESOURCE_ENERGY) > 0;
     }
   });
@@ -278,9 +345,9 @@ function _pickStorage(creep) {
   return st;
 }
 
-// -----------------------------
+// ============================
 // Main role
-// -----------------------------
+// ============================
 var TaskCourier = {
   run: function (creep) {
     // State bootstrap
@@ -318,34 +385,38 @@ var TaskCourier = {
         for (var i = 0; i < srcObjs.length; i++) {
           var c = srcObjs[i];
           var e = (c.store && c.store[RESOURCE_ENERGY]) || 0;
-          if (e >= CONTAINER_MIN && e > bestEnergy) { bestEnergy = e; bestObj = c; }
+          if (e >= CFG.CONTAINER_MIN && e > bestEnergy) { bestEnergy = e; bestObj = c; }
         }
         best = bestObj;
       }
       if (!container || (best && container.id !== best.id && _clearlyBetter(best, container))) {
         container = best || null;
         creep.memory.pickupContainerId = container ? container.id : null;
-        creep.memory.retargetAt = now + RETARGET_COOLDOWN;
+        creep.memory.retargetAt = now + CFG.RETARGET_COOLDOWN;
       }
     }
 
-    // Opportunistic: big pile near us
-    var nearby = creep.pos.findInRange(FIND_DROPPED_RESOURCES, DROPPED_ALONG_ROUTE_R, {
-      filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) >= DROPPED_BIG_MIN; }
+    // Opportunistic: big pile near us (en route)
+    var nearby = creep.pos.findInRange(FIND_DROPPED_RESOURCES, CFG.DROPPED_ALONG_ROUTE_R, {
+      filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) >= CFG.DROPPED_BIG_MIN; }
     });
     if (nearby && nearby.length) {
       var pile = _closestByRange(creep.pos, nearby);
+      debugSay(creep, '↘️Drop');
+      debugDraw(creep, pile, CFG.DRAW.DROP_COLOR, "DROP*");
       if (creep.pickup(pile) === ERR_NOT_IN_RANGE) go(creep, pile, 1, 20);
       return;
     }
 
     // If we have a source container: try drops near it first, then withdraw
     if (container) {
-      var drops = container.pos.findInRange(FIND_DROPPED_RESOURCES, DROPPED_NEAR_CONTAINER_R, {
+      var drops = container.pos.findInRange(FIND_DROPPED_RESOURCES, CFG.DROPPED_NEAR_CONTAINER_R, {
         filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) > 0; }
       });
       if (drops.length) {
         var bestDrop = _closestByRange(creep.pos, drops);
+        debugSay(creep, '↘️Drop');
+        debugDraw(creep, bestDrop, CFG.DRAW.DROP_COLOR, "DROP");
         var pr = creep.pickup(bestDrop);
         if (pr === ERR_NOT_IN_RANGE) { go(creep, bestDrop, 1, 20); return; }
         if (pr === OK && creep.store.getFreeCapacity() === 0) { creep.memory.transferring = true; return; }
@@ -353,8 +424,10 @@ var TaskCourier = {
 
       var energyIn = (container.store && container.store[RESOURCE_ENERGY]) | 0;
       if (energyIn > 0) {
+        debugSay(creep, '↘️Con');
+        debugDraw(creep, container, CFG.DRAW.WD_COLOR, "CON");
         var wr = creep.withdraw(container, RESOURCE_ENERGY);
-        if (wr === ERR_NOT_IN_RANGE) { go(creep, container, 1, 40); return; }
+        if (wr === ERR_NOT_IN_RANGE) { go(creep, container, 1, CFG.PATH_REUSE); return; }
         if (wr === OK) { if (creep.store.getFreeCapacity() === 0) creep.memory.transferring = true; return; }
         if (wr === ERR_NOT_ENOUGH_RESOURCES) creep.memory.retargetAt = Game.time; // allow quick retarget
       } else {
@@ -362,9 +435,9 @@ var TaskCourier = {
       }
     }
 
-    // Optional: graves/ruins scan (only if container path didn't work, and on cooldown)
+    // Graves/ruins scan (cooldown)
     if ((rc.nextGraveScanAt | 0) <= Game.time) {
-      rc.nextGraveScanAt = Game.time + GRAVE_SCAN_COOLDOWN;
+      rc.nextGraveScanAt = Game.time + CFG.GRAVE_SCAN_COOLDOWN;
       var graves = room.find(FIND_TOMBSTONES, {
         filter: function (t) { return ((t.store[RESOURCE_ENERGY] | 0) > 0); }
       });
@@ -377,17 +450,21 @@ var TaskCourier = {
     if (rc.graves && rc.graves.length) {
       var grave = _closestByRange(creep.pos, rc.graves);
       if (grave) {
+        debugSay(creep, '↘️Grv');
+        debugDraw(creep, grave, CFG.DRAW.GRAVE_COLOR, "GRAVE");
         var gw = creep.withdraw(grave, RESOURCE_ENERGY);
         if (gw === ERR_NOT_IN_RANGE) { go(creep, grave, 1, 20); }
         return;
       }
     }
 
-    // Any nearby dropped (>=50) as last resort
+    // Any nearby dropped (>=50) as last resort before storage
     var dropped = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
       filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) >= 50; }
     });
     if (dropped) {
+      debugSay(creep, '↘️Drop');
+      debugDraw(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP");
       if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) go(creep, dropped, 1, 20);
       return;
     }
@@ -397,14 +474,18 @@ var TaskCourier = {
                   : (room.terminal && (room.terminal.store[RESOURCE_ENERGY] | 0) > 0) ? room.terminal
                   : null;
     if (storeLike) {
+      debugSay(creep, storeLike.structureType === STRUCTURE_STORAGE ? '↘️Sto' : '↘️Term');
+      debugDraw(creep, storeLike, CFG.DRAW.WD_COLOR, storeLike.structureType === STRUCTURE_STORAGE ? "STO" : "TERM");
       var sr = creep.withdraw(storeLike, RESOURCE_ENERGY);
-      if (sr === ERR_NOT_IN_RANGE) { go(creep, storeLike, 1, 40); }
+      if (sr === ERR_NOT_IN_RANGE) { go(creep, storeLike, 1, CFG.PATH_REUSE); }
       return;
     }
 
     // Idle near anchor
-    var anchor = room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS);
-    if (anchor && !creep.pos.inRangeTo(anchor, 3)) go(creep, anchor, 3, 40);
+    var anchor = room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
+    debugSay(creep, 'IDLE');
+    debugDraw(creep, (anchor.pos || anchor), CFG.DRAW.IDLE_COLOR, "IDLE");
+    if (!creep.pos.inRangeTo(anchor, 3)) go(creep, anchor, 3, CFG.PATH_REUSE);
   },
 
   // -----------------------------
@@ -424,10 +505,11 @@ var TaskCourier = {
       // Priority 3: storage (last choice)
       if (!target) target = _pickStorage(creep);
 
-      // If nothing at all, idle near anchor
       if (!target) {
-        var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS);
-        if (anchor && !creep.pos.inRangeTo(anchor, 3)) go(creep, anchor, 3, 40);
+        var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
+        debugSay(creep, 'IDLE');
+        debugDraw(creep, (anchor.pos || anchor), CFG.DRAW.IDLE_COLOR, "IDLE");
+        if (!creep.pos.inRangeTo(anchor, 3)) go(creep, anchor, 3, CFG.PATH_REUSE);
         return;
       }
       creep.memory.dropoffId = target.id;
@@ -436,12 +518,19 @@ var TaskCourier = {
     // Reserve and deliver (so other Couriers/Queen avoid this target)
     var reserved = reserveFill(creep, target, carryAmt, RESOURCE_ENERGY);
     if (reserved > 0) {
+      // Label + color by type
+      var st = target.structureType;
+      if (st === STRUCTURE_EXTENSION) { debugSay(creep, '→ EXT'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "EXT"); }
+      else if (st === STRUCTURE_SPAWN) { debugSay(creep, '→ SPN'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "SPN"); }
+      else if (st === STRUCTURE_TOWER) { debugSay(creep, '→ TWR'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "TWR"); }
+      else if (st === STRUCTURE_STORAGE) { debugSay(creep, '→ STO'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "STO"); }
+      else { debugSay(creep, '→ FILL'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "FILL"); }
+
       var tr = transferTo(creep, target, RESOURCE_ENERGY);
       if (tr === OK && (creep.store[RESOURCE_ENERGY] | 0) === 0) {
         creep.memory.transferring = false;
         creep.memory.dropoffId = null;
       }
-      // If out of range or not OK, we moved or cleared reservation above.
     } else {
       // Couldn’t reserve (no effective free). Clear sticky and try again next tick.
       creep.memory.dropoffId = null;

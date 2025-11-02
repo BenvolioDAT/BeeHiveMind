@@ -1,11 +1,32 @@
-// ============================
-// Dependencies
-// ============================
+// Task.Luna – Remote harvester with SAY + DRAW breadcrumbs (ES5-safe)
+// Visual intent lines help you see: travel, pick, harvest, return, and fallbacks.
+
 var BeeToolbox = require('BeeToolbox');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 
 // ============================
-// Tunables
+// Debug UI (toggle here)
+// ============================
+var CFG = Object.freeze({
+  DEBUG_SAY: true,     // creep.say breadcrumbs
+  DEBUG_DRAW: true,    // RoomVisual lines + labels
+  DRAW: {
+    TRAVEL_COLOR:  "#8ab6ff",  // room travel (to target/home)
+    PICK_COLOR:    "#ffe66e",  // choosing a source / assignment
+    SRC_COLOR:     "#ff9a6e",  // harvesting source
+    DROP_COLOR:    "#ffe66e",  // drops (rare here)
+    DELIVER_COLOR: "#6effa1",  // delivering energy
+    BUILD_COLOR:   "#e6c16e",  // building
+    UPG_COLOR:     "#c1a6ff",  // upgrading
+    IDLE_COLOR:    "#bfbfbf",  // idling / anchor
+    WIDTH: 0.12,
+    OPACITY: 0.45,
+    FONT: 0.6
+  }
+});
+
+// ============================
+// Tunables (existing behaviour)
 // ============================
 // NOTE: REMOTE_RADIUS is measured in "room hops" from the home room.
 var REMOTE_RADIUS = 1;
@@ -30,6 +51,49 @@ var STUCK_WINDOW = 4;
 // Flag pruning cadence & grace (sources only)
 var FLAG_PRUNE_PERIOD   = 25;   // how often to scan for source-flag deletions
 var FLAG_RETENTION_TTL  = 200;  // keep a source-flag this many ticks since last activity
+
+// ============================
+// Helpers: SAY + DRAW
+// ============================
+function debugSay(creep, msg) {
+  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+}
+function _posOf(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target; // RoomPosition-like
+  return null;
+}
+function debugDraw(creep, target, color, label) {
+  if (!CFG.DEBUG_DRAW || !creep || !target) return;
+  var room = creep.room; if (!room || !room.visual) return;
+
+  var tpos = _posOf(target); if (!tpos || tpos.roomName !== room.name) return;
+
+  try {
+    room.visual.line(creep.pos, tpos, {
+      color: color,
+      width: CFG.DRAW.WIDTH,
+      opacity: CFG.DRAW.OPACITY,
+      lineStyle: "solid"
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
+        color: color,
+        opacity: CFG.DRAW.OPACITY,
+        font: CFG.DRAW.FONT,
+        align: "center"
+      });
+    }
+  } catch (e) {}
+}
+function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
+  try {
+    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
+  } catch (e) {}
+}
 
 // ============================
 // Helpers: short id, flags
@@ -109,21 +173,18 @@ function ensureControllerFlag(ctrl){
   var roomName = ctrl.pos.roomName;
   var rm = _roomMem(roomName);
 
-  // Expected flag name for this room’s controller
   var expect = 'Reserve:' + roomName;
 
-  // If we already know a flag name and it’s still valid, reuse
   if (rm.controllerFlagName) {
     var f0 = Game.flags[rm.controllerFlagName];
     if (f0 &&
         f0.pos.x === ctrl.pos.x &&
         f0.pos.y === ctrl.pos.y &&
         f0.pos.roomName === roomName) {
-      return; // still good
+      return;
     }
   }
 
-  // Adopt any Reserve:roomName flag already sitting on this controller
   var flagsHere = ctrl.pos.lookFor(LOOK_FLAGS) || [];
   for (var i = 0; i < flagsHere.length; i++) {
     if (flagsHere[i].name === expect) {
@@ -132,7 +193,6 @@ function ensureControllerFlag(ctrl){
     }
   }
 
-  // Otherwise create a new one (idempotent: if it fails, we’ll adopt next tick)
   var rc = ctrl.room.createFlag(ctrl.pos, expect, COLOR_WHITE, COLOR_PURPLE);
   if (typeof rc === 'string') rm.controllerFlagName = rc;
 }
@@ -142,7 +202,6 @@ function pruneControllerFlagIfNoForagers(roomName, roomCountMap){
   var fname = rm.controllerFlagName;
   if (!fname) return;
 
-  // Only prune if no active foragers are assigned/in this room
   var count = roomCountMap && roomCountMap[roomName] ? roomCountMap[roomName] : 0;
   if (count > 0) return;
 
@@ -199,7 +258,6 @@ function maSetOwner(memAssign, sid, owner, roomName){
   var e = _maEnsure(memAssign[sid], roomName);
   e.owner = owner; e.roomName = roomName || e.roomName; e.since = Game.time;
   memAssign[sid] = e;
-  // PRUNE / lastActive: any time we set owner, bump activity so source-flag isn't pruned
   if (e.roomName) touchSourceActive(e.roomName, sid);
 }
 function maClearOwner(memAssign, sid){
@@ -221,7 +279,6 @@ function resolveOwnershipForSid(sid){
   var memAssign = ensureAssignmentsMem();
   var e = _maEnsure(memAssign[sid], null);
 
-  // Collect live contenders
   var contenders = [];
   for (var name in Game.creeps){
     var c = Game.creeps[name];
@@ -231,13 +288,11 @@ function resolveOwnershipForSid(sid){
     }
   }
 
-  // If no contenders, clear owner; counts refresh in audit
   if (!contenders.length){
     maClearOwner(memAssign, sid);
     return null;
   }
 
-  // Elect one: oldest _assignTick wins; tie-break by name
   contenders.sort(function(a,b){
     var at = a.memory._assignTick||0, bt=b.memory._assignTick||0;
     if (at!==bt) return at-bt;
@@ -245,10 +300,8 @@ function resolveOwnershipForSid(sid){
   });
   var winner = contenders[0];
 
-  // Bless the winner
   maSetOwner(memAssign, sid, winner.name, winner.memory.targetRoom||null);
 
-  // Force losers to yield
   for (var i=1; i<contenders.length; i++){
     var loser = contenders[i];
     if (loser && loser.memory && loser.memory.sourceId === sid){
@@ -263,14 +316,12 @@ function resolveOwnershipForSid(sid){
 function auditRemoteAssignments(){
   var memAssign = ensureAssignmentsMem();
 
-  // Reset counts to 0
   for (var sid in memAssign){
     memAssign[sid] = _maEnsure(memAssign[sid], memAssign[sid].roomName||null);
     memAssign[sid].count = 0;
   }
 
-  // Count live assignments + per-room counts (for controller flags)
-  var roomCounts = {}; // roomName -> number of Luna harvesters assigned/in that room
+  var roomCounts = {};
   for (var name in Game.creeps){
     var c = Game.creeps[name];
     if (!c || !c.memory) continue;
@@ -288,7 +339,6 @@ function auditRemoteAssignments(){
     }
   }
 
-  // Scrub owners / resolve duplicates
   for (var sid3 in memAssign){
     var owner = maOwner(memAssign, sid3);
     if (owner){
@@ -307,11 +357,8 @@ function auditRemoteAssignments(){
     }
   }
 
-  // PRUNE: source flags on cadence
   if ((Game.time % FLAG_PRUNE_PERIOD) === 0) pruneUnusedSourceFlags();
 
-  // NEW: Controller flag prune — remove the controller flag in rooms with zero foragers
-  // We do this every audit so it's snappy (no TTL needed).
   var rooms = Memory.rooms || {};
   for (var roomName in rooms) {
     if (!rooms.hasOwnProperty(roomName)) continue;
@@ -333,7 +380,6 @@ function pruneUnusedSourceFlags(){
   var memAssign = ensureAssignmentsMem();
   var now = Game.time;
 
-  // Walk all known rooms/sources in memory
   var rooms = Memory.rooms || {};
   for (var roomName in rooms){
     if (!rooms.hasOwnProperty(roomName)) continue;
@@ -345,9 +391,8 @@ function pruneUnusedSourceFlags(){
       if (!rm.sources.hasOwnProperty(sid)) continue;
       var srec = rm.sources[sid] || {};
       var flagName = srec.flagName;
-      if (!flagName) continue; // nothing to remove
+      if (!flagName) continue;
 
-      // Decide if the flag is removable:
       var e = _maEnsure(memAssign[sid], rm.sources[sid].roomName || roomName);
       var count  = e.count|0;
       var owner  = e.owner || null;
@@ -358,7 +403,6 @@ function pruneUnusedSourceFlags(){
 
       if (roomLocked || (nobodyOwns && inactiveLong)) {
         var f = Game.flags[flagName];
-        // Only remove if the flag still sits on the source tile; otherwise just clean memory.
         if (f) {
           var prefix = 'SRC-' + roomName + '-';
           var looksLikeOurs = (typeof flagName === 'string' && flagName.indexOf(prefix) === 0);
@@ -370,7 +414,6 @@ function pruneUnusedSourceFlags(){
             try { f.remove(); } catch (e1) {}
           }
         }
-        // Always clear the memory pointer so we can recreate later if needed
         delete srec.flagName;
         rm.sources[sid] = srec;
       }
@@ -426,6 +469,7 @@ function go(creep, dest, opts){
     maxOps: 6000
   };
   if (BeeToolbox && BeeToolbox.roomCallback) tOpts.roomCallback = BeeToolbox.roomCallback;
+  debugDraw(creep, dest, CFG.DRAW.TRAVEL_COLOR, "GO");
   creep.travelTo((dest.pos||dest), tOpts);
 }
 
@@ -494,9 +538,8 @@ function markValidRemoteSourcesForHome(homeName){
       if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
       var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
       ensureSourceFlag(s);
-      // record tile for safer prune compares
       var srec = _sourceMem(rn, s.id); srec.x = s.pos.x; srec.y = s.pos.y;
-      memAssign[s.id] = e; // persist shape
+      memAssign[s.id] = e;
     }
   }
 }
@@ -554,7 +597,6 @@ function pickRemoteSource(creep){
       var lin = Game.map.getRoomLinearDistance(homeName, rn);
 
       if (shouldAvoid(creep, s.id)){ avoided.push({id:s.id,roomName:rn,cost:cost,lin:lin,left:avoidRemaining(creep,s.id)}); continue; }
-      // Skip if another owner is active
       var ownerNow = maOwner(memAssign, s.id);
       if (ownerNow && ownerNow !== creep.name) continue;
       if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
@@ -604,6 +646,18 @@ function pickRemoteSource(creep){
     maInc(memAssign, best.id, best.roomName);
     maSetOwner(memAssign, best.id, creep.name, best.roomName);
 
+    // Visuals + say:
+    var srcObj = Game.getObjectById(best.id);
+    if (srcObj) {
+      debugSay(creep, '🎯SRC');
+      debugDraw(creep, srcObj, CFG.DRAW.PICK_COLOR, "PICK");
+      debugRing(creep.room, srcObj.pos, CFG.DRAW.PICK_COLOR, shortSid(best.id));
+    } else {
+      var center = new RoomPosition(25,25,best.roomName);
+      debugSay(creep, '🎯'+best.roomName);
+      debugDraw(creep, center, CFG.DRAW.TRAVEL_COLOR, "PICK?");
+    }
+
     if (creep.memory._lastLogSid !== best.id){
       console.log('🧭 '+creep.name+' pick src='+best.id.slice(-6)+' room='+best.roomName+' cost='+best.cost+(best.sticky?' (sticky)':''));
       creep.memory._lastLogSid = best.id;
@@ -629,9 +683,10 @@ function releaseAssignment(creep){
   creep.memory.targetRoom = null;
   creep.memory.assigned   = false;
   creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+
+  debugSay(creep, '🌓YIELD');
 }
 
-// If duplicates exist, loser yields this tick (no repick same tick)
 function validateExclusiveSource(creep){
   if (!creep.memory || !creep.memory.sourceId) return true;
 
@@ -639,13 +694,11 @@ function validateExclusiveSource(creep){
   var memAssign = ensureAssignmentsMem();
   var owner = maOwner(memAssign, sid);
 
-  // If someone else is the recorded owner, we yield
   if (owner && owner !== creep.name){
     releaseAssignment(creep);
     return false;
   }
 
-  // Hard scan in case of races
   var winners=[];
   for (var name in Game.creeps){
     var c=Game.creeps[name];
@@ -654,7 +707,6 @@ function validateExclusiveSource(creep){
     }
   }
   if (winners.length <= MAX_LUNA_PER_SOURCE){
-    // become/keep owner if none set
     if (!owner) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
     return true;
   }
@@ -667,7 +719,6 @@ function validateExclusiveSource(creep){
   var win = winners[0];
   maSetOwner(memAssign, sid, win.name, win.memory.targetRoom||null);
 
-  // If we're not the winner, yield
   if (win.name !== creep.name){
     console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
     releaseAssignment(creep);
@@ -680,21 +731,22 @@ function validateExclusiveSource(creep){
 // NEW: dump energy into build/upgrade when storage is full
 // ============================
 function tryBuildOrUpgrade(creep) {
-  // Need WORK to build/upgrade
   var hasWork = (creep.getActiveBodyparts && creep.getActiveBodyparts(WORK)) | 0;
   if (!hasWork) return false;
 
-  // Build any local construction site (nearest)
   var site = creep.pos.findClosestByRange(FIND_CONSTRUCTION_SITES);
   if (site) {
+    debugSay(creep, '🔨');
+    debugDraw(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
     var br = creep.build(site);
     if (br === ERR_NOT_IN_RANGE) go(creep, site, { range: 3, reusePath: 15 });
     return true;
   }
 
-  // Fallback: upgrade controller (if it's ours)
   var ctrl = creep.room.controller;
   if (ctrl && ctrl.my) {
+    debugSay(creep, '⬆️');
+    debugDraw(creep, ctrl, CFG.DRAW.UPG_COLOR, "UPG");
     var ur = creep.upgradeController(ctrl);
     if (ur === ERR_NOT_IN_RANGE) go(creep, ctrl, { range: 3, reusePath: 15 });
     return true;
@@ -729,7 +781,10 @@ var TaskLuna = {
 
     // Cooldown after yield
     if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt){
-      var _anchor = getAnchorPos(getHomeName(creep)); go(creep,_anchor,{range:2,reusePath:10}); return;
+      var _anchor = getAnchorPos(getHomeName(creep));
+      debugSay(creep, '…cd');
+      debugDraw(creep, _anchor, CFG.DRAW.IDLE_COLOR, "COOLDOWN");
+      go(creep,_anchor,{range:2,reusePath:10}); return;
     }
 
     // If we were flagged to yield by resolver, obey & stop
@@ -749,13 +804,23 @@ var TaskLuna = {
         creep.memory._assignTick = Game.time;
       }else{
         this.initializeAndAssign(creep);
-        if (!creep.memory.sourceId){ var anchor=getAnchorPos(getHomeName(creep)); go(creep,anchor,{range:2}); return; }
-        else creep.memory._assignTick = Game.time;
+        if (!creep.memory.sourceId){
+          var anchor=getAnchorPos(getHomeName(creep));
+          debugSay(creep, 'IDLE');
+          debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
+          go(creep,anchor,{range:2});
+          return;
+        } else {
+          creep.memory._assignTick = Game.time;
+        }
       }
     }
 
     // If room got locked by invader activity, drop and repick
     if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)){
+      debugSay(creep, '⛔LOCK');
+      var center = new RoomPosition(25,25,creep.memory.targetRoom);
+      debugDraw(creep, center, CFG.DRAW.TRAVEL_COLOR, "LOCK");
       console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
       releaseAssignment(creep);
       return;
@@ -766,7 +831,10 @@ var TaskLuna = {
 
     // Travel to target room
     if (creep.memory.targetRoom && creep.pos.roomName !== creep.memory.targetRoom){
-      go(creep, new RoomPosition(25,25,creep.memory.targetRoom), { range:20, reusePath:20 });
+      var dest = new RoomPosition(25,25,creep.memory.targetRoom);
+      debugSay(creep, '➡️'+creep.memory.targetRoom);
+      debugDraw(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
+      go(creep, dest, { range:20, reusePath:20 });
       return;
     }
 
@@ -779,22 +847,20 @@ var TaskLuna = {
       }
     }
 
-    // Optional metadata
     var targetRoomObj = Game.rooms[creep.memory.targetRoom];
-    if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ BeeToolbox.logSourcesInRoom(targetRoomObj); }
+    if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ try { BeeToolbox.logSourcesInRoom(targetRoomObj); } catch (e) {} }
 
-    // Avoid rooms you marked hostile in Memory
     var tmem = _roomMem(creep.memory.targetRoom);
     if (tmem && tmem.hostile){
       console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
+      debugSay(creep, '⚠️HOST');
       releaseAssignment(creep);
       return;
     }
     if (!tmem || !tmem.sources) return;
 
-    // NEW: while we’re actively working this room, ensure a controller flag exists
     var ctl = targetRoomObj && targetRoomObj.controller;
-    if (ctl) ensureControllerFlag(ctl);
+    if (ctl) { ensureControllerFlag(ctl); debugRing(targetRoomObj, ctl.pos, CFG.DRAW.TRAVEL_COLOR, "CTRL"); }
 
     // Work the source
     this.harvestSource(creep);
@@ -804,7 +870,6 @@ var TaskLuna = {
   getNearbyRoomsWithSources: function(creep){
     var homeName = getHomeName(creep);
 
-    // Build an allowlist with BFS radius (room hops from home)
     var inRadius = {};
     var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
     for (var i=0; i<ring.length; i++) inRadius[ring[i]] = true;
@@ -813,13 +878,12 @@ var TaskLuna = {
     var filtered = all.filter(function(roomName){
       var rm = Memory.rooms[roomName];
       if (!rm || !rm.sources) return false;
-      if (!inRadius[roomName]) return false;                 // ★ enforce radius here
+      if (!inRadius[roomName]) return false;
       if (rm.hostile) return false;
       if (isRoomLockedByInvaderCore(roomName)) return false;
       return roomName !== Memory.firstSpawnRoom;
     });
 
-    // Sort by linear distance from home (cheap tiebreaker)
     return filtered.sort(function(a,b){
       return Game.map.getRoomLinearDistance(homeName, a) - Game.map.getRoomLinearDistance(homeName, b);
     });
@@ -828,7 +892,6 @@ var TaskLuna = {
   findRoomWithLeastForagers: function(rooms, homeName){
     if (!rooms || !rooms.length) return null;
 
-    // Guard: enforce radius again (cheap insurance if caller changes later)
     var inRadius = {};
     var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
     for (var i=0; i<ring.length; i++) inRadius[ring[i]] = true;
@@ -836,7 +899,7 @@ var TaskLuna = {
     var best=null, lowest=Infinity;
     for (var j=0;j<rooms.length;j++){
       var rn=rooms[j];
-      if (!inRadius[rn]) continue;                 // ★ radius fence
+      if (!inRadius[rn]) continue;
       if (isRoomLockedByInvaderCore(rn)) continue;
 
       var rm=_roomMem(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
@@ -870,6 +933,11 @@ var TaskLuna = {
         maInc(memAssign, sid, creep.memory.targetRoom);
         maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom);
 
+        debugSay(creep, '🎯SRC');
+        var srcObj = Game.getObjectById(sid);
+        if (srcObj) { debugDraw(creep, srcObj, CFG.DRAW.PICK_COLOR, "ASSIGN"); debugRing(creep.room, srcObj.pos, CFG.DRAW.PICK_COLOR, shortSid(sid)); }
+        else { var center = new RoomPosition(25,25,creep.memory.targetRoom); debugDraw(creep, center, CFG.DRAW.TRAVEL_COLOR, "ASSIGN"); }
+
         if (creep.memory._lastLogSid !== sid){
           console.log('🐝 '+creep.name+' assigned to source: '+sid+' in '+creep.memory.targetRoom);
           creep.memory._lastLogSid = sid;
@@ -886,14 +954,13 @@ var TaskLuna = {
     var sids = Object.keys(roomMemory.sources); if (!sids.length) return null;
 
     var memAssign = ensureAssignmentsMem();
-    // Prefer free → then sticky (self) → finally any
     var free=[], sticky=[], rest=[];
     for (var i=0;i<sids.length;i++){
       var sid=sids[i];
       var owner = maOwner(memAssign, sid);
       var cnt   = maCount(memAssign, sid);
-      if (owner && owner !== creep.name) continue;           // taken
-      if (cnt >= MAX_LUNA_PER_SOURCE) continue;              // full
+      if (owner && owner !== creep.name) continue;
+      if (cnt >= MAX_LUNA_PER_SOURCE) continue;
 
       if (creep.memory.sourceId===sid) sticky.push(sid);
       else if (!owner) free.push(sid);
@@ -903,13 +970,13 @@ var TaskLuna = {
     var pick = free[0] || sticky[0] || rest[0] || null;
     if (!pick) return null;
 
-    if (!tryClaimSourceForTick(creep, pick)) return null; // rare
+    if (!tryClaimSourceForTick(creep, pick)) return null;
     return pick;
   },
 
   updateReturnState: function(creep){
-    if (!creep.memory.returning && creep.store.getFreeCapacity(RESOURCE_ENERGY)===0) creep.memory.returning=true;
-    if (creep.memory.returning && creep.store.getUsedCapacity(RESOURCE_ENERGY)===0) creep.memory.returning=false;
+    if (!creep.memory.returning && creep.store.getFreeCapacity(RESOURCE_ENERGY)===0) { creep.memory.returning=true; debugSay(creep, '⤴️RET'); }
+    if (creep.memory.returning && creep.store.getUsedCapacity(RESOURCE_ENERGY)===0) { creep.memory.returning=false; debugSay(creep, '⤵️WK'); }
   },
 
   // UPDATED: includes build/upgrade fallback when all sinks are full
@@ -918,11 +985,14 @@ var TaskLuna = {
 
     // Go home first
     if (creep.room.name !== homeName) {
-      go(creep, new RoomPosition(25, 25, homeName), { range: 20, reusePath: 20 });
+      var destHome = new RoomPosition(25, 25, homeName);
+      debugSay(creep, '🏠');
+      debugDraw(creep, destHome, CFG.DRAW.TRAVEL_COLOR, "HOME");
+      go(creep, destHome, { range: 20, reusePath: 20 });
       return;
     }
 
-    // Priority 1: Extensions/Spawns/Towers (keep base alive first)
+    // Priority 1: Extensions/Spawns/Towers
     var pri = creep.room.find(FIND_STRUCTURES, {
       filter: function (s) {
         if (!s.store) return false;
@@ -934,6 +1004,9 @@ var TaskLuna = {
     if (pri.length) {
       var a = creep.pos.findClosestByPath(pri);
       if (a) {
+        var lbl = (a.structureType===STRUCTURE_EXTENSION?'EXT': a.structureType===STRUCTURE_SPAWN?'SPN':'TWR');
+        debugSay(creep, '→ '+lbl);
+        debugDraw(creep, a, CFG.DRAW.DELIVER_COLOR, lbl);
         var rc = creep.transfer(a, RESOURCE_ENERGY);
         if (rc === ERR_NOT_IN_RANGE) go(creep, a);
         return;
@@ -943,6 +1016,8 @@ var TaskLuna = {
     // Priority 2: Storage
     var stor = creep.room.storage;
     if (stor && stor.store && stor.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+      debugSay(creep, '→ STO');
+      debugDraw(creep, stor, CFG.DRAW.DELIVER_COLOR, "STO");
       var rc2 = creep.transfer(stor, RESOURCE_ENERGY);
       if (rc2 === ERR_NOT_IN_RANGE) go(creep, stor);
       return;
@@ -958,17 +1033,21 @@ var TaskLuna = {
     if (conts.length) {
       var b = creep.pos.findClosestByPath(conts);
       if (b) {
+        debugSay(creep, '→ CON');
+        debugDraw(creep, b, CFG.DRAW.DELIVER_COLOR, "CON");
         var rc3 = creep.transfer(b, RESOURCE_ENERGY);
         if (rc3 === ERR_NOT_IN_RANGE) go(creep, b);
         return;
       }
     }
 
-    // NEW: Everything is full → build anything you can; else upgrade controller
+    // Everything is full → build/upgrade
     if (tryBuildOrUpgrade(creep)) return;
 
-    // Nothing to do—idle politely at anchor
+    // Idle near anchor
     var anchor = getAnchorPos(homeName);
+    debugSay(creep, 'IDLE');
+    debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
     go(creep, anchor, { range: 2 });
   },
 
@@ -978,10 +1057,14 @@ var TaskLuna = {
     }
 
     if (creep.room.name !== creep.memory.targetRoom){
-      go(creep,new RoomPosition(25,25,creep.memory.targetRoom),{range:20,reusePath:20}); return;
+      var dest = new RoomPosition(25,25,creep.memory.targetRoom);
+      debugSay(creep, '➡️'+creep.memory.targetRoom);
+      debugDraw(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
+      go(creep, dest, { range:20,reusePath:20 }); return;
     }
 
     if (isRoomLockedByInvaderCore(creep.room.name)){
+      debugSay(creep, '⛔LOCK');
       console.log('⛔ '+creep.name+' bailing from locked room '+creep.room.name+'.');
       releaseAssignment(creep); return;
     }
@@ -990,11 +1073,9 @@ var TaskLuna = {
     var src = Game.getObjectById(sid);
     if (!src){ if (Game.time%25===0) console.log('Source not found for '+creep.name); releaseAssignment(creep); return; }
 
-    ensureSourceFlag(src); // will touch lastActive
-    // also remember tile for safer prune compare
+    ensureSourceFlag(src);
     var srec = _sourceMem(creep.room.name, sid); srec.x = src.pos.x; srec.y = src.pos.y;
 
-    // NEW: keep controller flag fresh while active in the room
     if (creep.room.controller) ensureControllerFlag(creep.room.controller);
 
     var rm = _roomMem(creep.memory.targetRoom);
@@ -1004,12 +1085,13 @@ var TaskLuna = {
       if (!res.incomplete) rm.sources[sid].entrySteps = res.path.length;
     }
 
-    if ((creep.memory._stuck|0) >= STUCK_WINDOW){ go(creep, src, { range:1, reusePath:3 }); creep.say('🚧'); }
+    if ((creep.memory._stuck|0) >= STUCK_WINDOW){ go(creep, src, { range:1, reusePath:3 }); debugSay(creep, '🚧'); }
 
+    debugSay(creep, '⛏️SRC');
+    debugDraw(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
     var rc = creep.harvest(src);
     if (rc===ERR_NOT_IN_RANGE) go(creep, src, { range:1, reusePath:15 });
     else if (rc===OK){
-      // harvesting is also activity
       touchSourceActive(creep.room.name, sid);
     }
   }
