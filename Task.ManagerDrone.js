@@ -3,35 +3,19 @@ var LOG_LEVEL = Logger.LOG_LEVEL;
 var taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
 
 var TaskIdle = require('./Task.Idle');
-var TaskBaseHarvest = require('./Task.BaseHarvest');
-var TaskLuna = require('./Task.Luna');
 var TaskBuilder = require('./Task.Builder');
-var TaskCourier = require('./Task.Courier');
-var TaskQueen = require('./Task.Queen');
-var TaskScout = require('./Task.Scout');
 var TaskRepair = require('./Task.Repair');
 var TaskUpgrader = require('./Task.Upgrader');
-var TaskCombatArcher = require('./Task.CombatArcher');
-var TaskCombatMedic = require('./Task.CombatMedic');
-var TaskCombatMelee = require('./Task.CombatMelee');
-var TaskDismantler = require('./Task.Dismantler');
-var TaskTrucker = require('Task.Trucker');
-var TaskClaimer = require('Task.Claimer');
 
 const DEFAULT_NEEDS = Object.freeze({
-  baseharvest: 2,
-  builder: 2,
+  builder: 1,
   repair: 1,
-  courier: 2,
-  upgrader: 2,
-  scout: 1,
+  upgrader: 1,
 });
 
 const DEFAULT_PRIORITY = Object.freeze([
-  'baseharvest',
   'repair',
   'builder',
-  'courier',
   'upgrader',
 ]);
 
@@ -46,22 +30,10 @@ function registerTask(name, module) {
   }
   TASK_REGISTRY[name] = module;
 }
-
-registerTask('baseharvest', TaskBaseHarvest);
-registerTask('luna', TaskLuna);
 registerTask('builder', TaskBuilder);
-registerTask('courier', TaskCourier);
-registerTask('queen', TaskQueen);
-registerTask('scout', TaskScout);
 registerTask('repair', TaskRepair);
 registerTask('upgrader', TaskUpgrader);
-registerTask('CombatMedic', TaskCombatMedic);
-registerTask('CombatMelee', TaskCombatMelee);
-registerTask('CombatArcher', TaskCombatArcher);
-registerTask('Dismantler', TaskDismantler);
 registerTask('idle', TaskIdle);
-registerTask('Trucker', TaskTrucker);
-registerTask('Claimer', TaskClaimer);
 
 const cache = (global.__taskManagerCache = global.__taskManagerCache || {
   tick: -1,
