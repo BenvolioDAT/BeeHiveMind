@@ -1,5 +1,25 @@
-// TaskBaseHarvest.js — queued handoff + conflict-safe miner
+// TaskBaseHarvest.js — queued handoff + conflict-safe miner (with Debug_say & Debug_draw)
 var BeeToolbox = require('BeeToolbox');
+
+/** =========================
+ *  Debug UI toggles & styling
+ *  ========================= */
+var CFG = Object.freeze({
+  DEBUG_SAY: true,    // creep.say breadcrumbs
+  DEBUG_DRAW: true,   // RoomVisual lines/labels/rings
+  DRAW: {
+    TRAVEL:   "#8ab6ff",
+    SOURCE:   "#ffd16e",
+    SEAT:     "#6effa1",
+    QUEUE:    "#ffe66e",
+    YIELD:    "#ff6e6e",
+    OFFLOAD:  "#6ee7ff",
+    IDLE:     "#bfbfbf",
+    WIDTH: 0.12,
+    OPACITY: 0.45,
+    FONT: 0.6
+  }
+});
 
 /** =========================
  *  Config knobs
@@ -8,9 +28,67 @@ var CONFIG = {
   maxHarvestersPerSource: 1,   // 1 = strict single-seat miners (best w/ container)
   avoidTicksAfterYield: 20,    // loser avoids yielded source for this many ticks
   handoffTtl: 120,             // if incumbent's TTL <= this, allow queueing
-  queueRange: 2,               // park within this range when queueing (1 = adjacent)
-  travelReuse: 12              // reusePath hint for travel helper (if used internally)
+  queueRange: 2,               // (kept for semantics; queue finder picks tiles around seat)
+  travelReuse: 12              // reusePath hint for travel helper
 };
+
+/** =========================
+ *  Debug helpers
+ *  ========================= */
+function debugSay(creep, msg) {
+  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+}
+function _posOf(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
+}
+function debugDrawLine(creep, target, color, label) {
+  if (!CFG.DEBUG_DRAW || !creep || !target) return;
+  var room = creep.room; if (!room || !room.visual) return;
+  var tpos = _posOf(target); if (!tpos || tpos.roomName !== room.name) return;
+  try {
+    room.visual.line(creep.pos, tpos, {
+      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
+        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
+      });
+    }
+  } catch (e) {}
+}
+function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
+  try {
+    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
+  } catch (e) {}
+}
+
+/** =========================
+ *  Travel helper (BeeTravel → Traveler → moveTo)
+ *  Draws a path hint to the target.
+ *  ========================= */
+function go(creep, dest, range, reuse) {
+  range = (range != null) ? range : 1;
+  reuse = (reuse != null) ? reuse : CONFIG.travelReuse;
+  var dpos = (dest && dest.pos) ? dest.pos : dest;
+  if (dpos) debugDrawLine(creep, dpos, CFG.DRAW.TRAVEL, "GO");
+
+  try {
+    if (BeeToolbox && BeeToolbox.BeeTravel) {
+      BeeToolbox.BeeTravel(creep, (dest.pos || dest), { range: range, reusePath: reuse });
+      return;
+    }
+    if (typeof creep.travelTo === 'function') {
+      creep.travelTo((dest.pos || dest), { range: range, reusePath: reuse, ignoreCreeps: false, maxOps: 4000 });
+      return;
+    }
+  } catch (e) {}
+  if (creep.pos.getRangeTo(dest) > range) creep.moveTo(dest, { reusePath: reuse, maxOps: 2000 });
+}
 
 /** =========================
  *  Small utils
@@ -139,7 +217,9 @@ function resolveSourceConflict(creep, source) {
     creep.memory.assignedSource = null;
     creep.memory._reassignCooldown = Game.time + 5;
     creep.memory.waitingForSeat = false;
-    creep.say('yield 🐝');
+
+    debugSay(creep, 'yield 🐝');
+    debugRing(creep.room, source.pos, CFG.DRAW.YIELD, "YIELD");
     return true;
   }
   return false;
@@ -251,6 +331,10 @@ function assignSource(creep) {
   creep.memory.seatRoom = best.seatPos.roomName;
   creep.memory.waitingForSeat = !!bestWillQueue;
 
+  debugSay(creep, bestWillQueue ? '⏳' : '🎯');
+  debugRing(creep.room, best.source.pos, CFG.DRAW.SOURCE, "SRC");
+  debugRing(creep.room, best.seatPos,   CFG.DRAW.SEAT,   "SEAT");
+
   return best.source.id;
 }
 
@@ -280,18 +364,23 @@ var TaskBaseHarvest = {
     // (0) Simple state flip based on store
     if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
       creep.memory.harvesting = true;
+      debugSay(creep, '⤵️MINE');
     }
     if (creep.memory.harvesting && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
       creep.memory.harvesting = false;
+      debugSay(creep, '⤴️DROP');
     }
 
     // (1) Harvesting phase
     if (creep.memory.harvesting) {
       var sid = assignSource(creep);
-      if (!sid) return;
+      if (!sid) { debugSay(creep, '❓'); return; }
 
       var source = Game.getObjectById(sid);
-      if (!source) { creep.memory.assignedSource = null; creep.memory.waitingForSeat = false; return; }
+      if (!source) {
+        creep.memory.assignedSource = null; creep.memory.waitingForSeat = false;
+        return;
+      }
 
       // Resolve local conflicts if we are in the scrum
       if (resolveSourceConflict(creep, source)) return;
@@ -300,6 +389,10 @@ var TaskBaseHarvest = {
       var seatPos = (creep.memory.seatRoom === creep.room.name)
         ? new RoomPosition(creep.memory.seatX, creep.memory.seatY, creep.memory.seatRoom)
         : getPreferredSeatPos(source);
+
+      if (seatPos) {
+        debugRing(creep.room, seatPos, CFG.DRAW.SEAT, "SEAT");
+      }
 
       // Capacity math
       var seats = getAdjacentContainerForSource(source) ? 1 : countWalkableSeatsAround(source.pos);
@@ -312,61 +405,75 @@ var TaskBaseHarvest = {
       }
 
       // Seat occupancy: any creep (ally or not) blocks the exact tile unless it's me
-      var seatBlocked = isTileOccupiedByAnyCreep(seatPos, creep.name) && !creep.pos.isEqualTo(seatPos);
+      var seatBlocked = seatPos ? (isTileOccupiedByAnyCreep(seatPos, creep.name) && !creep.pos.isEqualTo(seatPos)) : false;
 
       // Decide whether to queue this tick
-      var shouldQueue = (seatBlocked || creep.memory.waitingForSeat) && used >= seats && shouldQueueForSource(creep, source, seats, used);
+      var shouldQ = (seatBlocked || creep.memory.waitingForSeat) && used >= seats && shouldQueueForSource(creep, source, seats, used);
 
-      if (shouldQueue) {
+      if (shouldQ) {
         // Park near seat (not on it)
         var queueSpot = findQueueSpotNearSeat(seatPos, creep.name) || seatPos;
         creep.memory.waitingForSeat = true;
 
-        if (!creep.pos.isEqualTo(queueSpot)) {
-          // Use numeric range for your BeeTravel variant
-          BeeToolbox.BeeTravel(creep, queueSpot, 0);
-          return;
-        }
+        debugSay(creep, '⏳');
+        debugRing(creep.room, queueSpot, CFG.DRAW.QUEUE, "QUEUE");
+        if (!creep.pos.isEqualTo(queueSpot)) { go(creep, queueSpot, 0, CONFIG.travelReuse); return; }
 
-        // If we can reach the source from here (range 1), go ahead and harvest while waiting
-        if (creep.pos.getRangeTo(source) <= 1) creep.harvest(source);
+        // If we can reach the source from here (range 1), nibble while waiting
+        if (creep.pos.getRangeTo(source) <= 1) {
+          debugDrawLine(creep, source, CFG.DRAW.SOURCE, "HARV");
+          creep.harvest(source);
+        }
 
         // If the seat frees up OR capacity opens, take it now
         if (!isTileOccupiedByAnyCreep(seatPos, creep.name) || countAssignedHarvesters(creep.room.name, source.id) < seats) {
-          BeeToolbox.BeeTravel(creep, seatPos, 0);
+          go(creep, seatPos, 0, CONFIG.travelReuse);
           creep.memory.waitingForSeat = false;
         }
         return;
       }
 
       // NO QUEUE: seat free or capacity available → go sit or harvest
-      if (!creep.pos.isEqualTo(seatPos)) {
-        BeeToolbox.BeeTravel(creep, seatPos, 0);
+      if (seatPos && !creep.pos.isEqualTo(seatPos)) {
+        debugSay(creep, '🪑');
+        go(creep, seatPos, 0, CONFIG.travelReuse);
         return;
       }
       creep.memory.waitingForSeat = false;
+
+      debugSay(creep, '⛏️');
+      debugDrawLine(creep, source, CFG.DRAW.SOURCE, "HARV");
       creep.harvest(source);
       return;
     }
 
     // (2) Not harvesting (full): offload
-    if (creep.store.getFreeCapacity() === 0) {
+    if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
       var cont = getContainerAtOrAdjacent(creep.pos);
       if (cont) {
+        debugSay(creep, '📦');
+        debugDrawLine(creep, cont, CFG.DRAW.OFFLOAD, "OFFLOAD");
         var tr = creep.transfer(cont, RESOURCE_ENERGY);
-        if (tr === ERR_NOT_IN_RANGE) {
-          BeeToolbox.BeeTravel(creep, cont.pos || cont, 1);
-        }
+        if (tr === ERR_NOT_IN_RANGE) go(creep, (cont.pos || cont), 1, CONFIG.travelReuse);
         return;
       }
     }
 
     // (3) If no couriers exist, dump to ground as last resort
-    var couriers = _.filter(Game.creeps, function(c){ return c.memory.task === 'courier'; });
-    if (couriers.length === 0 && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+    var courierCount = 0;
+    for (var cname in Game.creeps) {
+      var cc = Game.creeps[cname];
+      if (cc && cc.memory && cc.memory.task === 'courier') courierCount++;
+    }
+    if (courierCount === 0 && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      debugSay(creep, '🫠');
       creep.drop(RESOURCE_ENERGY);
       return;
     }
+
+    // Otherwise idle gently on our seat (or where we are)
+    debugSay(creep, '🧘');
+    debugRing(creep.room, creep.pos, CFG.DRAW.IDLE, "IDLE");
   }
 };
 

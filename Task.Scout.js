@@ -1,7 +1,84 @@
-
+// Task.Scout.js — ring-based exploration with Debug_say & Debug_draw
 var BeeToolbox = require('BeeToolbox');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 
+/** =========================
+ *  Debug toggles & styling
+ *  ========================= */
+var CFG = Object.freeze({
+  DEBUG_SAY: true,
+  DEBUG_DRAW: true,
+  DRAW: {
+    TRAVEL:   "#8ab6ff",
+    ROOM:     "#e6f58b",
+    EXIT_OK:  "#9cff9c",
+    EXIT_BAD: "#ff7b7b",
+    BLOCK:    "#ff6e6e",
+    INTEL:    "#ffd16e",
+    TARGET:   "#b0a7ff",
+    TEXT:     "#e0e0e0",
+    WIDTH:    0.12,
+    OPACITY:  0.45,
+    FONT:     0.7
+  }
+});
+
+/** =========================
+ *  Tiny debug helpers
+ *  ========================= */
+function debugSay(creep, msg) {
+  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+}
+function _posOf(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
+}
+function debugDrawLine(from, to, color, label) {
+  if (!CFG.DEBUG_DRAW || !from || !to) return;
+  var fpos = (from.pos || from);
+  var tpos = _posOf(to);
+  if (!fpos || !tpos) return;
+  var room = Game.rooms[fpos.roomName];
+  if (!room || !room.visual || tpos.roomName !== fpos.roomName) return;
+  try {
+    room.visual.line(fpos, tpos, { color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY });
+    if (label) room.visual.text(label, (fpos.x + tpos.x)/2, (fpos.y + tpos.y)/2 - 0.3,
+      { color: color, opacity: 0.9, font: CFG.DRAW.FONT, align: "center",
+        backgroundColor: "#000000", backgroundOpacity: 0.25 });
+  } catch (e) {}
+}
+function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
+  try {
+    room.visual.circle(pos, { radius: 0.6, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.8, { color: color, font: CFG.DRAW.FONT, opacity: 0.9, align: "center" });
+  } catch (e) {}
+}
+function debugLabel(room, pos, text, color) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos || !text) return;
+  try {
+    room.visual.text(text, pos.x, pos.y - 1.2, {
+      color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
+      backgroundColor: "#000000", backgroundOpacity: 0.25
+    });
+  } catch (e) {}
+}
+function drawExitMarker(room, exitDir, label, color) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual) return;
+  var x = 25, y = 25;
+  if (exitDir === FIND_EXIT_TOP)    { y = 1;  x = 25; }
+  if (exitDir === FIND_EXIT_BOTTOM) { y = 48; x = 25; }
+  if (exitDir === FIND_EXIT_LEFT)   { x = 1;  y = 25; }
+  if (exitDir === FIND_EXIT_RIGHT)  { x = 48; y = 25; }
+  var pos = new RoomPosition(x, y, room.name);
+  debugRing(room, pos, color, label);
+}
+
+/** =========================
+ *  Tunables (original)
+ *  ========================= */
 // ---------- Tunables ----------
 var EXPLORE_RADIUS     = 5;      // max linear distance (rooms) from home
 var REVISIT_DELAY      = 1000;   // re-visit cadence per room
@@ -101,6 +178,13 @@ function markBlocked(roomName) {
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
   Memory.rooms[roomName].blocked = Game.time;
+
+  // visual: center red ring if visible
+  if (CFG.DEBUG_DRAW && Game.rooms[roomName]) {
+    var R = Game.rooms[roomName];
+    var center = new RoomPosition(25,25,roomName);
+    debugRing(R, center, CFG.DRAW.BLOCK, "BLOCK");
+  }
 }
 function isBlockedRecently(roomName) {
   if (!Memory.rooms) return false;
@@ -259,6 +343,18 @@ function logRoomIntel(room) {
   intel.hostiles = room.find(FIND_HOSTILE_CREEPS).length;
 
   seedSourcesFromVision(room);
+
+  // HUD: controller/owner/reservation + threats
+  if (CFG.DEBUG_DRAW) {
+    var tag = (intel.owner ? ('👑 ' + intel.owner) : (intel.reservation ? ('📌 ' + intel.reservation) : 'free'));
+    var extras = [];
+    if (intel.invaderCore && intel.invaderCore.present) extras.push('IC');
+    if (intel.powerBank) extras.push('PB');
+    if (intel.keeperLairs) extras.push('SK:' + intel.keeperLairs);
+    var text = tag + ' • src:' + intel.sources + (extras.length ? ' • ' + extras.join(',') : '');
+    var center = new RoomPosition(25,25,room.name);
+    debugLabel(room, center, text, CFG.DRAW.INTEL);
+  }
 }
 
 // ---------- Scout memory ----------
@@ -288,11 +384,17 @@ function ensureScoutMem(creep) {
   return m;
 }
 
-// ---------- Movement (Traveler wrapper) ----------
+// ---------- Movement (Traveler wrapper + line) ----------
 function go(creep, dest, opts) {
   opts = opts || {};
   var desired = (opts.range != null) ? opts.range : 1;
   var reuse   = (opts.reusePath != null) ? opts.reusePath : PATH_REUSE;
+
+  if (creep.pos.getRangeTo(dest) > desired) {
+    // draw line within same room
+    var dpos = (dest.pos || dest);
+    debugDrawLine(creep, dpos, CFG.DRAW.TRAVEL, "GO");
+  }
 
   if (creep.pos.getRangeTo(dest) <= desired) return OK;
 
@@ -315,7 +417,10 @@ function go(creep, dest, opts) {
 function isExitBlockedCached(room, exitDir) {
   var key = room.name + '|' + exitDir;
   var cache = global.__SCOUT.exitBlock[key];
-  if (cache && cache.expire > Game.time) return cache.blocked;
+  if (cache && cache.expire > Game.time) {
+    if (CFG.DEBUG_DRAW) drawExitMarker(room, exitDir, cache.blocked ? "X" : "→", cache.blocked ? CFG.DRAW.EXIT_BAD : CFG.DRAW.EXIT_OK);
+    return cache.blocked;
+  }
 
   var edge = room.find(exitDir);
   var blocked = true;
@@ -338,6 +443,8 @@ function isExitBlockedCached(room, exitDir) {
     }
   }
   global.__SCOUT.exitBlock[key] = { blocked: blocked, expire: Game.time + EXIT_BLOCK_TTL };
+
+  if (CFG.DEBUG_DRAW) drawExitMarker(room, exitDir, blocked ? "X" : "→", blocked ? CFG.DRAW.EXIT_BAD : CFG.DRAW.EXIT_OK);
   return blocked;
 }
 
@@ -445,6 +552,13 @@ function rebuildQueueAllRings(mem, creep) {
   }
 
   mem.queue = queue;
+
+  // Visual: show queue size at center of current room
+  if (CFG.DEBUG_DRAW && Game.rooms[creep.room.name]) {
+    var R = Game.rooms[creep.room.name];
+    var center = new RoomPosition(25,25,creep.room.name);
+    debugLabel(R, center, '🧭 queue:' + (queue.length|0), CFG.DRAW.TARGET);
+  }
 }
 
 // pick an inward neighbor if we drift outside radius
@@ -499,6 +613,7 @@ var TaskScout = {
       if (back) {
         creep.memory.targetRoom = back;
         creep.memory.nextHop = back;
+        debugSay(creep, '↩');
       }
     }
 
@@ -511,6 +626,12 @@ var TaskScout = {
 
       stampVisit(creep.room.name);
       logRoomIntel(creep.room);
+
+      // draw arrival mark
+      if (CFG.DEBUG_DRAW) {
+        debugRing(creep.room, creep.pos, CFG.DRAW.ROOM, "ARRIVE");
+        debugLabel(creep.room, creep.pos, creep.room.name, CFG.DRAW.TEXT);
+      }
 
       // clear per-room waypoint on arrival
       if (creep.memory.targetRoom === creep.room.name) {
@@ -534,6 +655,7 @@ var TaskScout = {
       if (!hop) {
         // route no longer valid; mark and drop
         markBlocked(creep.memory.targetRoom);
+        debugSay(creep, '⛔');
         creep.memory.targetRoom = null;
         creep.memory.nextHop = null;
         return;
@@ -547,11 +669,15 @@ var TaskScout = {
       }
       if (TaskScout.isExitBlocked(creep, dir)) {
         markBlocked(hop);
+        drawExitMarker(creep.room, dir, "X", CFG.DRAW.EXIT_BAD);
         creep.memory.nextHop = null;
         return;
+      } else {
+        drawExitMarker(creep.room, dir, "→", CFG.DRAW.EXIT_OK);
       }
 
       // step toward the center of hop (waypoint)
+      debugSay(creep, '➡');
       go(creep, new RoomPosition(25, 25, hop), { range: 20, reusePath: PATH_REUSE });
       return;
     }
@@ -577,11 +703,17 @@ var TaskScout = {
 
       creep.memory.targetRoom = next;
       creep.memory.nextHop = computeNextHop(creep.room.name, next);
+
+      // visuals for chosen target (if visible)
+      if (CFG.DEBUG_DRAW && Game.rooms[creep.room.name]) {
+        debugLabel(Game.rooms[creep.room.name], creep.pos, '🎯 ' + next, CFG.DRAW.TARGET);
+      }
       break;
     }
 
     // If still nothing to do, idle slightly off-center
     if (!creep.memory.targetRoom) {
+      debugSay(creep, '🕊');
       go(creep, new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE });
       return;
     }
@@ -600,9 +732,12 @@ var TaskScout = {
       var dir2 = creep.room.findExitTo(nh);
       if (dir2 < 0 || TaskScout.isExitBlocked(creep, dir2)) {
         markBlocked(nh);
+        drawExitMarker(creep.room, dir2, "X", CFG.DRAW.EXIT_BAD);
         creep.memory.nextHop = null;
         return;
       }
+      drawExitMarker(creep.room, dir2, "→", CFG.DRAW.EXIT_OK);
+      debugSay(creep, '➡');
       go(creep, new RoomPosition(25, 25, nh), { range: 20, reusePath: PATH_REUSE });
     } else {
       creep.memory.targetRoom = null; // arrived

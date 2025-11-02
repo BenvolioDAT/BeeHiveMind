@@ -1,6 +1,28 @@
-
+// Task.Claimer.js — Reserve/Claim/Attack with Debug_say & Debug_draw
 var BeeToolbox = require('BeeToolbox');
 
+/** =========================
+ *  Debug UI toggles & styling
+ *  ========================= */
+var CFG = Object.freeze({
+  DEBUG_SAY: true,   // creep.say breadcrumbs
+  DEBUG_DRAW: true,  // RoomVisual lines/labels/rings
+  DRAW: {
+    TRAVEL:   "#8ab6ff",
+    CTRL:     "#ffd16e",
+    FLAG:     "#a0ffa0",
+    LOCK:     "#ff6e6e",
+    SIGN:     "#b0a7ff",
+    TEXT:     "#e0e0e0",
+    WIDTH:    0.12,
+    OPACITY:  0.45,
+    FONT:     0.7
+  }
+});
+
+/** =========================
+ *  Core config
+ *  ========================= */
 var CONFIG = {
   defaultMode: 'reserve',
   placeSpawnOnClaim: false,
@@ -61,24 +83,90 @@ var SIGN_TEXTS = [
   "💣 Boom. Controller tagged."
 ];
 
-
-// how many ticks to treat as "1 day" before refreshing sign
+// ticks ~ “a day” before re-signing
 var SIGN_DAY_TICKS = 1500;
 
 // ---- Multi-room Reserve Helpers ----
 var RESERVE_CONFIG = {
-  desired: 2500,      // aim to keep rooms near this; max is 5000
-  rotateAt: 1000,     // once >= this, head to next target
-  scanRoleNames: ['luna', 'remoteMiner','remoteHarvest'], // tweak to your codebase
-  maxTargets: 8       // safety cap
+  desired: 2500,
+  rotateAt: 1000,
+  scanRoleNames: ['luna', 'remoteMiner','remoteHarvest'],
+  maxTargets: 8
 };
 
 // ---- Room Locking (prevents 2 claimers from dogpiling one room) ----
 var LOCK = { ttl: 10 };
 
-function ensureLockMem() {
-  if (!Memory.reserveLocks) Memory.reserveLocks = {};
+/** =========================
+ *  Debug helpers
+ *  ========================= */
+function debugSay(creep, msg) { if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true); }
+
+function _posOf(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
 }
+function debugDrawLine(from, to, color, label) {
+  if (!CFG.DEBUG_DRAW || !from || !to) return;
+  var room = from.room || Game.rooms[from.roomName];
+  var tpos = _posOf(to);
+  if (!room || !room.visual || !tpos || (room.name !== tpos.roomName)) return;
+  try {
+    room.visual.line((from.pos||from), tpos, {
+      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.4, {
+        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
+      });
+    }
+  } catch (e) {}
+}
+function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
+  try {
+    room.visual.circle(pos, { radius: 0.55, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.7, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
+  } catch (e) {}
+}
+function debugLabel(room, pos, text, color) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos || !text) return;
+  try {
+    room.visual.text(text, pos.x, pos.y - 1.1, {
+      color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.9, align: "center", backgroundColor: "#000000", backgroundOpacity: 0.25
+    });
+  } catch (e) {}
+}
+
+/** =========================
+ *  Travel helper (BeeTravel → Traveler → moveTo)
+ *  Draws a path hint.
+ *  ========================= */
+function go(creep, dest, range, reuse) {
+  range = (range != null) ? range : 1;
+  reuse = (reuse != null) ? reuse : CONFIG.reusePath;
+  var dpos = (dest && dest.pos) ? dest.pos : dest;
+  if (dpos) debugDrawLine(creep, dpos, CFG.DRAW.TRAVEL, "GO");
+
+  try {
+    if (BeeToolbox && BeeToolbox.BeeTravel) {
+      BeeToolbox.BeeTravel(creep, (dest.pos || dest), { range: range, reusePath: reuse });
+      return;
+    }
+    if (typeof creep.travelTo === 'function') {
+      creep.travelTo((dest.pos || dest), { range: range, reusePath: reuse, ignoreCreeps: false, maxOps: 4000 });
+      return;
+    }
+  } catch (e) {}
+  if (creep.pos.getRangeTo(dest) > range) creep.moveTo(dest, { reusePath: reuse, maxOps: 2000 });
+}
+
+/** =========================
+ *  Lock memory
+ *  ========================= */
+function ensureLockMem() { if (!Memory.reserveLocks) Memory.reserveLocks = {}; }
 function isRoomLocked(rn) {
   ensureLockMem();
   var L = Memory.reserveLocks[rn];
@@ -88,8 +176,7 @@ function isRoomLocked(rn) {
   return true;
 }
 function acquireRoomLock(rn, creep) {
-  ensureLockMem();
-  isRoomLocked(rn);
+  ensureLockMem(); isRoomLocked(rn);
   if (Memory.reserveLocks[rn]) return false;
   Memory.reserveLocks[rn] = { creep: creep.name, until: Game.time + LOCK.ttl };
   return true;
@@ -109,6 +196,9 @@ function releaseRoomLock(rn, creep) {
   if (L.creep === creep.name) delete Memory.reserveLocks[rn];
 }
 
+/** =========================
+ *  Target gathering / intel
+ *  ========================= */
 function gatherReserveTargets() {
   var set = {};
   for (var fname in Game.flags) {
@@ -131,7 +221,6 @@ function gatherReserveTargets() {
   return out;
 }
 
-// Cache reservation intel we see
 function rememberReservationIntel(room) {
   if (!room || !room.controller) return;
   if (!Memory.reserveIntel) Memory.reserveIntel = {};
@@ -146,11 +235,19 @@ function rememberReservationIntel(room) {
     owner = 'me';
   }
   Memory.reserveIntel[room.name] = { ticks: ticks, owner: owner, t: Game.time };
+
+  // Draw little HUD over controller
+  if (CFG.DEBUG_DRAW) {
+    var tag = (owner ? owner : "free") + " • " + (ticks|0);
+    debugRing(room, ctl.pos, CFG.DRAW.CTRL, "CTL");
+    debugLabel(room, ctl.pos, tag, CFG.DRAW.TEXT);
+  }
 }
 
 function pickNextReserveTarget(creep, candidates) {
   if (!candidates || !candidates.length) return null;
 
+  // First: unseen intel & unlocked
   for (var i = 0; i < candidates.length; i++) {
     var rn = candidates[i];
     if (!Memory.reserveIntel || !Memory.reserveIntel[rn]) {
@@ -158,6 +255,7 @@ function pickNextReserveTarget(creep, candidates) {
     }
   }
 
+  // Next: ours / free with lowest ticks
   var best = null, bestTicks = 999999;
   for (var j = 0; j < candidates.length; j++) {
     var rn2 = candidates[j];
@@ -185,43 +283,45 @@ function resolveTargetRoom(creep) {
   var chosenFlag = Game.flags[exactName];
   if (!chosenFlag) {
     for (var fname in Game.flags) {
-      if (fname.indexOf(exactName) === 0) {
-        chosenFlag = Game.flags[fname];
-        break;
-      }
+      if (fname.indexOf(exactName) === 0) { chosenFlag = Game.flags[fname]; break; }
     }
   }
   if (chosenFlag) {
     creep.memory.targetRoom = chosenFlag.pos.roomName;
+    // draw flag if visible
+    if (CFG.DEBUG_DRAW && chosenFlag.pos && Game.rooms[chosenFlag.pos.roomName]) {
+      debugRing(Game.rooms[chosenFlag.pos.roomName], chosenFlag.pos, CFG.DRAW.FLAG, "FLAG");
+    }
     return creep.memory.targetRoom;
   }
   if (creep.memory.targetRoom) return creep.memory.targetRoom;
   return null;
 }
 
+/** =========================
+ *  Movement helpers
+ *  ========================= */
 function moveToRoom(creep, roomName) {
   if (creep.pos.roomName !== roomName) {
     var dest = new RoomPosition(25, 25, roomName);
-    if (BeeToolbox && BeeToolbox.BeeTravel) {
-      BeeToolbox.BeeTravel(creep, dest, { range: 20, reusePath: CONFIG.reusePath });
-    } else {
-      creep.moveTo(dest, { reusePath: CONFIG.reusePath, range: 20 });
-    }
+    debugSay(creep, '➡️' + roomName);
+    go(creep, dest, 20, CONFIG.reusePath);
     return false;
   }
   return true;
 }
 
-// ---- Updated signing logic with random pool ----
+/** =========================
+ *  Controller actions
+ *  ========================= */
+// Updated signing logic with random pool + visuals
 function signIfWanted(creep, controller) {
   if (!controller || controller.my) return;
 
   var needNew = false;
-  if (!controller.sign) {
-    needNew = true;
-  } else if (controller.sign.username !== creep.owner.username) {
-    needNew = true;
-  } else {
+  if (!controller.sign) needNew = true;
+  else if (controller.sign.username !== creep.owner.username) needNew = true;
+  else {
     var age = Game.time - controller.sign.time;
     if (age >= SIGN_DAY_TICKS) needNew = true;
   }
@@ -233,10 +333,13 @@ function signIfWanted(creep, controller) {
     }
     var res = creep.signController(controller, creep.memory.signText);
     if (res === ERR_NOT_IN_RANGE) {
-      if (BeeToolbox && BeeToolbox.BeeTravel) BeeToolbox.BeeTravel(creep, controller);
-      else creep.moveTo(controller);
+      debugSay(creep, '✍️');
+      debugDrawLine(creep, controller, CFG.DRAW.SIGN, "SIGN");
+      go(creep, controller, 1, CONFIG.reusePath);
     } else if (res === OK) {
-      delete creep.memory.signText; // clear so next time it picks fresh
+      debugSay(creep, '✅');
+      debugRing(creep.room, controller.pos, CFG.DRAW.SIGN, "SIGNED");
+      delete creep.memory.signText;
     }
   }
 }
@@ -254,7 +357,8 @@ function placeSpawnIfWanted(creep, controller) {
       var x = Math.max(1, Math.min(48, controller.pos.x + dx));
       var y = Math.max(1, Math.min(48, controller.pos.y + dy));
       if (creep.room.createConstructionSite(x, y, STRUCTURE_SPAWN) === OK) {
-        creep.say('🚧 spawn');
+        debugSay(creep, '🚧');
+        debugRing(creep.room, new RoomPosition(x,y,controller.pos.roomName), CFG.DRAW.CTRL, "SPAWN");
         break;
       }
     }
@@ -262,124 +366,156 @@ function placeSpawnIfWanted(creep, controller) {
 }
 
 function doClaim(creep, controller) {
-  if (!controller) { creep.say('❓no ctl'); return; }
+  if (!controller) { debugSay(creep, '❓ctl'); return; }
+  debugRing(creep.room, controller.pos, CFG.DRAW.CTRL, "CTL");
+
   if (controller.my) {
     signIfWanted(creep, controller);
     placeSpawnIfWanted(creep, controller);
-    creep.say('✅ claimed');
+    debugSay(creep, '✅');
     return;
   }
   if (controller.owner && !controller.my) {
     var r = creep.attackController(controller);
-    if (r === ERR_NOT_IN_RANGE) return BeeToolbox.BeeTravel(creep, controller);
-    creep.say('⚔ atkCtl');
+    if (r === ERR_NOT_IN_RANGE) { debugSay(creep, '⚔'); debugDrawLine(creep, controller, CFG.DRAW.CTRL, "ATK"); go(creep, controller, 1, CONFIG.reusePath); return; }
+    debugSay(creep, '⚔');
     return;
   }
   var res = creep.claimController(controller);
   if (res === ERR_NOT_IN_RANGE) {
-    BeeToolbox.BeeTravel(creep, controller);
+    debugSay(creep, '👑');
+    debugDrawLine(creep, controller, CFG.DRAW.CTRL, "CLAIM");
+    go(creep, controller, 1, CONFIG.reusePath);
   } else if (res === OK) {
-    creep.say('👑 mine');
+    debugSay(creep, '👑');
     signIfWanted(creep, controller);
     placeSpawnIfWanted(creep, controller);
   } else if (res === ERR_GCL_NOT_ENOUGH) {
-    creep.say('➡ reserve');
+    debugSay(creep, '➡R');
     doReserve(creep, controller);
   } else {
-    creep.say('❌' + res);
+    debugSay(creep, '❌' + res);
   }
 }
 
 function doReserve(creep, controller) {
-  if (!controller) { creep.say('❓no ctl'); return; }
+  if (!controller) { debugSay(creep, '❓ctl'); return; }
+  debugRing(creep.room, controller.pos, CFG.DRAW.CTRL, "CTL");
   if (controller.reservation && controller.reservation.username !== creep.owner.username) {
     var r = creep.attackController(controller);
-    if (r === ERR_NOT_IN_RANGE) return BeeToolbox.BeeTravel(creep, controller);
-    creep.say('🪓 deres');
+    if (r === ERR_NOT_IN_RANGE) { debugSay(creep, '🪓'); debugDrawLine(creep, controller, CFG.DRAW.CTRL, "DERES"); go(creep, controller, 1, CONFIG.reusePath); return; }
+    debugSay(creep, '🪓');
     return;
   }
   var res = creep.reserveController(controller);
   if (res === ERR_NOT_IN_RANGE) {
-    BeeToolbox.BeeTravel(creep, controller);
+    debugSay(creep, '📌');
+    debugDrawLine(creep, controller, CFG.DRAW.CTRL, "+RES");
+    go(creep, controller, 1, CONFIG.reusePath);
   } else if (res === OK) {
-    creep.say('📌 +res');
+    debugSay(creep, '📌');
   } else {
-    creep.say('❌' + res);
+    debugSay(creep, '❌' + res);
   }
   signIfWanted(creep, controller);
 }
 
 function doAttack(creep, controller) {
-  if (!controller) { creep.say('❓no ctl'); return; }
+  if (!controller) { debugSay(creep, '❓ctl'); return; }
   var r = creep.attackController(controller);
   if (r === ERR_NOT_IN_RANGE) {
-    BeeToolbox.BeeTravel(creep, controller);
+    debugSay(creep, '🪓');
+    debugDrawLine(creep, controller, CFG.DRAW.CTRL, "ATK");
+    go(creep, controller, 1, CONFIG.reusePath);
   } else if (r === OK) {
-    creep.say('🪓 atkCtl');
+    debugSay(creep, '🪓');
   } else {
-    creep.say('❌' + r);
+    debugSay(creep, '❌' + r);
   }
 }
 
+/** =========================
+ *  Public API
+ *  ========================= */
 var TaskClaimer = {
   run: function(creep) {
+    // Update intel for any room we’re in
     rememberReservationIntel(creep.room);
 
-    var plan = gatherReserveTargets();
+    // Make sure 'luna' is in the scan set
     if (RESERVE_CONFIG.scanRoleNames.indexOf('luna') === -1)
       RESERVE_CONFIG.scanRoleNames.push('luna');
 
+    var plan = gatherReserveTargets();
+
+    // If our target vanished from plan, release lock
     if (creep.memory.targetRoom && plan.indexOf(creep.memory.targetRoom) === -1) {
       releaseRoomLock(creep.memory.targetRoom, creep);
       creep.memory.targetRoom = null;
     }
 
+    // Choose target room
     if (!creep.memory.targetRoom) {
       var modeTmp = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
+
       if (modeTmp === 'reserve') {
         var pick = pickNextReserveTarget(creep, plan);
         if (pick && acquireRoomLock(pick, creep)) {
           creep.memory.targetRoom = pick;
+          debugSay(creep, '🎯');
         } else {
           for (var i = 0; i < plan.length && !creep.memory.targetRoom; i++) {
             var alt = plan[i];
             if (alt !== pick && acquireRoomLock(alt, creep)) creep.memory.targetRoom = alt;
           }
-          if (!creep.memory.targetRoom) { creep.say('🔒 all'); return; }
+          if (!creep.memory.targetRoom) { debugSay(creep, '🔒'); return; }
         }
       } else {
         creep.memory.targetRoom = resolveTargetRoom(creep);
+        if (!creep.memory.targetRoom) { debugSay(creep, '❌'); return; }
       }
     } else {
       refreshRoomLock(creep.memory.targetRoom, creep);
     }
 
     var targetRoom = creep.memory.targetRoom;
-    if (!targetRoom) { creep.say('❌ no target'); return; }
+    if (!targetRoom) { debugSay(creep, '❌'); return; }
 
-    if (!moveToRoom(creep, targetRoom)) { refreshRoomLock(targetRoom, creep); return; }
+    // Show lock status (if we’re in the room with the flag/ctl)
+    if (CFG.DEBUG_DRAW && Game.rooms[targetRoom] && isRoomLocked(targetRoom)) {
+      var center = new RoomPosition(25,25,targetRoom);
+      debugRing(Game.rooms[targetRoom], center, CFG.DRAW.LOCK, "LOCK");
+    }
 
+    // Travel to room
+    if (!moveToRoom(creep, targetRoom)) {
+      refreshRoomLock(targetRoom, creep);
+      return;
+    }
+
+    // We are in target — act on controller
     var ctl = creep.room.controller;
-    if (!ctl) { releaseRoomLock(targetRoom, creep); creep.say('🚫no ctl'); return; }
+    if (!ctl) { releaseRoomLock(targetRoom, creep); debugSay(creep, '🚫'); creep.memory.targetRoom = null; return; }
 
     var mode = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
-    if (mode === 'claim') return doClaim(creep, ctl);
-    if (mode === 'attack') return doAttack(creep, ctl);
+    if (mode === 'claim') { doClaim(creep, ctl); }
+    else if (mode === 'attack') { doAttack(creep, ctl); }
+    else { doReserve(creep, ctl); }
 
-    doReserve(creep, ctl);
     rememberReservationIntel(creep.room);
     refreshRoomLock(targetRoom, creep);
 
+    // Rotation logic when reserved enough
     if (ctl.reservation && ctl.reservation.username === creep.owner.username) {
       var ticks = ctl.reservation.ticksToEnd || 0;
       if (ticks >= RESERVE_CONFIG.rotateAt) {
         releaseRoomLock(targetRoom, creep);
-        creep.say('➡ next');
+        debugSay(creep, '➡');
         creep.memory.targetRoom = null;
       }
     } else if (ctl.my) {
       releaseRoomLock(targetRoom, creep);
-      creep.say('🏠 mine');
+      debugSay(creep, '🏠');
       creep.memory.targetRoom = null;
     }
   }
