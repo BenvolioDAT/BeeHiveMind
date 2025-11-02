@@ -20,7 +20,7 @@ var CONFIG = {
   maxRooms: 2,
   reusePath: 10,
   maxOps: 2000,
-  waitForMedic: false,
+  waitForMedic: true,
   doorBash: true,
   edgePenalty: 8
 };
