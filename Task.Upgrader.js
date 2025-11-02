@@ -46,12 +46,6 @@ function debugLine(from, to, color, label) {
   if (!f || !t || f.roomName !== t.roomName) return;
   var R = _roomOf(f); if (!R || !R.visual) return;
   R.visual.line(f, t, { color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPAC });
-  if (label) {
-    var mx = (f.x + t.x) / 2, my = (f.y + t.y) / 2;
-    R.visual.text(label, mx, my - 0.3,
-      { color: color, opacity: 0.95, font: CFG.DRAW.FONT, align: "center",
-        backgroundColor: "#000000", backgroundOpacity: 0.25 });
-  }
 }
 function debugRing(target, color, text) {
   if (!CFG.DEBUG_DRAW || !target) return;
@@ -76,7 +70,7 @@ function go(creep, dest, range) {
   var R = (range != null) ? range : 1;
   var dpos = _posOf(dest) || dest;
   if (creep.pos.roomName === dpos.roomName && creep.pos.getRangeTo(dpos) > R) {
-    debugLine(creep.pos, dpos, CFG.DRAW.PATH, "→");
+    debugLine(creep.pos, dpos, CFG.DRAW.PATH);
   }
   if (creep.pos.getRangeTo(dpos) <= R) return OK;
 
