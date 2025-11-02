@@ -1,18 +1,28 @@
-// Combat.Melee.js (ES5-safe)
-// Fixes included:
-//  - Pre-retarget to weak enemies is actually used
-//  - When adjacent, attack hostile *Invader* rampart covering target tile first
-//  - Door-bash only Invader ramparts (PvE-only), walls still valid
-//  - Edge penalty applies near edges (1/48), not literal edges which are excluded
-//  - Micro considers ranged attackers as threats too
+// Combat.Melee.js — PvE melee with Debug_say & Debug_draw instrumentation (ES5-safe)
+//
+// Additions:
+//  - DEBUG_SAY & DEBUG_DRAW toggles with lightweight HUD
+//  - Path/attack/flee visuals (lines, rings, labels)
+//  - Buddy/anchor annotations while guarding or rallying
+//  - Tower danger rings for fast visual debugging
+//
+// PvE-only acceptance: targets *Invader* creeps/structures (never player assets)
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
 
 function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
 function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
-// Acceptance: CombatMelee only targets Invader-owned creeps/structures (PvE-only enforcement)
+function _isInvaderTarget(t){
+  if (!t) return false;
+  if (t.owner && t.owner.username) return t.owner.username === 'Invader';
+  if (t.structureType === STRUCTURE_INVADER_CORE) return true;
+  return false;
+}
 
+// ==========================
+// Config
+// ==========================
 var CONFIG = {
   focusSticky: 15,
   fleeHpPct: 0.35,
@@ -22,17 +32,98 @@ var CONFIG = {
   maxOps: 2000,
   waitForMedic: true,
   doorBash: true,
-  edgePenalty: 8
+  edgePenalty: 8,
+
+  // Debug
+  DEBUG_SAY: true,
+  DEBUG_DRAW: true,
+
+  COLORS: {
+    PATH:   "#7ac7ff",
+    ATTACK: "#ffb74d",
+    FLEE:   "#ff5c7a",
+    BUDDY:  "#ffd54f",
+    TOWER:  "#f0c040",
+    TEXT:   "#f2f2f2",
+    DANGER: "#ff9e80",
+    COVER:  "#90caf9",
+    TARGET: "#ffa726"
+  },
+  WIDTH: 0.13,
+  OPAC:  0.45,
+  FONT:  0.7
 };
 
+// ==========================
+// Debug helpers
+// ==========================
+function _posOf(t){ return t && t.pos ? t.pos : t; }
+function _roomOf(p){ return p && Game.rooms[p.roomName]; }
+
+function debugSay(creep, msg){
+  if (CONFIG.DEBUG_SAY && creep && creep.say) creep.say(msg, true);
+}
+function debugLine(from, to, color, label){
+  if (!CONFIG.DEBUG_DRAW || !from || !to) return;
+  var f=_posOf(from), t=_posOf(to); if(!f||!t||f.roomName!==t.roomName) return;
+  var R=_roomOf(f); if(!R||!R.visual) return;
+  R.visual.line(f, t, { color: color, width: CONFIG.WIDTH, opacity: CONFIG.OPAC });
+  if (label){
+    var mx=(f.x+t.x)/2, my=(f.y+t.y)/2;
+    R.visual.text(label, mx, my-0.25, {
+      color: color, opacity: 0.95, font: CONFIG.FONT, align:"center",
+      backgroundColor:"#000", backgroundOpacity:0.25
+    });
+  }
+}
+function debugRing(target, color, text, radius){
+  if (!CONFIG.DEBUG_DRAW || !target) return;
+  var p=_posOf(target); if(!p) return;
+  var R=_roomOf(p); if(!R||!R.visual) return;
+  R.visual.circle(p, { radius: radius!=null?radius:0.6, fill:"transparent", stroke: color, opacity: CONFIG.OPAC, width: CONFIG.WIDTH });
+  if (text) R.visual.text(text, p.x, p.y-0.8, { color: color, font: CONFIG.FONT, opacity: 0.95, align:"center" });
+}
+function hud(creep, text){
+  if (!CONFIG.DEBUG_DRAW) return;
+  var R=creep.room; if(!R||!R.visual) return;
+  R.visual.text(text, creep.pos.x, creep.pos.y-1.2, {
+    color: CONFIG.COLORS.TEXT, font: CONFIG.FONT, opacity: 0.95, align: "center",
+    backgroundColor:"#000", backgroundOpacity:0.25
+  });
+}
+
+// Movement wrapper (TaskSquad.stepToward > BeeTravel > moveTo) with path preview
+function moveSmart(creep, dest, range){
+  var d = _posOf(dest) || dest;
+  if (creep.pos.roomName === d.roomName && creep.pos.getRangeTo(d) > (range||1)){
+    debugLine(creep.pos, d, CONFIG.COLORS.PATH, "→");
+  }
+  if (TaskSquad && typeof TaskSquad.stepToward === 'function'){
+    return TaskSquad.stepToward(creep, d, range);
+  }
+  try {
+    if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function'){
+      return BeeToolbox.BeeTravel(creep, d, { range: (range!=null?range:1), reusePath: CONFIG.reusePath });
+    }
+  } catch(e){}
+  return creep.moveTo(d, { reusePath: CONFIG.reusePath, maxOps: CONFIG.maxOps });
+}
+
+// ==========================
+// Core
+// ==========================
 var CombatMelee = {
   run: function (creep) {
     if (creep.spawning) return;
 
+    // HUD
+    hud(creep, "🗡 " + creep.hits + "/" + creep.hitsMax);
+
     // (0) optional: wait for medic if you want tighter stack
     if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
       var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
-      if (rf) this._moveSmart(creep, rf.pos || rf, 0);
+      if (rf) moveSmart(creep, rf.pos || rf, 0);
+      debugSay(creep, "⏳");
       return;
     }
 
@@ -40,34 +131,49 @@ var CombatMelee = {
     this._auxHeal(creep);
 
     // (1) emergency bail if low HP or in tower ring
-    var lowHp = (creep.hits / creep.hitsMax) < CONFIG.fleeHpPct;
+    var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
     if (lowHp || this._inTowerDanger(creep.pos)) {
+      debugRing(creep.pos, CONFIG.COLORS.DANGER, "flee", 1.0);
       this._flee(creep);
       var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
-      if (adjBad && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(adjBad);
+      if (adjBad && creep.getActiveBodyparts(ATTACK) > 0) {
+        debugLine(creep.pos, adjBad.pos, CONFIG.COLORS.ATTACK, "⚔");
+        creep.attack(adjBad);
+      }
       return;
     }
 
     // (2) bodyguard: interpose for squishy squadmates
     if (this._guardSquadmate(creep)) {
       var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
-      if (hugger && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(hugger);
+      if (hugger && creep.getActiveBodyparts(ATTACK) > 0) {
+        debugLine(creep.pos, hugger.pos, CONFIG.COLORS.ATTACK, "⚔");
+        creep.attack(hugger);
+      }
       return;
     }
 
-    // (3) squad shared target
+    // (3) squad shared target (enforce PvE: skip if not Invader-owned/core)
     var target = TaskSquad.sharedTarget(creep);
+    if (target && !_isInvaderTarget(target)) target = null;
+
     if (!target) {
       var anc = TaskSquad.getAnchor(creep);
-      if (anc) this._moveSmart(creep, anc, 1);
+      if (anc) {
+        debugRing(anc, CONFIG.COLORS.BUDDY, "anchor", 0.8);
+        moveSmart(creep, anc, 1);
+      }
       return;
     }
+
+    if (CONFIG.DEBUG_DRAW) debugRing(target, CONFIG.COLORS.TARGET, "target", 0.7);
 
     // Opportunistic pre-retarget to weaklings in 1..2 (actually used now)
     if (Game.time % 3 === 0) {
       var weak = this._weakestIn1to2(creep);
-      if (weak && (weak.hits / weak.hitsMax) < 0.5) {
+      if (weak && (weak.hits / Math.max(1, weak.hitsMax)) < 0.5) {
         target = weak;
+        if (CONFIG.DEBUG_DRAW) debugRing(target, CONFIG.COLORS.TARGET, "weak", 0.9);
       }
     }
 
@@ -83,19 +189,25 @@ var CombatMelee = {
         }
       }
       if (cover && creep.getActiveBodyparts(ATTACK) > 0) {
+        debugLine(creep.pos, cover.pos, CONFIG.COLORS.COVER, "🛡");
+        debugSay(creep, "🔨");
         creep.attack(cover);
         return;
       }
 
       // Explicit Invader Core handling: stand and swing
       if (target.structureType && target.structureType === STRUCTURE_INVADER_CORE) {
-        creep.say('⚔ core!');
+        debugSay(creep, "⚔ core!");
+        debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "⚔");
         if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
         return;
       }
 
       // Normal melee attack (unshielded)
-      if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
+      if (creep.getActiveBodyparts(ATTACK) > 0) {
+        debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "⚔");
+        creep.attack(target);
+      }
 
       // Micro-step to a safer/better adjacent tile (avoid tower/edges/melee stacks)
       var better = this._bestAdjacentTile(creep, target);
@@ -110,27 +222,33 @@ var CombatMelee = {
     if (CONFIG.doorBash) {
       var blocker = this._blockingDoor(creep, target);
       if (blocker && creep.pos.isNearTo(blocker)) {
-        if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(blocker);
+        if (creep.getActiveBodyparts(ATTACK) > 0) {
+          debugSay(creep, "🧱");
+          debugLine(creep.pos, blocker.pos, CONFIG.COLORS.COVER, "bash");
+          creep.attack(blocker);
+        }
         return;
       }
     }
 
-    // (6) close in via Traveler-powered TaskSquad (polite traffic + swaps)
-    TaskSquad.stepToward(creep, target.pos, 1);
+    // (6) close in via TaskSquad pathing (polite traffic + swaps)
+    moveSmart(creep, target.pos, 1);
 
     // Opportunistic hit if we brushed into melee with a creep
     var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
-    if (adj && creep.getActiveBodyparts(ATTACK) > 0) creep.attack(adj);
-
-    // (7) (moved earlier) retarget already applied above
+    if (adj && creep.getActiveBodyparts(ATTACK) > 0) {
+      debugLine(creep.pos, adj.pos, CONFIG.COLORS.ATTACK, "⚔");
+      creep.attack(adj);
+    }
   },
 
-  // --- heal self/squad if possible (keeps ES5 style, no double actions)
+  // --- heal self/squad if possible (no double actions)
   _auxHeal: function (creep) {
     var healParts = creep.getActiveBodyparts(HEAL);
     if (!healParts) return;
 
     if (creep.hits < creep.hitsMax) {
+      debugSay(creep, "💊");
       creep.heal(creep);
       return;
     }
@@ -140,10 +258,15 @@ var CombatMelee = {
       return c.my && c.id !== creep.id && c.memory && c.memory.squadId === sid && c.hits < c.hitsMax;
     });
     if (!mates.length) return;
-    var target = _.min(mates, function (c) { return c.hits / c.hitsMax; });
 
-    if (creep.pos.isNearTo(target)) creep.heal(target);
-    else if (creep.pos.inRangeTo(target, 3)) creep.rangedHeal(target);
+    var target = _.min(mates, function (c) { return c.hits / Math.max(1, c.hitsMax); });
+    if (creep.pos.isNearTo(target)) {
+      debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "heal");
+      creep.heal(target);
+    } else if (creep.pos.inRangeTo(target, 3)) {
+      debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "rheal");
+      creep.rangedHeal(target);
+    }
   },
 
   // --- interpose for allies (uses TaskSquad.swap + stepToward)
@@ -162,29 +285,30 @@ var CombatMelee = {
     var buddy = creep.pos.findClosestByRange(threatened);
     if (!buddy) return false;
 
+    if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "guard", 0.8);
+
     if (creep.pos.isNearTo(buddy)) {
       // Try a same-squad friendly swap to put melee between buddy and threat
-      if (TaskSquad.tryFriendlySwap && TaskSquad.tryFriendlySwap(creep, buddy.pos)) return true;
+      if (TaskSquad.tryFriendlySwap && TaskSquad.tryFriendlySwap(creep, buddy.pos)) {
+        debugSay(creep, "↔");
+        return true;
+      }
 
       var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {filter: function (h){return _isInvaderCreep(h) && h.getActiveBodyparts(ATTACK)>0;}})[0];
       if (bad) {
         var best = this._bestAdjacentTile(creep, bad);
         if (best && creep.pos.getRangeTo(best) === 1) {
+          debugLine(creep.pos, best, CONFIG.COLORS.PATH, "cover");
           creep.move(creep.pos.getDirectionTo(best));
           return true;
         }
       }
     } else {
-      TaskSquad.stepToward(creep, buddy.pos, 1);
+      debugLine(creep.pos, buddy.pos, CONFIG.COLORS.PATH, "guard");
+      moveSmart(creep, buddy.pos, 1);
       return true;
     }
     return false;
-  },
-
-  // --- unified movement shim (Traveler via TaskSquad)
-  _moveSmart: function (creep, targetPos, range) {
-    if (!targetPos) return;
-    TaskSquad.stepToward(creep, (targetPos.pos || targetPos), range);
   },
 
   _inTowerDanger: function (pos) {
@@ -192,10 +316,12 @@ var CombatMelee = {
     var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){
       return _isInvaderStruct(s) && s.structureType === STRUCTURE_TOWER;
     }});
+    var danger = false;
     for (var i=0;i<towers.length;i++) {
-      if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) return true;
+      if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius) danger = true;
+      if (CONFIG.DEBUG_DRAW) debugRing(towers[i], CONFIG.COLORS.TOWER, "InvTower", CONFIG.towerAvoidRadius);
     }
-    return false;
+    return danger;
   },
 
   _bestAdjacentTile: function (creep, target) {
@@ -240,6 +366,10 @@ var CombatMelee = {
 
       if (score<bestScore) { bestScore=score; best=pos; }
     }
+
+    if (CONFIG.DEBUG_DRAW && (best.x !== creep.pos.x || best.y !== creep.pos.y)) {
+      debugRing(best, CONFIG.COLORS.PATH, "best", 0.5);
+    }
     return best;
   },
 
@@ -255,25 +385,28 @@ var CombatMelee = {
     if (!best) return null;
     var distNow = creep.pos.getRangeTo(target);
     var distThru = best.pos.getRangeTo(target);
+    if (CONFIG.DEBUG_DRAW) debugRing(best, CONFIG.COLORS.COVER, "door", 0.6);
     return distThru < distNow ? best : null;
   },
 
   _weakestIn1to2: function (creep) {
     var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 2, { filter: _isInvaderCreep });
     if (!xs.length) return null;
-    return _.min(xs, function (c){ return c.hits / c.hitsMax; });
+    return _.min(xs, function (c){ return c.hits / Math.max(1, c.hitsMax); });
   },
 
   _flee: function (creep) {
     var rally = Game.flags.MedicRally || Game.flags.Rally || TaskSquad.getAnchor(creep);
     if (rally) {
-      this._moveSmart(creep, rally.pos || rally, 1);
+      debugLine(creep.pos, rally.pos || rally, CONFIG.COLORS.FLEE, "flee");
+      moveSmart(creep, rally.pos || rally, 1);
     } else {
       var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
       if (bad) {
         var dir = creep.pos.getDirectionTo(bad);
         var zero = (dir - 1 + 8) % 8;
         var back = ((zero + 4) % 8) + 1;
+        debugSay(creep, "↩");
         creep.move(back);
       }
     }
