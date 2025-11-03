@@ -7,8 +7,8 @@ var CFG = Object.freeze({
   PATH_REUSE: 30,
   MAX_OPS: 2000,
   TOWER_REFILL_PCT: 0.80,
-  DEBUG_SAY: false,
-  DEBUG_DRAW: true,
+  DEBUG_SAY: false,  // turn off to mute creep.say
+  DEBUG_DRAW: true, // turn off to disable RoomVisual lines/text
   DRAW: {
     WD_COLOR: "#6ec1ff",
     FILL_COLOR: "#6effa1",
@@ -19,12 +19,7 @@ var CFG = Object.freeze({
     WIDTH: 0.12,
     OPACITY: 0.45,
     FONT: 0.6
-  },
-  // NEW: behavior glue
-  STICK_TTL: 8,        // ticks to keep a chosen target even if PIB gets noisy
-  PIB_MIN_HOLD: 1,     // minimal "keep-alive" reservation when others crowd you
-  PIB_ETA_PAD: 3,      // extra ticks on PIB eta so it doesn’t expire mid-walk
-  STUCK_WINDOW: 4      // ticks without moving -> consider stuck (soft handling)
+  }
 });
 
 // ============================
@@ -41,28 +36,36 @@ function go(creep, dest, range) {
   }
 
   if (creep.pos.getRangeTo(dest) > range) {
-    var forceRepath = (creep.memory.__forceRepathAt === Game.time);
-    creep.moveTo(dest, { reusePath: forceRepath ? 0 : CFG.PATH_REUSE, maxOps: CFG.MAX_OPS });
+    creep.moveTo(dest, { reusePath: CFG.PATH_REUSE, maxOps: CFG.MAX_OPS });
   }
 }
 
-function debugSay(creep, msg) { if (CFG.DEBUG_SAY) creep.say(msg, true); }
+function debugSay(creep, msg) {
+  if (CFG.DEBUG_SAY) creep.say(msg, true);
+}
 
 function debugDraw(creep, target, color, label) {
   if (!CFG.DEBUG_DRAW || !creep || !target) return;
   var room = creep.room;
   if (!room || !room.visual) return;
 
+  // Only draw if target is in same room (visuals are per-room)
   var tpos = target.pos || (target.position || null);
   if (!tpos || tpos.roomName !== room.name) return;
 
   try {
     room.visual.line(creep.pos, tpos, {
-      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
+      color: color,
+      width: CFG.DRAW.WIDTH,
+      opacity: CFG.DRAW.OPACITY,
+      lineStyle: "solid"
     });
     if (label) {
       room.visual.text(label, tpos.x, tpos.y - 0.3, {
-        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
+        color: color,
+        opacity: CFG.DRAW.OPACITY,
+        font: CFG.DRAW.FONT,
+        align: "center"
       });
     }
   } catch (e) {}
@@ -73,7 +76,10 @@ function firstSpawn(room) {
   return ss.length ? ss[0] : null;
 }
 
-function isContainerNearSource(structure) { return structure.pos.findInRange(FIND_SOURCES, 2).length > 0; }
+function isContainerNearSource(structure) {
+  // <=2 tiles counts as "source container"
+  return structure.pos.findInRange(FIND_SOURCES, 2).length > 0;
+}
 
 function nearestByRange(pos, arr) {
   var best = null, bestD = 1e9;
@@ -89,7 +95,8 @@ function harvestFromClosest(creep) {
   var srcs = creep.room.find(FIND_SOURCES_ACTIVE);
   if (!srcs.length) return ERR_NOT_FOUND;
   var best = nearestByRange(creep.pos, srcs);
-  debugSay(creep, '⛏️Src'); debugDraw(creep, best, CFG.DRAW.SRC_COLOR, "SRC");
+  debugSay(creep, '⛏️Src');
+  debugDraw(creep, best, CFG.DRAW.SRC_COLOR, "SRC");
   var rc = creep.harvest(best);
   if (rc === ERR_NOT_IN_RANGE) go(creep, best);
   return rc;
@@ -115,7 +122,10 @@ function _qrMap() {
   }
   return Memory._queenRes.map;
 }
-function _reservedFor(structId) { var map = _qrMap(); return map[structId] || 0; }
+function _reservedFor(structId) {
+  var map = _qrMap();
+  return map[structId] || 0;
+}
 
 // ============================
 // Predictive Intent Buffer (PIB)
@@ -127,6 +137,7 @@ function _pibRoot() {
   }
   return Memory._PIB;
 }
+
 function _pibRoom(roomName) {
   var root = _pibRoot();
   var rooms = root.rooms;
@@ -136,7 +147,9 @@ function _pibRoom(roomName) {
 
 function _pibSumReserved(roomName, targetId, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
-  var R = _pibRoom(roomName), byCreep = (R.fills[targetId] || {}), total = 0;
+  var R = _pibRoom(roomName);
+  var byCreep = (R.fills[targetId] || {});
+  var total = 0;
   for (var cname in byCreep) {
     if (!byCreep.hasOwnProperty(cname)) continue;
     var rec = byCreep[cname];
@@ -160,9 +173,13 @@ function _pibReserveFill(creep, target, amount, resourceType) {
 
   var dist = 0;
   try { dist = creep.pos.getRangeTo(target); } catch (e) { dist = 5; }
-  var eta = Math.max(2, (dist | 0) + 1 + CFG.PIB_ETA_PAD); // padded ETA
+  var eta = Math.max(2, (dist | 0) + 1);
 
-  R.fills[target.id][creep.name] = { res: resourceType, amount: amount | 0, untilTick: Game.time + eta };
+  R.fills[target.id][creep.name] = {
+    res: resourceType,
+    amount: amount | 0,
+    untilTick: Game.time + eta
+  };
   return amount | 0;
 }
 
@@ -182,11 +199,14 @@ function _pibReleaseFill(creep, target, resourceType) {
 // ============================
 // NEW helpers: PIB accounting per-creep
 // ============================
+
+// How much *this creep* already reserved (active)?
 function _pibMine(creep, target, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
   var roomName = (creep.room && creep.room.name) || (target.pos && target.pos.roomName);
   if (!roomName) return 0;
-  var R = _pibRoom(roomName), map = R.fills[target.id];
+  var R = _pibRoom(roomName);
+  var map = R.fills[target.id];
   if (!map) return 0;
   var rec = map[creep.name];
   if (!rec || rec.res !== resourceType) return 0;
@@ -196,12 +216,15 @@ function _pibMine(creep, target, resourceType) {
   return 0;
 }
 
+// Total reserved by others (exclude this creep)
 function _pibSumReservedExcept(roomName, targetId, resourceType, exceptName) {
   resourceType = resourceType || RESOURCE_ENERGY;
-  var R = _pibRoom(roomName), byCreep = (R.fills[targetId] || {}), total = 0;
+  var R = _pibRoom(roomName);
+  var byCreep = (R.fills[targetId] || {});
+  var total = 0;
   for (var cname in byCreep) {
     if (!byCreep.hasOwnProperty(cname)) continue;
-    if (cname === exceptName) continue;
+    if (cname === exceptName) continue; // ignore my own PIB
     var rec = byCreep[cname];
     if (!rec || rec.res !== resourceType) continue;
     if (rec.untilTick > Game.time) total += (rec.amount | 0);
@@ -211,16 +234,20 @@ function _pibSumReservedExcept(roomName, targetId, resourceType, exceptName) {
   return total;
 }
 
+// Free capacity *for this creep* (ignores my own PIB)
 function _effectiveFreeFor(creep, struct, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
+
   var freeNow = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
   var sameTickReserved = _reservedFor(struct.id) | 0;
+
   var roomName = (struct.pos && struct.pos.roomName) || (struct.room && struct.room.name);
   var pibOthers = roomName ? (_pibSumReservedExcept(roomName, struct.id, resourceType, creep.name) | 0) : 0;
+
   return Math.max(0, freeNow - sameTickReserved - pibOthers);
 }
 
-// Reserve for *me* and refresh my PIB; also keep a tiny hold if there’s raw space
+// Reserve for *me* and refresh my PIB even if others temporarily zero me out
 function reserveFillFor(creep, target, amount, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
   var map = _qrMap();
@@ -229,51 +256,41 @@ function reserveFillFor(creep, target, amount, resourceType) {
   var want = Math.max(0, Math.min(amount, freeForMe));
 
   var mine = _pibMine(creep, target, resourceType);
-  var rawFree = (target.store && target.store.getFreeCapacity(resourceType)) || 0;
-
-  if (want === 0 && mine === 0 && rawFree > 0 && CFG.PIB_MIN_HOLD > 0) {
-    // Soft-claim a sliver so our sticky doesn’t die to transient reservations
-    var hold = Math.min(amount, CFG.PIB_MIN_HOLD);
-    map[target.id] = (map[target.id] || 0) + hold;
-    _pibReserveFill(creep, target, hold, resourceType);
-    creep.memory.qTargetId = target.id;
-    return hold;
-  }
-
-  if (want > 0) {
-    map[target.id] = (map[target.id] || 0) + want;
-    _pibReserveFill(creep, target, want, resourceType);
-    creep.memory.qTargetId = target.id;
-    return want;
-  }
-
-  if (mine > 0) {
-    // Refresh my own reservation window
+  if (want === 0 && mine > 0) {
+    // keep my reservation alive while I walk
     _pibReserveFill(creep, target, mine, resourceType);
-    creep.memory.qTargetId = target.id;
-    return mine;
+  } else if (want > 0) {
+    map[target.id] = (map[target.id] || 0) + want; // same-tick guard
+    _pibReserveFill(creep, target, want, resourceType);
   }
 
-  return 0;
+  if (want > 0 || mine > 0) creep.memory.qTargetId = target.id;
+  return (want > 0) ? want : mine;
 }
 
 // ============================
-// Capacity helpers (shared selection)
+// Capacity accounting with buffers
+// (kept for general selection logic)
 // ============================
 function _effectiveFree(struct, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
+
   var freeNow = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
   var sameTickReserved = _reservedFor(struct.id) | 0;
+
   var roomName = (struct.pos && struct.pos.roomName) || (struct.room && struct.room.name);
   var pibReserved = roomName ? (_pibSumReserved(roomName, struct.id, resourceType) | 0) : 0;
+
   return Math.max(0, freeNow - sameTickReserved - pibReserved);
 }
 
 function reserveFill(creep, target, amount, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
+
   var map = _qrMap();
   var free = _effectiveFree(target, resourceType);
   var want = Math.max(0, Math.min(amount, free));
+
   if (want > 0) {
     map[target.id] = (map[target.id] || 0) + want;
     creep.memory.qTargetId = target.id;
@@ -285,17 +302,17 @@ function reserveFill(creep, target, amount, resourceType) {
 function transferTo(creep, target, res) {
   res = res || RESOURCE_ENERGY;
   var rc = creep.transfer(target, res);
+
   if (rc === ERR_NOT_IN_RANGE) { go(creep, target); return rc; }
+
   if (rc === OK) {
     _pibReleaseFill(creep, target, res);
   } else if (rc === ERR_FULL) {
     _pibReleaseFill(creep, target, res);
     creep.memory.qTargetId = null;
-    creep.memory.qStickUntil = 0;
   } else if (rc !== OK && rc !== ERR_TIRED && rc !== ERR_BUSY) {
     _pibReleaseFill(creep, target, res);
     creep.memory.qTargetId = null;
-    creep.memory.qStickUntil = 0;
   }
   return rc;
 }
@@ -410,23 +427,6 @@ function chooseWithdrawTarget(creep, cache) {
 }
 
 // ============================
-// Anti-stuck tracker (soft)
-// ============================
-function _updateStuck(creep, target) {
-  var lp = creep.memory.qLastPos;
-  var same = lp && lp.x === creep.pos.x && lp.y === creep.pos.y && lp.roomName === creep.pos.roomName;
-  if (same && target && creep.pos.getRangeTo(target) > 1) {
-    creep.memory.qStuckTicks = (creep.memory.qStuckTicks | 0) + 1;
-  } else {
-    creep.memory.qStuckTicks = 0;
-  }
-  creep.memory.qLastPos = { x: creep.pos.x, y: creep.pos.y, roomName: creep.pos.roomName };
-  if ((creep.memory.qStuckTicks | 0) >= CFG.STUCK_WINDOW) {
-    creep.memory.__forceRepathAt = Game.time; // one-tick forced repath
-  }
-}
-
-// ============================
 // Main
 // ============================
 var TaskQueen = {
@@ -437,41 +437,32 @@ var TaskQueen = {
     var carrying = carryAmt > 0;
 
     if (carrying) {
-      // ---------- Sticky target first ----------
+      // ---------- Sticky target first (fixed: ignore my own PIB, refresh it) ----------
       if (creep.memory.qTargetId) {
         var sticky = Game.getObjectById(creep.memory.qTargetId);
         if (sticky) {
-          var rawFree = (sticky.store && sticky.store.getFreeCapacity(RESOURCE_ENERGY)) || 0;
           var freeForMe = _effectiveFreeFor(creep, sticky, RESOURCE_ENERGY);
-          var iReserved = _pibMine(creep, sticky, RESOURCE_ENERGY) > 0;
-          var hasTTL = (creep.memory.qStickUntil | 0) > Game.time;
+          var iAlreadyReserved = _pibMine(creep, sticky, RESOURCE_ENERGY) > 0;
 
-          // Stay on target if it’s physically not full OR I have a live hold OR within stick TTL
-          if (rawFree > 0 || iReserved || hasTTL) {
-            reserveFillFor(creep, sticky, carryAmt, RESOURCE_ENERGY);
+          if (freeForMe > 0 || iAlreadyReserved) {
+            reserveFillFor(creep, sticky, carryAmt, RESOURCE_ENERGY); // refresh PIB each tick
             debugSay(creep, '→ STICK');
             debugDraw(creep, sticky, CFG.DRAW.STICK_COLOR, "STICK");
-            _updateStuck(creep, sticky);
             transferTo(creep, sticky);
             return;
           } else {
             creep.memory.qTargetId = null;
-            creep.memory.qStickUntil = 0;
           }
         } else {
           creep.memory.qTargetId = null;
-          creep.memory.qStickUntil = 0;
         }
       }
 
       // ---------- Pick a new fill target ----------
       var target = chooseFillTarget(creep, cache);
       if (target) {
-        // Set stick window immediately so we don’t bounce if PIB is noisy this tick
-        creep.memory.qTargetId = target.id;
-        creep.memory.qStickUntil = Game.time + CFG.STICK_TTL;
-
         if (reserveFillFor(creep, target, carryAmt, RESOURCE_ENERGY) > 0) {
+          // Label + color by type
           var st = target.structureType;
           if (st === STRUCTURE_EXTENSION) { debugSay(creep, '→ EXT'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "EXT"); }
           else if (st === STRUCTURE_SPAWN) { debugSay(creep, '→ SPN'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "SPN"); }
@@ -481,21 +472,15 @@ var TaskQueen = {
           else if (st === STRUCTURE_STORAGE)  { debugSay(creep, '→ STO'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "STO"); }
           else { debugSay(creep, '→ FILL'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "FILL"); }
 
-          _updateStuck(creep, target);
           transferTo(creep, target);
           return;
         }
-        // Even if reservation returned 0 this tick, stick TTL keeps us pointed there.
-        debugSay(creep, '→ STICK?');
-        debugDraw(creep, target, CFG.DRAW.STICK_COLOR, "STICK?");
-        _updateStuck(creep, target);
-        go(creep, target, 1);
-        return;
       }
 
       // ---------- Idle near anchor ----------
       var anchor = cache.spawn || room.controller || creep.pos;
-      debugSay(creep, 'IDLE'); debugDraw(creep, (anchor.pos || anchor), CFG.DRAW.IDLE_COLOR, "IDLE");
+      debugSay(creep, 'IDLE');
+      debugDraw(creep, (anchor.pos || anchor), CFG.DRAW.IDLE_COLOR, "IDLE");
       go(creep, (anchor.pos || anchor), 2);
       return;
     }
@@ -504,9 +489,12 @@ var TaskQueen = {
     var withdrawTarget = chooseWithdrawTarget(creep, cache);
     if (withdrawTarget) {
       if (withdrawTarget.resourceType === RESOURCE_ENERGY) {
-        debugSay(creep, '↘️Drop'); debugDraw(creep, withdrawTarget, CFG.DRAW.DROP_COLOR, "DROP");
+        // Dropped resource
+        debugSay(creep, '↘️Drop');
+        debugDraw(creep, withdrawTarget, CFG.DRAW.DROP_COLOR, "DROP");
         if (creep.pickup(withdrawTarget) === ERR_NOT_IN_RANGE) go(creep, withdrawTarget);
       } else {
+        // Structure (storage/container)
         if (withdrawTarget.structureType === STRUCTURE_STORAGE) { debugSay(creep, '↘️Sto'); }
         else if (withdrawTarget.structureType === STRUCTURE_CONTAINER) { debugSay(creep, '↘️Con'); }
         else { debugSay(creep, '↘️Wd'); }
