@@ -10,6 +10,12 @@
  *       other creeps are already carrying toward a target
  *     - Lightweight per-room caches recomputed once per tick
  *
+ * WITHDRAWAL PRIORITY (updated)
+ *   1) Dropped energy (closest)
+ *   2) Storage (if it has energy)
+ *   3) Side containers (NOT near sources)
+ *   4) Source “seat” containers (adjacent to sources)  ← last resort
+ *
  * MEMORY CONTRACT (creep)
  *   creep.memory.qTargetId        -> sticky fill target id (structure)
  *   creep.memory.qLastWithdrawId  -> last structure id we withdrew from
@@ -22,6 +28,7 @@
  *
  * STYLE
  *   ES5-safe (no const/let/arrow). Comments explain each step and intent.
+ *   Movement prefers BeeToolbox.BeeTravel if present (often wraps Traveler).
  */
 
 var BeeToolbox = require('BeeToolbox');
@@ -128,12 +135,13 @@ function firstSpawn(room) {
 
 /**
  * isContainerNearSource(structure)
- *   A container within ≤2 tiles of a source is treated as “source container”.
- *   Queen prefers “side containers” (not near sources) for withdraws.
+ *   A container within ≤1 tile of a source is treated as “source/seat container”.
+ *   Queen prefers “side containers” (not near sources) for withdraws and only
+ *   touches these seat containers as a last resort to avoid starving miners.
  */
 function isContainerNearSource(structure) {
-  // <=2 tiles counts as "source container"
-  return structure.pos.findInRange(FIND_SOURCES, 2).length > 0;
+  // ≤1 tile counts as a “seat” container on the source
+  return structure.pos.findInRange(FIND_SOURCES, 1).length > 0;
 }
 
 /**
@@ -384,6 +392,7 @@ if (!global.__QUEEN) global.__QUEEN = { tick: -1, byRoom: {} };
  *     - terminalNeed/storageNeed: terminal/storage that can accept more energy
  *     - storageHasEnergy: storage that currently *has* energy for withdraw
  *     - sideContainers: non-source containers with energy (preferred withdraw)
+ *     - sourceContainers: “seat” containers adjacent (≤1) to sources (LAST RESORT)
  */
 function _qCache(room) {
   var G = global.__QUEEN;
@@ -441,6 +450,15 @@ function _qCache(room) {
     }
   });
 
+  // “Seat” containers adjacent to sources (LAST RESORT to avoid starving miners)
+  var sourceContainers = room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER &&
+             isContainerNearSource(s) &&
+             s.store && (s.store.getUsedCapacity(RESOURCE_ENERGY) | 0) > 0;
+    }
+  });
+
   R = {
     spawn: sp,
     linkNearSpawn: linkNearSpawn,
@@ -449,7 +467,8 @@ function _qCache(room) {
     terminalNeed: terminalNeed,
     storageNeed: storageNeed,
     storageHasEnergy: storageHasEnergy,
-    sideContainers: sideContainers
+    sideContainers: sideContainers,
+    sourceContainers: sourceContainers
   };
   G.byRoom[room.name] = R;
   return R;
@@ -498,25 +517,35 @@ function chooseFillTarget(creep, cache) {
 
 /**
  * chooseWithdrawTarget(creep, cache)
- *   Withdrawal priority:
- *     1) Storage with energy (most stable / safe)
- *     2) Nearest “side container” (non-source container) with energy
- *     3) Nearest dropped energy on the ground
+ *   Withdrawal priority (UPDATED):
+ *     1) Nearest dropped energy on the ground
+ *     2) Storage with energy (most stable / safe)
+ *     3) Nearest “side container” (non-source container) with energy
+ *     4) LAST: Nearest source “seat” container (adjacent to source)
  *   If none exist, the Queen falls through to “no action” (this file
  *   doesn’t contain harvest logic).
  */
 function chooseWithdrawTarget(creep, cache) {
-  if (cache.storageHasEnergy) return cache.storageHasEnergy;
-
-  if (cache.sideContainers.length) {
-    var side = nearestByRange(creep.pos, cache.sideContainers);
-    if (side) return side;
-  }
-
+  // 1) Dropped energy first (fast cleanup & least path contention)
   var drop = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
     filter: function (r) { return r.resourceType === RESOURCE_ENERGY; }
   });
   if (drop) return drop;
+
+  // 2) Storage (stable, safe)
+  if (cache.storageHasEnergy) return cache.storageHasEnergy;
+
+  // 3) Side container (not near sources)
+  if (cache.sideContainers && cache.sideContainers.length) {
+    var side = nearestByRange(creep.pos, cache.sideContainers);
+    if (side) return side;
+  }
+
+  // 4) LAST: Source seat container (adjacent to a source; avoid starving miners)
+  if (cache.sourceContainers && cache.sourceContainers.length) {
+    var seat = nearestByRange(creep.pos, cache.sourceContainers);
+    if (seat) return seat;
+  }
 
   return null; // fall through to harvest (not implemented here)
 }
@@ -533,11 +562,11 @@ function chooseWithdrawTarget(creep, cache) {
  *        A2) Else choose a new fill target (priority chain)
  *        A3) If none available, idle near spawn/controller
  *     B) If not carrying:
- *        B1) Choose best withdrawal option (storage -> side container -> drop)
- *        B2) Move/pickup/withdraw accordingly
+ *        B1) Choose best withdrawal option (drop -> storage -> side -> source-seat)
+ *        B2) Move/pickup/withdraw accordingly (with clear debug crumbs)
  *
  *   Debug:
- *     - debugSay: short markers (“→ EXT”, “↘️Sto”, “IDLE”)
+ *     - debugSay: short markers (“→ EXT”, “↘️Sto”, “↘️SrcBox”, “IDLE”)
  *     - debugDraw: line + small label to target of action
  */
 var TaskQueen = {
@@ -604,17 +633,32 @@ var TaskQueen = {
         if (creep.pickup(withdrawTarget) === ERR_NOT_IN_RANGE) go(creep, withdrawTarget);
       } else {
         // B2) Structure path: withdraw from storage/container/etc.
-        if (withdrawTarget.structureType === STRUCTURE_STORAGE) { debugSay(creep, '↘️Sto'); }
-        else if (withdrawTarget.structureType === STRUCTURE_CONTAINER) { debugSay(creep, '↘️Con'); }
-        else { debugSay(creep, '↘️Wd'); }
-        debugDraw(creep, withdrawTarget, CFG.DRAW.WD_COLOR, "WD");
-        withdrawFrom(creep, withdrawTarget);
+        if (withdrawTarget.structureType === STRUCTURE_STORAGE) {
+          debugSay(creep, '↘️Sto');
+          debugDraw(creep, withdrawTarget, CFG.DRAW.WD_COLOR, "WD");
+          withdrawFrom(creep, withdrawTarget);
+        } else if (withdrawTarget.structureType === STRUCTURE_CONTAINER) {
+          // Differentiate side vs source seat container for visibility
+          if (isContainerNearSource(withdrawTarget)) {
+            debugSay(creep, '↘️SrcBox');
+            debugDraw(creep, withdrawTarget, CFG.DRAW.WD_COLOR, "SRC-BOX");
+          } else {
+            debugSay(creep, '↘️Con');
+            debugDraw(creep, withdrawTarget, CFG.DRAW.WD_COLOR, "WD");
+          }
+          withdrawFrom(creep, withdrawTarget);
+        } else {
+          // Fallback label for other withdraw-capable structures (if any)
+          debugSay(creep, '↘️Wd');
+          debugDraw(creep, withdrawTarget, CFG.DRAW.WD_COLOR, "WD");
+          withdrawFrom(creep, withdrawTarget);
+        }
       }
       return;
     }
 
     // No withdraw option (this role doesn’t harvest): do nothing this tick.
-    // (You can optionally add a fail-safe like stepping toward storage/spawn.)
+    // (Optional: step toward storage/spawn for faster future acquisition.)
   }
 };
 
