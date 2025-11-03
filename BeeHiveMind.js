@@ -1,44 +1,60 @@
 'use strict';
 
 /**
- * BeeHiveMind – tick orchestrator
- * Readability-first refactor: same behavior, clearer structure & comments.
- *
- * Notes:
- * - Uses ES6 const/let and for..of for clarity.
- * - Keeps per-tick caching to avoid repeated scans.
- * - Spawning still uses your spawn.logic entry points.
+ * BeeHiveMind – tick orchestrator (with spawn queue + debug breadcrumbs)
+ * Readability-first refactor: same strategy, clearer structure & comments.
  */
 
 // ----------------------------- Dependencies -----------------------------
-const CoreLogger   = require('core.logger');
-const { LOG_LEVEL } = CoreLogger;
-const hiveLog      = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
+const CoreLogger     = require('core.logger');
+const { LOG_LEVEL }  = CoreLogger;
+const hiveLog        = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
-const spawnLogic   = require('spawn.logic');
+const spawnLogic     = require('spawn.logic');
 const roleWorker_Bee = require('role.Worker_Bee');
-const TaskBuilder  = require('Task.Builder');       // (kept; not directly used here but likely used elsewhere)
-const RoomPlanner  = require('Planner.Room');
-const RoadPlanner  = require('Planner.Road');
-const TradeEnergy  = require('Trade.Energy');
-const TaskLuna     = require('Task.Luna');
+const TaskBuilder    = require('Task.Builder');       // kept for your ecosystem
+const RoomPlanner    = require('Planner.Room');
+const RoadPlanner    = require('Planner.Road');
+const TradeEnergy    = require('Trade.Energy');
+const TaskLuna       = require('Task.Luna');
 
 // Map role -> run fn (extend as you add roles)
-const creepRoles = {
-  Worker_Bee: roleWorker_Bee.run
-};
+const creepRoles = { Worker_Bee: roleWorker_Bee.run };
 
 // --------------------------- Tunables & Constants ------------------------
-const DYING_SOON_TTL   = 60;   // Skip creeps about to expire when counting quotas
-const INVADER_LOCK_TTL = 1500; // Mem lock suppression window for remotes
+const DYING_SOON_TTL        = 60;     // Skip creeps about to expire when counting quotas
+const INVADER_LOCK_TTL      = 1500;   // Mem lock suppression window for remotes
+
+// --- Spawn Queue knobs ---
+const QUEUE_RETRY_COOLDOWN  = 5;      // ticks to wait before retrying a failed queue item
+const QUEUE_HARD_LIMIT      = 20;     // per-room queue sanity cap
+
+// --- Debug knobs ---
+const DEBUG_SPAWN_QUEUE     = true;   // flip to false to silence most debug
+const DBG_EVERY             = 5;      // periodic summaries every N ticks
+
+// Role priorities (higher spawns first; tweak to taste)
+const ROLE_PRIORITY = {
+  baseharvest: 100,
+  courier:      95,
+  queen:        90,
+  upgrader:     80,
+  builder:      75,
+  luna:         70,
+  repair:       60,
+  Claimer:      55,
+  scout:        40,
+  Trucker:      35,
+  Dismantler:   30,
+  CombatArcher: 25,
+  CombatMelee:  25,
+  CombatMedic:  25
+};
 
 // --------------------------- Global Tick Cache ---------------------------
 if (!global.__BHM) global.__BHM = {};
 
-/**
- * Prepare and return the per-tick cache object.
- * Idempotent: cheap to call; exits early if already prepared this tick.
- */
+/** Prepare and return the per-tick cache (idempotent). */
 function prepareTickCaches() {
   const C = global.__BHM;
   const now = Game.time;
@@ -78,17 +94,10 @@ function indexByName(rooms) {
   return map;
 }
 
-/** Return all spawns as an array (no filtering). */
-function getAllSpawns() {
-  return Object.values(Game.spawns);
-}
+/** Return all spawns as an array. */
+function getAllSpawns() { return Object.values(Game.spawns); }
 
-/**
- * Scan creeps once: collect list, roleCounts (by memory.task),
- * and special luna counts grouped by "home".
- * - Aliases old 'remoteharvest' task to 'luna' (persists fix in memory).
- * - Skips creeps that will die very soon to avoid overcounting.
- */
+/** Scan creeps once for counts (task-based) and per-home Luna counts. */
 function buildCreepAndRoleCounts() {
   const creeps           = [];
   const roleCounts       = Object.create(null);
@@ -97,7 +106,7 @@ function buildCreepAndRoleCounts() {
   for (const c of Object.values(Game.creeps)) {
     creeps.push(c);
 
-    // Avoid counting expiring creeps against quotas; let new wave replace them
+    // Avoid counting expiring creeps against quotas
     const ttl = c.ticksToLive;
     if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
 
@@ -107,12 +116,11 @@ function buildCreepAndRoleCounts() {
       task = 'luna';
       c.memory.task = 'luna';
     }
-
     if (!task) continue;
+
     roleCounts[task] = (roleCounts[task] || 0) + 1;
 
     if (task === 'luna') {
-      // Resolve home preferencing: memory.home -> memory._home -> current room
       let home = (c.memory && c.memory.home) || null;
       if (!home && c.memory && c.memory._home) home = c.memory._home;
       if (!home && c.room) home = c.room.name;
@@ -123,292 +131,364 @@ function buildCreepAndRoleCounts() {
   return { creeps, roleCounts, lunaCountsByHome };
 }
 
-/**
- * Count my construction sites overall and by room.
- */
+/** Count my construction sites overall and by room. */
 function computeConstructionSiteCounts() {
   const byRoom = Object.create(null);
   let total = 0;
-
   for (const site of Object.values(Game.constructionSites)) {
-    if (!site || !site.my) continue; // Screeps exposes only your sites, but keep defensive check
+    if (!site || !site.my) continue;
     total += 1;
     const rn = site.pos && site.pos.roomName;
     if (rn) byRoom[rn] = (byRoom[rn] || 0) + 1;
   }
-
   return { byRoom, total };
 }
 
-/**
- * For each owned home room, fetch its active remotes via RoadPlanner
- * (once per tick, centralized here).
- */
+/** For each owned room, fetch its active remotes via RoadPlanner (once per tick). */
 function computeRemotesByHome(ownedRooms) {
   const out = Object.create(null);
   const hasHelper = RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function';
   if (!hasHelper) return out;
-
-  for (const home of ownedRooms) {
-    out[home.name] = RoadPlanner.getActiveRemoteRooms(home) || [];
-  }
+  for (const home of ownedRooms) out[home.name] = RoadPlanner.getActiveRemoteRooms(home) || [];
   return out;
+}
+
+// ------------------------------ Debug utils ------------------------------
+function tickEvery(n) { return Game.time % n === 0; }
+function dlog() {
+  if (!DEBUG_SPAWN_QUEUE) return;
+  try { hiveLog.debug.apply(hiveLog, arguments); } catch (e) { /* noop */ }
+}
+function fmt(room) { return room && room.name ? room.name : String(room); }
+function energyStatus(room) {
+  const a = room.energyAvailable | 0;
+  const c = room.energyCapacityAvailable | 0;
+  return a + '/' + c;
+}
+
+// ------------------------------ Spawn Queue ------------------------------
+// Memory helpers
+function ensureRoomQueue(roomName) {
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  if (!Array.isArray(Memory.rooms[roomName].spawnQueue)) Memory.rooms[roomName].spawnQueue = [];
+  return Memory.rooms[roomName].spawnQueue;
+}
+function queuedCount(roomName, role) {
+  const q = ensureRoomQueue(roomName);
+  let n = 0; for (let i = 0; i < q.length; i++) if (q[i] && q[i].role === role) n++;
+  return n;
+}
+function enqueue(roomName, role, opts) {
+  const q = ensureRoomQueue(roomName);
+  if (q.length >= QUEUE_HARD_LIMIT) {
+    dlog('🐝 [Queue]', roomName, 'queue full (', q.length, '/', QUEUE_HARD_LIMIT, '), skip enqueue of', role);
+    return false;
+  }
+  const item = {
+    role,
+    home: roomName,
+    created: Game.time,
+    priority: ROLE_PRIORITY[role] || 0,
+    retryAt: 0,
+    ...(opts || {})   // hints: body tier, targets, flags, etc.
+  };
+  q.push(item);
+  dlog('➕ [Queue]', roomName, 'enqueued', role, '(prio', item.priority + ')');
+  return true;
+}
+function pruneOverfilledQueue(roomName, quotas, C) {
+  const q = ensureRoomQueue(roomName);
+  const before = q.length;
+
+  // Highest priority first, then oldest
+  q.sort((a, b) => (b.priority - a.priority) || (a.created - b.created));
+
+  // Allowed remaining per role = quota - active
+  const remaining = {};
+  for (const role of Object.keys(quotas)) {
+    const active = (role === 'luna')
+      ? (C.lunaCountsByHome && C.lunaCountsByHome[roomName] | 0)
+      : (C.roleCounts[role] | 0);
+    remaining[role] = Math.max(0, (quotas[role] | 0) - active);
+  }
+
+  const kept = [];
+  const used = Object.create(null);
+  for (let i = 0; i < q.length; i++) {
+    const it = q[i];
+    const left = remaining[it.role] | 0;
+    const usedSoFar = used[it.role] | 0;
+    if (usedSoFar < left) { kept.push(it); used[it.role] = usedSoFar + 1; }
+  }
+  Memory.rooms[roomName].spawnQueue = kept;
+
+  const dropped = before - kept.length;
+  if (dropped > 0 || tickEvery(DBG_EVERY)) {
+    dlog('🧹 [Queue]', roomName, 'prune:',
+      'before=', before, 'kept=', kept.length, 'dropped=', dropped,
+      'remaining=', JSON.stringify(remaining));
+  }
+}
+
+// Signals
+function getBuilderNeed(C, room) {
+  if (!room) return 0;
+  const local = C.roomSiteCounts[room.name] || 0;
+  let remote = 0;
+  const remotes = C.remotesByHome[room.name] || [];
+  for (const rn of remotes) remote += (C.roomSiteCounts[rn] || 0);
+  const need = (local + remote) > 0 ? 1 : 0;
+  if (tickEvery(DBG_EVERY)) dlog('🧱 [Signal] builderNeed', fmt(room), 'local=', local, 'remote=', remote, '->', need);
+  return need;
+}
+function determineLunaQuota(C, room) {
+  if (!room) return 0;
+  const remotes = C.remotesByHome[room.name] || [];
+  if (!remotes.length) return 0;
+
+  const remoteSet = Object.create(null);
+  for (const rn of remotes) remoteSet[rn] = true;
+
+  const roomsMem  = Memory.rooms || {};
+  const perSource = (TaskLuna && TaskLuna.MAX_LUNA_PER_SOURCE) || 1;
+
+  let totalSources = 0;
+  for (const remoteName of remotes) {
+    const mem = roomsMem[remoteName] || {};
+    if (mem.hostile) continue;
+    if (mem._invaderLock && mem._invaderLock.locked) {
+      const lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+      if (lockTick == null || (Game.time - lockTick) <= INVADER_LOCK_TTL) continue;
+    }
+    let srcCount = 0;
+    const live = Game.rooms[remoteName];
+    if (live) {
+      const found = live.find(FIND_SOURCES);
+      srcCount = found ? found.length : 0;
+    }
+    if (srcCount === 0 && mem.sources) {
+      for (const sid in mem.sources) if (Object.prototype.hasOwnProperty.call(mem.sources, sid)) srcCount++;
+    }
+    if (srcCount === 0 && mem.intel && typeof mem.intel.sources === 'number') {
+      srcCount = mem.intel.sources | 0;
+    }
+    totalSources += srcCount;
+  }
+  if (totalSources <= 0 && remotes.length > 0) totalSources = remotes.length;
+
+  // Never below current active assignments
+  let active = 0;
+  const assignments = Memory.remoteAssignments || {};
+  for (const aid in assignments) {
+    if (!Object.prototype.hasOwnProperty.call(assignments, aid)) continue;
+    const entry = assignments[aid]; if (!entry) continue;
+    const rName = entry.roomName || entry.room;
+    if (!rName || !remoteSet[rName]) continue;
+    let count = entry.count || 0;
+    if (!count && entry.owner) count = 1;
+    if (count > 0) active += count;
+  }
+
+  const desired = Math.max(active, totalSources * perSource);
+  if (tickEvery(DBG_EVERY)) dlog('🌙 [Signal] lunaQuota', fmt(room), 'remotes=', remotes.length, 'sources=', totalSources, 'active=', active, '->', desired);
+  return desired;
+}
+
+// Per-room quota policy (tweak here to change strategy)
+function computeRoomQuotas(C, room) {
+  const quotas = {
+    baseharvest:  2,
+    courier:      1,
+    queen:        1,
+    upgrader:     2,
+    builder:      getBuilderNeed(C, room),
+    scout:        1,
+    // Switch to determineLunaQuota(C, room) when you're ready:
+    luna:         4, // determineLunaQuota(C, room),
+    repair:       0,
+    CombatArcher: 0,
+    CombatMelee:  0,
+    CombatMedic:  0,
+    Dismantler:   0,
+    Trucker:      0,
+    Claimer:      1
+  };
+  if (tickEvery(DBG_EVERY)) dlog('🎯 [Quotas]', fmt(room), JSON.stringify(quotas));
+  return quotas;
+}
+
+// Fill queue with deficits (active + queued < quota)
+function fillQueueForRoom(C, room) {
+  const quotas  = computeRoomQuotas(C, room);
+  const roomName = room.name;
+
+  // Optional: enable dynamic Luna
+  // quotas.luna = determineLunaQuota(C, room);
+
+  // Reconcile/drop surplus first
+  pruneOverfilledQueue(roomName, quotas, C);
+
+  for (const role of Object.keys(quotas)) {
+    const limit   = quotas[role] | 0;
+    const active  = (role === 'luna')
+      ? (C.lunaCountsByHome && C.lunaCountsByHome[roomName] | 0)
+      : (C.roleCounts[role] | 0);
+    const queued  = queuedCount(roomName, role);
+    const deficit = Math.max(0, limit - active - queued);
+
+    if (deficit > 0 && tickEvery(DBG_EVERY)) {
+      dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit, 'active=', active, 'queued=', queued, 'deficit=', deficit);
+    }
+    for (let i = 0; i < deficit; i++) enqueue(roomName, role);
+  }
+}
+
+// Pull one item for this spawn and attempt to spawn it
+function dequeueAndSpawn(spawner) {
+  if (!spawner || spawner.spawning) return false;
+  const room = spawner.room;
+  const roomName = room.name;
+  const q = ensureRoomQueue(roomName);
+  if (!q.length) {
+    if (tickEvery(DBG_EVERY)) dlog('🕳️ [Queue]', roomName, 'empty (energy', energyStatus(room) + ')');
+    return false;
+  }
+
+  // Highest priority, then oldest; skip items in cooldown
+  q.sort((a, b) => (b.priority - a.priority) || (a.created - b.created));
+
+  for (let i = 0; i < q.length; i++) {
+    const item = q[i];
+    if (!item || (item.retryAt && Game.time < item.retryAt)) continue;
+
+    dlog('🎬 [SpawnTry]', roomName, 'role=', item.role, 'prio=', item.priority, 'age=', (Game.time - item.created),
+         'energy=', energyStatus(room));
+
+    const spawnResource =
+      (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
+        ? spawnLogic.Calculate_Spawn_Resource(spawner)
+        : null;
+
+    const ok =
+      (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function')
+        ? spawnLogic.Spawn_Worker_Bee(spawner, item.role, spawnResource, item) // pass item as context
+        : false;
+
+    if (ok) {
+      dlog('✅ [SpawnOK]', roomName, 'spawned', item.role, 'at', spawner.name);
+      q.splice(i, 1);    // success: remove from queue
+      return true;
+    } else {
+      item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN; // backoff
+      dlog('⏳ [SpawnWait]', roomName, item.role, 'backoff to', item.retryAt, '(energy', energyStatus(room) + ')');
+      return false;      // 1 attempt per spawn per tick
+    }
+  }
+
+  // Nothing eligible this tick
+  if (tickEvery(DBG_EVERY)) dlog('⏸️ [Queue]', roomName, 'no eligible items (cooldowns active)');
+  return false;
 }
 
 // ------------------------------ Main Module ------------------------------
 const BeeHiveMind = {
-  /**
-   * Top-level tick entrypoint.
-   * Order: init memory -> prep caches -> per-room -> per-creep -> spawn -> trade.
-   */
+  /** Top-level tick entrypoint. */
   run() {
     BeeHiveMind.initializeMemory();
 
     const C = prepareTickCaches();
 
-    // 1) Per-room planning (keep light; heavy .find loops belong inside planners)
-    for (const room of C.roomsOwned) {
-      BeeHiveMind.manageRoom(room, C);
-    }
+    // 1) Per-room planning
+    for (const room of C.roomsOwned) BeeHiveMind.manageRoom(room, C);
 
     // 2) Per-creep behavior
     BeeHiveMind.runCreeps(C);
 
-    // 3) Spawning (one pass over spawns using cached counts/intel)
+    // 3) Spawning (queue-based)
     BeeHiveMind.manageSpawns(C);
 
-    // 4) Market / energy trade (global decisions)
+    // 4) Trading
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
-      // Example gate: run every 3 ticks to reduce churn
       // if (Game.time % 3 === 0) TradeEnergy.runAll();
       TradeEnergy.runAll();
     }
   },
 
-  /**
-   * Room loop – call site/road planners. Keep this lean per tick.
-   */
+  /** Room loop – keep lean. */
   manageRoom(room, C) {
     if (!room) return;
 
-    if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
-      RoomPlanner.ensureSites(room);
-    }
-    if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
-      RoadPlanner.ensureRemoteRoads(room);
-    }
-
-    // Add light per-room logic here if needed (avoid repeated room-wide scans)
-    void C; // (explicitly mark as used if you add logic later)
+    if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') RoomPlanner.ensureSites(room);
+    if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') RoadPlanner.ensureRemoteRoads(room);
+    void C;
   },
 
-  /**
-   * Creep loop – ensure tasks, then dispatch by role with safe fallback.
-   */
+  /** Creep loop – dispatch by role with safe fallback. */
   runCreeps(C) {
     for (const creep of C.creeps) {
-      BeeHiveMind.assignTask(creep); // idempotent if already set
-
+      BeeHiveMind.assignTask(creep);
       const roleName = (creep.memory && creep.memory.role) || 'Worker_Bee';
       let roleFn = creepRoles[roleName];
       if (typeof roleFn !== 'function') roleFn = roleWorker_Bee.run;
-
-      try {
-        roleFn(creep);
-      } catch (e) {
-        hiveLog.debug('⚠️ Role error for', (creep.name || 'unknown'), '(' + roleName + '):', e);
-      }
+      try { roleFn(creep); }
+      catch (e) { hiveLog.debug('⚠️ Role error for', (creep.name || 'unknown'), '(' + roleName + '):', e); }
     }
   },
 
-  /**
-   * Assign default task from role if missing (simple, non-invasive).
-   */
+  /** Assign default task from role if missing. */
   assignTask(creep) {
     if (!creep || (creep.memory && creep.memory.task)) return;
-
     const role = creep.memory && creep.memory.role;
     if (role === 'Queen')        creep.memory.task = 'queen';
     else if (role === 'Scout')   creep.memory.task = 'scout';
     else if (role === 'repair')  creep.memory.task = 'repair';
-    // else: leave undefined, spawn logic will decide what to create next
   },
 
   /**
-   * Spawn manager – once per spawn, per tick.
-   * - Maintains squads first (single-spawn responsibility prevents double-spawn).
-   * - Fills worker task quotas using cached counts and remote intel.
+   * Queue-based spawn manager.
+   * - Builds queues per room from quota deficits.
+   * - First available spawn handles squads once per tick.
+   * - Each spawn dequeues at most one item and attempts to spawn it.
    */
   manageSpawns(C) {
-    // Local helpers (read-only; pure) --------------------------------------
+    if (!C || !Array.isArray(C.spawns) || !Array.isArray(C.roomsOwned)) return;
 
-    /** Builder need: returns 1 if any local/remote sites exist, else 0. */
-    const getBuilderNeed = (room) => {
-      if (!room) return 0;
-      const local = C.roomSiteCounts[room.name] || 0;
-      let remote = 0;
-      const remotes = C.remotesByHome[room.name] || [];
-      for (const rn of remotes) remote += (C.roomSiteCounts[rn] || 0);
-      return (local + remote) > 0 ? 1 : 0;
-    };
+    // 0) Build/refresh queues per owned room (only for rooms with a spawn)
+    for (const room of C.roomsOwned) {
+      if (!room.find(FIND_MY_SPAWNS).length) continue;
+      ensureRoomQueue(room.name);
+      fillQueueForRoom(C, room);
+    }
 
-    /**
-     * Determine desired # of Luna (remote harvesters) for a given home room.
-     * - Counts sources in remotes (live room intel, memory.sources, or mem.intel.sources).
-     * - Respects hostile/locked rooms.
-     * - Ensures we never downscale below current active assignments.
-     */
-    const determineLunaQuota = (room) => {
-      if (!room) return 0;
+    // 1) Squad maintenance — only the first available spawn should attempt it
+    let squadHandled = false;
 
-      const remotes = C.remotesByHome[room.name] || [];
-      if (!remotes.length) return 0;
-
-      // Set of remote room names for quick membership checks
-      const remoteSet = Object.create(null);
-      for (const rn of remotes) remoteSet[rn] = true;
-
-      const roomsMem  = Memory.rooms || {};
-      const perSource = (TaskLuna && TaskLuna.MAX_LUNA_PER_SOURCE) || 1;
-
-      let totalSources = 0;
-
-      for (const remoteName of remotes) {
-        const mem = roomsMem[remoteName] || {};
-
-        // Skip hostile/locked remotes
-        if (mem.hostile) continue;
-        if (mem._invaderLock && mem._invaderLock.locked) {
-          const lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
-          if (lockTick == null || (Game.time - lockTick) <= INVADER_LOCK_TTL) continue;
-        }
-
-        // Prefer live intel when visible
-        let srcCount = 0;
-        const live = Game.rooms[remoteName];
-        if (live) {
-          const found = live.find(FIND_SOURCES);
-          srcCount = found ? found.length : 0;
-        }
-
-        // Fall back to coarse memory intel
-        if (srcCount === 0 && mem.sources) {
-          for (const _sid in mem.sources) {
-            if (Object.prototype.hasOwnProperty.call(mem.sources, _sid)) srcCount += 1;
-          }
-        }
-        if (srcCount === 0 && mem.intel && typeof mem.intel.sources === 'number') {
-          srcCount = mem.intel.sources | 0; // safe here; value already numeric
-        }
-
-        totalSources += srcCount;
-      }
-
-      // As a last resort, assume 1 source per remote
-      if (totalSources <= 0 && remotes.length > 0) totalSources = remotes.length;
-
-      // Never scale under active assignments
-      let desired = totalSources * perSource;
-      let active = 0;
-
-      const assignments = Memory.remoteAssignments || {};
-      for (const aid in assignments) {
-        if (!Object.prototype.hasOwnProperty.call(assignments, aid)) continue;
-        const entry = assignments[aid];
-        if (!entry) continue;
-        const rName = entry.roomName || entry.room;
-        if (!rName || !remoteSet[rName]) continue;
-        let count = entry.count || 0;
-        if (!count && entry.owner) count = 1; // legacy truthy owner means “1”
-        if (count > 0) active += count;
-      }
-
-      if (active > desired) desired = active;
-      return desired;
-    };
-
-    // Clone role counts so we can mutate as we schedule spawns
-    const roleCounts       = Object.assign({}, C.roleCounts);
-    const lunaCountsByHome = Object.assign({}, C.lunaCountsByHome || {});
-
-    // Iterate spawns once each
+    // 2) Each spawn: try squad (once), then dequeue one worker
     for (const spawner of C.spawns) {
       if (!spawner || spawner.spawning) continue;
 
-      // 1) Squad maintenance (only first spawn should do it to avoid double-spawns)
-      if (spawnLogic && typeof spawnLogic.Spawn_Squad === 'function') {
-        // Try Alpha; if it spawned, skip to next spawn
-        if (spawnLogic.Spawn_Squad(spawner, 'Alpha')) continue;
-        // Uncomment as you introduce more formations:
-        // if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) continue;
-        // if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) continue;
-        // if (spawnLogic.Spawn_Squad(spawner, 'Delta')) continue;
-      }
-
-      const room = spawner.room;
-
-      // 2) Compute quotas (cheap per-spawn; may be memoized room-wide if needed)
-      const workerTaskLimits = {
-        baseharvest:  2,
-        courier:      1,
-        queen:        1,
-        upgrader:     2,
-        builder:      getBuilderNeed(room),
-        scout:        1,
-        // Switch to determineLunaQuota(room) when ready; left as 4 for stability.
-        luna:         4, // determineLunaQuota(room),
-        repair:       0,
-        CombatArcher: 0,
-        CombatMelee:  0,
-        CombatMedic:  0,
-        Dismantler:   0,
-        Trucker:      0,
-        Claimer:      0
-      };
-
-      // 3) Find first underfilled task, attempt to spawn it, then move on
-      for (const task of Object.keys(workerTaskLimits)) {
-        const limit = Number(workerTaskLimits[task]) || 0;
-
-        // Use special per-home count for 'luna'
-        let currentCount = (task === 'luna')
-          ? (Number(lunaCountsByHome[room.name]) || 0)
-          : (Number(roleCounts[task]) || 0);
-
-        if (currentCount >= limit) continue;
-
-        const spawnResource = (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
-          ? spawnLogic.Calculate_Spawn_Resource(spawner)
-          : null;
-
-        const didSpawn = (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function')
-          ? spawnLogic.Spawn_Worker_Bee(spawner, task, spawnResource)
-          : false;
-
-        if (didSpawn) {
-          // Reflect the new spawn immediately so later spawns see the updated counts
-          if (task === 'luna') {
-            lunaCountsByHome[room.name] = (Number(lunaCountsByHome[room.name]) || 0) + 1;
-          } else {
-            roleCounts[task] = (Number(roleCounts[task]) || 0) + 1;
-          }
+      if (!squadHandled && spawnLogic && typeof spawnLogic.Spawn_Squad === 'function') {
+        const didSquad = spawnLogic.Spawn_Squad(spawner, 'Alpha');
+        if (didSquad) {
+          squadHandled = true;
+          dlog('🛡️ [Squad]', spawner.room.name, 'Alpha maintained at', spawner.name);
+          continue; // this spawn consumed its attempt this tick
         }
-        // Either way, only one attempt per spawn per tick
-        break;
+        // add more formations as you enable them:
+        // if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) { squadHandled = true; dlog(...); continue; }
+        // if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) { squadHandled = true; dlog(...); continue; }
       }
+
+      // pull from the spawn's room queue
+      dequeueAndSpawn(spawner);
     }
   },
 
-  /**
-   * Stub for future remote ops orchestration (claiming/scouting/etc).
-   */
-  manageRemoteOps() {
-    // Intentionally empty (future hook)
-  },
+  /** Stub hook for future remote ops. */
+  manageRemoteOps() {},
 
-  /**
-   * Normalize Memory.rooms to objects (defensive init).
-   */
+  /** Normalize Memory.rooms to objects. */
   initializeMemory() {
     if (!Memory.rooms) Memory.rooms = {};
     for (const roomName of Object.keys(Memory.rooms)) {
