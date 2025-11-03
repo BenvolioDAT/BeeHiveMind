@@ -1,33 +1,68 @@
+/**
+ * TaskQueen — Energy Distributor (“Queen”)
+ *
+ * PURPOSE
+ *   Moves energy from sources (storage/containers/drops) into needy structures
+ *   (extensions, spawns, towers, link-near-spawn, terminal, storage) with:
+ *     - Sticky targets (keep filling the same structure across ticks if possible)
+ *     - Per-tick reservations to avoid double-filling the same structure
+ *     - A simple Predictive Intent Buffer (PIB) to subtract “in-flight” energy
+ *       other creeps are already carrying toward a target
+ *     - Lightweight per-room caches recomputed once per tick
+ *
+ * MEMORY CONTRACT (creep)
+ *   creep.memory.qTargetId        -> sticky fill target id (structure)
+ *   creep.memory.qLastWithdrawId  -> last structure id we withdrew from
+ *   creep.memory.qLastWithdrawAt  -> Game.time when we last withdrew
+ *
+ * MEMORY CONTRACT (global/tick-scoped)
+ *   Memory._queenRes              -> { tick, map } same-tick “fill reservations”
+ *   Memory._PIB                   -> { tick, rooms: { [roomName]: { fills: { [targetId]: { [creepName]: {res, amount, untilTick} } } } } }
+ *   global.__QUEEN                -> { tick, byRoom } per-room derived caches for the tick
+ *
+ * STYLE
+ *   ES5-safe (no const/let/arrow). Comments explain each step and intent.
+ */
+
 var BeeToolbox = require('BeeToolbox');
 
 // ============================
 // Tunables
 // ============================
 var CFG = Object.freeze({
-  PATH_REUSE: 30,
-  MAX_OPS: 2000,
-  TOWER_REFILL_PCT: 0.80,
-  DEBUG_SAY: true,  // turn off to mute creep.say
-  DEBUG_DRAW: true, // turn off to disable RoomVisual lines/text
+  PATH_REUSE: 30,           // Reuse paths to reduce pathfinder CPU
+  MAX_OPS: 2000,            // Upper bound for PathFinder ops (fallback moveTo)
+  TOWER_REFILL_PCT: 0.80,   // Refill towers at or below 80% energy
+  DEBUG_SAY: true,          // creep.say breadcrumbs
+  DEBUG_DRAW: true,         // RoomVisual lines/labels
   DRAW: {
-    WD_COLOR: "#6ec1ff",
-    FILL_COLOR: "#6effa1",
-    DROP_COLOR: "#ffe66e",
-    SRC_COLOR: "#ff9a6e",
-    IDLE_COLOR: "#bfbfbf",
-    STICK_COLOR: "#aaffaa",
-    WIDTH: 0.12,
-    OPACITY: 0.45,
-    FONT: 0.6
+    WD_COLOR: "#6ec1ff",    // Withdraw lane color
+    FILL_COLOR: "#6effa1",  // Fill lane color
+    DROP_COLOR: "#ffe66e",  // Dropped resource pursuit color
+    SRC_COLOR: "#ff9a6e",   // Source color (unused here but kept for consistency)
+    IDLE_COLOR: "#bfbfbf",  // Idle anchor color
+    STICK_COLOR: "#aaffaa", // Sticky target color
+    WIDTH: 0.12,            // Line width
+    OPACITY: 0.45,          // Visual opacity
+    FONT: 0.6               // Label font size
   }
 });
 
 // ============================
 // Movement / Utils
 // ============================
+
+/**
+ * go(creep, dest, range?)
+ *   Unified movement helper.
+ *   - If BeeToolbox.BeeTravel exists, use it (supports reusePath)
+ *   - Else fallback to moveTo with reusePath/MAX_OPS
+ *   - Only moves when out of desired range
+ */
 function go(creep, dest, range) {
   range = (range != null) ? range : 1;
 
+  // Prefer your custom traveler wrapper if available
   if (BeeToolbox && BeeToolbox.BeeTravel) {
     try {
       BeeToolbox.BeeTravel(creep, dest, { range: range, reusePath: CFG.PATH_REUSE });
@@ -35,21 +70,32 @@ function go(creep, dest, range) {
     } catch (e) {}
   }
 
+  // Fallback to vanilla moveTo with sane caps
   if (creep.pos.getRangeTo(dest) > range) {
     creep.moveTo(dest, { reusePath: CFG.PATH_REUSE, maxOps: CFG.MAX_OPS });
   }
 }
 
+/**
+ * debugSay(creep, msg)
+ *   Conditionally say text (quiet switchable via CFG.DEBUG_SAY)
+ */
 function debugSay(creep, msg) {
   if (CFG.DEBUG_SAY) creep.say(msg, true);
 }
 
+/**
+ * debugDraw(creep, target, color, label)
+ *   Draws a line from creep to target + optional label.
+ *   - Only renders if both are in the same room (RoomVisual is per-room)
+ *   - Safe-guards around missing room.visual
+ */
 function debugDraw(creep, target, color, label) {
   if (!CFG.DEBUG_DRAW || !creep || !target) return;
   var room = creep.room;
   if (!room || !room.visual) return;
 
-  // Only draw if target is in same room (visuals are per-room)
+  // Respect RoomVisual scoping: only draw if the target is in this room
   var tpos = target.pos || (target.position || null);
   if (!tpos || tpos.roomName !== room.name) return;
 
@@ -71,16 +117,29 @@ function debugDraw(creep, target, color, label) {
   } catch (e) {}
 }
 
+/**
+ * firstSpawn(room)
+ *   Convenience: pick the first owned spawn in the room (anchor for idling)
+ */
 function firstSpawn(room) {
   var ss = room.find(FIND_MY_SPAWNS);
   return ss.length ? ss[0] : null;
 }
 
+/**
+ * isContainerNearSource(structure)
+ *   A container within ≤2 tiles of a source is treated as “source container”.
+ *   Queen prefers “side containers” (not near sources) for withdraws.
+ */
 function isContainerNearSource(structure) {
   // <=2 tiles counts as "source container"
   return structure.pos.findInRange(FIND_SOURCES, 2).length > 0;
 }
 
+/**
+ * nearestByRange(pos, arr)
+ *   Manual nearest-by-range (no pathing) utility
+ */
 function nearestByRange(pos, arr) {
   var best = null, bestD = 1e9;
   for (var i = 0; i < arr.length; i++) {
@@ -91,6 +150,12 @@ function nearestByRange(pos, arr) {
   return best;
 }
 
+/**
+ * withdrawFrom(creep, target, res=RESOURCE_ENERGY)
+ *   Wrapper for creep.withdraw with:
+ *     - Range handling via go()
+ *     - Memory bookkeeping (qLastWithdrawId/At) on success
+ */
 function withdrawFrom(creep, target, res) {
   res = res || RESOURCE_ENERGY;
   var rc = creep.withdraw(target, res);
@@ -104,13 +169,27 @@ function withdrawFrom(creep, target, res) {
 
 // ============================
 // Per-tick Queen fill reservations
+//   These are *per tick* reservations (not persisted across ticks).
+//   They ensure we don't over-commit the same structure in a single tick
+//   when multiple Queens act concurrently.
 // ============================
+
+/**
+ * _qrMap()
+ *   Get-or-create the current tick reservation map:
+ *   Memory._queenRes = { tick: Game.time, map: { [structId]: reservedAmount } }
+ */
 function _qrMap() {
   if (!Memory._queenRes || Memory._queenRes.tick !== Game.time) {
     Memory._queenRes = { tick: Game.time, map: {} };
   }
   return Memory._queenRes.map;
 }
+
+/**
+ * _reservedFor(structId)
+ *   Return how much energy is already reserved (this tick) for structId.
+ */
 function _reservedFor(structId) {
   var map = _qrMap();
   return map[structId] || 0;
@@ -118,7 +197,16 @@ function _reservedFor(structId) {
 
 // ============================
 // Predictive Intent Buffer (PIB)
+//   Short-lived “in-flight” reservations across creeps/rooms that subtract
+//   from a structure’s effective free capacity *until* ETA expires.
+//   This reduces "ping-pong" & “dog-pile the same target”.
 // ============================
+
+/**
+ * _pibRoot()
+ *   Initializes/reset PIB root per tick while preserving the per-room maps.
+ *   Structure: Memory._PIB = { tick, rooms: { [roomName]: { fills: { targetId: { creepName: {res, amount, untilTick} } } } } }
+ */
 function _pibRoot() {
   var root = Memory._PIB;
   if (!root || root.tick !== Game.time) {
@@ -127,6 +215,10 @@ function _pibRoot() {
   return Memory._PIB;
 }
 
+/**
+ * _pibRoom(roomName)
+ *   Ensure a room bucket exists for PIB fills accounting.
+ */
 function _pibRoom(roomName) {
   var root = _pibRoot();
   var rooms = root.rooms;
@@ -134,6 +226,12 @@ function _pibRoom(roomName) {
   return rooms[roomName];
 }
 
+/**
+ * _pibSumReserved(roomName, targetId, resourceType=ENERGY)
+ *   Sum valid (not expired) in-flight reservations for a target.
+ *   - Cleans up expired records as it goes
+ *   - Deletes empty target maps to keep memory tidy
+ */
 function _pibSumReserved(roomName, targetId, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
   var R = _pibRoom(roomName);
@@ -144,12 +242,18 @@ function _pibSumReserved(roomName, targetId, resourceType) {
     var rec = byCreep[cname];
     if (!rec || rec.res !== resourceType) continue;
     if (rec.untilTick > Game.time) total += (rec.amount | 0);
-    else delete byCreep[cname];
+    else delete byCreep[cname]; // expired
   }
   if (Object.keys(byCreep).length === 0) delete R.fills[targetId];
   return total;
 }
 
+/**
+ * _pibReserveFill(creep, target, amount, resourceType=ENERGY)
+ *   Record that this creep intends to deliver `amount` of `resourceType`
+ *   to `target`, with a simple ETA (range-based TTL).
+ *   Returns the integer amount stored (or 0 on failure).
+ */
 function _pibReserveFill(creep, target, amount, resourceType) {
   if (!creep || !target || !amount) return 0;
   resourceType = resourceType || RESOURCE_ENERGY;
@@ -160,6 +264,7 @@ function _pibReserveFill(creep, target, amount, resourceType) {
   var R = _pibRoom(roomName);
   if (!R.fills[target.id]) R.fills[target.id] = {};
 
+  // ETA: rough “range + 1” guard, minimum 2 ticks (reduces flicker)
   var dist = 0;
   try { dist = creep.pos.getRangeTo(target); } catch (e) { dist = 5; }
   var eta = Math.max(2, (dist | 0) + 1);
@@ -172,6 +277,10 @@ function _pibReserveFill(creep, target, amount, resourceType) {
   return amount | 0;
 }
 
+/**
+ * _pibReleaseFill(creep, target, resourceType=ENERGY)
+ *   Remove this creep’s reservation for a target (on success/failure).
+ */
 function _pibReleaseFill(creep, target, resourceType) {
   if (!creep || !target) return;
   resourceType = resourceType || RESOURCE_ENERGY;
@@ -187,7 +296,17 @@ function _pibReleaseFill(creep, target, resourceType) {
 
 // ============================
 // Capacity accounting with buffers
+//   _effectiveFree subtracts both per-tick reservations and PIB “in-flight”.
 // ============================
+
+/**
+ * _effectiveFree(struct, resourceType=ENERGY)
+ *   Returns how much *usable* free capacity remains after subtracting:
+ *     - freeNow (structure.store.getFreeCapacity)
+ *     - same-tick Queen reservations
+ *     - PIB “in-flight” reserved fills
+ *   Floor at 0 to avoid negative values.
+ */
 function _effectiveFree(struct, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
 
@@ -200,6 +319,14 @@ function _effectiveFree(struct, resourceType) {
   return Math.max(0, freeNow - sameTickReserved - pibReserved);
 }
 
+/**
+ * reserveFill(creep, target, amount, resourceType=ENERGY)
+ *   Reserve up to `amount`, clamped by current _effectiveFree.
+ *   - Writes same-tick reservation map
+ *   - Sets creep.memory.qTargetId (sticky target)
+ *   - Mirrors into PIB so other creeps see the reduced free capacity
+ *   Returns the amount reserved (0 if none).
+ */
 function reserveFill(creep, target, amount, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
 
@@ -215,6 +342,13 @@ function reserveFill(creep, target, amount, resourceType) {
   return want;
 }
 
+/**
+ * transferTo(creep, target, res=ENERGY)
+ *   Wrapper for creep.transfer with:
+ *     - Range handling via go()
+ *     - PIB cleanup on success/full/error
+ *     - Sticky target clearing when appropriate
+ */
 function transferTo(creep, target, res) {
   res = res || RESOURCE_ENERGY;
   var rc = creep.transfer(target, res);
@@ -225,9 +359,9 @@ function transferTo(creep, target, res) {
     _pibReleaseFill(creep, target, res);
   } else if (rc === ERR_FULL) {
     _pibReleaseFill(creep, target, res);
-    creep.memory.qTargetId = null;
+    creep.memory.qTargetId = null; // target can’t take more; drop stickiness
   } else if (rc !== OK && rc !== ERR_TIRED && rc !== ERR_BUSY) {
-    _pibReleaseFill(creep, target, res);
+    _pibReleaseFill(creep, target, res); // fail-safe cleanup
     creep.memory.qTargetId = null;
   }
   return rc;
@@ -235,17 +369,32 @@ function transferTo(creep, target, res) {
 
 // ============================
 // Per-room, once-per-tick cache
+//   Builds a snapshot of “who needs energy” and “where to withdraw”
+//   to avoid scanning the room repeatedly within the same tick.
 // ============================
 if (!global.__QUEEN) global.__QUEEN = { tick: -1, byRoom: {} };
 
+/**
+ * _qCache(room)
+ *   Returns cached derived data for the room:
+ *     - spawn: first owned spawn (idle anchor)
+ *     - linkNearSpawn: nearest link to spawn (if any)
+ *     - extSpawnNeedy: all spawn/extension with free capacity
+ *     - towersNeedy: towers at/below TOWER_REFILL_PCT capacity
+ *     - terminalNeed/storageNeed: terminal/storage that can accept more energy
+ *     - storageHasEnergy: storage that currently *has* energy for withdraw
+ *     - sideContainers: non-source containers with energy (preferred withdraw)
+ */
 function _qCache(room) {
   var G = global.__QUEEN;
-  if (G.tick !== Game.time) { G.tick = Game.time; G.byRoom = {}; }
+  if (G.tick !== Game.time) { G.tick = Game.time; G.byRoom = {}; } // wipe cache each tick
   var R = G.byRoom[room.name];
   if (R) return R;
 
+  // Anchor spawn (useful for idling and link proximity)
   var sp = firstSpawn(room);
 
+  // Optional: link near spawn (used as lower-priority fill target)
   var linkNearSpawn = null;
   if (sp) {
     linkNearSpawn = sp.pos.findClosestByRange(FIND_STRUCTURES, {
@@ -253,6 +402,7 @@ function _qCache(room) {
     });
   }
 
+  // Extensions + Spawns that can accept energy
   var extSpawnNeedy = room.find(FIND_STRUCTURES, {
     filter: function (s) {
       if (!s.store) return false;
@@ -261,6 +411,7 @@ function _qCache(room) {
     }
   });
 
+  // Towers under the refill threshold
   var towersNeedy = room.find(FIND_STRUCTURES, {
     filter: function (s) {
       if (s.structureType !== STRUCTURE_TOWER || !s.store) return false;
@@ -271,14 +422,17 @@ function _qCache(room) {
     }
   });
 
+  // “Can accept more” targets for lower-priority filling
   var terminalNeed = (room.terminal && room.terminal.store &&
                       (room.terminal.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) ? room.terminal : null;
 
   var storageNeed  = (room.storage && room.storage.store &&
                       (room.storage.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0) ? room.storage : null;
 
+  // Storage as a top withdraw source, if it has energy
   var storageHasEnergy = (room.storage && (room.storage.store[RESOURCE_ENERGY] | 0) > 0) ? room.storage : null;
 
+  // Non-source containers with energy (side buffers) preferred over source containers
   var sideContainers = room.find(FIND_STRUCTURES, {
     filter: function (s) {
       return s.structureType === STRUCTURE_CONTAINER &&
@@ -304,6 +458,12 @@ function _qCache(room) {
 // ============================
 // Target selection helpers
 // ============================
+
+/**
+ * pickNearestNeedy(creep, candidates[])
+ *   Filter to those with effective free capacity > 0,
+ *   then pick the closest by range (no pathing cost).
+ */
 function pickNearestNeedy(creep, candidates) {
   var ok = [];
   for (var i = 0; i < candidates.length; i++) {
@@ -313,6 +473,16 @@ function pickNearestNeedy(creep, candidates) {
   return ok.length ? nearestByRange(creep.pos, ok) : null;
 }
 
+/**
+ * chooseFillTarget(creep, cache)
+ *   Priority order:
+ *     1) Extensions/Spawns (closest needy)
+ *     2) Towers (under configured threshold)
+ *     3) Link near spawn
+ *     4) Terminal (skip if it was the last withdrawal source to prevent “bounce”)
+ *     5) Storage  (skip if it was the last withdrawal source to prevent “bounce”)
+ *   Each candidate is also checked through _effectiveFree() to incorporate reservations.
+ */
 function chooseFillTarget(creep, cache) {
   var target =
     pickNearestNeedy(creep, cache.extSpawnNeedy) ||
@@ -326,6 +496,15 @@ function chooseFillTarget(creep, cache) {
   return target;
 }
 
+/**
+ * chooseWithdrawTarget(creep, cache)
+ *   Withdrawal priority:
+ *     1) Storage with energy (most stable / safe)
+ *     2) Nearest “side container” (non-source container) with energy
+ *     3) Nearest dropped energy on the ground
+ *   If none exist, the Queen falls through to “no action” (this file
+ *   doesn’t contain harvest logic).
+ */
 function chooseWithdrawTarget(creep, cache) {
   if (cache.storageHasEnergy) return cache.storageHasEnergy;
 
@@ -339,21 +518,39 @@ function chooseWithdrawTarget(creep, cache) {
   });
   if (drop) return drop;
 
-  return null; // fall through to harvest
+  return null; // fall through to harvest (not implemented here)
 }
 
 // ============================
 // Main
 // ============================
+
+/**
+ * TaskQueen.run(creep)
+ *   High-level behavior:
+ *     A) If carrying energy:
+ *        A1) Try sticky target first (fast path)
+ *        A2) Else choose a new fill target (priority chain)
+ *        A3) If none available, idle near spawn/controller
+ *     B) If not carrying:
+ *        B1) Choose best withdrawal option (storage -> side container -> drop)
+ *        B2) Move/pickup/withdraw accordingly
+ *
+ *   Debug:
+ *     - debugSay: short markers (“→ EXT”, “↘️Sto”, “IDLE”)
+ *     - debugDraw: line + small label to target of action
+ */
 var TaskQueen = {
   run: function (creep) {
     var room  = creep.room;
-    var cache = _qCache(room);
+    var cache = _qCache(room); // per-tick snapshot of room state
     var carryAmt = creep.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
     var carrying = carryAmt > 0;
 
+    // ------------- A) We have energy: deliver it -------------
     if (carrying) {
-      // Sticky target first
+      // A1) Try sticky target first: if previous target still can take energy,
+      //     reserve and push to it (reduces re-target churn across ticks).
       if (creep.memory.qTargetId) {
         var sticky = Game.getObjectById(creep.memory.qTargetId);
         if (sticky && _effectiveFree(sticky, RESOURCE_ENERGY) > 0) {
@@ -364,15 +561,17 @@ var TaskQueen = {
             return;
           }
         } else {
+          // Sticky target is full or gone; clear it
           creep.memory.qTargetId = null;
         }
       }
 
-      // Pick a new fill target
+      // A2) Choose a fresh fill target via priority chain
       var target = chooseFillTarget(creep, cache);
       if (target) {
+        // Reserve up to what we carry (clamped by effective free)
         if (reserveFill(creep, target, carryAmt, RESOURCE_ENERGY) > 0) {
-          // Label + color by type
+          // Label + color by type for quick visual debugging
           var st = target.structureType;
           if (st === STRUCTURE_EXTENSION) { debugSay(creep, '→ EXT'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "EXT"); }
           else if (st === STRUCTURE_SPAWN) { debugSay(creep, '→ SPN'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "SPN"); }
@@ -387,7 +586,7 @@ var TaskQueen = {
         }
       }
 
-      // Idle near anchor
+      // A3) Nothing to fill right now: idle near an anchor (spawn > controller)
       var anchor = cache.spawn || room.controller || creep.pos;
       debugSay(creep, 'IDLE');
       debugDraw(creep, (anchor.pos || anchor), CFG.DRAW.IDLE_COLOR, "IDLE");
@@ -395,16 +594,16 @@ var TaskQueen = {
       return;
     }
 
-    // Not carrying: acquire energy
+    // ------------- B) We do NOT have energy: acquire it -------------
     var withdrawTarget = chooseWithdrawTarget(creep, cache);
     if (withdrawTarget) {
       if (withdrawTarget.resourceType === RESOURCE_ENERGY) {
-        // Dropped resource
+        // B1) Dropped resource path: pickup
         debugSay(creep, '↘️Drop');
         debugDraw(creep, withdrawTarget, CFG.DRAW.DROP_COLOR, "DROP");
         if (creep.pickup(withdrawTarget) === ERR_NOT_IN_RANGE) go(creep, withdrawTarget);
       } else {
-        // Structure (storage/container)
+        // B2) Structure path: withdraw from storage/container/etc.
         if (withdrawTarget.structureType === STRUCTURE_STORAGE) { debugSay(creep, '↘️Sto'); }
         else if (withdrawTarget.structureType === STRUCTURE_CONTAINER) { debugSay(creep, '↘️Con'); }
         else { debugSay(creep, '↘️Wd'); }
@@ -413,6 +612,9 @@ var TaskQueen = {
       }
       return;
     }
+
+    // No withdraw option (this role doesn’t harvest): do nothing this tick.
+    // (You can optionally add a fail-safe like stepping toward storage/spawn.)
   }
 };
 
