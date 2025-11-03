@@ -339,7 +339,7 @@ function assignSource(creep) {
 }
 
 /** =========================
- *  Offload helper (when full)
+ *  Offload helpers (when full)
  *  ========================= */
 
 function getContainerAtOrAdjacent(pos) {
@@ -353,6 +353,54 @@ function getContainerAtOrAdjacent(pos) {
     filter: function(s) { return s.structureType === STRUCTURE_CONTAINER; }
   });
   return (around && around.length) ? around[0] : null;
+}
+
+// Count creeps with a given memory.task (simple scan)
+function countCreepsWithTask(taskName) {
+  var n = 0;
+  for (var name in Game.creeps) {
+    var c = Game.creeps[name];
+    if (c && c.memory && c.memory.task === taskName) n++;
+  }
+  return n;
+}
+
+// Prefer returning to spawn/extensions; fallback to storage; then any container.
+function findEmergencyEnergySink(creep) {
+  // 1) Spawns
+  var spawn = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+    filter: function(s) {
+      return s.structureType === STRUCTURE_SPAWN &&
+             s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+    }
+  });
+  if (spawn) return spawn;
+
+  // 2) Extensions
+  var ext = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+    filter: function(s) {
+      return s.structureType === STRUCTURE_EXTENSION &&
+             s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+    }
+  });
+  if (ext) return ext;
+
+  // 3) Storage (if present and can take energy)
+  if (creep.room.storage && creep.room.storage.store &&
+      creep.room.storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+    return creep.room.storage;
+  }
+
+  // 4) Any container with room
+  var cont = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+    filter: function(s) {
+      return s.structureType === STRUCTURE_CONTAINER &&
+             s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+    }
+  });
+  if (cont) return cont;
+
+  return null;
 }
 
 /** =========================
@@ -449,26 +497,70 @@ var TaskBaseHarvest = {
 
     // (2) Not harvesting (full): offload
     if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+      var courierCount = countCreepsWithTask('courier');
+      var queenCount   = countCreepsWithTask('queen');
+      var haveCollectors = (courierCount > 0 || queenCount > 0);
+
+      // Prefer container on/adjacent: if present, sit on it and transfer
       var cont = getContainerAtOrAdjacent(creep.pos);
       if (cont) {
+        // If we're not standing on it, step onto it (since miners are meant to sit on the can)
+        if (!creep.pos.isEqualTo(cont.pos)) {
+          debugSay(creep, '📦→');
+          debugDrawLine(creep, cont, CFG.DRAW.OFFLOAD, "SEAT");
+          go(creep, cont.pos, 0, CONFIG.travelReuse);
+          return;
+        }
+
+        // On the container: try transfer
         debugSay(creep, '📦');
-        debugDrawLine(creep, cont, CFG.DRAW.OFFLOAD, "OFFLOAD");
         var tr = creep.transfer(cont, RESOURCE_ENERGY);
-        if (tr === ERR_NOT_IN_RANGE) go(creep, (cont.pos || cont), 1, CONFIG.travelReuse);
+        if (tr === OK) return;
+        if (tr === ERR_NOT_IN_RANGE) { go(creep, cont.pos, 0, CONFIG.travelReuse); return; }
+
+        // Container rejected (likely full). If collectors exist, drop; else emergency haul.
+        if (haveCollectors) {
+          debugSay(creep, '⬇️');
+          creep.drop(RESOURCE_ENERGY);
+          return;
+        } else {
+          var sink1 = findEmergencyEnergySink(creep);
+          if (sink1) {
+            debugSay(creep, '🏠');
+            debugDrawLine(creep, sink1, CFG.DRAW.OFFLOAD, "RETURN");
+            var rs1 = creep.transfer(sink1, RESOURCE_ENERGY);
+            if (rs1 === ERR_NOT_IN_RANGE) { go(creep, sink1, 1, CONFIG.travelReuse); return; }
+            if (rs1 === OK) return;
+          }
+          // Still nowhere? drop as absolute last resort.
+          debugSay(creep, '⬇️');
+          creep.drop(RESOURCE_ENERGY);
+          return;
+        }
+      }
+
+      // No container next to us:
+      if (haveCollectors) {
+        // Couriers/Queen alive → drop for pickup (fastest turnaround)
+        debugSay(creep, '⬇️');
+        debugRing(creep.room, creep.pos, CFG.DRAW.OFFLOAD, "DROP");
+        creep.drop(RESOURCE_ENERGY);
+        return;
+      } else {
+        // Emergency hauler mode (both courier and queen missing)
+        var sink = findEmergencyEnergySink(creep);
+        if (sink) {
+          debugSay(creep, '🏠');
+          debugDrawLine(creep, sink, CFG.DRAW.OFFLOAD, "RETURN");
+          var rs = creep.transfer(sink, RESOURCE_ENERGY);
+          if (rs === ERR_NOT_IN_RANGE) { go(creep, sink, 1, CONFIG.travelReuse); return; }
+          if (rs === OK) return;
+        }
+        // No sink available: drop rather than clog
+        debugSay(creep, '⬇️');
+        creep.drop(RESOURCE_ENERGY);
         return;
       }
-    }
-
-    // (3) If no couriers exist, dump to ground as last resort
-    var courierCount = 0;
-    for (var cname in Game.creeps) {
-      var cc = Game.creeps[cname];
-      if (cc && cc.memory && cc.memory.task === 'courier') courierCount++;
-    }
-    if (courierCount === 0 && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
-      debugSay(creep, '🫠');
-      creep.drop(RESOURCE_ENERGY);
-      return;
     }
 
     // Otherwise idle gently on our seat (or where we are)

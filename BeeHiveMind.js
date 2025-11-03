@@ -10,6 +10,7 @@ const CoreLogger     = require('core.logger');
 const { LOG_LEVEL }  = CoreLogger;
 const hiveLog        = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
+const BeeVisualsSpawnPanel = require('BeeVisuals.SpawnPanel');
 const spawnLogic     = require('spawn.logic');
 const roleWorker_Bee = require('role.Worker_Bee');
 const TaskBuilder    = require('Task.Builder');       // kept for your ecosystem
@@ -301,18 +302,18 @@ function computeRoomQuotas(C, room) {
     baseharvest:  2,
     courier:      1,
     queen:        1,
-    upgrader:     2,
+    upgrader:     1,
     builder:      getBuilderNeed(C, room),
     scout:        1,
     // Switch to determineLunaQuota(C, room) when you're ready:
-    luna:         4, // determineLunaQuota(C, room),
+    luna:         0, // determineLunaQuota(C, room),
     repair:       0,
     CombatArcher: 0,
     CombatMelee:  0,
     CombatMedic:  0,
     Dismantler:   0,
     Trucker:      0,
-    Claimer:      1
+    Claimer:      0
   };
   if (tickEvery(DBG_EVERY)) dlog('🎯 [Quotas]', fmt(room), JSON.stringify(quotas));
   return quotas;
@@ -396,6 +397,11 @@ const BeeHiveMind = {
   /** Top-level tick entrypoint. */
   run() {
     BeeHiveMind.initializeMemory();
+    // Visual overlays (spawn HUD + queue)
+    if (BeeVisualsSpawnPanel && typeof BeeVisualsSpawnPanel.drawVisuals === 'function') {
+      BeeVisualsSpawnPanel.drawVisuals();
+    }
+
 
     const C = prepareTickCaches();
 

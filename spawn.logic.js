@@ -37,12 +37,12 @@ const C  = (c, m) => [...Array(c).fill(CLAIM), ...Array(m).fill(MOVE)];
 const CONFIGS = {
   // Workers
   baseharvest: [
-    B(6,0,5), 
-    B(5,0,5), 
-    B(4,0,4), 
-    B(3,0,3), 
-    B(2,0,2), 
-    B(1,0,1),
+    B(6,1,5), 
+    B(5,1,5), 
+    B(4,1,4), 
+    B(3,1,3), 
+    B(2,1,2), 
+    B(1,1,1),
   ],
   courier: [
     CM(30,15), 
