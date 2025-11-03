@@ -197,80 +197,7 @@ function _pibReleaseFill(creep, target, resourceType) {
 }
 
 // ============================
-// NEW helpers: PIB accounting per-creep
-// ============================
-
-// How much *this creep* already reserved (active)?
-function _pibMine(creep, target, resourceType) {
-  resourceType = resourceType || RESOURCE_ENERGY;
-  var roomName = (creep.room && creep.room.name) || (target.pos && target.pos.roomName);
-  if (!roomName) return 0;
-  var R = _pibRoom(roomName);
-  var map = R.fills[target.id];
-  if (!map) return 0;
-  var rec = map[creep.name];
-  if (!rec || rec.res !== resourceType) return 0;
-  if (rec.untilTick > Game.time) return (rec.amount | 0);
-  delete map[creep.name];
-  if (Object.keys(map).length === 0) delete R.fills[target.id];
-  return 0;
-}
-
-// Total reserved by others (exclude this creep)
-function _pibSumReservedExcept(roomName, targetId, resourceType, exceptName) {
-  resourceType = resourceType || RESOURCE_ENERGY;
-  var R = _pibRoom(roomName);
-  var byCreep = (R.fills[targetId] || {});
-  var total = 0;
-  for (var cname in byCreep) {
-    if (!byCreep.hasOwnProperty(cname)) continue;
-    if (cname === exceptName) continue; // ignore my own PIB
-    var rec = byCreep[cname];
-    if (!rec || rec.res !== resourceType) continue;
-    if (rec.untilTick > Game.time) total += (rec.amount | 0);
-    else delete byCreep[cname];
-  }
-  if (Object.keys(byCreep).length === 0) delete R.fills[targetId];
-  return total;
-}
-
-// Free capacity *for this creep* (ignores my own PIB)
-function _effectiveFreeFor(creep, struct, resourceType) {
-  resourceType = resourceType || RESOURCE_ENERGY;
-
-  var freeNow = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
-  var sameTickReserved = _reservedFor(struct.id) | 0;
-
-  var roomName = (struct.pos && struct.pos.roomName) || (struct.room && struct.room.name);
-  var pibOthers = roomName ? (_pibSumReservedExcept(roomName, struct.id, resourceType, creep.name) | 0) : 0;
-
-  return Math.max(0, freeNow - sameTickReserved - pibOthers);
-}
-
-// Reserve for *me* and refresh my PIB even if others temporarily zero me out
-function reserveFillFor(creep, target, amount, resourceType) {
-  resourceType = resourceType || RESOURCE_ENERGY;
-  var map = _qrMap();
-
-  var freeForMe = _effectiveFreeFor(creep, target, resourceType);
-  var want = Math.max(0, Math.min(amount, freeForMe));
-
-  var mine = _pibMine(creep, target, resourceType);
-  if (want === 0 && mine > 0) {
-    // keep my reservation alive while I walk
-    _pibReserveFill(creep, target, mine, resourceType);
-  } else if (want > 0) {
-    map[target.id] = (map[target.id] || 0) + want; // same-tick guard
-    _pibReserveFill(creep, target, want, resourceType);
-  }
-
-  if (want > 0 || mine > 0) creep.memory.qTargetId = target.id;
-  return (want > 0) ? want : mine;
-}
-
-// ============================
 // Capacity accounting with buffers
-// (kept for general selection logic)
 // ============================
 function _effectiveFree(struct, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
@@ -437,31 +364,25 @@ var TaskQueen = {
     var carrying = carryAmt > 0;
 
     if (carrying) {
-      // ---------- Sticky target first (fixed: ignore my own PIB, refresh it) ----------
+      // Sticky target first
       if (creep.memory.qTargetId) {
         var sticky = Game.getObjectById(creep.memory.qTargetId);
-        if (sticky) {
-          var freeForMe = _effectiveFreeFor(creep, sticky, RESOURCE_ENERGY);
-          var iAlreadyReserved = _pibMine(creep, sticky, RESOURCE_ENERGY) > 0;
-
-          if (freeForMe > 0 || iAlreadyReserved) {
-            reserveFillFor(creep, sticky, carryAmt, RESOURCE_ENERGY); // refresh PIB each tick
+        if (sticky && _effectiveFree(sticky, RESOURCE_ENERGY) > 0) {
+          if (reserveFill(creep, sticky, carryAmt, RESOURCE_ENERGY) > 0) {
             debugSay(creep, '→ STICK');
             debugDraw(creep, sticky, CFG.DRAW.STICK_COLOR, "STICK");
             transferTo(creep, sticky);
             return;
-          } else {
-            creep.memory.qTargetId = null;
           }
         } else {
           creep.memory.qTargetId = null;
         }
       }
 
-      // ---------- Pick a new fill target ----------
+      // Pick a new fill target
       var target = chooseFillTarget(creep, cache);
       if (target) {
-        if (reserveFillFor(creep, target, carryAmt, RESOURCE_ENERGY) > 0) {
+        if (reserveFill(creep, target, carryAmt, RESOURCE_ENERGY) > 0) {
           // Label + color by type
           var st = target.structureType;
           if (st === STRUCTURE_EXTENSION) { debugSay(creep, '→ EXT'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "EXT"); }
@@ -477,7 +398,7 @@ var TaskQueen = {
         }
       }
 
-      // ---------- Idle near anchor ----------
+      // Idle near anchor
       var anchor = cache.spawn || room.controller || creep.pos;
       debugSay(creep, 'IDLE');
       debugDraw(creep, (anchor.pos || anchor), CFG.DRAW.IDLE_COLOR, "IDLE");
@@ -485,7 +406,7 @@ var TaskQueen = {
       return;
     }
 
-    // ---------- Not carrying: acquire energy ----------
+    // Not carrying: acquire energy
     var withdrawTarget = chooseWithdrawTarget(creep, cache);
     if (withdrawTarget) {
       if (withdrawTarget.resourceType === RESOURCE_ENERGY) {
@@ -504,7 +425,7 @@ var TaskQueen = {
       return;
     }
 
-    // ---------- Last resort: harvest directly ----------
+    // Last resort: harvest directly
     harvestFromClosest(creep);
   }
 };
