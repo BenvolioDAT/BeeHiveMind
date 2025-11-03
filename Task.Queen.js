@@ -7,7 +7,7 @@ var CFG = Object.freeze({
   PATH_REUSE: 30,
   MAX_OPS: 2000,
   TOWER_REFILL_PCT: 0.80,
-  DEBUG_SAY: false,  // turn off to mute creep.say
+  DEBUG_SAY: true,  // turn off to mute creep.say
   DEBUG_DRAW: true, // turn off to disable RoomVisual lines/text
   DRAW: {
     WD_COLOR: "#6ec1ff",
@@ -89,17 +89,6 @@ function nearestByRange(pos, arr) {
     if (d < bestD) { bestD = d; best = o; }
   }
   return best;
-}
-
-function harvestFromClosest(creep) {
-  var srcs = creep.room.find(FIND_SOURCES_ACTIVE);
-  if (!srcs.length) return ERR_NOT_FOUND;
-  var best = nearestByRange(creep.pos, srcs);
-  debugSay(creep, '⛏️Src');
-  debugDraw(creep, best, CFG.DRAW.SRC_COLOR, "SRC");
-  var rc = creep.harvest(best);
-  if (rc === ERR_NOT_IN_RANGE) go(creep, best);
-  return rc;
 }
 
 function withdrawFrom(creep, target, res) {
@@ -424,9 +413,6 @@ var TaskQueen = {
       }
       return;
     }
-
-    // Last resort: harvest directly
-    harvestFromClosest(creep);
   }
 };
 
