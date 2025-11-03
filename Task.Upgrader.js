@@ -54,14 +54,6 @@ function debugRing(target, color, text) {
   R.visual.circle(p, { radius: 0.6, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPAC, width: CFG.DRAW.WIDTH });
   if (text) R.visual.text(text, p.x, p.y - 0.8, { color: color, font: CFG.DRAW.FONT, opacity: 0.95, align: "center" });
 }
-function hud(creep, text) {
-  if (!CFG.DEBUG_DRAW) return;
-  var R = creep.room; if (!R || !R.visual) return;
-  R.visual.text(text, creep.pos.x, creep.pos.y - 1.2, {
-    color: CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
-    backgroundColor: "#000", backgroundOpacity: 0.25
-  });
-}
 
 /** =========================
  *  Travel wrapper (with path line)
@@ -125,10 +117,6 @@ var TaskUpgrader = {
       creep.memory.upgrading = true;
       debugSay(creep, "⚡ upgrade");
     }
-
-    // HUD
-    var e = creep.store[RESOURCE_ENERGY] | 0;
-    hud(creep, (creep.memory.upgrading ? "⚡" : "⛽") + " " + e + "/" + creep.store.getCapacity(RESOURCE_ENERGY));
 
     if (creep.memory.upgrading) {
       var controller = creep.room.controller;
