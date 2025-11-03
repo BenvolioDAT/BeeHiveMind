@@ -235,7 +235,6 @@ function shouldQueueForSource(creep, source, seats, used) {
   var inc = getIncumbents(creep.room.name, source.id, creep.name);
   for (var i = 0; i < inc.length; i++) {
     var t = inc[i].ticksToLive;
-    // ticksToLive can be undefined briefly; treat as not expiring
     if (typeof t === 'number' && t <= CONFIG.handoffTtl) return true;
   }
   return false;
@@ -249,10 +248,8 @@ function findQueueSpotNearSeat(seatPos, myName) {
       if (dx === 0 && dy === 0) continue;
       var p = new RoomPosition(seatPos.x + dx, seatPos.y + dy, seatPos.roomName);
       if (!isWalkable(p)) continue;
-      // Prefer currently unoccupied tiles
       var occupied = isTileOccupiedByAlly(p, myName);
       var score = occupied ? -10 : 0;
-      // Slight bias for lower y/x for determinism
       score += (-p.y * 0.01) + (-p.x * 0.001);
       if (score > bestScore) { bestScore = score; best = p; }
     }
@@ -267,12 +264,10 @@ function findQueueSpotNearSeat(seatPos, myName) {
 function assignSource(creep) {
   if (creep.spawning) return;
 
-  // Respect short cooldown to avoid thrash after we yielded
   if (creep.memory._reassignCooldown && Game.time < creep.memory._reassignCooldown) {
     return creep.memory.assignedSource || null;
   }
 
-  // Keep current assignment if any
   if (creep.memory.assignedSource) return creep.memory.assignedSource;
 
   var sources = creep.room.find(FIND_SOURCES);
@@ -285,7 +280,6 @@ function assignSource(creep) {
   for (var i = 0; i < sources.length; i++) {
     var s = sources[i];
 
-    // Avoid the source we just yielded from for a short window
     if (creep.memory._avoidSourceId === s.id &&
         creep.memory._avoidUntil &&
         Game.time < creep.memory._avoidUntil) {
@@ -293,9 +287,8 @@ function assignSource(creep) {
     }
 
     var seatPos = getPreferredSeatPos(s);
-    if (!seatPos) continue; // no usable seat
+    if (!seatPos) continue;
 
-    // Effective capacity: container implies 1 seat (strict miner seat)
     var seats = getAdjacentContainerForSource(s) ? 1 : countWalkableSeatsAround(s.pos);
     if (CONFIG.maxHarvestersPerSource > 0) {
       seats = Math.min(seats, CONFIG.maxHarvestersPerSource);
@@ -305,13 +298,11 @@ function assignSource(creep) {
     var free = seats - used;
     var willQueue = false;
 
-    // If full, consider queueing only if an incumbent is expiring soon
     if (free <= 0) {
       if (!shouldQueueForSource(creep, s, seats, used)) continue;
       willQueue = true;
     }
 
-    // Score: prefer free seats strongly; then proximity to the seat
     var range = creep.pos.getRangeTo(seatPos);
     var score = (free > 0 ? 1000 : 0) - range;
 
@@ -324,7 +315,6 @@ function assignSource(creep) {
 
   if (!best) return null;
 
-  // Lock assignment and remember if we're starting as queued
   creep.memory.assignedSource = best.source.id;
   creep.memory.seatX = best.seatPos.x;
   creep.memory.seatY = best.seatPos.y;
@@ -343,19 +333,16 @@ function assignSource(creep) {
  *  ========================= */
 
 function getContainerAtOrAdjacent(pos) {
-  // Same tile first
   var here = pos.lookFor(LOOK_STRUCTURES);
   for (var i = 0; i < here.length; i++) {
     if (here[i].structureType === STRUCTURE_CONTAINER) return here[i];
   }
-  // Adjacent
   var around = pos.findInRange(FIND_STRUCTURES, 1, {
     filter: function(s) { return s.structureType === STRUCTURE_CONTAINER; }
   });
   return (around && around.length) ? around[0] : null;
 }
 
-// Count creeps with a given memory.task (simple scan)
 function countCreepsWithTask(taskName) {
   var n = 0;
   for (var name in Game.creeps) {
@@ -367,7 +354,6 @@ function countCreepsWithTask(taskName) {
 
 // Prefer returning to spawn/extensions; fallback to storage; then any container.
 function findEmergencyEnergySink(creep) {
-  // 1) Spawns
   var spawn = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
     filter: function(s) {
       return s.structureType === STRUCTURE_SPAWN &&
@@ -376,7 +362,6 @@ function findEmergencyEnergySink(creep) {
   });
   if (spawn) return spawn;
 
-  // 2) Extensions
   var ext = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
     filter: function(s) {
       return s.structureType === STRUCTURE_EXTENSION &&
@@ -385,13 +370,11 @@ function findEmergencyEnergySink(creep) {
   });
   if (ext) return ext;
 
-  // 3) Storage (if present and can take energy)
   if (creep.room.storage && creep.room.storage.store &&
       creep.room.storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
     return creep.room.storage;
   }
 
-  // 4) Any container with room
   var cont = creep.pos.findClosestByPath(FIND_STRUCTURES, {
     filter: function(s) {
       return s.structureType === STRUCTURE_CONTAINER &&
@@ -410,13 +393,10 @@ function findEmergencyEnergySink(creep) {
 var TaskBaseHarvest = {
   run: function(creep) {
     // (0) Simple state flip based on store
-    if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
-      creep.memory.harvesting = true;
-      debugSay(creep, '⤵️MINE');
-    }
-    if (creep.memory.harvesting && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
-      creep.memory.harvesting = false;
-      debugSay(creep, '⤴️DROP');
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
+      if (!creep.memory.harvesting) { creep.memory.harvesting = true; debugSay(creep, '⤵️MINE'); }
+    } else if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+      if (creep.memory.harvesting) { creep.memory.harvesting = false; debugSay(creep, '⤴️DROP'); }
     }
 
     // (1) Harvesting phase
@@ -459,7 +439,6 @@ var TaskBaseHarvest = {
       var shouldQ = (seatBlocked || creep.memory.waitingForSeat) && used >= seats && shouldQueueForSource(creep, source, seats, used);
 
       if (shouldQ) {
-        // Park near seat (not on it)
         var queueSpot = findQueueSpotNearSeat(seatPos, creep.name) || seatPos;
         creep.memory.waitingForSeat = true;
 
@@ -467,13 +446,11 @@ var TaskBaseHarvest = {
         debugRing(creep.room, queueSpot, CFG.DRAW.QUEUE, "QUEUE");
         if (!creep.pos.isEqualTo(queueSpot)) { go(creep, queueSpot, 0, CONFIG.travelReuse); return; }
 
-        // If we can reach the source from here (range 1), nibble while waiting
         if (creep.pos.getRangeTo(source) <= 1) {
           debugDrawLine(creep, source, CFG.DRAW.SOURCE, "HARV");
           creep.harvest(source);
         }
 
-        // If the seat frees up OR capacity opens, take it now
         if (!isTileOccupiedByAnyCreep(seatPos, creep.name) || countAssignedHarvesters(creep.room.name, source.id) < seats) {
           go(creep, seatPos, 0, CONFIG.travelReuse);
           creep.memory.waitingForSeat = false;
@@ -489,66 +466,36 @@ var TaskBaseHarvest = {
       }
       creep.memory.waitingForSeat = false;
 
+      // --- Same-tick dump+harvest ONLY if collectors exist ---
+      var courierCount = countCreepsWithTask('courier');
+      var queenCount   = countCreepsWithTask('queen');
+      var haveCollectors = (courierCount > 0 || queenCount > 0);
+
+      var contHere = getContainerAtOrAdjacent(creep.pos);
+      if (haveCollectors && contHere && creep.pos.isEqualTo(contHere.pos)) {
+        if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+          var tr = creep.transfer(contHere, RESOURCE_ENERGY);
+          if (tr === ERR_FULL) { debugSay(creep, '⬇️'); creep.drop(RESOURCE_ENERGY); }
+          else if (tr === ERR_NOT_IN_RANGE) { go(creep, contHere.pos, 0, CONFIG.travelReuse); return; }
+        }
+      }
+
+      // Always swing the pick this tick
       debugSay(creep, '⛏️');
       debugDrawLine(creep, source, CFG.DRAW.SOURCE, "HARV");
       creep.harvest(source);
       return;
     }
 
-    // (2) Not harvesting (full): offload
-    if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
-      var courierCount = countCreepsWithTask('courier');
-      var queenCount   = countCreepsWithTask('queen');
-      var haveCollectors = (courierCount > 0 || queenCount > 0);
+    // (2) Offload phase: keep going until empty
+    if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      var courierCount2 = countCreepsWithTask('courier');
+      var queenCount2   = countCreepsWithTask('queen');
+      var haveCollectors2 = (courierCount2 > 0 || queenCount2 > 0);
 
-      // Prefer container on/adjacent: if present, sit on it and transfer
-      var cont = getContainerAtOrAdjacent(creep.pos);
-      if (cont) {
-        // If we're not standing on it, step onto it (since miners are meant to sit on the can)
-        if (!creep.pos.isEqualTo(cont.pos)) {
-          debugSay(creep, '📦→');
-          debugDrawLine(creep, cont, CFG.DRAW.OFFLOAD, "SEAT");
-          go(creep, cont.pos, 0, CONFIG.travelReuse);
-          return;
-        }
-
-        // On the container: try transfer
-        debugSay(creep, '📦');
-        var tr = creep.transfer(cont, RESOURCE_ENERGY);
-        if (tr === OK) return;
-        if (tr === ERR_NOT_IN_RANGE) { go(creep, cont.pos, 0, CONFIG.travelReuse); return; }
-
-        // Container rejected (likely full). If collectors exist, drop; else emergency haul.
-        if (haveCollectors) {
-          debugSay(creep, '⬇️');
-          creep.drop(RESOURCE_ENERGY);
-          return;
-        } else {
-          var sink1 = findEmergencyEnergySink(creep);
-          if (sink1) {
-            debugSay(creep, '🏠');
-            debugDrawLine(creep, sink1, CFG.DRAW.OFFLOAD, "RETURN");
-            var rs1 = creep.transfer(sink1, RESOURCE_ENERGY);
-            if (rs1 === ERR_NOT_IN_RANGE) { go(creep, sink1, 1, CONFIG.travelReuse); return; }
-            if (rs1 === OK) return;
-          }
-          // Still nowhere? drop as absolute last resort.
-          debugSay(creep, '⬇️');
-          creep.drop(RESOURCE_ENERGY);
-          return;
-        }
-      }
-
-      // No container next to us:
-      if (haveCollectors) {
-        // Couriers/Queen alive → drop for pickup (fastest turnaround)
-        debugSay(creep, '⬇️');
-        debugRing(creep.room, creep.pos, CFG.DRAW.OFFLOAD, "DROP");
-        creep.drop(RESOURCE_ENERGY);
-        return;
-      } else {
-        // Emergency hauler mode (both courier and queen missing)
-        var sink = findEmergencyEnergySink(creep);
+      // If we DON'T have collectors, prioritize hauling to spawn/ext/storage.
+      if (!haveCollectors2) {
+        var sink = findEmergencyEnergySink(creep); // spawn → ext → storage → container
         if (sink) {
           debugSay(creep, '🏠');
           debugDrawLine(creep, sink, CFG.DRAW.OFFLOAD, "RETURN");
@@ -556,16 +503,44 @@ var TaskBaseHarvest = {
           if (rs === ERR_NOT_IN_RANGE) { go(creep, sink, 1, CONFIG.travelReuse); return; }
           if (rs === OK) return;
         }
-        // No sink available: drop rather than clog
+        debugSay(creep, '⬇️'); // absolute last resort
+        creep.drop(RESOURCE_ENERGY);
+        return;
+      }
+
+      // We DO have collectors → container-first flow (fast turnaround)
+      var cont = getContainerAtOrAdjacent(creep.pos);
+      if (cont) {
+        if (!creep.pos.isEqualTo(cont.pos)) {
+          debugSay(creep, '📦→');
+          debugDrawLine(creep, cont, CFG.DRAW.OFFLOAD, "SEAT");
+          go(creep, cont.pos, 0, CONFIG.travelReuse);
+          return;
+        }
+
+        debugSay(creep, '📦');
+        var tr2 = creep.transfer(cont, RESOURCE_ENERGY);
+        if (tr2 === OK) return;
+        if (tr2 === ERR_NOT_IN_RANGE) { go(creep, cont.pos, 0, CONFIG.travelReuse); return; }
+
+        // Container rejected (likely full). Drop to keep miner unblocked.
         debugSay(creep, '⬇️');
         creep.drop(RESOURCE_ENERGY);
         return;
       }
+
+      // No container next to us but collectors exist → drop for pickup
+      debugSay(creep, '⬇️');
+      debugRing(creep.room, creep.pos, CFG.DRAW.OFFLOAD, "DROP");
+      creep.drop(RESOURCE_ENERGY);
+      return;
     }
 
-    // Otherwise idle gently on our seat (or where we are)
-    debugSay(creep, '🧘');
-    debugRing(creep.room, creep.pos, CFG.DRAW.IDLE, "IDLE");
+    // Otherwise idle only when empty (waiting on regen/seat)
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
+      debugSay(creep, '🧘');
+      debugRing(creep.room, creep.pos, CFG.DRAW.IDLE, "IDLE");
+    }
   }
 };
 
