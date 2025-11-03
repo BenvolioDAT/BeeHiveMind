@@ -1,9 +1,8 @@
-
 var CFG = Object.freeze({
   maxSitesPerTick: 5,            // gentle drip; global cap is 100
   csiteSafetyLimit: 40,          // stop early if we’re near the global cap
   tickModulo: 2,                 // stagger planners across rooms; set to 1 to run every tick
-  noPlacementCooldownPlaced: 4, // ticks to wait after we successfully place >=1 site
+  noPlacementCooldownPlaced: 4,  // ticks to wait after we successfully place >=1 site
   noPlacementCooldownNone: 10    // ticks to wait when nothing placed
 });
 
@@ -189,6 +188,26 @@ var RoomPlanner = {
       return false;
     }
 
+    // ============================================================
+    // 1) PRIORITY: ensure ONE container near each owned-room source
+    // ============================================================
+    var delta = RoomPlanner._ensureSourceContainers(
+      room, anchor, terrain, built, sites, allowed,
+      CFG.maxSitesPerTick - placed,
+      CFG.csiteSafetyLimit - cCount
+    );
+    placed += delta.placed;
+    cCount += delta.placed; // one site per placement
+
+    // Stop early if we hit limits during source-container placement
+    if (placed >= CFG.maxSitesPerTick || cCount >= CFG.csiteSafetyLimit) {
+      mem.nextPlanTick = Game.time + CFG.noPlacementCooldownPlaced;
+      return;
+    }
+
+    // ============================================================
+    // 2) BASE LAYOUT (existing behavior)
+    // ============================================================
     for (var k = 0; k < RoomPlanner.BASE_OFFSETS.length; k++) {
       if (placed >= CFG.maxSitesPerTick) break;
       if (cCount >= CFG.csiteSafetyLimit) break;
@@ -222,6 +241,126 @@ var RoomPlanner = {
     }
 
     mem.nextPlanTick = Game.time + (placed ? CFG.noPlacementCooldownPlaced : CFG.noPlacementCooldownNone);
+  },
+
+  /**
+   * Place exactly one container per source in an owned room that has a spawn.
+   * Updates Memory.rooms[roomName].sources[sourceId].container = {status, x, y, id/siteId}
+   *
+   * Status values:
+   *  - "Good"    : container exists and is healthy
+   *  - "Repair"  : container exists but is damaged (hits < 60% of max)
+   *  - "Building": csite exists within range 1 of source
+   *  - "Need"    : no container/csite; will attempt to place (respecting caps)
+   */
+  _ensureSourceContainers: function (room, anchor, terrain, built, sites, allowedFn, slotsLeft, globalCapLeft) {
+    var placed = 0;
+
+    if (!room) return { placed: 0 };
+    if (!anchor) return { placed: 0 };
+
+    // respect overall container cap for the room
+    var haveContainers = (built[STRUCTURE_CONTAINER] | 0) + (sites[STRUCTURE_CONTAINER] | 0);
+    var capContainers  = allowedFn(STRUCTURE_CONTAINER);
+    if (haveContainers >= capContainers) return { placed: 0 };
+
+    // ensure memory path exists
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+    if (!Memory.rooms[room.name].sources) Memory.rooms[room.name].sources = {};
+    var sourcesMem = Memory.rooms[room.name].sources;
+
+    // utility: check if tile is passable for a creep to stand (no walls/solid structs/sites)
+    function isPassable(x, y) {
+      if (x < 1 || x > 48 || y < 1 || y > 48) return false;
+      if (terrain.get(x, y) === TERRAIN_MASK_WALL) return false;
+
+      var ss = room.lookForAt(LOOK_STRUCTURES, x, y);
+      for (var i = 0; i < ss.length; i++) {
+        var st = ss[i].structureType;
+        // allow roads, containers, my ramparts; block others (walls, extensions, spawns, etc.)
+        if (st === STRUCTURE_ROAD) continue;
+        if (st === STRUCTURE_CONTAINER) continue;
+        if (st === STRUCTURE_RAMPART && ss[i].my) continue;
+        return false;
+      }
+      // also avoid placing where another site already sits
+      if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return false;
+      return true;
+    }
+
+    var sources = room.find(FIND_SOURCES);
+    for (var s = 0; s < sources.length; s++) {
+      var src = sources[s];
+      var sid = src.id;
+      if (!sourcesMem[sid]) sourcesMem[sid] = {};
+      if (!sourcesMem[sid].container) sourcesMem[sid].container = {};
+      var cmem = sourcesMem[sid].container;
+
+      // 1) If a container already exists within 1, mark Good/Repair and record coords/id.
+      var structs = src.pos.findInRange(FIND_STRUCTURES, 1, {
+        filter: function (o) { return o.structureType === STRUCTURE_CONTAINER; }
+      });
+      if (structs.length) {
+        var cont = structs[0];
+        cmem.x = cont.pos.x; cmem.y = cont.pos.y; cmem.id = cont.id; cmem.siteId = undefined;
+        var healthy = (cont.hits != null && cont.hitsMax != null) ? (cont.hits / cont.hitsMax) : 1;
+        cmem.status = (healthy < 0.60) ? 'Repair' : 'Good';
+        continue;
+      }
+
+      // 2) If a csite (container) already exists within 1, mark Building and record pos/siteId.
+      var cs = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
+        filter: function (c) { return c.structureType === STRUCTURE_CONTAINER; }
+      });
+      if (cs.length) {
+        cmem.x = cs[0].pos.x; cmem.y = cs[0].pos.y; cmem.id = undefined; cmem.siteId = cs[0].id;
+        cmem.status = 'Building';
+        continue;
+      }
+
+      // 3) Otherwise we Need one. Try to place (respecting per-tick/global caps).
+      cmem.status = 'Need';
+      if (slotsLeft <= 0 || globalCapLeft <= 0) continue;
+      if (haveContainers >= capContainers) continue;
+
+      // Pick first good neighbor tile (8-neighborhood)
+      var placedHere = false;
+      for (var dx = -1; dx <= 1 && !placedHere; dx++) {
+        for (var dy = -1; dy <= 1 && !placedHere; dy++) {
+          if (dx === 0 && dy === 0) continue;
+          var tx = src.pos.x + dx;
+          var ty = src.pos.y + dy;
+          if (!isPassable(tx, ty)) continue;
+
+          // final safety: don't double-place if somehow occupied (already checked above)
+          var rc = room.createConstructionSite(tx, ty, STRUCTURE_CONTAINER);
+          if (rc === OK) {
+            // record in memory
+            cmem.x = tx; cmem.y = ty; cmem.id = undefined; cmem.status = 'Building';
+            // try to fetch site id we just created (cheap local look)
+            var lookup = room.lookForAt(LOOK_CONSTRUCTION_SITES, tx, ty);
+            cmem.siteId = (lookup && lookup.length) ? lookup[0].id : undefined;
+
+            // bump counters and caps
+            placed += 1;
+            slotsLeft -= 1;
+            globalCapLeft -= 1;
+            haveContainers += 1;
+            sites[STRUCTURE_CONTAINER] = (sites[STRUCTURE_CONTAINER] | 0) + 1;
+
+            // optional debug breadcrumb (comment out if noisy)
+            // console.log('[Planner] placed container site near source', sid, 'at', room.name, tx + ',' + ty);
+
+            placedHere = true;
+          }
+          // else: ERR_* -> ignore; try another neighbor
+        }
+      }
+      // if we could not place at any neighbor, we keep status = 'Need' and try next tick
+    }
+
+    return { placed: placed };
   },
 
   // --- Helpers ---

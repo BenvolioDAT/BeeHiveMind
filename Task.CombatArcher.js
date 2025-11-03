@@ -56,18 +56,11 @@ function _roomOf(p){ return p && Game.rooms[p.roomName]; }
 function debugSay(creep, msg){
   if (CONFIG.DEBUG_SAY && creep && creep.say) creep.say(msg, true);
 }
-function debugLine(from, to, color, label){
+function debugLine(from, to, color){
   if (!CONFIG.DEBUG_DRAW || !from || !to) return;
   var f=_posOf(from), t=_posOf(to); if(!f||!t||f.roomName!==t.roomName) return;
   var R=_roomOf(f); if(!R||!R.visual) return;
   R.visual.line(f, t, { color: color, width: CONFIG.WIDTH, opacity: CONFIG.OPAC });
-  if (label){
-    var mx=(f.x+t.x)/2, my=(f.y+t.y)/2;
-    R.visual.text(label, mx, my-0.25, {
-      color: color, opacity: 0.95, font: CONFIG.FONT, align:"center",
-      backgroundColor:"#000", backgroundOpacity:0.25
-    });
-  }
 }
 function debugRing(target, color, text, radius){
   if (!CONFIG.DEBUG_DRAW || !target) return;
@@ -76,20 +69,12 @@ function debugRing(target, color, text, radius){
   R.visual.circle(p, { radius: radius!=null?radius:0.6, fill:"transparent", stroke: color, opacity: CONFIG.OPAC, width: CONFIG.WIDTH });
   if (text) R.visual.text(text, p.x, p.y-0.8, { color: color, font: CONFIG.FONT, opacity: 0.95, align:"center" });
 }
-function hud(creep, text){
-  if (!CONFIG.DEBUG_DRAW) return;
-  var R=creep.room; if(!R||!R.visual) return;
-  R.visual.text(text, creep.pos.x, creep.pos.y-1.2, {
-    color: CONFIG.COLORS.TEXT, font: CONFIG.FONT, opacity: 0.95, align: "center",
-    backgroundColor:"#000", backgroundOpacity:0.25
-  });
-}
 
 // Wrap TaskSquad.stepToward / BeeTravel / moveTo and draw a line
 function moveSmart(creep, dest, range){
   var d = _posOf(dest) || dest;
   if (creep.pos.roomName === d.roomName && creep.pos.getRangeTo(d) > (range||1)){
-    debugLine(creep.pos, d, CONFIG.COLORS.PATH, "→");
+    debugLine(creep.pos, d, CONFIG.COLORS.PATH);
   }
   if (TaskSquad && typeof TaskSquad.stepToward === 'function'){
     return TaskSquad.stepToward(creep, d, range);
@@ -204,9 +189,6 @@ function shootOpportunistic(creep){
 var TaskCombatArcher = {
   run: function(creep){
     if (creep.spawning) return;
-
-    // HUD
-    hud(creep, "🏹 " + creep.hits + "/" + creep.hitsMax);
 
     // Optional rally until medic present
     if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)){
