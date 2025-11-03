@@ -52,6 +52,35 @@ const ROLE_PRIORITY = {
   CombatMedic:  25
 };
 
+/** -----------------------------------------------------------------------
+ *  NEW: minimal energy per role (used to "lock the head" of the queue).
+ *  If the top-priority role isn't affordable yet, we WAIT instead of
+ *  letting lower priorities jump ahead.
+ *  --------------------------------------------------------------------- */
+const ROLE_MIN_ENERGY = {
+  baseharvest: 200,   // WORK+CARRY+MOVE (adjust to your tiers)
+  courier:     150,
+  queen:       200,
+  upgrader:    200,
+  builder:     200,
+  luna:        250,   // starter remote miner
+  repair:      200,
+  Claimer:     650,   // CLAIM+MOVE
+  scout:       50,
+  Trucker:     200,
+  Dismantler:  150,
+  CombatArcher:200,
+  CombatMelee: 200,
+  CombatMedic: 200
+};
+function minEnergyFor(role) {
+  if (spawnLogic && typeof spawnLogic.minEnergyFor === 'function') {
+    const v = spawnLogic.minEnergyFor(role);
+    if (typeof v === 'number') return v;
+  }
+  return ROLE_MIN_ENERGY[role] || 200;
+}
+
 // --------------------------- Global Tick Cache ---------------------------
 if (!global.__BHM) global.__BHM = {};
 
@@ -321,7 +350,7 @@ function computeRoomQuotas(C, room) {
 
 // Fill queue with deficits (active + queued < quota)
 function fillQueueForRoom(C, room) {
-  const quotas  = computeRoomQuotas(C, room);
+  const quotas   = computeRoomQuotas(C, room);
   const roomName = room.name;
 
   // Optional: enable dynamic Luna
@@ -345,7 +374,14 @@ function fillQueueForRoom(C, room) {
   }
 }
 
-// Pull one item for this spawn and attempt to spawn it
+/** -----------------------------------------------------------------------
+ *  NEW dequeue: priority barrier + energy gate
+ *  - Sort queue (prio desc, then oldest)
+ *  - Only consider items with the current HIGHEST priority
+ *  - If room energy < min for that priority, WAIT (don’t back-off, don’t
+ *    look at lower priorities)
+ *  - Otherwise spawn the oldest eligible item at that priority
+ *  --------------------------------------------------------------------- */
 function dequeueAndSpawn(spawner) {
   if (!spawner || spawner.spawning) return false;
   const room = spawner.room;
@@ -356,40 +392,60 @@ function dequeueAndSpawn(spawner) {
     return false;
   }
 
-  // Highest priority, then oldest; skip items in cooldown
+  // Highest priority first, then oldest
   q.sort((a, b) => (b.priority - a.priority) || (a.created - b.created));
 
-  for (let i = 0; i < q.length; i++) {
-    const item = q[i];
-    if (!item || (item.retryAt && Game.time < item.retryAt)) continue;
+  // Establish the head priority (barrier)
+  const headPriority = q[0].priority;
+  const headRole     = q[0].role;
 
-    dlog('🎬 [SpawnTry]', roomName, 'role=', item.role, 'prio=', item.priority, 'age=', (Game.time - item.created),
-         'energy=', energyStatus(room));
-
-    const spawnResource =
-      (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
-        ? spawnLogic.Calculate_Spawn_Resource(spawner)
-        : null;
-
-    const ok =
-      (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function')
-        ? spawnLogic.Spawn_Worker_Bee(spawner, item.role, spawnResource, item) // pass item as context
-        : false;
-
-    if (ok) {
-      dlog('✅ [SpawnOK]', roomName, 'spawned', item.role, 'at', spawner.name);
-      q.splice(i, 1);    // success: remove from queue
-      return true;
-    } else {
-      item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN; // backoff
-      dlog('⏳ [SpawnWait]', roomName, item.role, 'backoff to', item.retryAt, '(energy', energyStatus(room) + ')');
-      return false;      // 1 attempt per spawn per tick
-    }
+  // Energy gate: if we can't afford the head priority, HOLD
+  const needed = minEnergyFor(headRole);
+  if ((room.energyAvailable | 0) < needed) {
+    if (tickEvery(DBG_EVERY)) dlog('⛽ [QueueHold]', roomName, 'prio', headPriority, 'role', headRole,
+                                   'need', needed, 'have', room.energyAvailable);
+    return false;
   }
 
-  // Nothing eligible this tick
-  if (tickEvery(DBG_EVERY)) dlog('⏸️ [Queue]', roomName, 'no eligible items (cooldowns active)');
-  return false;
+  // Oldest, not-cooling-down item at the head priority
+  let pickIndex = -1;
+  for (let i = 0; i < q.length; i++) {
+    const it = q[i];
+    if (!it) continue;
+    if (it.priority !== headPriority) break;         // stop once we leave the head block
+    if (it.retryAt && Game.time < it.retryAt) continue;
+    pickIndex = i;
+    break;
+  }
+  if (pickIndex === -1) {
+    if (tickEvery(DBG_EVERY)) dlog('⏸️ [Queue]', roomName, 'head priority cooling down');
+    return false;
+  }
+
+  const item = q[pickIndex];
+  dlog('🎬 [SpawnTry]', roomName, 'role=', item.role, 'prio=', item.priority,
+       'age=', (Game.time - item.created), 'energy=', energyStatus(room));
+
+  const spawnResource =
+    (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function')
+      ? spawnLogic.Calculate_Spawn_Resource(spawner)
+      : null;
+
+  const ok =
+    (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function')
+      ? spawnLogic.Spawn_Worker_Bee(spawner, item.role, spawnResource, item)
+      : false;
+
+  if (ok) {
+    dlog('✅ [SpawnOK]', roomName, 'spawned', item.role, 'at', spawner.name);
+    q.splice(pickIndex, 1);
+    return true;
+  } else {
+    // Only back-off if we *could afford it* but still failed (e.g., name collision)
+    item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
+    dlog('⏳ [SpawnWait]', roomName, item.role, 'backoff to', item.retryAt, '(energy', energyStatus(room) + ')');
+    return false; // one attempt per spawn per tick
+  }
 }
 
 // ------------------------------ Main Module ------------------------------
@@ -401,7 +457,6 @@ const BeeHiveMind = {
     if (BeeVisualsSpawnPanel && typeof BeeVisualsSpawnPanel.drawVisuals === 'function') {
       BeeVisualsSpawnPanel.drawVisuals();
     }
-
 
     const C = prepareTickCaches();
 
