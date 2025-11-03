@@ -49,6 +49,7 @@ function debugDraw(creep, target, color, label) {
   var room = creep.room;
   if (!room || !room.visual) return;
 
+  // Only draw if target is in same room (visuals are per-room)
   var tpos = target.pos || (target.position || null);
   if (!tpos || tpos.roomName !== room.name) return;
 
@@ -160,40 +161,6 @@ function _pibSumReserved(roomName, targetId, resourceType) {
   return total;
 }
 
-// NEW: amount reserved by others (exclude this creep)
-function _pibSumReservedExcept(roomName, targetId, resourceType, exceptName) {
-  resourceType = resourceType || RESOURCE_ENERGY;
-  var R = _pibRoom(roomName);
-  var byCreep = (R.fills[targetId] || {});
-  var total = 0;
-  for (var cname in byCreep) {
-    if (!byCreep.hasOwnProperty(cname)) continue;
-    if (cname === exceptName) continue;
-    var rec = byCreep[cname];
-    if (!rec || rec.res !== resourceType) continue;
-    if (rec.untilTick > Game.time) total += (rec.amount | 0);
-    else delete byCreep[cname];
-  }
-  if (Object.keys(byCreep).length === 0) delete R.fills[targetId];
-  return total;
-}
-
-// NEW: how much *this creep* has reserved (active)
-function _pibMine(creep, target, resourceType) {
-  resourceType = resourceType || RESOURCE_ENERGY;
-  var roomName = (creep.room && creep.room.name) || (target.pos && target.pos.roomName);
-  if (!roomName) return 0;
-  var R = _pibRoom(roomName);
-  var map = R.fills[target.id];
-  if (!map) return 0;
-  var rec = map[creep.name];
-  if (!rec || rec.res !== resourceType) return 0;
-  if (rec.untilTick > Game.time) return (rec.amount | 0);
-  delete map[creep.name];
-  if (Object.keys(map).length === 0) delete R.fills[target.id];
-  return 0;
-}
-
 function _pibReserveFill(creep, target, amount, resourceType) {
   if (!creep || !target || !amount) return 0;
   resourceType = resourceType || RESOURCE_ENERGY;
@@ -230,7 +197,7 @@ function _pibReleaseFill(creep, target, resourceType) {
 }
 
 // ============================
-// Capacity accounting
+// Capacity accounting with buffers
 // ============================
 function _effectiveFree(struct, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
@@ -244,20 +211,6 @@ function _effectiveFree(struct, resourceType) {
   return Math.max(0, freeNow - sameTickReserved - pibReserved);
 }
 
-// NEW: free capacity for *this* creep (ignore my own PIB)
-function _effectiveFreeFor(creep, struct, resourceType) {
-  resourceType = resourceType || RESOURCE_ENERGY;
-
-  var freeNow = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
-  var sameTickReserved = _reservedFor(struct.id) | 0;
-
-  var roomName = (struct.pos && struct.pos.roomName) || (struct.room && struct.room.name);
-  var pibOthers = roomName ? (_pibSumReservedExcept(roomName, struct.id, resourceType, creep.name) | 0) : 0;
-
-  return Math.max(0, freeNow - sameTickReserved - pibOthers);
-}
-
-// Original API (kept for compatibility elsewhere)
 function reserveFill(creep, target, amount, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
 
@@ -271,29 +224,6 @@ function reserveFill(creep, target, amount, resourceType) {
     _pibReserveFill(creep, target, want, resourceType);
   }
   return want;
-}
-
-// NEW: reserve capacity *for this creep* (ignores its own PIB when computing free)
-// Also refreshes PIB every tick so sticky targets don't expire.
-function reserveFillFor(creep, target, amount, resourceType) {
-  resourceType = resourceType || RESOURCE_ENERGY;
-  var map = _qrMap();
-
-  var freeForMe = _effectiveFreeFor(creep, target, resourceType);
-  var want = Math.max(0, Math.min(amount, freeForMe));
-
-  // Even if want==0 (because others reserved), keep my existing PIB alive if I already have one.
-  var mine = _pibMine(creep, target, resourceType);
-  if (want === 0 && mine > 0) {
-    // Refresh my reservation window using what I already had.
-    _pibReserveFill(creep, target, mine, resourceType);
-  } else if (want > 0) {
-    map[target.id] = (map[target.id] || 0) + want;
-    _pibReserveFill(creep, target, want, resourceType);
-  }
-
-  if (want > 0 || mine > 0) creep.memory.qTargetId = target.id;
-  return (want > 0) ? want : mine;
 }
 
 function transferTo(creep, target, res) {
@@ -434,36 +364,26 @@ var TaskQueen = {
     var carrying = carryAmt > 0;
 
     if (carrying) {
-      // ---------- Sticky target logic (fixed) ----------
+      // Sticky target first
       if (creep.memory.qTargetId) {
         var sticky = Game.getObjectById(creep.memory.qTargetId);
-        if (sticky) {
-          // Raw physical free (ignores any PIB); plus check if I already have a reservation there
-          var rawFree = (sticky.store && sticky.store.getFreeCapacity(RESOURCE_ENERGY)) || 0;
-          var mineAmt = _pibMine(creep, sticky, RESOURCE_ENERGY);
-          var freeForMe = _effectiveFreeFor(creep, sticky, RESOURCE_ENERGY);
-
-          // If there's real space OR I have a live reservation, keep going and refresh my PIB
-          if (rawFree > 0 || mineAmt > 0 || freeForMe > 0) {
-            // Reserve for *me* (and refresh even if others make freeForMe==0)
-            reserveFillFor(creep, sticky, carryAmt, RESOURCE_ENERGY);
+        if (sticky && _effectiveFree(sticky, RESOURCE_ENERGY) > 0) {
+          if (reserveFill(creep, sticky, carryAmt, RESOURCE_ENERGY) > 0) {
             debugSay(creep, '→ STICK');
             debugDraw(creep, sticky, CFG.DRAW.STICK_COLOR, "STICK");
             transferTo(creep, sticky);
             return;
-          } else {
-            // Truly no space and no reservation left: drop the sticky
-            creep.memory.qTargetId = null;
           }
         } else {
           creep.memory.qTargetId = null;
         }
       }
 
-      // ---------- Pick a new fill target ----------
+      // Pick a new fill target
       var target = chooseFillTarget(creep, cache);
       if (target) {
-        if (reserveFillFor(creep, target, carryAmt, RESOURCE_ENERGY) > 0) {
+        if (reserveFill(creep, target, carryAmt, RESOURCE_ENERGY) > 0) {
+          // Label + color by type
           var st = target.structureType;
           if (st === STRUCTURE_EXTENSION) { debugSay(creep, '→ EXT'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "EXT"); }
           else if (st === STRUCTURE_SPAWN) { debugSay(creep, '→ SPN'); debugDraw(creep, target, CFG.DRAW.FILL_COLOR, "SPN"); }
@@ -478,7 +398,7 @@ var TaskQueen = {
         }
       }
 
-      // ---------- Idle near anchor ----------
+      // Idle near anchor
       var anchor = cache.spawn || room.controller || creep.pos;
       debugSay(creep, 'IDLE');
       debugDraw(creep, (anchor.pos || anchor), CFG.DRAW.IDLE_COLOR, "IDLE");
@@ -486,7 +406,7 @@ var TaskQueen = {
       return;
     }
 
-    // ---------- Not carrying: acquire energy ----------
+    // Not carrying: acquire energy
     var withdrawTarget = chooseWithdrawTarget(creep, cache);
     if (withdrawTarget) {
       if (withdrawTarget.resourceType === RESOURCE_ENERGY) {
@@ -505,7 +425,7 @@ var TaskQueen = {
       return;
     }
 
-    // ---------- Last resort: harvest directly ----------
+    // Last resort: harvest directly
     harvestFromClosest(creep);
   }
 };
