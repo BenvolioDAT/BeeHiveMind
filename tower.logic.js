@@ -1,4 +1,69 @@
+// Tower.Manager.debugged.js — coordinated attack/heal/repair with Debug_say & Debug_draw (ES5-safe)
 
+/**
+ * Behavior summary (per tick, per room):
+ * 1) If any hostiles: all towers ATTACK nearest (PvE neutral; no username checks here).
+ * 2) Else if any wounded allies and energy >= HEAL_MIN: HEAL nearest wounded.
+ * 3) Else REPAIR using Memory.rooms[room].repairTargets (priority = list order),
+ *    with short per-tower locks to avoid thrash and same-tick de-duplication.
+ *
+ * Visuals:
+ *  - ATTACK: red line tower→foe, red ring on foe, label "ATK"
+ *  - HEAL:   aqua line tower→ally, aqua ring on ally, label "HEAL"
+ *  - REPAIR: green line tower→target, green ring on target, label "REP"
+ *  - Tower "say": drawn text above the tower (since structures can’t creep.say)
+ */
+
+var CFG = Object.freeze({
+  DEBUG_SAY: true,          // draw tiny labels above towers
+  DEBUG_DRAW: true,         // RoomVisual lines/circles/labels
+
+  // Energy thresholds (tune to taste)
+  ATTACK_MIN: 10,           // min energy to allow attack (towers are cheap to fire)
+  HEAL_MIN:   200,          // min energy to allow heal
+  REPAIR_MIN: 400,          // min energy to allow repair (keeps buffer for defense)
+
+  // Tower repair stickiness
+  LOCK_TTL: 3,              // ticks a tower tries to stick to its locked repair target
+
+  // Draw palette
+  DRAW: {
+    ATK:   "#ff6e6e",
+    HEAL:  "#6ee7ff",
+    REP:   "#6effa1",
+    LOCK:  "#ffe66e",
+    IDLE:  "#bfbfbf"
+  }
+});
+
+// -----------------------------
+// Tiny debug helpers
+// -----------------------------
+function _tsay(tower, msg) {
+  if (!CFG.DEBUG_SAY || !tower) return;
+  var pos = tower.pos;
+  tower.room.visual.text(
+    msg,
+    pos.x, pos.y - 0.9,
+    { color: "#ddd", font: 0.8, align: "center" }
+  );
+}
+function _line(room, a, b, color) {
+  if (!CFG.DEBUG_DRAW || !room || !a || !b) return;
+  room.visual.line((a.pos || a), (b.pos || b), { color: color || "#fff", opacity: 0.6, width: 0.08 });
+}
+function _ring(room, p, color) {
+  if (!CFG.DEBUG_DRAW || !room || !p) return;
+  room.visual.circle((p.pos || p), { radius: 0.5, stroke: color || "#fff", fill: "transparent", opacity: 0.5 });
+}
+function _label(room, p, text, color) {
+  if (!CFG.DEBUG_DRAW || !room || !p) return;
+  room.visual.text(text, (p.pos || p).x, (p.pos || p).y - 0.6, { color: color || "#ddd", font: 0.8, align: "center" });
+}
+
+// -----------------------------
+// Module
+// -----------------------------
 module.exports = {
   run: function () {
     // Find the first spawn (keeps your existing assumption)
@@ -29,43 +94,79 @@ module.exports = {
     });
     if (!towers || !towers.length) return;
 
-    // ========== 1) Hostile handling (always first) ==========
+    // ------------------------------------
+    // 1) Hostile handling (always first)
+    // ------------------------------------
     var hostilePresent = false;
-    for (var h = 0; h < towers.length; h++) {
-      var tChk = towers[h];
+    var scanIdx;
+    for (scanIdx = 0; scanIdx < towers.length; scanIdx++) {
+      var tChk = towers[scanIdx];
       var nearestHostile = tChk.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
       if (nearestHostile) { hostilePresent = true; break; }
     }
 
     if (hostilePresent) {
-      // Everyone shoots their nearest baddie
+      // Everyone shoots their nearest baddie (simple + effective)
       for (var a = 0; a < towers.length; a++) {
         var at = towers[a];
+        var energyA = at.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
+        if (energyA < CFG.ATTACK_MIN) continue;
+
         var foe = at.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
-        if (foe) at.attack(foe);
+        if (foe) {
+          at.attack(foe);
+          _tsay(at, "ATK");
+          _line(at.room, at.pos, foe.pos, CFG.DRAW.ATK);
+          _ring(at.room, foe.pos, CFG.DRAW.ATK);
+          _label(at.room, foe.pos, "ATK", CFG.DRAW.ATK);
+        }
       }
       return; // done this tick
     }
 
-    // ========== 2) Repair coordination ==========
+    // ------------------------------------
+    // 2) (Optional) heal wounded allies
+    // ------------------------------------
+    // Heals come before repairs but after combat; keeps creeps alive mid-ops.
+    var anyHealed = false;
+    for (var h = 0; h < towers.length; h++) {
+      var ht = towers[h];
+      var energyH = ht.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
+      if (energyH < CFG.HEAL_MIN) continue;
 
-    // Filter + validate target list (live objects that still need repairs)
-    // Note: we trust your priority already baked into repairTargets order.
+      var patient = ht.pos.findClosestByRange(FIND_MY_CREEPS, {
+        filter: function (c) { return c.hits < c.hitsMax; }
+      });
+      if (patient) {
+        ht.heal(patient);
+        _tsay(ht, "HEAL");
+        _line(ht.room, ht.pos, patient.pos, CFG.DRAW.HEAL);
+        _ring(ht.room, patient.pos, CFG.DRAW.HEAL);
+        _label(ht.room, patient.pos, "HEAL", CFG.DRAW.HEAL);
+        anyHealed = true;
+      }
+    }
+    // (We do not early-return; multiple towers can heal different targets, then proceed to repairs.)
+
+    // ------------------------------------
+    // 3) Repair coordination
+    // ------------------------------------
+
+    // Validate/collect live repair targets (still damaged)
     var validTargets = [];
-    for (var i = 0; i < RMem.repairTargets.length; i++) {
+    var i;
+    for (i = 0; i < RMem.repairTargets.length; i++) {
       var tdata = RMem.repairTargets[i];
       if (!tdata || !tdata.id) continue;
       var obj = Game.getObjectById(tdata.id);
       if (!obj) continue;
-      // Needs repair?
       if (obj.hits < obj.hitsMax) {
-        validTargets.push({ id: obj.id, hits: obj.hits, hitsMax: obj.hitsMax, pos: obj.pos, type: obj.structureType });
+        validTargets.push({ id: obj.id, pos: obj.pos, hits: obj.hits, hitsMax: obj.hitsMax, type: obj.structureType });
       }
     }
 
-    // If no valid targets, we can trim memory a bit
+    // If no valid targets, soft-trim the queue head(s) and bail
     if (!validTargets.length) {
-      // Soft clean: drop head items that are finished/invalid
       while (RMem.repairTargets.length) {
         var head = RMem.repairTargets[0];
         var headObj = head && head.id ? Game.getObjectById(head.id) : null;
@@ -78,9 +179,6 @@ module.exports = {
     // Used targets THIS tick so we don't double-up
     var usedTargetIds = {};
 
-    // Energy threshold per tower to allow repairs (tune as you like)
-    var REPAIR_ENERGY_MIN = 400;
-
     // Helper: claim next available target for a tower (no duplicates this tick)
     function pickTargetForTower(tw) {
       // 1) Respect lock if still valid and not already used this tick
@@ -88,8 +186,7 @@ module.exports = {
       if (lock && lock.id) {
         var o = Game.getObjectById(lock.id);
         if (o && o.hits < o.hitsMax && !usedTargetIds[o.id]) {
-          // renew the lock a bit
-          lock.ttl = Math.max(1, (lock.ttl | 0) - 1);
+          // Keep lock (we'll decrement TTL later in cleanup)
           usedTargetIds[o.id] = true;
           return o;
         } else {
@@ -98,18 +195,16 @@ module.exports = {
         }
       }
 
-      // 2) Find the first valid target not yet used this tick
-      // You can do nearest-first if you like; here we honor list order (priority)
+      // 2) Find first valid (list order = priority) not yet used this tick
       for (var j = 0; j < validTargets.length; j++) {
         var cand = validTargets[j];
         if (usedTargetIds[cand.id]) continue;
         var obj2 = Game.getObjectById(cand.id);
         if (!obj2) continue;
         if (obj2.hits >= obj2.hitsMax) continue;
-        usedTargetIds[cand.id] = true;
 
-        // set/refresh a short lock so we stay on it a few ticks
-        RMem._towerLocks[tw.id] = { id: obj2.id, ttl: 3 }; // ~3 ticks stickiness
+        usedTargetIds[cand.id] = true;
+        RMem._towerLocks[tw.id] = { id: obj2.id, ttl: CFG.LOCK_TTL | 0 };
         return obj2;
       }
 
@@ -121,29 +216,37 @@ module.exports = {
     for (var k = 0; k < towers.length; k++) {
       var tower = towers[k];
 
-      // Skip if low energy
+      // Skip if low energy for repairs
       var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
-      if (energy < REPAIR_ENERGY_MIN) continue;
+      if (energy < CFG.REPAIR_MIN) {
+        _tsay(tower, "idle");
+        continue;
+      }
 
-      // If there's only one target, only let the FIRST tower act on it
-      // (This is naturally enforced by usedTargetIds once the first tower picks it.)
       var target = pickTargetForTower(tower);
-      if (target) {
-        tower.repair(target);
+      if (!target) {
+        _tsay(tower, "idle");
+        continue;
+      }
 
-        // Optional: visualize
-        tower.room.visual.circle(target.pos, { radius: 0.45, fill: 'transparent', stroke: '#66ff66' });
-        tower.room.visual.line(tower.pos, target.pos, { opacity: 0.3 });
+      tower.repair(target);
+      _tsay(tower, "REP");
+      _line(tower.room, tower.pos, target.pos, CFG.DRAW.REP);
+      _ring(tower.room, target.pos, CFG.DRAW.REP);
+      _label(tower.room, target.pos, "REP", CFG.DRAW.REP);
 
-        // If target is now done, trim head(s) of queue if they match
-        // (Keeps Memory.repairTargets tidy when you focus the first items most)
-        while (RMem.repairTargets.length) {
-          var head2 = RMem.repairTargets[0];
-          if (!head2 || !head2.id) { RMem.repairTargets.shift(); continue; }
-          var ho = Game.getObjectById(head2.id);
-          if (!ho || ho.hits >= ho.hitsMax) RMem.repairTargets.shift();
-          else break;
-        }
+      // Optional: draw lock line to remind assignment
+      if (CFG.DEBUG_DRAW) {
+        _line(tower.room, tower.pos, target.pos, CFG.DRAW.LOCK);
+      }
+
+      // If target is now done, trim head(s) of queue if they match
+      while (RMem.repairTargets.length) {
+        var head2 = RMem.repairTargets[0];
+        if (!head2 || !head2.id) { RMem.repairTargets.shift(); continue; }
+        var ho = Game.getObjectById(head2.id);
+        if (!ho || ho.hits >= ho.hitsMax) RMem.repairTargets.shift();
+        else break;
       }
     }
 
