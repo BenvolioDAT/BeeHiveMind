@@ -3,7 +3,7 @@ var BeeToolbox = require('BeeToolbox');
 
 // =============== Config ===============
 var CFG = Object.freeze({
-  DEBUG_SAY: true,
+  DEBUG_SAY: false,
   DEBUG_DRAW: true,
 
   TRAVEL_REUSE: 16,

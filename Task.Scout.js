@@ -6,7 +6,7 @@ try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
  *  Debug toggles & styling
  *  ========================= */
 var CFG = Object.freeze({
-  DEBUG_SAY: true,
+  DEBUG_SAY: false,
   DEBUG_DRAW: true,
   DRAW: {
     TRAVEL:   "#8ab6ff",

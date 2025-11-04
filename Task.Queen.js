@@ -40,7 +40,7 @@ var CFG = Object.freeze({
   PATH_REUSE: 30,           // Reuse paths to reduce pathfinder CPU
   MAX_OPS: 2000,            // Upper bound for PathFinder ops (fallback moveTo)
   TOWER_REFILL_PCT: 0.80,   // Refill towers at or below 80% energy
-  DEBUG_SAY: true,          // creep.say breadcrumbs
+  DEBUG_SAY: false,          // creep.say breadcrumbs
   DEBUG_DRAW: true,         // RoomVisual lines/labels
   DRAW: {
     WD_COLOR: "#6ec1ff",    // Withdraw lane color

@@ -6,7 +6,7 @@ try { require('Traveler'); } catch (e) {} // use if available
 // Debug UI toggles & styling
 // ==============================
 var CFG = Object.freeze({
-  DEBUG_SAY: true,   // creep.say breadcrumbs
+  DEBUG_SAY: false,   // creep.say breadcrumbs
   DEBUG_DRAW: true,  // RoomVisual lines/labels
   DRAW: {
     TRAVEL_COLOR:  "#8ab6ff",

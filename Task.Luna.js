@@ -8,7 +8,7 @@ try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 // Debug UI (toggle here)
 // ============================
 var CFG = Object.freeze({
-  DEBUG_SAY: true,     // creep.say breadcrumbs
+  DEBUG_SAY: false,     // creep.say breadcrumbs
   DEBUG_DRAW: true,    // RoomVisual lines + labels
   DRAW: {
     TRAVEL_COLOR:  "#8ab6ff",  // room travel (to target/home)

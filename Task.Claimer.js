@@ -5,7 +5,7 @@ var BeeToolbox = require('BeeToolbox');
  *  Debug UI toggles & styling
  *  ========================= */
 var CFG = Object.freeze({
-  DEBUG_SAY: true,   // creep.say breadcrumbs
+  DEBUG_SAY: false,   // creep.say breadcrumbs
   DEBUG_DRAW: true,  // RoomVisual lines/labels/rings
   DRAW: {
     TRAVEL:   "#8ab6ff",

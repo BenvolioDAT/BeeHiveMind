@@ -30,7 +30,7 @@ var CFG = Object.freeze({
   TOWER_REFILL_AT_OR_BELOW: 0.70, // refill towers when <= 70%
 
   // Debug UI
-  DEBUG_SAY: true,                // creep.say breadcrumbs
+  DEBUG_SAY: false,                // creep.say breadcrumbs
   DEBUG_DRAW: true,               // RoomVisual lines + labels
   DRAW: {
     WD_COLOR: "#6ec1ff",          // withdraw lines
