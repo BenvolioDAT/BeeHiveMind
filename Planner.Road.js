@@ -13,8 +13,8 @@ const CFG = Object.freeze({
   maxOpsPlanning: 20000,       // PathFinder ops guardrail; lower on CPU pinches
 
   // Placement behavior
-  placeBudgetPerTick: 10,      // ROAD sites we attempt per tick across a path
-  globalCSiteSafetyLimit: 5,  // skip if near 100 cap
+  placeBudgetPerTick: 3,      // ROAD sites we attempt per tick across a path
+  globalCSiteSafetyLimit: 3,  // skip if near 100 cap
   plannerTickModulo: 3,        // run ensureRemoteRoads only 1/modulo ticks (staggered by room)
 
   // Auditing: regular interval + tiny random chance to smooth load
