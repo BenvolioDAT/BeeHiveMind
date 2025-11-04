@@ -85,6 +85,7 @@ var RoomPlanner = {
     { type: STRUCTURE_EXTENSION, x:  5, y: -1 },
 
     // roads
+    /*
     { type: STRUCTURE_ROAD, x:  1, y:  1 },
     { type: STRUCTURE_ROAD, x:  0, y:  1 },
     { type: STRUCTURE_ROAD, x: -1, y:  1 },
@@ -119,6 +120,7 @@ var RoomPlanner = {
     { type: STRUCTURE_ROAD, x:  1, y: -4 },
     { type: STRUCTURE_ROAD, x:  0, y:  4 },
     { type: STRUCTURE_ROAD, x:  0, y: -4 }
+     */
   ],
 
   ensureSites: function (room) {

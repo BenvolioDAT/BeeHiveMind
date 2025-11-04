@@ -9,12 +9,12 @@ const CFG = Object.freeze({
   roadCost: 1,
 
   // Pathfinding safety caps (prevent expensive searches on mega routes)
-  maxRoomsPlanning: 10,        // cap path search footprint (tune for your empire layout)
+  maxRoomsPlanning: 4,        // cap path search footprint (tune for your empire layout)
   maxOpsPlanning: 20000,       // PathFinder ops guardrail; lower on CPU pinches
 
   // Placement behavior
   placeBudgetPerTick: 10,      // ROAD sites we attempt per tick across a path
-  globalCSiteSafetyLimit: 20,  // skip if near 100 cap
+  globalCSiteSafetyLimit: 5,  // skip if near 100 cap
   plannerTickModulo: 3,        // run ensureRemoteRoads only 1/modulo ticks (staggered by room)
 
   // Auditing: regular interval + tiny random chance to smooth load

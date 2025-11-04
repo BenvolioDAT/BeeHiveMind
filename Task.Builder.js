@@ -101,18 +101,7 @@ function go(creep, dest, range, reuse) {
 // Energy intake (prefer floor snacks)
 // ==============================
 function collectEnergy(creep) {
-  // 1) Dropped
-  var dropped = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
-    filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) >= PICKUP_MIN; }
-  });
-  if (dropped) {
-    debugSay(creep, '🍪');
-    debugDraw(creep, dropped, CFG.DRAW.PICKUP_COLOR, "DROP");
-    if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) go(creep, dropped, 1, 15);
-    return true;
-  }
-
-  // 2) Tombstones / Ruins
+  // 1) Tombstones / Ruins
   var tomb = creep.pos.findClosestByRange(FIND_TOMBSTONES, { filter: function (t) { return (t.store[RESOURCE_ENERGY] | 0) > 0; } });
   if (tomb) {
     debugSay(creep, '🪦');
@@ -127,6 +116,17 @@ function collectEnergy(creep) {
     debugDraw(creep, ruin, CFG.DRAW.RUIN_COLOR, "RUIN");
     var rr = creep.withdraw(ruin, RESOURCE_ENERGY);
     if (rr === ERR_NOT_IN_RANGE) go(creep, ruin, 1, 20);
+    return true;
+  }
+
+  // 2) Dropped
+  var dropped = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
+    filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) >= PICKUP_MIN; }
+  });
+  if (dropped) {
+    debugSay(creep, '🍪');
+    debugDraw(creep, dropped, CFG.DRAW.PICKUP_COLOR, "DROP");
+    if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) go(creep, dropped, 1, 15);
     return true;
   }
 

@@ -335,7 +335,7 @@ function computeRoomQuotas(C, room) {
     builder:      getBuilderNeed(C, room),
     scout:        1,
     // Switch to determineLunaQuota(C, room) when you're ready:
-    luna:         4, // determineLunaQuota(C, room),
+    luna:         5, // determineLunaQuota(C, room),
     repair:       0,
     CombatArcher: 0,
     CombatMelee:  0,
