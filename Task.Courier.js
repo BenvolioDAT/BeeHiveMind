@@ -2,9 +2,9 @@
 
 /**
  * What changed & why:
- * - Rebuilt courier role around persistent _task envelopes so targets stick until exhausted or invalid.
- * - Uses BeeSelectors for cached lookups and BeeActions for action safety plus movement intents.
- * - Integrates Logistics haul hints and emits visual breadcrumbs guarded by CFG.DEBUG flags.
+ * - Tightened courier haul integration by consuming Logistics.Manager TTL-backed requests with per-tick claims.
+ * - Swapped ad-hoc priorities for Movement.Manager intent types so traffic ordering stays consistent across roles.
+ * - Keeps persistent _task envelopes while leaning on BeeSelectors/BeeActions for cached targets and safe actions.
  */
 
 var BeeSelectors = require('BeeSelectors');
@@ -23,16 +23,13 @@ var CFG = Object.freeze({
     FONT: 0.6
   },
   STUCK_TICKS: 6,
-  MOVE_PRIORITIES: {
-    withdraw: 50,
-    pickup: 60,
-    deliver: 40
-  }
+  HAUL_GRACE: 2
 });
 
 function debugSay(creep, msg) {
   if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
 }
+
 function drawLine(creep, target, color, label) {
   if (!CFG.DEBUG_DRAW || !creep || !target) return;
   var room = creep.room;
@@ -67,15 +64,51 @@ function clearTask(creep) {
   creep.memory._task = null;
 }
 
+function haulMemoryValid(entry) {
+  if (!entry) return false;
+  if (entry.expires != null && Game.time > entry.expires) return false;
+  return true;
+}
+
+function getHaulRequests() {
+  if (!Memory.__BHM || !Memory.__BHM.haul) return null;
+  var haul = Memory.__BHM.haul;
+  if (!haul || !haul.requests || !haul.requests.length) return null;
+  if (haul.expires != null && Game.time > haul.expires) return null;
+  return haul;
+}
+
+function initHaulClaims() {
+  if (!global.__BHM) global.__BHM = { caches: {} };
+  if (global.__BHM.haulClaimsTick !== Game.time) {
+    global.__BHM.haulClaimsTick = Game.time;
+    global.__BHM.haulClaims = {};
+  }
+}
+
 function claimHaulRequest(creep) {
-  if (!Memory.__BHM || Memory.__BHM.haulTick !== Game.time) return null;
-  var reqs = Memory.__BHM.haulRequests || [];
-  for (var i = 0; i < reqs.length; i++) {
-    var r = reqs[i];
-    if (!r) continue;
-    if (r.room !== creep.room.name) continue;
-    if (r.resource !== RESOURCE_ENERGY) continue;
-    return r;
+  var haul = getHaulRequests();
+  if (!haul) return null;
+  initHaulClaims();
+  var claims = global.__BHM.haulClaims;
+  var requests = haul.requests;
+  for (var i = 0; i < requests.length; i++) {
+    var req = requests[i];
+    if (!req) continue;
+    if (req.room !== creep.room.name) continue;
+    if (req.resource !== RESOURCE_ENERGY) continue;
+    var key = req.room + '|' + req.type + '|' + req.resource + '|' + req.reason;
+    if (claims[key]) continue;
+    claims[key] = creep.name;
+    return {
+      room: req.room,
+      type: req.type,
+      resource: req.resource,
+      amount: req.amount,
+      reason: req.reason,
+      expires: (haul.expires != null) ? haul.expires : (Game.time + CFG.HAUL_GRACE),
+      key: key
+    };
   }
   return null;
 }
@@ -109,6 +142,13 @@ function pickWithdrawTask(creep) {
   return null;
 }
 
+function targetFromHaul(room, haul) {
+  if (!haul) return null;
+  if (haul.type === 'pull') return room.storage || room.terminal || null;
+  if (haul.type === 'push') return room.terminal || room.storage || null;
+  return null;
+}
+
 function pickDeliverTask(creep) {
   var room = creep.room;
   var targets = BeeSelectors.findSpawnLikeNeedingEnergy(room);
@@ -122,8 +162,11 @@ function pickDeliverTask(creep) {
     return { type: 'deliver', targetId: chosen.id, since: Game.time, data: { sink: 'tower' } };
   }
   var haul = claimHaulRequest(creep);
-  if (haul && room.storage) {
-    return { type: 'deliver', targetId: room.storage.id, since: Game.time, data: { sink: 'haul', request: haul } };
+  if (haul) {
+    var haulTarget = targetFromHaul(room, haul);
+    if (haulTarget) {
+      return { type: 'deliver', targetId: haulTarget.id, since: Game.time, data: { sink: 'haul', request: haul } };
+    }
   }
   var storage = BeeSelectors.findStorageNeedingEnergy(room);
   if (storage) {
@@ -133,6 +176,16 @@ function pickDeliverTask(creep) {
     return { type: 'deliver', targetId: room.terminal.id, since: Game.time, data: { sink: 'terminal' } };
   }
   return null;
+}
+
+function needsNewDueToHaul(task) {
+  if (!task || !task.data || !task.data.request) return false;
+  var haul = task.data.request;
+  if (!haulMemoryValid(haul)) return true;
+  var mem = getHaulRequests();
+  if (!mem) return true;
+  if (mem.expires != null && Game.time > mem.expires) return true;
+  return false;
 }
 
 function needNewTask(creep, task) {
@@ -146,6 +199,7 @@ function needNewTask(creep, task) {
   }
   if (task.type === 'deliver') {
     if (creep.store[RESOURCE_ENERGY] === 0) return true;
+    if (needsNewDueToHaul(task)) return true;
     if (target.store && target.store.getFreeCapacity(RESOURCE_ENERGY) === 0) return true;
     if (target.energyCapacity != null && (target.energy | 0) >= (target.energyCapacity | 0)) return true;
   }
@@ -168,11 +222,10 @@ function executeTask(creep, task) {
     clearTask(creep);
     return;
   }
-  var priority = CFG.MOVE_PRIORITIES[task.type] || 0;
   if (task.type === 'withdraw') {
     drawLine(creep, target, CFG.DRAW.WITHDRAW, 'WD');
     debugSay(creep, '📦');
-    var withdrawOpts = { priority: priority, reusePath: 20 };
+    var withdrawOpts = { reusePath: 20 };
     var rc = BeeActions.safeWithdraw(creep, target, RESOURCE_ENERGY, withdrawOpts);
     if (rc === OK && creep.store.getFreeCapacity() === 0) clearTask(creep);
     return;
@@ -180,7 +233,7 @@ function executeTask(creep, task) {
   if (task.type === 'pickup') {
     drawLine(creep, target, CFG.DRAW.PICKUP, 'DROP');
     debugSay(creep, '🍪');
-    var pickupOpts = { priority: priority, reusePath: 10 };
+    var pickupOpts = { reusePath: 10 };
     var pc = BeeActions.safePickup(creep, target, pickupOpts);
     if (pc === OK && creep.store.getFreeCapacity() === 0) clearTask(creep);
     return;
@@ -188,7 +241,7 @@ function executeTask(creep, task) {
   if (task.type === 'deliver') {
     drawLine(creep, target, CFG.DRAW.DELIVER, 'DEL');
     debugSay(creep, '🚚');
-    var transferOpts = { priority: priority, reusePath: 20 };
+    var transferOpts = { reusePath: 20 };
     var tr = BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, null, transferOpts);
     if (tr === OK && creep.store[RESOURCE_ENERGY] === 0) clearTask(creep);
     return;

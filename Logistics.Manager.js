@@ -2,8 +2,9 @@
 
 /**
  * What changed & why:
- * - Added empire-wide stock scanning plus simple threshold/overflow policies for storage + terminal routing.
- * - Produces intents so DECIDE can hand them to ACT without re-scanning the world multiple times per tick.
+ * - Hardened empire logistics by deduping haul intents, attaching TTL metadata, and publishing summaries once per tick.
+ * - Added light documentation of threshold rules so callers understand when overflow or refill actions trigger.
+ * - Keeps Memory writes namespaced under Memory.__BHM with issued/expiry ticks for downstream consumers (couriers, trade).
  */
 
 if (!global.__BHM) global.__BHM = { caches: {} };
@@ -29,6 +30,8 @@ var THRESHOLDS = {
   TERMINAL_ENERGY_TARGET: 6000,
   MIN_SEND_AMOUNT: 2000
 };
+
+var HAUL_REQUEST_TTL = 10;
 
 function summarizeRoom(room) {
   if (!room) return null;
@@ -84,6 +87,17 @@ function chooseOverflowResource(summary) {
   return { resource: bestRes, amount: bestAmount };
 }
 
+function dedupeHaul(intents, request) {
+  if (!intents._haulSet) intents._haulSet = {};
+  var key = request.room + '|' + request.type + '|' + request.resource;
+  if (intents._haulSet[key]) {
+    intents._haulSet[key].amount = Math.max(intents._haulSet[key].amount, request.amount | 0);
+    return;
+  }
+  intents._haulSet[key] = request;
+  intents.haulRequests.push(request);
+}
+
 var LogisticsManager = {
   beginTick: function (context) {
     var empire = { energy: 0, rooms: {} };
@@ -110,6 +124,18 @@ var LogisticsManager = {
       if (summary.storageEnergy > THRESHOLDS.STORAGE_ENERGY_TARGET) donors.push(summary);
       if (summary.storageEnergy < THRESHOLDS.STORAGE_ENERGY_FLOOR) receivers.push(summary);
       if (summary.storage && summary.storageFree <= THRESHOLDS.STORAGE_FREE_FLOOR) overflowRooms.push(summary);
+      if (summary.terminal && summary.terminalEnergy < THRESHOLDS.TERMINAL_ENERGY_FLOOR && summary.storageEnergy > THRESHOLDS.STORAGE_ENERGY_TARGET) {
+        var refillAmount = Math.min(summary.storageEnergy - THRESHOLDS.STORAGE_ENERGY_TARGET, THRESHOLDS.TERMINAL_ENERGY_TARGET - summary.terminalEnergy);
+        if (refillAmount > 0) {
+          dedupeHaul(intents, {
+            room: summary.room.name,
+            type: 'push',
+            resource: RESOURCE_ENERGY,
+            amount: refillAmount,
+            reason: 'terminal-floor'
+          });
+        }
+      }
     }
     if (donors.length && receivers.length) {
       donors.sort(function (a, b) { return b.storageEnergy - a.storageEnergy; });
@@ -128,7 +154,7 @@ var LogisticsManager = {
             amount: amount,
             reason: 'storage-floor'
           });
-          intents.haulRequests.push({
+          dedupeHaul(intents, {
             room: receiver.room.name,
             type: 'pull',
             resource: RESOURCE_ENERGY,
@@ -164,7 +190,7 @@ var LogisticsManager = {
             amount: sendAmount,
             reason: 'overflow'
           });
-          intents.haulRequests.push({
+          dedupeHaul(intents, {
             room: target.room.name,
             type: 'pull',
             resource: choice.resource,
@@ -181,8 +207,11 @@ var LogisticsManager = {
     if (!intents) return;
     if (intents.haulRequests && intents.haulRequests.length) {
       if (!Memory.__BHM) Memory.__BHM = {};
-      Memory.__BHM.haulRequests = intents.haulRequests;
-      Memory.__BHM.haulTick = Game.time;
+      Memory.__BHM.haul = {
+        issuedAt: Game.time,
+        expires: Game.time + HAUL_REQUEST_TTL,
+        requests: intents.haulRequests
+      };
     }
     if (!intents.terminalSends || !intents.terminalSends.length) return;
     for (var i = 0; i < intents.terminalSends.length; i++) {
@@ -196,7 +225,8 @@ var LogisticsManager = {
       if (amount < THRESHOLDS.MIN_SEND_AMOUNT) continue;
       var res = terminal.send(order.resource, amount, toRoom, 'BHM:' + order.reason);
       if (res === OK) {
-        console.log('[Logistics] Sent ' + amount + ' ' + order.resource + ' from ' + order.from + ' to ' + toRoom + ' (' + order.reason + ')');
+        var logMsg = '[Logistics] Sent ' + amount + ' ' + order.resource + ' from ' + order.from + ' to ' + toRoom + ' (' + order.reason + ')';
+        console.log(logMsg);
       }
     }
   }

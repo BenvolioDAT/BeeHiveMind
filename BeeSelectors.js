@@ -2,9 +2,9 @@
 
 /**
  * What changed & why:
- * - Centralized per-room scans (containers, drops, needy structures) so roles reuse cached data instead of re-running room.find.
- * - Provides reusable selectors for common economic intents (best container, towers needing energy, etc.).
- * - Added construction/repair helpers and idle anchors so builder-style roles share a single cached view of work targets.
+ * - Collapsed all per-room FIND calls into a single snapshot builder invoked once per tick via global.__BHM caches.
+ * - Added shared repair target reservation helpers so creeps and towers coordinate off the same queue.
+ * - Preserved existing selector APIs while wiring them to the snapshot (containers, drops, towers, build, anchor).
  */
 
 if (!global.__BHM) global.__BHM = { caches: {} };
@@ -19,6 +19,14 @@ if (typeof global.__BHM.getCached !== 'function') {
     caches[key] = { value: value, expireTick: (ttl > 0) ? (now + ttl) : now };
     return value;
   };
+}
+
+function resetReservationsIfNeeded() {
+  if (!global.__BHM) return;
+  if (!global.__BHM.repairReservationsTick || global.__BHM.repairReservationsTick !== Game.time) {
+    global.__BHM.repairReservationsTick = Game.time;
+    global.__BHM.repairReservations = {};
+  }
 }
 
 var TOWER_REFILL_AT = 0.8;
@@ -50,71 +58,75 @@ function computeRepairGoal(structure) {
   return Math.min(structure.hitsMax, Math.floor(structure.hitsMax * 0.9));
 }
 
-function computeRoomEnergyData(room) {
-  return global.__BHM.getCached('selectors:energy:' + room.name, 0, function () {
-    var data = {
-      containers: [],
+function buildSnapshot(room) {
+  var key = 'selectors:snapshot:' + room.name;
+  return global.__BHM.getCached(key, 0, function () {
+    var snapshot = {
+      room: room,
+      energyContainers: [],
       spawnLikeNeedy: [],
       towerNeedy: [],
-      storage: room.storage || null,
-      terminal: room.terminal || null,
       dropped: [],
       tombstones: [],
-      ruins: []
+      ruins: [],
+      storage: room.storage || null,
+      terminal: room.terminal || null,
+      sites: [],
+      repairs: [],
+      anchor: null,
+      controllerLink: null
     };
+    var controller = room.controller || null;
     var structures = room.find(FIND_STRUCTURES);
     for (var i = 0; i < structures.length; i++) {
       var s = structures[i];
       if (!s || !s.structureType) continue;
-      if (s.store && s.store[RESOURCE_ENERGY] > 0 && s.structureType === STRUCTURE_CONTAINER) {
-        data.containers.push(s);
+      if (s.structureType === STRUCTURE_CONTAINER && s.store && (s.store[RESOURCE_ENERGY] | 0) > 0) {
+        snapshot.energyContainers.push(s);
       }
       if (s.structureType === STRUCTURE_EXTENSION || s.structureType === STRUCTURE_SPAWN) {
-        if ((s.energy | 0) < (s.energyCapacity | 0)) data.spawnLikeNeedy.push(s);
+        if ((s.energy | 0) < (s.energyCapacity | 0)) snapshot.spawnLikeNeedy.push(s);
       }
       if (s.structureType === STRUCTURE_TOWER) {
-        var pct = (s.store[RESOURCE_ENERGY] | 0) / ((s.store.getCapacity(RESOURCE_ENERGY)) || 1);
-        if (pct <= TOWER_REFILL_AT) data.towerNeedy.push(s);
+        var used = (s.store[RESOURCE_ENERGY] | 0);
+        var cap = s.store.getCapacity(RESOURCE_ENERGY) || 1;
+        if ((used / cap) <= TOWER_REFILL_AT) snapshot.towerNeedy.push(s);
+      if (s.structureType === STRUCTURE_LINK && controller && controller.pos && s.pos.inRangeTo(controller.pos, 3)) {
+        snapshot.controllerLink = s;
+      }
+      }
+      var goal = computeRepairGoal(s);
+      if (goal && s.hits < goal) {
+        snapshot.repairs.push({ target: s, goalHits: goal });
       }
     }
     var drops = room.find(FIND_DROPPED_RESOURCES, {
       filter: function (r) { return r.resourceType === RESOURCE_ENERGY && r.amount > 0; }
     });
-    for (var d = 0; d < drops.length; d++) data.dropped.push(drops[d]);
+    for (var d = 0; d < drops.length; d++) snapshot.dropped.push(drops[d]);
     var tombs = room.find(FIND_TOMBSTONES, {
       filter: function (t) { return t.store && (t.store[RESOURCE_ENERGY] | 0) > 0; }
     });
-    for (var t = 0; t < tombs.length; t++) data.tombstones.push(tombs[t]);
+    for (var t = 0; t < tombs.length; t++) snapshot.tombstones.push(tombs[t]);
     var ruins = room.find(FIND_RUINS, {
       filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] | 0) > 0; }
     });
-    for (var r = 0; r < ruins.length; r++) data.ruins.push(ruins[r]);
-    return data;
-  });
-}
-
-function computeRoomWorkData(room) {
-  return global.__BHM.getCached('selectors:work:' + room.name, 0, function () {
-    var data = {
-      sites: [],
-      repairs: []
-    };
+    for (var r = 0; r < ruins.length; r++) snapshot.ruins.push(ruins[r]);
     var sites = room.find(FIND_CONSTRUCTION_SITES);
-    for (var i = 0; i < sites.length; i++) {
-      data.sites.push(sites[i]);
+    for (var sIdx = 0; sIdx < sites.length; sIdx++) snapshot.sites.push(sites[sIdx]);
+    if (room.storage) snapshot.anchor = room.storage;
+    else if (room.terminal) snapshot.anchor = room.terminal;
+    else {
+      var spawns = room.find(FIND_MY_SPAWNS);
+      if (spawns && spawns.length) snapshot.anchor = spawns[0];
     }
-    var structures = room.find(FIND_STRUCTURES);
-    for (var s = 0; s < structures.length; s++) {
-      var structure = structures[s];
-      if (!structure) continue;
-      if (structure.hits == null || structure.hitsMax == null) continue;
-      if (structure.hits >= structure.hitsMax) continue;
-      var goal = computeRepairGoal(structure);
-      if (goal && structure.hits < goal) {
-        data.repairs.push({ target: structure, goalHits: goal });
-      }
-    }
-    return data;
+    snapshot.energyContainers.sort(byEnergyDesc);
+    snapshot.dropped.sort(byEnergyDesc);
+    snapshot.tombstones.sort(byEnergyDesc);
+    snapshot.ruins.sort(byEnergyDesc);
+    snapshot.sites.sort(byBuildPriority);
+    snapshot.repairs.sort(byRepairUrgency);
+    return snapshot;
   });
 }
 
@@ -140,54 +152,55 @@ function byRepairUrgency(a, b) {
 }
 
 var BeeSelectors = {
+  prepareRoomSnapshot: function (room) {
+    if (!room) return null;
+    return buildSnapshot(room);
+  },
+
   getRoomEnergyData: function (room) {
     if (!room) return null;
-    return computeRoomEnergyData(room);
+    return buildSnapshot(room);
   },
 
   findBestEnergyContainer: function (room) {
-    var data = computeRoomEnergyData(room);
-    if (!data || !data.containers.length) return null;
-    data.containers.sort(byEnergyDesc);
-    return data.containers[0];
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.energyContainers.length) return null;
+    return snap.energyContainers[0];
   },
 
   findBestEnergyDrop: function (room) {
-    var data = computeRoomEnergyData(room);
-    if (!data || !data.dropped.length) return null;
-    data.dropped.sort(byEnergyDesc);
-    return data.dropped[0];
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.dropped.length) return null;
+    return snap.dropped[0];
   },
 
   findTombstoneWithEnergy: function (room) {
-    var data = computeRoomEnergyData(room);
-    if (!data || !data.tombstones.length) return null;
-    data.tombstones.sort(byEnergyDesc);
-    return data.tombstones[0];
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.tombstones.length) return null;
+    return snap.tombstones[0];
   },
 
   findRuinWithEnergy: function (room) {
-    var data = computeRoomEnergyData(room);
-    if (!data || !data.ruins.length) return null;
-    data.ruins.sort(byEnergyDesc);
-    return data.ruins[0];
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.ruins.length) return null;
+    return snap.ruins[0];
   },
 
   findTowersNeedingEnergy: function (room) {
-    var data = computeRoomEnergyData(room);
-    return data ? data.towerNeedy.slice() : [];
+    var snap = buildSnapshot(room);
+    return snap ? snap.towerNeedy.slice() : [];
   },
 
   findSpawnLikeNeedingEnergy: function (room) {
-    var data = computeRoomEnergyData(room);
-    return data ? data.spawnLikeNeedy.slice() : [];
+    var snap = buildSnapshot(room);
+    return snap ? snap.spawnLikeNeedy.slice() : [];
   },
 
   findStorageNeedingEnergy: function (room) {
-    var store = room.storage;
-    if (!store || !store.store) return null;
-    if (store.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) return null;
-    return store;
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.storage) return null;
+    if (snap.storage.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) return null;
+    return snap.storage;
   },
 
   selectClosestByRange: function (pos, list) {
@@ -207,30 +220,50 @@ var BeeSelectors = {
   },
 
   findBestConstructionSite: function (room) {
-    if (!room) return null;
-    var data = computeRoomWorkData(room);
-    if (!data || !data.sites.length) return null;
-    data.sites.sort(byBuildPriority);
-    return data.sites[0];
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.sites.length) return null;
+    return snap.sites[0];
   },
 
   findBestRepairTarget: function (room) {
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.repairs.length) return null;
+    return snap.repairs[0];
+  },
+
+  reserveRepairTarget: function (room, reserverId) {
     if (!room) return null;
-    var data = computeRoomWorkData(room);
-    if (!data || !data.repairs.length) return null;
-    data.repairs.sort(byRepairUrgency);
-    return data.repairs[0];
+    resetReservationsIfNeeded();
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.repairs.length) return null;
+    var roomName = room.name;
+    if (!global.__BHM.repairReservations[roomName]) global.__BHM.repairReservations[roomName] = {};
+    var reservations = global.__BHM.repairReservations[roomName];
+    for (var i = 0; i < snap.repairs.length; i++) {
+      var entry = snap.repairs[i];
+      if (!entry || !entry.target) continue;
+      if (reservations[entry.target.id]) continue;
+      reservations[entry.target.id] = reserverId || 'anon';
+      return entry;
+    }
+    return null;
+  },
+
+  releaseRepairTarget: function (roomName, targetId) {
+    if (!roomName || !targetId) return;
+    resetReservationsIfNeeded();
+    var resByRoom = global.__BHM.repairReservations[roomName];
+    if (resByRoom && resByRoom[targetId]) delete resByRoom[targetId];
   },
 
   findRoomAnchor: function (room) {
-    if (!room) return null;
-    return global.__BHM.getCached('selectors:anchor:' + room.name, 0, function () {
-      if (room.storage) return room.storage;
-      if (room.terminal) return room.terminal;
-      var spawns = room.find(FIND_MY_SPAWNS);
-      if (spawns && spawns.length) return spawns[0];
-      return null;
-    });
+    var snap = buildSnapshot(room);
+    return snap ? snap.anchor : null;
+  },
+
+  findControllerLink: function (room) {
+    var snap = buildSnapshot(room);
+    return snap ? snap.controllerLink : null;
   }
 };
 

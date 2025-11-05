@@ -6,6 +6,12 @@
  * - Centralized global caches on global.__BHM with TTL helpers so sensors run once per tick.
  * - Added plumbing for Logistics and Movement managers plus persistent task scaffolding.
  * - Preserved the existing spawn-queue policy while staging decisions ahead of actions for clarity.
+ *
+ * Phases:
+ *   SENSE  → build room/empire snapshots, prep selectors, reset movement.
+ *   DECIDE → derive quotas, planner cadences, logistics intents.
+ *   ACT    → run planners/roles/spawns/trade while queuing actions & movement.
+ *   MOVE   → resolve Movement.Manager intents last for deterministic traffic.
  */
 
 // ----------------------------- Dependencies -----------------------------
@@ -20,6 +26,7 @@ var RoomPlanner = require('Planner.Room');
 var RoadPlanner = require('Planner.Road');
 var TradeEnergy = require('Trade.Energy');
 var TaskLuna = require('Task.Luna');
+var BeeSelectors = require('BeeSelectors');
 var MovementManager = require('Movement.Manager');
 var LogisticsManager = require('Logistics.Manager');
 
@@ -427,6 +434,11 @@ var BeeHiveMind = {
     context.tick = Game.time;
     context.roomsOwned = getOwnedRooms();
     context.roomsMap = indexByName(context.roomsOwned);
+    context.roomSnapshots = {};
+    for (var rs = 0; rs < context.roomsOwned.length; rs++) {
+      var senseRoom = context.roomsOwned[rs];
+      context.roomSnapshots[senseRoom.name] = BeeSelectors.prepareRoomSnapshot(senseRoom);
+    }
     context.spawns = getAllSpawns();
     var creepScan = buildCreepAndRoleCounts();
     context.creeps = creepScan.creeps;
@@ -470,6 +482,7 @@ var BeeHiveMind = {
   },
 
   run: function () {
+    MovementManager.startTick();
     var context = BeeHiveMind.sense();
     BeeHiveMind.decide(context);
     BeeHiveMind.act(context);
@@ -485,7 +498,6 @@ var BeeHiveMind = {
   },
 
   runCreeps: function (context) {
-    MovementManager.startTick();
     for (var i = 0; i < context.creeps.length; i++) {
       var creep = context.creeps[i];
       BeeHiveMind.ensureTaskEnvelope(creep);
