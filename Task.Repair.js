@@ -1,12 +1,5 @@
 'use strict';
 
-/**
- * What changed & why:
- * - Replaced ad-hoc queue popping with BeeSelectors.reserveRepairTarget so creeps and towers share one repair list.
- * - Adopted persistent _task envelopes with BeeActions wrappers for movement intents and safe execution.
- * - Uses snapshot-based energy sourcing (drops/containers/storage) instead of per-tick room.find spam.
- */
-
 var BeeSelectors = require('BeeSelectors');
 var BeeActions = require('BeeActions');
 var MovementManager = require('Movement.Manager');

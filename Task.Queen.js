@@ -1,12 +1,5 @@
 'use strict';
 
-/**
- * What changed & why:
- * - Rebuilt the queen role around the shared _task envelope so targets persist across ticks until satisfied.
- * - Wired withdrawals/deliveries through BeeSelectors + BeeActions which queue movement intents for the MOVE phase.
- * - Added lightweight per-tick fill reservations plus debug breadcrumbs that respect CFG.DEBUG toggles.
- */
-
 var BeeSelectors = require('BeeSelectors');
 var BeeActions = require('BeeActions');
 var MovementManager = require('Movement.Manager');
