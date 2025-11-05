@@ -173,6 +173,192 @@ function byRepairUrgency(a, b) {
   return a.target.hits - b.target.hits;
 }
 
+function ensureRemoteMemory() {
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Memory.__BHM.remotesByHome) Memory.__BHM.remotesByHome = {};
+  if (!Memory.__BHM.remoteSourceClaims) Memory.__BHM.remoteSourceClaims = {};
+  if (!Memory.__BHM.seatReservations) Memory.__BHM.seatReservations = {};
+  if (!Memory.__BHM.avoidSources) Memory.__BHM.avoidSources = {};
+  if (!Memory.__BHM.haulRequests) Memory.__BHM.haulRequests = {};
+}
+
+function posToSeat(pos) {
+  if (!pos) return null;
+  return { x: pos.x, y: pos.y, roomName: pos.roomName };
+}
+
+function chooseBestSeatForSource(pos) {
+  if (!pos) return null;
+  var terrain = new Room.Terrain(pos.roomName);
+  var best = null;
+  var bestScore = -999;
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var x = pos.x + dx;
+      var y = pos.y + dy;
+      if (x < 0 || x > 49 || y < 0 || y > 49) continue;
+      var terrainType = terrain.get(x, y);
+      if (terrainType === TERRAIN_MASK_WALL) continue;
+      var score = 0;
+      if (terrainType === TERRAIN_MASK_SWAMP) score = 1;
+      else score = 2; // plain preferred
+      if (!best || score > bestScore) {
+        bestScore = score;
+        best = new RoomPosition(x, y, pos.roomName);
+      }
+    }
+  }
+  return best ? posToSeat(best) : null;
+}
+
+function getSourceContainerOrSiteImpl(source) {
+  if (!source || !source.pos) return { container: null, site: null, seatPos: null, containerEnergy: 0, source: source };
+  var pos = source.pos;
+  var room = source.room;
+  var container = null;
+  var site = null;
+  var seat = null;
+  var energy = 0;
+  if (room) {
+    var structures = pos.findInRange(FIND_STRUCTURES, 1, {
+      filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
+    });
+    if (structures && structures.length) {
+      container = structures[0];
+      seat = posToSeat(container.pos);
+      if (container.store) energy = container.store[RESOURCE_ENERGY] || 0;
+    }
+    if (!container) {
+      var sites = pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
+        filter: function (c) { return c.structureType === STRUCTURE_CONTAINER; }
+      });
+      if (sites && sites.length) {
+        site = sites[0];
+        seat = posToSeat(site.pos);
+      }
+    }
+  }
+  if (!seat) seat = chooseBestSeatForSource(pos);
+  return { container: container, site: site, seatPos: seat, containerEnergy: energy, source: source };
+}
+
+function collectSourceFlags() {
+  var map = {};
+  for (var name in Game.flags) {
+    if (!Object.prototype.hasOwnProperty.call(Game.flags, name)) continue;
+    var flag = Game.flags[name];
+    if (!flag || typeof flag.name !== 'string') continue;
+    if (flag.name.indexOf('SRC-') !== 0) continue;
+    var key = flag.pos.roomName + ':' + flag.pos.x + ':' + flag.pos.y;
+    map[key] = flag;
+  }
+  return map;
+}
+
+function buildRemoteSourcesSnapshot(homeRoomName) {
+  ensureRemoteMemory();
+  var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
+  var flagsByPos = collectSourceFlags();
+  var byId = {};
+  var list = [];
+
+  function pushEntry(data) {
+    if (!data || !data.sourceId) return;
+    var existing = byId[data.sourceId];
+    if (existing) {
+      if (data.flag && !existing.flag) existing.flag = data.flag;
+      if (data.container && !existing.container) {
+        existing.container = data.container;
+        existing.containerEnergy = data.containerEnergy;
+      }
+      if (!existing.seatPos && data.seatPos) existing.seatPos = data.seatPos;
+      if (!existing.source && data.source) existing.source = data.source;
+      return;
+    }
+    byId[data.sourceId] = data;
+    list.push(data);
+  }
+
+  for (var i = 0; i < remotes.length; i++) {
+    var roomName = remotes[i];
+    var room = Game.rooms[roomName];
+    if (room) {
+      var sources = room.find(FIND_SOURCES);
+      for (var j = 0; j < sources.length; j++) {
+        var src = sources[j];
+        var seatInfo = getSourceContainerOrSiteImpl(src);
+        var key = roomName + ':' + src.pos.x + ':' + src.pos.y;
+        pushEntry({
+          sourceId: src.id,
+          roomName: roomName,
+          source: src,
+          container: seatInfo.container,
+          containerEnergy: seatInfo.containerEnergy,
+          site: seatInfo.site,
+          seatPos: seatInfo.seatPos,
+          flag: flagsByPos[key] || null
+        });
+      }
+    } else {
+      var mem = (Memory.rooms && Memory.rooms[roomName] && Memory.rooms[roomName].sources) || null;
+      if (!mem) continue;
+      for (var sid in mem) {
+        if (!Object.prototype.hasOwnProperty.call(mem, sid)) continue;
+        var entry = mem[sid] || {};
+        var seatPos = null;
+        if (entry.seat) {
+          seatPos = { x: entry.seat.x, y: entry.seat.y, roomName: entry.seat.roomName || roomName };
+        } else if (entry.x != null && entry.y != null) {
+          seatPos = chooseBestSeatForSource(new RoomPosition(entry.x, entry.y, roomName));
+        }
+        var keyMem = roomName + ':' + (entry.x != null ? entry.x : (entry.seat ? entry.seat.x : '')) + ':' + (entry.y != null ? entry.y : (entry.seat ? entry.seat.y : ''));
+        pushEntry({
+          sourceId: sid,
+          roomName: roomName,
+          source: null,
+          container: null,
+          containerEnergy: 0,
+          site: null,
+          seatPos: seatPos,
+          flag: flagsByPos[keyMem] || null
+        });
+      }
+    }
+  }
+
+  // Flags may indicate additional rooms not listed yet
+  for (var key in flagsByPos) {
+    if (!Object.prototype.hasOwnProperty.call(flagsByPos, key)) continue;
+    var parts = key.split(':');
+    if (parts.length !== 3) continue;
+    var fRoom = parts[0];
+    if (remotes.indexOf(fRoom) === -1) continue;
+    var fx = parseInt(parts[1], 10);
+    var fy = parseInt(parts[2], 10);
+    var roomObj = Game.rooms[fRoom];
+    if (!roomObj) continue;
+    var look = roomObj.lookForAt(LOOK_SOURCES, fx, fy);
+    if (!look || !look.length) continue;
+    var srcObj = look[0];
+    if (!srcObj || !srcObj.id) continue;
+    if (byId[srcObj.id]) continue;
+    var seatInfo2 = getSourceContainerOrSiteImpl(srcObj);
+    pushEntry({
+      sourceId: srcObj.id,
+      roomName: fRoom,
+      source: srcObj,
+      container: seatInfo2.container,
+      containerEnergy: seatInfo2.containerEnergy,
+      site: seatInfo2.site,
+      seatPos: seatInfo2.seatPos,
+      flag: flagsByPos[key]
+    });
+  }
+
+  return list;
+}
+
 var BeeSelectors = {
   prepareRoomSnapshot: function (room) {
     if (!room) return null;
@@ -196,6 +382,57 @@ var BeeSelectors = {
     var snap = buildSnapshot(room);
     if (!snap || !snap.dropped.length) return null;
     return snap.dropped[0];
+  },
+
+  getSourceContainerOrSite: function (source) {
+    return getSourceContainerOrSiteImpl(source);
+  },
+
+  getRemoteSourcesSnapshot: function (homeRoomName) {
+    return buildRemoteSourcesSnapshot(homeRoomName);
+  },
+
+  findRemoteSourceContainers: function (homeRoomName) {
+    var list = buildRemoteSourcesSnapshot(homeRoomName);
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i];
+      if (!entry || !entry.container) continue;
+      out.push({
+        container: entry.container,
+        source: entry.source || null,
+        roomName: entry.roomName,
+        energy: entry.containerEnergy,
+        seatPos: entry.seatPos
+      });
+    }
+    return out;
+  },
+
+  pickBestHaulTarget: function (containers, homeRoomName) {
+    if (!containers || !containers.length) return null;
+    var best = null;
+    var bestScore = -999999;
+    for (var i = 0; i < containers.length; i++) {
+      var entry = containers[i];
+      if (!entry || !entry.container) continue;
+      var energy = entry.energy;
+      if (energy == null) {
+        energy = (entry.container.store && entry.container.store[RESOURCE_ENERGY]) || 0;
+      }
+      var score = energy;
+      if (homeRoomName && entry.roomName) {
+        var dist = Game.map.getRoomLinearDistance(homeRoomName, entry.roomName, true);
+        if (typeof dist === 'number' && dist > 0) {
+          score -= dist * 25;
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = entry;
+      }
+    }
+    return best;
   },
 
   findTombstoneWithEnergy: function (room) {

@@ -1,5 +1,8 @@
 'use strict';
 
+var BeeSelectors = null;
+try { BeeSelectors = require('BeeSelectors'); } catch (err) {}
+
 /**
  * What changed & why:
  * - Hardened haul intents with 1-tick TTL maps keyed by room:target so consumers release instantly after completion.
@@ -38,6 +41,7 @@ var THRESHOLDS = {
 };
 
 var HAUL_REQUEST_TTL = 1;
+var REMOTE_HAUL_THRESHOLD = 800;
 
 function summarizeRoom(room) {
   if (!room) return null;
@@ -106,6 +110,33 @@ function dedupeHaul(intents, request) {
   request.key = key;
   intents._haulMap[key] = request;
   intents.haulRequests.push(request);
+}
+
+function collectRemoteHaulRequests(intents, context) {
+  if (!BeeSelectors || typeof BeeSelectors.findRemoteSourceContainers !== 'function') return;
+  if (!context || !context.roomsOwned) return;
+  intents.remoteHaulRequests = intents.remoteHaulRequests || [];
+  for (var i = 0; i < context.roomsOwned.length; i++) {
+    var room = context.roomsOwned[i];
+    if (!room) continue;
+    var homeName = room.name;
+    var containers = BeeSelectors.findRemoteSourceContainers(homeName) || [];
+    for (var j = 0; j < containers.length; j++) {
+      var info = containers[j];
+      if (!info || !info.container || !info.container.id) continue;
+      var energy = info.energy != null ? info.energy : ((info.container.store && info.container.store[RESOURCE_ENERGY]) || 0);
+      if (energy < REMOTE_HAUL_THRESHOLD) continue;
+      var key = info.roomName + ':' + info.container.id;
+      intents.remoteHaulRequests.push({
+        key: key,
+        fromRoom: info.roomName,
+        toRoom: homeName,
+        targetId: info.container.id,
+        resource: RESOURCE_ENERGY,
+        amountHint: energy
+      });
+    }
+  }
 }
 
 var LogisticsManager = {
@@ -213,12 +244,37 @@ var LogisticsManager = {
         }
       }
     }
+    collectRemoteHaulRequests(intents, context);
     return intents;
   },
 
   execute: function (intents, context) {
     if (!intents) return;
     if (!Memory.__BHM) Memory.__BHM = {};
+    Memory.__BHM.haulRequests = Memory.__BHM.haulRequests || {};
+    var haulBus = Memory.__BHM.haulRequests;
+    for (var hk in haulBus) {
+      if (!Object.prototype.hasOwnProperty.call(haulBus, hk)) continue;
+      if (!haulBus[hk] || haulBus[hk].issuedAt !== Game.time) delete haulBus[hk];
+    }
+    Memory.__BHM._haulCleanupTick = Game.time;
+    if (intents.remoteHaulRequests && intents.remoteHaulRequests.length) {
+      for (var rh = 0; rh < intents.remoteHaulRequests.length; rh++) {
+        var remoteReq = intents.remoteHaulRequests[rh];
+        if (!remoteReq || !remoteReq.key) continue;
+        if (haulBus[remoteReq.key]) continue;
+        haulBus[remoteReq.key] = {
+          key: remoteReq.key,
+          fromRoom: remoteReq.fromRoom,
+          toRoom: remoteReq.toRoom,
+          targetId: remoteReq.targetId,
+          resource: remoteReq.resource,
+          amountHint: remoteReq.amountHint,
+          issuedAt: Game.time,
+          claimedBy: null
+        };
+      }
+    }
     if (intents.haulRequests && intents.haulRequests.length) {
       var haulMap = {};
       for (var h = 0; h < intents.haulRequests.length; h++) {
