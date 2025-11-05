@@ -10,6 +10,7 @@
 var BeeSelectors = null;
 var BeeActions = null;
 var Movement = null;
+var TaskLunaRoutePenaltyCache = null;
 
 try { BeeSelectors = require('BeeSelectors'); } catch (err) {}
 try { BeeActions = require('BeeActions'); } catch (err2) {}
@@ -48,15 +49,32 @@ function ensureTask(creep) {
     creep.memory._task = {
       type: 'luna',
       homeRoom: inferHome(creep),
+      remoteRoom: creep.memory && creep.memory.remoteRoom ? creep.memory.remoteRoom : null,
       sourceId: null,
       containerId: null,
       seatPos: null,
       since: Game.time,
       stuckSince: null,
-      seatKey: null
+      seatKey: null,
+      state: creep.memory && creep.memory.state ? creep.memory.state : 'travel'
     };
   }
-  return creep.memory._task;
+  var task = creep.memory._task;
+  if (!task.homeRoom && creep.memory.homeRoom) task.homeRoom = creep.memory.homeRoom;
+  if (!task.remoteRoom && creep.memory.remoteRoom) task.remoteRoom = creep.memory.remoteRoom;
+  if (!task.sourceId && creep.memory.sourceId) task.sourceId = creep.memory.sourceId;
+  if (!task.state && creep.memory.state) task.state = creep.memory.state;
+  if (task.homeRoom && !creep.memory.homeRoom) creep.memory.homeRoom = task.homeRoom;
+  if (task.remoteRoom && (!creep.memory.remoteRoom || creep.memory.remoteRoom !== task.remoteRoom)) {
+    creep.memory.remoteRoom = task.remoteRoom;
+  }
+  if (task.sourceId && (!creep.memory.sourceId || creep.memory.sourceId !== task.sourceId)) {
+    creep.memory.sourceId = task.sourceId;
+  }
+  if (task.state && (!creep.memory.state || creep.memory.state !== task.state)) {
+    creep.memory.state = task.state;
+  }
+  return task;
 }
 
 function bodyHasCarry(creep) {
@@ -137,7 +155,20 @@ function cleanupClaims() {
     var claim = claims[sid];
     if (!claim) { delete claims[sid]; continue; }
     if (claim.creepName && !Game.creeps[claim.creepName]) {
-      delete claims[sid];
+      var keep = false;
+      if (claim.spawnName) {
+        var spawnObj = Game.spawns[claim.spawnName];
+        if (spawnObj && spawnObj.spawning && spawnObj.spawning.name === claim.creepName) {
+          keep = true;
+        }
+      }
+      if (claim.pending && typeof claim.pendingTick === 'number') {
+        if ((Game.time - claim.pendingTick) <= 200) keep = true;
+      }
+      if (!keep) {
+        delete claims[sid];
+        continue;
+      }
     }
   }
 }
@@ -198,6 +229,30 @@ function seatPosFromTask(task) {
   return new RoomPosition(task.seatPos.x, task.seatPos.y, task.seatPos.roomName);
 }
 
+function buildRouteCallback() {
+  if (TaskLunaRoutePenaltyCache && TaskLunaRoutePenaltyCache.tick === Game.time) {
+    return TaskLunaRoutePenaltyCache.cb;
+  }
+  var callback = function (roomName) {
+    var cost = 1;
+    var roomsMem = Memory.rooms || {};
+    var entry = roomsMem[roomName];
+    if (entry) {
+      if (entry.hostile) cost += 3;
+      if (entry._avoid) cost += 2;
+      if (entry.avoid) cost += 2;
+      if (entry._invaderLock && entry._invaderLock.locked) cost += 4;
+    }
+    if (Memory.__BHM && Memory.__BHM.avoidRooms && Memory.__BHM.avoidRooms[roomName]) {
+      cost += 2;
+    }
+    if (cost < 1) cost = 1;
+    return cost;
+  };
+  TaskLunaRoutePenaltyCache = { tick: Game.time, cb: callback };
+  return callback;
+}
+
 function assignSource(creep, task) {
   ensureRemoteMemory();
   cleanupClaims();
@@ -207,6 +262,9 @@ function assignSource(creep, task) {
   var entries = BeeSelectors.getRemoteSourcesSnapshot(homeRoom) || [];
   var claims = Memory.__BHM.remoteSourceClaims;
   var avoid = Memory.__BHM.avoidSources;
+  var preferredRemote = null;
+  if (creep.memory && creep.memory.remoteRoom) preferredRemote = creep.memory.remoteRoom;
+  if (!preferredRemote && task.remoteRoom) preferredRemote = task.remoteRoom;
   var flagged = [];
   var unflagged = [];
   for (var i = 0; i < entries.length; i++) {
@@ -218,7 +276,25 @@ function assignSource(creep, task) {
     if (entry.flag) flagged.push(entry);
     else unflagged.push(entry);
   }
-  var order = flagged.concat(unflagged);
+  var order = [];
+  if (preferredRemote) {
+    for (var pr = 0; pr < flagged.length; pr++) {
+      if (flagged[pr] && flagged[pr].roomName === preferredRemote) order.push(flagged[pr]);
+    }
+    for (var pu = 0; pu < unflagged.length; pu++) {
+      if (unflagged[pu] && unflagged[pu].roomName === preferredRemote) order.push(unflagged[pu]);
+    }
+  }
+  for (var ff = 0; ff < flagged.length; ff++) {
+    if (!flagged[ff]) continue;
+    if (preferredRemote && flagged[ff].roomName === preferredRemote) continue;
+    order.push(flagged[ff]);
+  }
+  for (var uu = 0; uu < unflagged.length; uu++) {
+    if (!unflagged[uu]) continue;
+    if (preferredRemote && unflagged[uu].roomName === preferredRemote) continue;
+    order.push(unflagged[uu]);
+  }
   for (var j = 0; j < order.length; j++) {
     var pick = order[j];
     if (!pick) continue;
@@ -227,6 +303,7 @@ function assignSource(creep, task) {
     claims[pick.sourceId] = {
       creepName: creep.name,
       homeRoom: homeRoom,
+      remoteRoom: pick.roomName,
       since: Game.time
     };
     task.sourceId = pick.sourceId;
@@ -235,6 +312,13 @@ function assignSource(creep, task) {
     task.since = Game.time;
     task.stuckSince = null;
     task.seatKey = task.seatPos ? seatKeyFromPos(task.seatPos) : null;
+    task.remoteRoom = pick.roomName;
+    task.state = 'travel';
+    if (creep.memory) {
+      creep.memory.remoteRoom = pick.roomName;
+      creep.memory.sourceId = pick.sourceId;
+      creep.memory.state = 'travel';
+    }
     return;
   }
 }
@@ -270,18 +354,34 @@ function maintainAssignment(creep, task) {
   var claim = claims[task.sourceId];
   if (!claim || claim.creepName !== creep.name) {
     releaseAssignment(task, null);
+    if (creep.memory) creep.memory.sourceId = null;
     assignSource(creep, task);
     return;
+  }
+  if (claim.remoteRoom && (!task.remoteRoom || task.remoteRoom !== claim.remoteRoom)) {
+    task.remoteRoom = claim.remoteRoom;
+    if (creep.memory) creep.memory.remoteRoom = claim.remoteRoom;
+  }
+  if (claim.pending) {
+    claim.pending = false;
+    claim.pendingTick = null;
+    claim.spawnName = null;
   }
   var source = Game.getObjectById(task.sourceId);
   if (!source) return;
   if (source.room && controllerOwnedByOther(source.room)) {
     releaseAssignment(task, 'avoid');
+    if (creep.memory) creep.memory.sourceId = null;
     return;
   }
   if (detectThreat(source)) {
     releaseAssignment(task, 'avoid');
+    if (creep.memory) creep.memory.sourceId = null;
     return;
+  }
+  if (creep.memory) {
+    creep.memory.sourceId = task.sourceId;
+    if (task.remoteRoom) creep.memory.remoteRoom = task.remoteRoom;
   }
   refreshSeatInfo(task);
 }
@@ -300,15 +400,24 @@ function handleHarvestLoop(creep, task) {
   if (!source) return;
   var seatPos = seatPosFromTask(task);
   if (!seatPos) {
+    if (creep.memory) creep.memory.state = 'seat';
+    task.state = 'seat';
+    creep.say('seat');
     queueMove(creep, source.pos, MOVE_PRIORITY, 1);
     return;
   }
   var seatReserved = tryReserveSeat(task, seatPos);
   if (!seatReserved && !creep.pos.isEqualTo(seatPos)) {
+    if (creep.memory) creep.memory.state = 'seat';
+    task.state = 'seat';
+    creep.say('seat');
     queueMove(creep, seatPos, MOVE_PRIORITY, 1);
     return;
   }
   if (!creep.pos.isEqualTo(seatPos)) {
+    if (creep.memory) creep.memory.state = 'seat';
+    task.state = 'seat';
+    creep.say('seat');
     queueMove(creep, seatPos, MOVE_PRIORITY, 0);
     return;
   }
@@ -318,6 +427,9 @@ function handleHarvestLoop(creep, task) {
   }
   var seatInfoSource = Game.getObjectById(task.sourceId);
   if (container) {
+    if (creep.memory) creep.memory.state = 'harvest';
+    task.state = 'harvest';
+    creep.say('harvest');
     safeHarvest(creep, seatInfoSource);
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
       safeTransfer(creep, container);
@@ -330,11 +442,20 @@ function handleHarvestLoop(creep, task) {
     }
     if (site) {
       if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+        if (creep.memory) creep.memory.state = 'build';
+        task.state = 'build';
+        creep.say('build');
         safeBuild(creep, site);
       } else {
+        if (creep.memory) creep.memory.state = 'harvest';
+        task.state = 'harvest';
+        creep.say('harvest');
         safeHarvest(creep, seatInfoSource);
       }
     } else {
+      if (creep.memory) creep.memory.state = 'harvest';
+      task.state = 'harvest';
+      creep.say('harvest');
       safeHarvest(creep, seatInfoSource);
     }
   }
@@ -346,14 +467,23 @@ function handleTravel(creep, task) {
   if (source) {
     var seatPos = seatPosFromTask(task);
     if (seatPos) {
+      if (creep.memory) creep.memory.state = 'seat';
+      task.state = 'seat';
+      creep.say('seat');
       queueMove(creep, seatPos, MOVE_PRIORITY, 0);
       return;
     }
+    if (creep.memory) creep.memory.state = 'seat';
+    task.state = 'seat';
+    creep.say('seat');
     queueMove(creep, source.pos, MOVE_PRIORITY, 1);
     return;
   }
   var home = task.homeRoom || inferHome(creep);
   if (home && creep.pos.roomName !== home) {
+    if (creep.memory) creep.memory.state = 'travel';
+    task.state = 'travel';
+    creep.say('travel:' + home);
     queueMove(creep, { x: 25, y: 25, roomName: home }, IDLE_PRIORITY, 1);
   }
 }
@@ -376,6 +506,7 @@ function updateStuckState(creep, task) {
 var TaskLuna = {
   run: function (creep) {
     if (!creep) return;
+    try { require('Traveler'); } catch (travErr) {}
     var task = ensureTask(creep);
     if (!task) return;
     task.creepName = creep.name;
@@ -384,27 +515,76 @@ var TaskLuna = {
       task.warnedNoCarry = true;
     }
     maintainAssignment(creep, task);
+    var remoteRoom = task.remoteRoom || (creep.memory ? creep.memory.remoteRoom : null) || null;
+    if (!remoteRoom && task.sourceId) {
+      var guessSource = Game.getObjectById(task.sourceId);
+      if (guessSource && guessSource.pos) remoteRoom = guessSource.pos.roomName;
+    }
+    if (remoteRoom) {
+      task.remoteRoom = remoteRoom;
+      if (creep.memory) creep.memory.remoteRoom = remoteRoom;
+    }
+    if (!remoteRoom) {
+      if (creep.memory) creep.memory.state = 'no-remote';
+      task.state = 'no-remote';
+      creep.say('no-remote');
+      return;
+    }
+    if (creep.pos.roomName !== remoteRoom) {
+      if (creep.memory) creep.memory.state = 'travel';
+      task.state = 'travel';
+      creep.say('travel:' + remoteRoom);
+      var travelTarget = new RoomPosition(25, 25, remoteRoom);
+      var travelOpts = {
+        range: 20,
+        preferHighway: true,
+        maxOps: 4000,
+        stuckValue: 2,
+        routeCallback: buildRouteCallback()
+      };
+      if (typeof creep.travelTo === 'function') {
+        creep.travelTo(travelTarget, travelOpts);
+      } else {
+        queueMove(creep, { x: travelTarget.x, y: travelTarget.y, roomName: remoteRoom }, MOVE_PRIORITY, 20);
+      }
+      return;
+    }
     if (!task.sourceId) {
       handleTravel(creep, task);
+      if (creep.memory) creep.memory.state = 'no-source';
+      task.state = 'no-source';
+      creep.say('no-source');
       return;
     }
     var source = Game.getObjectById(task.sourceId);
     if (!source) {
       handleTravel(creep, task);
+      if (creep.memory) creep.memory.state = 'no-source';
+      task.state = 'no-source';
+      creep.say('no-source');
       return;
     }
     rememberSourceMetadata(source, task.containerId ? Game.getObjectById(task.containerId) : null, task.seatPos);
     if (source.room && controllerOwnedByOther(source.room)) {
       releaseAssignment(task, 'avoid');
+      if (creep.memory) creep.memory.state = 'no-source';
+      task.state = 'no-source';
+      creep.say('no-source');
       return;
     }
     if (detectThreat(source)) {
       releaseAssignment(task, 'avoid');
+      if (creep.memory) creep.memory.state = 'no-source';
+      task.state = 'no-source';
+      creep.say('no-source');
       return;
     }
     handleHarvestLoop(creep, task);
     updateStuckState(creep, task);
+    if (creep.memory && task.state) creep.memory.state = task.state;
   }
 };
+
+TaskLuna.MAX_LUNA_PER_SOURCE = 1;
 
 module.exports = TaskLuna;
