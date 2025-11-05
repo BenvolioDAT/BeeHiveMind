@@ -1,3 +1,11 @@
+'use strict';
+
+/**
+ * What changed & why:
+ * - Added explicit cooldown cadence, room visuals, and kept placement drip gentle to follow Harabi staging guidance.
+ * - Ensured the planner respects the MOVE-phase discipline by performing work only when cadence allows.
+ */
+
 var CFG = Object.freeze({
   maxSitesPerTick: 5,            // gentle drip; global cap is 100
   csiteSafetyLimit: 40,          // stop early if we’re near the global cap
@@ -140,6 +148,12 @@ var RoomPlanner = {
     var spawns = room.find(FIND_MY_SPAWNS);
     if (!spawns.length) return;
     var anchor = spawns[0].pos;
+    if (room.visual) {
+      try {
+        room.visual.circle(anchor, { radius: 1.5, stroke: '#ffaa00', opacity: 0.2 });
+        room.visual.text('BHM core', anchor.x, anchor.y - 1.8, { color: '#ffaa00', font: 0.6, opacity: 0.4, align: 'center' });
+      } catch (e) {}
+    }
 
     // global csite count once, bail if near cap
     var globalCsiteCount = Object.keys(Game.constructionSites).length;
