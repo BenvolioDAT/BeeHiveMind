@@ -498,6 +498,7 @@ var BeeHiveMind = {
   },
 
   runCreeps: function (context) {
+    try { require('Traveler'); } catch (travErr) {}
     for (var i = 0; i < context.creeps.length; i++) {
       var creep = context.creeps[i];
       BeeHiveMind.ensureTaskEnvelope(creep);
