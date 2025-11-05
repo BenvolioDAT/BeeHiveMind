@@ -45,9 +45,9 @@ const CONFIGS = {
     B(1,1,1),
   ],
   courier: [
-    CM(30,15), 
-    CM(23,23), 
-    CM(22,22), 
+    CM(30,15),
+    CM(23,23),
+    CM(22,22),
     CM(21,21), 
     CM(20,20), 
     CM(19,19),
@@ -67,8 +67,19 @@ const CONFIGS = {
     CM(5,5), 
     CM(4,4), 
     CM(3,3),
-    CM(2,2), 
+    CM(2,2),
     CM(1,1),
+  ],
+  trucker: [
+    A(0,0,0,0,0,25,15),
+    A(0,0,0,0,0,21,14),
+    A(0,0,0,0,0,18,12),
+    A(0,0,0,0,0,15,10),
+    A(0,0,0,0,0,12,8),
+    A(0,0,0,0,0,9,6),
+    A(0,0,0,0,0,6,4),
+    A(0,0,0,0,0,4,3),
+    A(0,0,0,0,0,2,2)
   ],
   builder: [ 
     B(6,12,18),
@@ -190,7 +201,6 @@ const CONFIGS = {
 // ---------- Task Aliases (normalize user-facing names) ----------
 // This lets getBodyForTask('Trucker') resolve to courier configs, etc.
 const TASK_ALIAS = {
-  trucker: 'courier',
   queen: 'Queen',
   scout: 'Scout',
   claimer: 'Claimer',
@@ -275,6 +285,7 @@ function normalizeTask(task) {
 
 // ---------- Role-specific wrappers (kept for API compatibility) ----------
 const Generate_Courier_Body          = (e) => Generate_Body_From_Config('courier', e);
+const Generate_Trucker_Body          = (e) => Generate_Body_From_Config('trucker', e);
 const Generate_BaseHarvest_Body      = (e) => Generate_Body_From_Config('baseharvest', e);
 const Generate_Builder_Body          = (e) => Generate_Body_From_Config('builder', e);
 const Generate_Repair_Body           = (e) => Generate_Body_From_Config('repair', e);
@@ -297,6 +308,7 @@ function getBodyForTask(task, energyAvailable) {
     case 'baseharvest':    return Generate_BaseHarvest_Body(energyAvailable);
     case 'upgrader':       return Generate_Upgrader_Body(energyAvailable);
     case 'courier':        return Generate_Courier_Body(energyAvailable);
+    case 'trucker':        return Generate_Trucker_Body(energyAvailable);
     case 'luna':           return Generate_Luna_Body(energyAvailable);
     case 'Scout':          return Generate_Scout_Body(energyAvailable);
     case 'Queen':          return Generate_Queen_Body(energyAvailable);
@@ -306,7 +318,6 @@ function getBodyForTask(task, energyAvailable) {
     case 'Dismantler':     return Generate_Dismantler_Config_Body(energyAvailable);
     case 'Claimer':        return Generate_Claimer_Body(energyAvailable);
     // Aliases
-    case 'trucker':        return Generate_Courier_Body(energyAvailable);
     default:
       if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
         spawnLog.debug('Unknown task:', task);
