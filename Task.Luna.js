@@ -14,8 +14,10 @@ var CFG = Object.freeze({
     TRAVEL_COLOR:  "#8ab6ff",  // room travel (to target/home)
     PICK_COLOR:    "#ffe66e",  // choosing a source / assignment
     SRC_COLOR:     "#ff9a6e",  // harvesting source
-    DROP_COLOR:    "#ffe66e",  // drops (rare here)
-    DELIVER_COLOR: "#6effa1",  // delivering energy
+    DROP_COLOR:    "#ffe66e",  // dropped energy / dump
+    DELIVER_COLOR: "#6effa1",  // delivery to sink
+    STICK_COLOR:   "#aaffaa",  // stickiness/seat
+    AVOID_COLOR:   "#ff6e6e",  // avoided/locked rooms
     BUILD_COLOR:   "#e6c16e",  // building
     UPG_COLOR:     "#c1a6ff",  // upgrading
     IDLE_COLOR:    "#bfbfbf",  // idling / anchor
@@ -36,6 +38,15 @@ var PLAIN_COST    = 2;
 var SWAMP_COST    = 10;
 var MAX_LUNA_PER_SOURCE = 1;
 
+// --- Container mining & haul signalling ---
+var PICKUP_WARN_PCT   = 0.60;  // requestPickup at 60%
+var PICKUP_URGENT_PCT = 0.80;  // reinforce at 80%
+
+// Optional miner emergency haul-home if jammed
+var EMERGENCY_EVAC_ENABLED = false;
+var EMERGENCY_EVAC_PCT     = 0.95;
+var EMERGENCY_EVAC_GRACE   = 50;
+
 var PF_CACHE_TTL = 150;
 var INVADER_LOCK_MEMO_TTL = 1500;
 
@@ -49,19 +60,20 @@ var ASSIGN_STICKY_TTL = 50;
 var STUCK_WINDOW = 4;
 
 // Flag pruning cadence & grace (sources only)
-var FLAG_PRUNE_PERIOD   = 25;   // how often to scan for source-flag deletions
-var FLAG_RETENTION_TTL  = 200;  // keep a source-flag this many ticks since last activity
+var FLAG_PRUNE_PERIOD = 200;
+var FLAG_GRACE_TICKS = 2000;
 
 // ============================
-// Helpers: SAY + DRAW
+// Tiny console helpers
 // ============================
 function debugSay(creep, msg) {
-  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+  if (!CFG.DEBUG_SAY || !creep) return;
+  try { creep.say(msg, true); } catch (e) {}
 }
 function _posOf(target) {
   if (!target) return null;
   if (target.pos) return target.pos;
-  if (target.x != null && target.y != null && target.roomName) return target; // RoomPosition-like
+  if (target.x!=null && target.y!=null && target.roomName) return target;
   return null;
 }
 function debugDraw(creep, target, color, label) {
@@ -78,388 +90,28 @@ function debugDraw(creep, target, color, label) {
       lineStyle: "solid"
     });
     if (label) {
-      room.visual.text(label, tpos.x, tpos.y - 0.3, {
-        color: color,
-        opacity: CFG.DRAW.OPACITY,
-        font: CFG.DRAW.FONT,
-        align: "center"
+      room.visual.text(label, tpos.x, tpos.y - 0.2, {
+        color: color, font: CFG.DRAW.FONT, opacity: 1
       });
     }
-  } catch (e) {}
-}
-function debugRing(room, pos, color, text) {
-  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
-  try {
-    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-  } catch (e) {}
+  } catch (e){}
 }
 
 // ============================
-// Helpers: short id, flags
+// Pathing (Traveler) wrapper
 // ============================
-function shortSid(id) {
-  if (!id || typeof id !== 'string') return '??????';
-  var n = id.length; return id.substr(n - 6);
-}
-
-function _roomMem(roomName){
-  Memory.rooms = Memory.rooms || {};
-  return (Memory.rooms[roomName] = (Memory.rooms[roomName] || {}));
-}
-function _sourceMem(roomName, sid) {
-  var rm = _roomMem(roomName);
-  rm.sources = rm.sources || {};
-  return (rm.sources[sid] = (rm.sources[sid] || {}));
-}
-
-// mark activity each time we touch/own/harvest a source
-function touchSourceActive(roomName, sid) {
-  if (!roomName || !sid) return;
-  var srec = _sourceMem(roomName, sid);
-  srec.lastActive = Game.time;
-}
-
-/** Ensure exactly one flag exists on this source tile (idempotent) and touch lastActive. */
-function ensureSourceFlag(source) {
-  if (!source || !source.pos || !source.room) return;
-
-  var roomName = source.pos.roomName;
-  var srec = _sourceMem(roomName, source.id);
-
-  // reuse previous flag if it still matches this tile
-  if (srec.flagName) {
-    var f = Game.flags[srec.flagName];
-    if (f &&
-        f.pos.x === source.pos.x &&
-        f.pos.y === source.pos.y &&
-        f.pos.roomName === roomName) {
-      touchSourceActive(roomName, source.id);
-      return;
-    }
-  }
-
-  // does a properly-named flag already sit here? adopt it
-  var flagsHere = source.pos.lookFor(LOOK_FLAGS) || [];
-  var expectedPrefix = 'SRC-' + roomName + '-';
-  var sidTail = shortSid(source.id);
-  for (var i = 0; i < flagsHere.length; i++) {
-    var fh = flagsHere[i];
-    if (typeof fh.name === 'string' &&
-        fh.name.indexOf(expectedPrefix) === 0 &&
-        fh.name.indexOf(sidTail) !== -1) {
-      srec.flagName = fh.name;
-      touchSourceActive(roomName, source.id);
-      return;
-    }
-  }
-
-  // create a new one
-  var base = expectedPrefix + sidTail;
-  var name = base, tries = 1;
-  while (Game.flags[name]) { tries++; name = base + '-' + tries; if (tries > 10) break; }
-  var rc = source.room.createFlag(source.pos, name, COLOR_YELLOW, COLOR_YELLOW);
-  if (typeof rc === 'string') {
-    srec.flagName = rc;
-    touchSourceActive(roomName, source.id);
-  }
-}
-
-// ============================
-// NEW: Controller flag helpers (Reserve:roomName style)
-// ============================
-function ensureControllerFlag(ctrl){
-  if (!ctrl) return;
-  var roomName = ctrl.pos.roomName;
-  var rm = _roomMem(roomName);
-
-  var expect = 'Reserve:' + roomName;
-
-  if (rm.controllerFlagName) {
-    var f0 = Game.flags[rm.controllerFlagName];
-    if (f0 &&
-        f0.pos.x === ctrl.pos.x &&
-        f0.pos.y === ctrl.pos.y &&
-        f0.pos.roomName === roomName) {
-      return;
-    }
-  }
-
-  var flagsHere = ctrl.pos.lookFor(LOOK_FLAGS) || [];
-  for (var i = 0; i < flagsHere.length; i++) {
-    if (flagsHere[i].name === expect) {
-      rm.controllerFlagName = expect;
-      return;
-    }
-  }
-
-  var rc = ctrl.room.createFlag(ctrl.pos, expect, COLOR_WHITE, COLOR_PURPLE);
-  if (typeof rc === 'string') rm.controllerFlagName = rc;
-}
-
-function pruneControllerFlagIfNoForagers(roomName, roomCountMap){
-  var rm = _roomMem(roomName);
-  var fname = rm.controllerFlagName;
-  if (!fname) return;
-
-  var count = roomCountMap && roomCountMap[roomName] ? roomCountMap[roomName] : 0;
-  if (count > 0) return;
-
-  var f = Game.flags[fname];
-  if (f) {
-    try { f.remove(); } catch (e) {}
-  }
-  delete rm.controllerFlagName;
-}
-
-// ============================
-// Avoid-list (per creep)
-// ============================
-function _ensureAvoid(creep){ if (!creep.memory._avoid) creep.memory._avoid = {}; return creep.memory._avoid; }
-function shouldAvoid(creep, sid){ var a=_ensureAvoid(creep); var t=a[sid]; return (typeof t==='number' && Game.time<t); }
-function markAvoid(creep, sid, ttl){ var a=_ensureAvoid(creep); a[sid] = Game.time + (ttl!=null?ttl:AVOID_TTL); }
-function avoidRemaining(creep, sid){ var a=_ensureAvoid(creep); var t=a[sid]; if (typeof t!=='number') return 0; var left=t-Game.time; return left>0?left:0; }
-
-// ============================
-// Per-tick *claim* (same-tick contention guard)
-// ============================
-function _claimTable(){ var sc=Memory._sourceClaim; if(!sc||sc.t!==Game.time){ Memory._sourceClaim={t:Game.time,m:{}}; } return Memory._sourceClaim.m; }
-function tryClaimSourceForTick(creep, sid){
-  var m=_claimTable(), cur=m[sid];
-  if (!cur){ m[sid]=creep.name; return true; }
-  if (creep.name < cur){ m[sid]=creep.name; return true; }
-  return cur===creep.name;
-}
-
-// ============================
-// remoteAssignments model
-// ============================
-function ensureAssignmentsMem(){ if(!Memory.remoteAssignments) Memory.remoteAssignments={}; return Memory.remoteAssignments; }
-function _maEnsure(entry, roomName){
-  if (!entry || typeof entry !== 'object') entry = { count: 0, owner: null, roomName: roomName||null, since: null };
-  if (typeof entry.count !== 'number') entry.count = (entry.count|0);
-  if (!('owner' in entry)) entry.owner = null;
-  if (!('roomName' in entry)) entry.roomName = roomName||null;
-  if (!('since' in entry)) entry.since = null;
-  return entry;
-}
-function maCount(memAssign, sid){
-  var e = memAssign[sid];
-  if (!e) return 0;
-  if (typeof e === 'number') return e; // backward compat
-  return e.count|0;
-}
-function maOwner(memAssign, sid){
-  var e = memAssign[sid];
-  if (!e || typeof e === 'number') return null;
-  return e.owner || null;
-}
-function maSetOwner(memAssign, sid, owner, roomName){
-  var e = _maEnsure(memAssign[sid], roomName);
-  e.owner = owner; e.roomName = roomName || e.roomName; e.since = Game.time;
-  memAssign[sid] = e;
-  if (e.roomName) touchSourceActive(e.roomName, sid);
-}
-function maClearOwner(memAssign, sid){
-  var e = _maEnsure(memAssign[sid], null);
-  e.owner = null; e.since = null;
-  memAssign[sid] = e;
-}
-function maInc(memAssign, sid, roomName){
-  var e = _maEnsure(memAssign[sid], roomName); e.count = (e.count|0) + 1; memAssign[sid]=e;
-}
-function maDec(memAssign, sid){
-  var e = _maEnsure(memAssign[sid], null); e.count = Math.max(0,(e.count|0)-1); memAssign[sid]=e;
-}
-
-// ============================
-// Ownership / duplicate resolver
-// ============================
-function resolveOwnershipForSid(sid){
-  var memAssign = ensureAssignmentsMem();
-  var e = _maEnsure(memAssign[sid], null);
-
-  var contenders = [];
-  for (var name in Game.creeps){
-    var c = Game.creeps[name];
-    if (!c || !c.memory) continue;
-    if (c.memory.task === 'luna' && c.memory.sourceId === sid){
-      contenders.push(c);
-    }
-  }
-
-  if (!contenders.length){
-    maClearOwner(memAssign, sid);
-    return null;
-  }
-
-  contenders.sort(function(a,b){
-    var at = a.memory._assignTick||0, bt=b.memory._assignTick||0;
-    if (at!==bt) return at-bt;
-    return a.name<b.name?-1:1;
-  });
-  var winner = contenders[0];
-
-  maSetOwner(memAssign, sid, winner.name, winner.memory.targetRoom||null);
-
-  for (var i=1; i<contenders.length; i++){
-    var loser = contenders[i];
-    if (loser && loser.memory && loser.memory.sourceId === sid){
-      loser.memory._forceYield = true;
-    }
-  }
-
-  return winner.name;
-}
-
-// Audits all sids once per tick: recompute counts, scrub dead owners, and prune flags
-function auditRemoteAssignments(){
-  var memAssign = ensureAssignmentsMem();
-
-  for (var sid in memAssign){
-    memAssign[sid] = _maEnsure(memAssign[sid], memAssign[sid].roomName||null);
-    memAssign[sid].count = 0;
-  }
-
-  var roomCounts = {};
-  for (var name in Game.creeps){
-    var c = Game.creeps[name];
-    if (!c || !c.memory) continue;
-    if (c.memory.task === 'luna') {
-      if (c.memory.sourceId){
-        var sid2 = c.memory.sourceId;
-        var e2 = _maEnsure(memAssign[sid2], c.memory.targetRoom||null);
-        e2.count = (e2.count|0) + 1;
-        memAssign[sid2] = e2;
-      }
-      if (c.memory.targetRoom){
-        var rn = c.memory.targetRoom;
-        roomCounts[rn] = (roomCounts[rn]|0) + 1;
-      }
-    }
-  }
-
-  for (var sid3 in memAssign){
-    var owner = maOwner(memAssign, sid3);
-    if (owner){
-      var oc = Game.creeps[owner];
-      if (!oc || !oc.memory || oc.memory.sourceId !== sid3){
-        resolveOwnershipForSid(sid3);
-      }else{
-        if (memAssign[sid3].count > MAX_LUNA_PER_SOURCE){
-          resolveOwnershipForSid(sid3);
-        }
-      }
-    }else{
-      if (memAssign[sid3].count > 0){
-        resolveOwnershipForSid(sid3);
-      }
-    }
-  }
-
-  if ((Game.time % FLAG_PRUNE_PERIOD) === 0) pruneUnusedSourceFlags();
-
-  var rooms = Memory.rooms || {};
-  for (var roomName in rooms) {
-    if (!rooms.hasOwnProperty(roomName)) continue;
-    pruneControllerFlagIfNoForagers(roomName, roomCounts);
-  }
-}
-
-function auditOncePerTick(){
-  if (Memory._auditRemoteAssignmentsTick !== Game.time){
-    auditRemoteAssignments();
-    Memory._auditRemoteAssignmentsTick = Game.time;
-  }
-}
-
-// ============================
-// Flag pruning (sources)
-// ============================
-function pruneUnusedSourceFlags(){
-  var memAssign = ensureAssignmentsMem();
-  var now = Game.time;
-
-  var rooms = Memory.rooms || {};
-  for (var roomName in rooms){
-    if (!rooms.hasOwnProperty(roomName)) continue;
-    var rm = rooms[roomName]; if (!rm || !rm.sources) continue;
-
-    var roomLocked = isRoomLockedByInvaderCore(roomName);
-
-    for (var sid in rm.sources){
-      if (!rm.sources.hasOwnProperty(sid)) continue;
-      var srec = rm.sources[sid] || {};
-      var flagName = srec.flagName;
-      if (!flagName) continue;
-
-      var e = _maEnsure(memAssign[sid], rm.sources[sid].roomName || roomName);
-      var count  = e.count|0;
-      var owner  = e.owner || null;
-      var last   = srec.lastActive|0;
-
-      var inactiveLong = (now - last) > FLAG_RETENTION_TTL;
-      var nobodyOwns   = (count === 0 && owner == null);
-
-      if (roomLocked || (nobodyOwns && inactiveLong)) {
-        var f = Game.flags[flagName];
-        if (f) {
-          var prefix = 'SRC-' + roomName + '-';
-          var looksLikeOurs = (typeof flagName === 'string' && flagName.indexOf(prefix) === 0);
-          var posMatches = (!srec.x || !srec.y) ? true : (f.pos.x === srec.x && f.pos.y === srec.y);
-          var srcObj = Game.getObjectById(sid);
-          var tileOk = srcObj ? (f.pos.x === srcObj.pos.x && f.pos.y === srcObj.pos.y && f.pos.roomName === srcObj.pos.roomName) : true;
-
-          if (looksLikeOurs && (posMatches && tileOk)) {
-            try { f.remove(); } catch (e1) {}
-          }
-        }
-        delete srec.flagName;
-        rm.sources[sid] = srec;
-      }
-    }
-  }
-}
-
-// ============================
-// Pathing helpers (Traveler-first)
-// ============================
-if (!Memory._pfCost) Memory._pfCost = {};
-
-function pfCostCached(anchorPos, targetPos, sourceId) {
-  var key = anchorPos.roomName + ':' + sourceId;
-  var rec = Memory._pfCost[key];
-  if (rec && (Game.time - rec.t) < PF_CACHE_TTL) return rec.c;
-  var c = pfCost(anchorPos, targetPos);
-  Memory._pfCost[key] = { c: c, t: Game.time };
-  return c;
-}
-function pfCost(anchorPos, targetPos) {
-  var ret = PathFinder.search(
-    anchorPos,
-    { pos: targetPos, range: 1 },
-    {
-      maxOps: MAX_PF_OPS,
-      plainCost: PLAIN_COST,
-      swampCost: SWAMP_COST,
-      roomCallback: function(roomName) {
-        var room = Game.rooms[roomName]; if (!room) return;
-        var m = new PathFinder.CostMatrix();
-        room.find(FIND_STRUCTURES).forEach(function(s){
-          if (s.structureType===STRUCTURE_ROAD) m.set(s.pos.x,s.pos.y,1);
-          else if (s.structureType!==STRUCTURE_CONTAINER && (s.structureType!==STRUCTURE_RAMPART || !s.my)) m.set(s.pos.x,s.pos.y,0xff);
-        });
-        room.find(FIND_CONSTRUCTION_SITES).forEach(function(cs){ if (cs.structureType!==STRUCTURE_ROAD) m.set(cs.pos.x,cs.pos.y,0xff); });
-        return m;
-      }
-    }
-  );
-  return ret.incomplete ? Infinity : ret.cost;
-}
-function go(creep, dest, opts){
+function go(creep, dest, opts) {
+  if (!creep || !dest) return;
   opts = opts || {};
-  var desired = (opts.range!=null) ? opts.range : 1;
-  if (creep.pos.getRangeTo(dest) <= desired) return;
+  var desired = (opts.range!=null?opts.range:1);
+  if (creep.pos.inRangeTo((dest.pos||dest), desired)) return;
+
+  if (!creep.travelTo) {
+    creep.moveTo((dest.pos||dest), { reusePath: (opts.reusePath!=null?opts.reusePath:15) });
+    debugDraw(creep, dest, CFG.DRAW.TRAVEL_COLOR, "GO");
+    return;
+  }
+
   var tOpts = {
     range: desired,
     reusePath: (opts.reusePath!=null?opts.reusePath:15),
@@ -491,80 +143,378 @@ function getHomeName(creep){
 }
 function getAnchorPos(homeName){
   var r = Game.rooms[homeName];
-  if (r){
-    if (r.storage) return r.storage.pos;
-    var spawns = r.find(FIND_MY_SPAWNS); if (spawns.length) return spawns[0].pos;
-    if (r.controller && r.controller.my) return r.controller.pos;
-  }
+  if (r && r.storage) return r.storage.pos;
+  var spawns = r? r.find(FIND_MY_SPAWNS) : null;
+  if (spawns && spawns.length) return spawns[0].pos;
   return new RoomPosition(25,25,homeName);
 }
-function bfsNeighborRooms(startName, radius){
-  radius = radius==null?1:radius;
-  var seen={}; seen[startName]=true;
-  var frontier=[startName];
-  for (var depth=0; depth<radius; depth++){
-    var next=[];
-    for (var f=0; f<frontier.length; f++){
-      var rn=frontier[f], exits=Game.map.describeExits(rn)||{};
-      for (var dir in exits){ var n=exits[dir]; if(!seen[n]){ seen[n]=true; next.push(n);} }
+
+// ============================
+// Memory helpers
+// ============================
+function _roomMem(roomName){
+  var r=Memory.rooms||(Memory.rooms={}); return (r[roomName]||(r[roomName]={}));
+}
+function _sourceMem(roomName, sid) {
+  var rm = _roomMem(roomName);
+  rm.sources = rm.sources || {};
+  return (rm.sources[sid] = (rm.sources[sid] || {}));
+}
+
+// mark activity each time we touch/own/harvest a source
+function touchSourceActive(roomName, sid) {
+  if (!roomName || !sid) return;
+  var srec = _sourceMem(roomName, sid);
+  srec.lastActive = Game.time;
+}
+
+// -------------------- Container + Haul Bus helpers --------------------
+function _ensureBHM(){
+  Memory.__BHM = Memory.__BHM || {};
+  Memory.__BHM.haulRequests = Memory.__BHM.haulRequests || {};
+  return Memory.__BHM;
+}
+
+function _publishHaulRequest(fromRoom, toRoom, containerId, amountHint){
+  if (!fromRoom || !containerId) return;
+  _ensureBHM();
+  var key = fromRoom + ':' + containerId;
+  Memory.__BHM.haulRequests[key] = {
+    key: key,
+    fromRoom: fromRoom,
+    toRoom: toRoom || null,
+    targetId: containerId,
+    resource: RESOURCE_ENERGY,
+    amountHint: amountHint || 0,
+    issuedAt: Game.time
+  };
+}
+
+// Container/csite within 1 tile of a source
+function _findContainerOrSiteNearSource(room, source) {
+  if (!room || !source) return { container: null, csite: null };
+  var container = source.pos.findInRange(FIND_STRUCTURES, 1, {
+    filter: function(s){ return s.structureType === STRUCTURE_CONTAINER; }
+  })[0];
+  var csite = source.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
+    filter: function(s){ return s.structureType === STRUCTURE_CONTAINER; }
+  })[0];
+  return { container: container||null, csite: csite||null };
+}
+
+// Prefer a non-wall, non-swamp seat around the source
+function _pickSeatPosNearSource(source) {
+  var roomName = source.pos.roomName;
+  var terrain = Game.map.getRoomTerrain(roomName);
+  var best = null, bestScore = -9999, dx, dy;
+  for (dx=-1; dx<=1; dx++){
+    for (dy=-1; dy<=1; dy++){
+      if (!dx && !dy) continue;
+      var x = source.pos.x + dx, y = source.pos.y + dy;
+      if (x<1||x>48||y<1||y>48) continue;
+      var t = terrain.get(x,y);
+      if (t & TERRAIN_MASK_WALL) continue;
+      var swamp = (t & TERRAIN_MASK_SWAMP) ? 1 : 0;
+      var score = 10 - (swamp ? 5 : 0);
+      if (score > bestScore){ bestScore = score; best = new RoomPosition(x,y,roomName); }
     }
-    frontier=next;
   }
-  var out=[]; for (var k in seen) if (k!==startName) out.push(k);
-  return out;
+  return best || source.pos;
+}
+
+// Update room memory container state for a source
+function _updateContainerMemory(source, container, homeRoomName) {
+  var srec = _sourceMem(source.pos.roomName, source.id);
+  srec.container = srec.container || {};
+  srec.container.lastTick = Game.time;
+
+  if (!container) {
+    srec.container.status = "Building";
+    srec.container.healthPct = 0;
+    srec.container.capacityPct = 0;
+    return;
+  }
+
+  srec.container.containerId = container.id;
+
+  var hits = container.hits|0, hitsMax = container.hitsMax||1;
+  srec.container.healthPct = Math.min(1, hits / hitsMax);
+
+  var used = (container.store && container.store[RESOURCE_ENERGY]) || 0;
+  var cap  = container.store && container.store.getCapacity ? container.store.getCapacity(RESOURCE_ENERGY) : 2000;
+  var pct  = cap>0 ? (used / cap) : 0;
+  srec.container.capacityPct = pct;
+
+  srec.container.status = (srec.container.healthPct < 0.80) ? "NeedsRepair" : "Good";
+
+  if (pct < PICKUP_WARN_PCT) {
+    srec.container.requestPickup = false;
+    if (srec.container.pickUpStatus !== "Enroute") srec.container.pickUpStatus = "None";
+  }
+}
+
+// Flip requestPickup at 60% / 80% and emit haul requests
+function _maybeSignalPickup(source, container, homeName, creepTask){
+  var srec = _sourceMem(source.pos.roomName, source.id);
+  srec.container = srec.container || {};
+  var pct = srec.container.capacityPct || 0;
+  var have = (container.store && container.store[RESOURCE_ENERGY]) || 0;
+
+  if (pct >= PICKUP_WARN_PCT) {
+    srec.container.requestPickup = true;
+    if (srec.container.pickUpStatus !== "Enroute") srec.container.pickUpStatus = "Queued";
+    _publishHaulRequest(container.pos.roomName, homeName, container.id, have);
+  }
+  if (pct >= PICKUP_URGENT_PCT) {
+    _publishHaulRequest(container.pos.roomName, homeName, container.id, have);
+    if (creepTask) creepTask._urgentSince = (creepTask._urgentSince==null)?Game.time:creepTask._urgentSince;
+  } else if (creepTask) {
+    creepTask._urgentSince = null;
+  }
+}
+
+// Optional: allow miner to haul home if container stays jammed
+function _maybeEmergencyEvac(creep, container, homeName, creepTask){
+  if (!EMERGENCY_EVAC_ENABLED) return;
+
+  var cap = container.store && container.store.getCapacity ? container.store.getCapacity(RESOURCE_ENERGY) : 2000;
+  var used = (container.store && container.store[RESOURCE_ENERGY]) || 0;
+  var pct  = cap>0 ? (used/cap) : 0;
+
+  if (pct >= EMERGENCY_EVAC_PCT && creepTask && creepTask._urgentSince!=null && (Game.time - creepTask._urgentSince) > EMERGENCY_EVAC_GRACE) {
+    // withdraw one load
+    if (creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+      var r = creep.withdraw(container, RESOURCE_ENERGY);
+      if (r === ERR_NOT_IN_RANGE) go(creep, container.pos, { range:1 });
+      return;
+    }
+    // deliver to home storage
+    if (creep.room.name !== homeName){
+      go(creep, new RoomPosition(25,25,homeName), { range:20 });
+      return;
+    }
+    if (creep.room.storage){
+      var rc = creep.transfer(creep.room.storage, RESOURCE_ENERGY);
+      if (rc === ERR_NOT_IN_RANGE) go(creep, creep.room.storage, { range:1 });
+    }
+  }
 }
 
 // ============================
-// Flagging helper (sources)
+// Source flag/anchors (existing)
 // ============================
+// ensure exactly one flag exists on this source tile (idempotent) and touch lastActive.
+function ensureSourceFlag(source) {
+  if (!source || !source.pos || !source.room) return;
+
+  var roomName = source.pos.roomName;
+  var srec = _sourceMem(roomName, source.id);
+
+  // reuse previous flag if it still matches this tile
+  if (srec.flagName) {
+    var f = Game.flags[srec.flagName];
+    if (f &&
+        f.pos.x === source.pos.x &&
+        f.pos.y === source.pos.y &&
+        f.pos.roomName === roomName) {
+      touchSourceActive(roomName, source.id);
+      return;
+    }
+  }
+
+  // find any flag on that tile; if none, create one
+  var flags = source.pos.lookFor(LOOK_FLAGS);
+  if (flags && flags.length) {
+    var f2 = flags[0];
+    srec.flagName = f2.name;
+    touchSourceActive(roomName, source.id);
+    return;
+  }
+
+  // create a unique flag name
+  var base = "SRC_" + roomName + "_" + source.pos.x + "x" + source.pos.y;
+  var idx = 0; var flagName = base;
+  while (Game.flags[flagName]) { idx++; flagName = base + "_" + idx; }
+
+  var ok = source.pos.createFlag(flagName);
+  if (ok === OK) {
+    srec.flagName = flagName;
+    touchSourceActive(roomName, source.id);
+  }
+}
+
+function pruneUnusedSourceFlags(){
+  for (var name in Game.flags){
+    var f = Game.flags[name];
+    if (!f) continue;
+    if (f.name.indexOf("SRC_") !== 0) continue;
+
+    var room = f.pos.roomName;
+    var rm = _roomMem(room);
+    var found = false;
+    if (rm && rm.sources){
+      for (var sid in rm.sources){
+        var sr = rm.sources[sid];
+        if (sr && sr.flagName === name){ found=true; break; }
+      }
+    }
+    if (!found){
+      var look = f.pos.lookFor(LOOK_SOURCES);
+      if (!look || !look.length){
+        f.remove();
+      }
+    }
+  }
+}
+
+function ensureControllerFlag(ctrl){
+  if (!ctrl || !ctrl.pos) return;
+  var name = "CTRL_" + ctrl.pos.roomName;
+  var f = Game.flags[name];
+  if (!f){
+    ctrl.pos.createFlag(name);
+  }
+}
+
+// ============================
+// Per-tick *claim* (same-tick contention guard)
+// ============================
+function _claimTable(){ var sc=Memory._sourceClaim; if(!sc||sc.t!==Game.time){ Memory._sourceClaim={t:Game.time,m:{}}; } return Memory._sourceClaim.m; }
+function tryClaimSourceForTick(creep, sid){
+  var m=_claimTable(), cur=m[sid];
+  if (!cur){ m[sid]=creep.name; return true; }
+  if (creep.name < cur){ m[sid]=creep.name; return true; }
+  return cur===creep.name;
+}
+
+// ============================
+// remoteAssignments model
+// ============================
+function ensureAssignmentsMem(){ if(!Memory.remoteAssignments) Memory.remoteAssignments={}; return Memory.remoteAssignments; }
+function _maEnsure(entry, roomName){
+  if (!entry || typeof entry !== 'object') entry = { count: 0, owner: null, roomName: roomName||null, since: null };
+  if (typeof entry.count !== 'number') entry.count = (entry.count|0);
+  if (!('owner' in entry)) entry.owner = null;
+  if (!('roomName' in entry)) entry.roomName = roomName||null;
+  if (!('since' in entry)) entry.since = null;
+  return entry;
+}
+function maCount(memAssign, sid){
+  var e = memAssign[sid];
+  if (!e) return 0;
+  if (typeof e === 'number') return e; // backward compat
+  return e.count|0;
+}
+function maOwner(memAssign, sid){
+  var e = memAssign[sid]; if (!e) return null;
+  if (typeof e === 'number') return null;
+  return e.owner || null;
+}
+function maRoom(memAssign, sid){
+  var e = memAssign[sid]; if (!e) return null;
+  if (typeof e === 'number') return null;
+  return e.roomName || null;
+}
+function maInc(memAssign, sid, roomName){
+  var e = _maEnsure(memAssign[sid], roomName); e.count=(e.count|0)+1; memAssign[sid]=e;
+}
+function maDec(memAssign, sid){
+  var e = _maEnsure(memAssign[sid]); e.count=Math.max(0,(e.count|0)-1); memAssign[sid]=e;
+}
+function maSetOwner(memAssign, sid, name, roomName){
+  var e = _maEnsure(memAssign[sid], roomName); e.owner=name; e.since=Game.time; memAssign[sid]=e;
+}
+function maClearOwner(memAssign, sid){
+  var e = _maEnsure(memAssign[sid]); e.owner=null; memAssign[sid]=e;
+}
+
+function markAvoid(creep, sid, ttl){
+  var rm = Memory._avoid||(Memory._avoid={});
+  rm[sid] = Game.time + (ttl|0);
+}
+function isAvoided(sid){
+  var rm = Memory._avoid; if (!rm) return false;
+  var t = rm[sid]; if (!t) return false;
+  return t > Game.time;
+}
+
+// recompute the set of valid remote source sids for a home (cached in Memory.rooms[homeName].remotes)
 function markValidRemoteSourcesForHome(homeName){
-  var anchor=getAnchorPos(homeName);
-  var memAssign=ensureAssignmentsMem();
-  var rooms=bfsNeighborRooms(homeName, REMOTE_RADIUS);
+  var neighborRooms = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+  var valid = {};
+  for (var i=0;i<neighborRooms.length;i++){
+    var rn = neighborRooms[i];
+    var room = Game.rooms[rn];
+    if (!room) continue;
 
-  for (var i=0;i<rooms.length;i++){
-    var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
-    var rm = _roomMem(rn);
-    if (rm.hostile) continue;
+    // respect invader core lock
     if (isRoomLockedByInvaderCore(rn)) continue;
-
-    if (rm._lastValidFlagScan && (Game.time - rm._lastValidFlagScan) < 300) continue;
-    rm._lastValidFlagScan = Game.time;
 
     var sources = room.find(FIND_SOURCES);
     for (var j=0;j<sources.length;j++){
-      var s=sources[j];
-      var e=_maEnsure(memAssign[s.id], rn);
-      if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
-      var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
-      ensureSourceFlag(s);
-      var srec = _sourceMem(rn, s.id); srec.x = s.pos.x; srec.y = s.pos.y;
-      memAssign[s.id] = e;
+      var s = sources[j];
+      valid[s.id] = rn;
     }
   }
+  var rm = _roomMem(homeName);
+  rm._validRemoteSources = valid;
 }
 
-// ============================
-// Invader lock detection
-// ============================
-function isRoomLockedByInvaderCore(roomName){
-  if (!roomName) return false;
-  var rm = _roomMem(roomName);
-  var now = Game.time, room = Game.rooms[roomName];
+// Path cost cache (source->target room anchor)
+function _pfCacheMem(){
+  if (!Memory._pfCache) Memory._pfCache = { t:0, m:{} };
+  return Memory._pfCache;
+}
+function pfCostCached(fromPos, toPos, key){
+  if (!fromPos || !toPos) return Infinity;
+  var mem = _pfCacheMem();
+  var rec = mem.m[key];
+  if (rec && (Game.time - mem.t) < PF_CACHE_TTL){
+    return rec.cost;
+  }
+  var ret = PathFinder.search(fromPos, { pos: toPos, range: 1 }, {
+    maxOps: MAX_PF_OPS,
+    plainCost: PLAIN_COST,
+    swampCost: SWAMP_COST,
+    maxRooms: 16
+  });
+  var cost = ret.incomplete ? Infinity : (ret.cost|0);
+  mem.m[key] = { cost: cost };
+  mem.t = Game.time;
+  return cost;
+}
 
-  if (room){
+// BFS neighbor rooms up to radius (coarse)
+function bfsNeighborRooms(homeName, radius){
+  var visited = {}; visited[homeName] = true;
+  var q = [homeName], out=[homeName], depth=0;
+  while (q.length && depth<radius){
+    var next = [];
+    for (var i=0;i<q.length;i++){
+      var r=q[i], exits = Game.map.describeExits(r) || {};
+      for (var dir in exits){
+        var nr = exits[dir];
+        if (!visited[nr]){ visited[nr]=true; out.push(nr); next.push(nr); }
+      }
+    }
+    q = next; depth++;
+  }
+  return out.filter(function(r){ return r!==homeName; });
+}
+
+// Lock via invader core presence (memoized)
+function isRoomLockedByInvaderCore(roomName){
+  var rm = _roomMem(roomName), now=Game.time;
+  if (!rm._invaderLock || typeof rm._invaderLock.locked!=='boolean' || typeof rm._invaderLock.t!=='number'){
+    var room = Game.rooms[roomName];
     var locked=false;
-    var cores = room.find(FIND_STRUCTURES, { filter:function(s){return s.structureType===STRUCTURE_INVADER_CORE;} });
-    if (cores && cores.length>0) locked=true;
-    if (!locked && room.controller && room.controller.reservation &&
-        room.controller.reservation.username==='Invader'){ locked=true; }
-    if (!locked && BeeToolbox && BeeToolbox.isRoomInvaderLocked){
-      try{ if (BeeToolbox.isRoomInvaderLocked(room)) locked=true; }catch(e){}
+    if (room){
+      var cores = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType===STRUCTURE_INVADER_CORE; } });
+      locked = !!(cores && cores.length);
     }
     rm._invaderLock = { locked: locked, t: now };
     return locked;
   }
-
   if (rm._invaderLock && typeof rm._invaderLock.locked==='boolean' && typeof rm._invaderLock.t==='number'){
     if ((now - rm._invaderLock.t) <= INVADER_LOCK_MEMO_TTL) return rm._invaderLock.locked;
   }
@@ -596,86 +546,79 @@ function pickRemoteSource(creep){
       var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
       var lin = Game.map.getRoomLinearDistance(homeName, rn);
 
-      if (shouldAvoid(creep, s.id)){ avoided.push({id:s.id,roomName:rn,cost:cost,lin:lin,left:avoidRemaining(creep,s.id)}); continue; }
-      var ownerNow = maOwner(memAssign, s.id);
-      if (ownerNow && ownerNow !== creep.name) continue;
-      if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
+      var sid=s.id;
+      var owner = maOwner(memAssign, sid);
+      var count = maCount(memAssign, sid);
+      var capLeft = Math.max(0, (MAX_LUNA_PER_SOURCE|0) - (count|0));
 
-      var sticky = (creep.memory.sourceId===s.id) ? 1 : 0;
-      candidates.push({ id:s.id, roomName:rn, cost:cost, lin:lin, sticky:sticky });
-    }
-  }
-
-  // 2) No vision → use Memory.rooms.*.sources
-  if (!candidates.length){
-    for (i=0;i<neighborRooms.length;i++){
-      rn=neighborRooms[i]; if (isRoomLockedByInvaderCore(rn)) continue;
-      var rm = _roomMem(rn); if (!rm || !rm.sources) continue;
-      for (var sid in rm.sources){
-        if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
-        var ownerNow2 = maOwner(memAssign, sid);
-        if (ownerNow2 && ownerNow2 !== creep.name) continue;
-        if (maCount(memAssign, sid) >= MAX_LUNA_PER_SOURCE) continue;
-
-        var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
-        var synth = (lin2*200)+800;
-        var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
-        candidates.push({ id:sid, roomName:rn, cost:synth, lin:lin2, sticky:sticky2 });
+      if (owner && owner !== creep.name){
+        // allow soft stickiness to currently assigned owner
+        if ((Game.time - (_sourceMem(rn, sid).lastActive||0)) <= ASSIGN_STICKY_TTL) {
+          avoided.push({ sid:sid, roomName:rn, cost:cost, lin:lin, reason:"sticky" });
+          continue;
+        }
       }
+
+      if (capLeft <= 0){
+        avoided.push({ sid:sid, roomName:rn, cost:cost, lin:lin, reason:"full" });
+        continue;
+      }
+
+      candidates.push({ sid:sid, roomName:rn, cost:cost, lin:lin });
+    }
+  }
+
+  // 2) No-vision (fallback by memory table)
+  if (!candidates.length){
+    var rm = _roomMem(homeName);
+    var valid = rm._validRemoteSources||{};
+    for (var sid2 in valid){
+      if (isAvoided(sid2)) continue;
+      var rn2 = valid[sid2];
+      var lin2 = Game.map.getRoomLinearDistance(homeName, rn2);
+      var cost2 = lin2*100 + 500;
+      var owner2 = maOwner(memAssign, sid2);
+      var count2 = maCount(memAssign, sid2);
+      var capLeft2 = Math.max(0,(MAX_LUNA_PER_SOURCE|0)-(count2|0));
+      if (capLeft2 <= 0) continue;
+      candidates.push({ sid:sid2, roomName:rn2, cost:cost2, lin:lin2 });
     }
   }
 
   if (!candidates.length){
-    if (!avoided.length) return null;
-    avoided.sort(function(a,b){ return (a.left-b.left)||(a.cost-b.cost)||(a.lin-b.lin)||(a.id<b.id?-1:1); });
-    var soonest = avoided[0];
-    if (soonest.left <= 5) candidates.push(soonest); else return null;
+    return null;
   }
 
+  // sort by cost then lin
   candidates.sort(function(a,b){
-    if (b.sticky !== a.sticky) return (b.sticky - a.sticky);
-    return (a.cost-b.cost) || (a.lin-b.lin) || (a.id<b.id?-1:1);
+    if (a.cost!==b.cost) return a.cost-b.cost;
+    return a.lin-b.lin;
   });
 
-  // (Fixed loop condition)
-  for (var k=0; k<candidates.length; k++){
-    var best=candidates[k];
-    if (!tryClaimSourceForTick(creep, best.id)) continue;
-
-    // Reserve immediately
-    maInc(memAssign, best.id, best.roomName);
-    maSetOwner(memAssign, best.id, creep.name, best.roomName);
-
-    // Visuals + say:
-    var srcObj = Game.getObjectById(best.id);
-    if (srcObj) {
-      debugSay(creep, '🎯SRC');
-      debugDraw(creep, srcObj, CFG.DRAW.PICK_COLOR, "PICK");
-      debugRing(creep.room, srcObj.pos, CFG.DRAW.PICK_COLOR, shortSid(best.id));
-    } else {
-      var center = new RoomPosition(25,25,best.roomName);
-      debugSay(creep, '🎯'+best.roomName);
-      debugDraw(creep, center, CFG.DRAW.TRAVEL_COLOR, "PICK?");
-    }
-
-    if (creep.memory._lastLogSid !== best.id){
-      console.log('🧭 '+creep.name+' pick src='+best.id.slice(-6)+' room='+best.roomName+' cost='+best.cost+(best.sticky?' (sticky)':''));
-      creep.memory._lastLogSid = best.id;
-    }
-    return best;
+  // try top few, claim same tick to avoid race
+  for (var k=0;k<Math.min(4,candidates.length);k++){
+    var pick=candidates[k];
+    if (tryClaimSourceForTick(creep, pick.sid)) return new RoomObjectSourceRef(pick.sid, pick.roomName);
   }
-
+  // fallback to best if we own the claim by tie-break
+  var pick2 = candidates[0];
+  if (tryClaimSourceForTick(creep, pick2.sid)) return new RoomObjectSourceRef(pick2.sid, pick2.roomName);
   return null;
 }
+
+function RoomObjectSourceRef(id, roomName){ this.id=id; this.roomName=roomName; }
 
 function releaseAssignment(creep){
   var memAssign = ensureAssignmentsMem();
   var sid = creep.memory.sourceId;
+  if (!sid) return;
 
-  if (sid){
-    maDec(memAssign, sid);
-    var owner = maOwner(memAssign, sid);
-    if (owner === creep.name) maClearOwner(memAssign, sid);
+  var owner = maOwner(memAssign, sid);
+  if (owner === creep.name) maClearOwner(memAssign, sid);
+  maDec(memAssign, sid);
+
+  var rn = creep.memory.targetRoom;
+  if (rn && isRoomLockedByInvaderCore(rn)){
     markAvoid(creep, sid, AVOID_TTL);
   }
 
@@ -706,202 +649,142 @@ function validateExclusiveSource(creep){
       winners.push(c);
     }
   }
-  if (winners.length <= MAX_LUNA_PER_SOURCE){
-    if (!owner) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
-    return true;
-  }
 
-  winners.sort(function(a,b){
-    var at=a.memory._assignTick||0, bt=b.memory._assignTick||0;
-    if (at!==bt) return at-bt;
-    return a.name<b.name?-1:1;
-  });
-  var win = winners[0];
-  maSetOwner(memAssign, sid, win.name, win.memory.targetRoom||null);
-
-  if (win.name !== creep.name){
-    console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
-    releaseAssignment(creep);
-    return false;
+  // resolve tie by lexicographic name (stable)
+  winners.sort(function(a,b){ return (a.name<b.name?-1:(a.name>b.name?1:0)); });
+  if (winners.length){
+    var win = winners[0];
+    if (win.name !== creep.name){
+      creep.memory._forceYield = true;
+      return false;
+    } else {
+      var e = ensureAssignmentsMem();
+      maSetOwner(e, sid, creep.name, creep.memory.targetRoom);
+      return true;
+    }
   }
   return true;
 }
 
 // ============================
-// NEW: dump energy into build/upgrade when storage is full
+// Controller flag pruning by room activity
 // ============================
-function tryBuildOrUpgrade(creep) {
-  var hasWork = (creep.getActiveBodyparts && creep.getActiveBodyparts(WORK)) | 0;
-  if (!hasWork) return false;
+function pruneControllerFlagIfNoForagers(roomName, roomCounts){
+  var name = "CTRL_"+roomName, f=Game.flags[name];
+  if (!f) return;
 
-  var site = creep.pos.findClosestByRange(FIND_CONSTRUCTION_SITES);
-  if (site) {
-    debugSay(creep, '🔨');
-    debugDraw(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
-    var br = creep.build(site);
-    if (br === ERR_NOT_IN_RANGE) go(creep, site, { range: 3, reusePath: 15 });
-    return true;
-  }
+  var count = roomCounts[roomName]||0;
+  if (count>0) return;
 
-  var ctrl = creep.room.controller;
-  if (ctrl && ctrl.my) {
-    debugSay(creep, '⬆️');
-    debugDraw(creep, ctrl, CFG.DRAW.UPG_COLOR, "UPG");
-    var ur = creep.upgradeController(ctrl);
-    if (ur === ERR_NOT_IN_RANGE) go(creep, ctrl, { range: 3, reusePath: 15 });
-    return true;
-  }
-
-  return false;
+  // nobody targeting this room, okay to remove
+  f.remove();
 }
 
 // ============================
-// Main role
+// Remote assignment audit (periodic)
+// ============================
+function auditRemoteAssignments(){
+  var memAssign = ensureAssignmentsMem();
+
+  var roomCounts = {};
+
+  for (var name in Game.creeps){
+    var c=Game.creeps[name];
+    if (c && c.memory && c.memory.task==='luna' && c.memory.targetRoom){
+      var rn = c.memory.targetRoom;
+      roomCounts[rn] = (roomCounts[rn]|0)+1;
+    }
+  }
+
+  // clamp counts per source and strip owners if creep gone
+  for (var sid3 in memAssign){
+    if (!memAssign.hasOwnProperty(sid3)) continue;
+    var owner = maOwner(memAssign, sid3);
+    if (owner && !Game.creeps[owner]){
+      maClearOwner(memAssign, sid3);
+    }
+    if (MAX_LUNA_PER_SOURCE > 0){
+      if (memAssign[sid3].count > MAX_LUNA_PER_SOURCE){
+        resolveOwnershipForSid(sid3);
+      }
+    }else{
+      if (memAssign[sid3].count > 0){
+        resolveOwnershipForSid(sid3);
+      }
+    }
+  }
+
+  if ((Game.time % FLAG_PRUNE_PERIOD) === 0) pruneUnusedSourceFlags();
+
+  var rooms = Memory.rooms || {};
+  for (var roomName in rooms) {
+    if (!rooms.hasOwnProperty(roomName)) continue;
+    pruneControllerFlagIfNoForagers(roomName, roomCounts);
+  }
+}
+
+function auditOncePerTick(){
+  if (Memory._auditRemoteAssignmentsTick !== Game.time){
+    auditRemoteAssignments();
+    Memory._auditRemoteAssignmentsTick = Game.time;
+  }
+}
+
+// ============================
+// Flag pruning (sources)
+// ============================
+function resolveOwnershipForSid(sid){
+  // collect all creeps on sid and pick lexicographically
+  var arr=[];
+  for (var name in Game.creeps){
+    var c=Game.creeps[name];
+    if (c && c.memory && c.memory.task==='luna' && c.memory.sourceId===sid){
+      arr.push(c);
+    }
+  }
+  arr.sort(function(a,b){ return (a.name<b.name?-1:(a.name>b.name?1:0)); });
+
+  var memAssign = ensureAssignmentsMem();
+  var keep = arr.shift();
+  if (keep){
+    maSetOwner(memAssign, sid, keep.name, keep.memory.targetRoom);
+    memAssign[sid].count = 1;
+  } else {
+    maClearOwner(memAssign, sid);
+    memAssign[sid].count = 0;
+  }
+
+  // others release
+  for (var i=0;i<arr.length;i++){
+    var loser = arr[i];
+    if (loser && loser.memory && loser.memory.task==='luna'){
+      releaseAssignment(loser);
+    }
+  }
+}
+
+// ============================
+// Task.Luna
 // ============================
 var TaskLuna = {
-  run: function(creep){
-    if (creep && creep.memory && creep.memory.task === 'remoteharvest') {
-      creep.memory.task = 'luna';
-    }
-    auditOncePerTick();
-    if (!creep.memory.home) getHomeName(creep);
-
-    // Anti-stuck tracking
-    var lastX=creep.memory._lx|0, lastY=creep.memory._ly|0, lastR=creep.memory._lr||'';
-    var samePos = (lastX===creep.pos.x && lastY===creep.pos.y && lastR===creep.pos.roomName);
-    creep.memory._stuck = samePos ? ((creep.memory._stuck|0)+1) : 0;
-    creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
-
-    // Carry state
-    this.updateReturnState(creep);
-    if (creep.memory.returning){ this.returnToStorage(creep); return; }
-
-    // Gentle EOL slot free
-    if (creep.ticksToLive!==undefined && creep.ticksToLive<5 && creep.memory.assigned){ releaseAssignment(creep); }
-
-    // Cooldown after yield
-    if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt){
-      var _anchor = getAnchorPos(getHomeName(creep));
-      debugSay(creep, '…cd');
-      debugDraw(creep, _anchor, CFG.DRAW.IDLE_COLOR, "COOLDOWN");
-      go(creep,_anchor,{range:2,reusePath:10}); return;
-    }
-
-    // If we were flagged to yield by resolver, obey & stop
-    if (creep.memory._forceYield){
-      delete creep.memory._forceYield;
-      releaseAssignment(creep);
-      return;
-    }
-
-    // Assignment phase
-    if (!creep.memory.sourceId){
-      var pick = pickRemoteSource(creep);
-      if (pick){
-        creep.memory.sourceId   = pick.id;
-        creep.memory.targetRoom = pick.roomName;
-        creep.memory.assigned   = true;
-        creep.memory._assignTick = Game.time;
-      }else{
-        this.initializeAndAssign(creep);
-        if (!creep.memory.sourceId){
-          var anchor=getAnchorPos(getHomeName(creep));
-          debugSay(creep, 'IDLE');
-          debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-          go(creep,anchor,{range:2});
-          return;
-        } else {
-          creep.memory._assignTick = Game.time;
-        }
-      }
-    }
-
-    // If room got locked by invader activity, drop and repick
-    if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)){
-      debugSay(creep, '⛔LOCK');
-      var center = new RoomPosition(25,25,creep.memory.targetRoom);
-      debugDraw(creep, center, CFG.DRAW.TRAVEL_COLOR, "LOCK");
-      console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
-      releaseAssignment(creep);
-      return;
-    }
-
-    // Ensure exclusivity or yield
-    if (!validateExclusiveSource(creep)) return;
-
-    // Travel to target room
-    if (creep.memory.targetRoom && creep.pos.roomName !== creep.memory.targetRoom){
-      var dest = new RoomPosition(25,25,creep.memory.targetRoom);
-      debugSay(creep, '➡️'+creep.memory.targetRoom);
-      debugDraw(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-      go(creep, dest, { range:20, reusePath:20 });
-      return;
-    }
-
-    // Defensive: memory wipe mid-run
-    if (!creep.memory.targetRoom || !creep.memory.sourceId){
-      this.initializeAndAssign(creep);
-      if (!creep.memory.targetRoom || !creep.memory.sourceId){
-        if (Game.time % 25 === 0) console.log('🚫 Forager '+creep.name+' could not be assigned a room/source.');
-        return;
-      }
-    }
-
-    var targetRoomObj = Game.rooms[creep.memory.targetRoom];
-    if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ try { BeeToolbox.logSourcesInRoom(targetRoomObj); } catch (e) {} }
-
-    var tmem = _roomMem(creep.memory.targetRoom);
-    if (tmem && tmem.hostile){
-      console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
-      debugSay(creep, '⚠️HOST');
-      releaseAssignment(creep);
-      return;
-    }
-    if (!tmem || !tmem.sources) return;
-
-    var ctl = targetRoomObj && targetRoomObj.controller;
-    if (ctl) { ensureControllerFlag(ctl); debugRing(targetRoomObj, ctl.pos, CFG.DRAW.TRAVEL_COLOR, "CTRL"); }
-
-    // Work the source
-    this.harvestSource(creep);
-  },
-
-  // ---- Legacy fallback (no vision) — now radius-bounded ----
+  /** pick rooms within REMOTE_RADIUS that have at least one source */
   getNearbyRoomsWithSources: function(creep){
     var homeName = getHomeName(creep);
-
-    var inRadius = {};
-    var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
-    for (var i=0; i<ring.length; i++) inRadius[ring[i]] = true;
-
-    var all = Object.keys(Memory.rooms||{});
-    var filtered = all.filter(function(roomName){
-      var rm = Memory.rooms[roomName];
-      if (!rm || !rm.sources) return false;
-      if (!inRadius[roomName]) return false;
-      if (rm.hostile) return false;
-      if (isRoomLockedByInvaderCore(roomName)) return false;
-      return roomName !== Memory.firstSpawnRoom;
-    });
-
-    return filtered.sort(function(a,b){
-      return Game.map.getRoomLinearDistance(homeName, a) - Game.map.getRoomLinearDistance(homeName, b);
-    });
+    var neighbors = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+    var out=[];
+    for (var i=0;i<neighbors.length;i++){
+      var rn=neighbors[i];
+      var room=Game.rooms[rn];
+      if (!room) { out.push(rn); continue; } // allow memory/fallback
+      if (room.find(FIND_SOURCES).length) out.push(rn);
+    }
+    return out;
   },
 
-  findRoomWithLeastForagers: function(rooms, homeName){
-    if (!rooms || !rooms.length) return null;
-
-    var inRadius = {};
-    var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
-    for (var i=0; i<ring.length; i++) inRadius[ring[i]] = true;
-
-    var best=null, lowest=Infinity;
-    for (var j=0;j<rooms.length;j++){
-      var rn=rooms[j];
-      if (!inRadius[rn]) continue;
-      if (isRoomLockedByInvaderCore(rn)) continue;
-
+  findRoomWithLeastForagers: function(rns, homeName){
+    var best = null, lowest = Infinity;
+    for (var i=0;i<rns.length;i++){
+      var rn = rns[i];
       var rm=_roomMem(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
 
       var count=0;
@@ -932,49 +815,26 @@ var TaskLuna = {
         var memAssign = ensureAssignmentsMem();
         maInc(memAssign, sid, creep.memory.targetRoom);
         maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom);
-
-        debugSay(creep, '🎯SRC');
-        var srcObj = Game.getObjectById(sid);
-        if (srcObj) { debugDraw(creep, srcObj, CFG.DRAW.PICK_COLOR, "ASSIGN"); debugRing(creep.room, srcObj.pos, CFG.DRAW.PICK_COLOR, shortSid(sid)); }
-        else { var center = new RoomPosition(25,25,creep.memory.targetRoom); debugDraw(creep, center, CFG.DRAW.TRAVEL_COLOR, "ASSIGN"); }
-
-        if (creep.memory._lastLogSid !== sid){
-          console.log('🐝 '+creep.name+' assigned to source: '+sid+' in '+creep.memory.targetRoom);
-          creep.memory._lastLogSid = sid;
-        }
-      }else{
-        if (Game.time%25===0) console.log('No available sources for creep: '+creep.name);
-        creep.memory.targetRoom=null; creep.memory.sourceId=null;
       }
     }
   },
 
   assignSource: function(creep, roomMemory){
-    if (!roomMemory || !roomMemory.sources) return null;
-    var sids = Object.keys(roomMemory.sources); if (!sids.length) return null;
-
-    var memAssign = ensureAssignmentsMem();
-    var free=[], sticky=[], rest=[];
-    for (var i=0;i<sids.length;i++){
-      var sid=sids[i];
-      var owner = maOwner(memAssign, sid);
-      var cnt   = maCount(memAssign, sid);
-      if (owner && owner !== creep.name) continue;
-      if (cnt >= MAX_LUNA_PER_SOURCE) continue;
-
-      if (creep.memory.sourceId===sid) sticky.push(sid);
-      else if (!owner) free.push(sid);
-      else rest.push(sid);
-    }
-
-    var pick = free[0] || sticky[0] || rest[0] || null;
+    // if roomMemory has known sources, pick from them; otherwise pick via picker
+    var pick = pickRemoteSource(creep);
     if (!pick) return null;
 
-    if (!tryClaimSourceForTick(creep, pick)) return null;
-    return pick;
+    if (isAvoided(pick.id)) return null;
+    if (!tryClaimSourceForTick(creep, pick.id)) return null;
+    if (isRoomLockedByInvaderCore(pick.roomName)){ return null; }
+
+    // success
+    return pick.id;
   },
 
   updateReturnState: function(creep){
+    // If we are container-mining on seat, we never "return" — we dump to the container.
+    if (creep.memory._containerMode) { creep.memory.returning = false; return; }
     if (!creep.memory.returning && creep.store.getFreeCapacity(RESOURCE_ENERGY)===0) { creep.memory.returning=true; debugSay(creep, '⤴️RET'); }
     if (creep.memory.returning && creep.store.getUsedCapacity(RESOURCE_ENERGY)===0) { creep.memory.returning=false; debugSay(creep, '⤵️WK'); }
   },
@@ -986,14 +846,14 @@ var TaskLuna = {
     // Go home first
     if (creep.room.name !== homeName) {
       var destHome = new RoomPosition(25, 25, homeName);
-      debugSay(creep, '🏠');
+      debugSay(creep, '↩️HOME');
       debugDraw(creep, destHome, CFG.DRAW.TRAVEL_COLOR, "HOME");
-      go(creep, destHome, { range: 20, reusePath: 20 });
+      go(creep, destHome, { range: 10, reusePath: 20 });
       return;
     }
 
-    // Priority 1: Extensions/Spawns/Towers
-    var pri = creep.room.find(FIND_STRUCTURES, {
+    // Priority 1: Spawns/extensions/towers
+    var pri = creep.room.find(FIND_MY_STRUCTURES, {
       filter: function (s) {
         if (!s.store) return false;
         var t = s.structureType;
@@ -1024,28 +884,42 @@ var TaskLuna = {
     }
 
     // Priority 3: Any container with room
-    var conts = creep.room.find(FIND_STRUCTURES, {
-      filter: function (s) {
-        return s.structureType === STRUCTURE_CONTAINER &&
-               s.store && (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0;
-      }
+    var containers = creep.room.find(FIND_STRUCTURES, {
+      filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0; }
     });
-    if (conts.length) {
-      var b = creep.pos.findClosestByPath(conts);
-      if (b) {
+    if (containers && containers.length) {
+      var c = creep.pos.findClosestByPath(containers);
+      if (c) {
         debugSay(creep, '→ CON');
-        debugDraw(creep, b, CFG.DRAW.DELIVER_COLOR, "CON");
-        var rc3 = creep.transfer(b, RESOURCE_ENERGY);
-        if (rc3 === ERR_NOT_IN_RANGE) go(creep, b);
+        debugDraw(creep, c, CFG.DRAW.DELIVER_COLOR, "CONT");
+        var rc3 = creep.transfer(c, RESOURCE_ENERGY);
+        if (rc3 === ERR_NOT_IN_RANGE) go(creep, c);
         return;
       }
     }
 
-    // Everything is full → build/upgrade
-    if (tryBuildOrUpgrade(creep)) return;
+    // Priority 4: build any site to burn energy
+    var site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES);
+    if (site) {
+      debugSay(creep, '🔨');
+      debugDraw(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
+      var br = creep.build(site);
+      if (br === ERR_NOT_IN_RANGE) go(creep, site, { range: 3 });
+      return;
+    }
 
-    // Idle near anchor
-    var anchor = getAnchorPos(homeName);
+    // Fallback: upgrade
+    var ctrl = creep.room.controller;
+    if (ctrl) {
+      debugSay(creep, '⚡UPG');
+      debugDraw(creep, ctrl, CFG.DRAW.UPG_COLOR, "UPG");
+      var ur = creep.upgradeController(ctrl);
+      if (ur === ERR_NOT_IN_RANGE) go(creep, ctrl, { range: 3 });
+      return;
+    }
+
+    // Last resort: idle at anchor
+    var anchor = getAnchorPos(getHomeName(creep));
     debugSay(creep, 'IDLE');
     debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
     go(creep, anchor, { range: 2 });
@@ -1056,44 +930,117 @@ var TaskLuna = {
       if (Game.time%25===0) console.log('Forager '+creep.name+' missing targetRoom/sourceId'); return;
     }
 
+    // Travel into target room first
     if (creep.room.name !== creep.memory.targetRoom){
       var dest = new RoomPosition(25,25,creep.memory.targetRoom);
       debugSay(creep, '➡️'+creep.memory.targetRoom);
       debugDraw(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-      go(creep, dest, { range:20,reusePath:20 }); return;
+      go(creep, dest, { range:20, reusePath:20 }); return;
     }
 
+    // Respect invader lock
     if (isRoomLockedByInvaderCore(creep.room.name)){
       debugSay(creep, '⛔LOCK');
       console.log('⛔ '+creep.name+' bailing from locked room '+creep.room.name+'.');
-      releaseAssignment(creep); return;
+      releaseAssignment(creep);
+      return;
     }
 
     var sid = creep.memory.sourceId;
     var src = Game.getObjectById(sid);
-    if (!src){ if (Game.time%25===0) console.log('Source not found for '+creep.name); releaseAssignment(creep); return; }
+    if (!src){
+      if (Game.time%25===0) console.log('Source not found for '+creep.name);
+      releaseAssignment(creep);
+      return;
+    }
 
+    // Controller & source flags (your existing visuals)
     ensureSourceFlag(src);
-    var srec = _sourceMem(creep.room.name, sid); srec.x = src.pos.x; srec.y = src.pos.y;
-
+    touchSourceActive(creep.room.name, sid);
     if (creep.room.controller) ensureControllerFlag(creep.room.controller);
 
-    var rm = _roomMem(creep.memory.targetRoom);
-    rm.sources = rm.sources || {};
-    if (rm.sources[sid] && rm.sources[sid].entrySteps == null){
-      var res = PathFinder.search(creep.pos, { pos: src.pos, range: 1 }, { plainCost: PLAIN_COST, swampCost: SWAMP_COST, maxOps: MAX_PF_OPS });
-      if (!res.incomplete) rm.sources[sid].entrySteps = res.path.length;
+    // Container discovery near the source
+    var seatInfo = _findContainerOrSiteNearSource(creep.room, src);
+    var container = seatInfo.container;
+    var csite     = seatInfo.csite;
+
+    // Record container state in room memory
+    _updateContainerMemory(src, container, getHomeName(creep));
+
+    // We are now operating in container mode if container or site exists
+    creep.memory._containerMode = !!(container || csite);
+
+    // If container exists: move onto it, dump, harvest, signal Truckers
+    if (container) {
+      // store container id into source memory (for haulers)
+      var srec = _sourceMem(creep.room.name, sid); srec.container = srec.container || {}; srec.container.containerId = container.id;
+
+      if (!creep.pos.isEqualTo(container.pos)) {
+        debugSay(creep, '⛳SEAT');
+        debugDraw(creep, container, CFG.DRAW.TRAVEL_COLOR, "SEAT");
+        go(creep, container.pos, { range:0, reusePath:10 });
+        return;
+      }
+
+      // Dump any carried energy first (keeps container topped)
+      if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+        debugDraw(creep, container, CFG.DRAW.DROP_COLOR, "DUMP");
+        var tr = creep.transfer(container, RESOURCE_ENERGY);
+        if (tr === ERR_NOT_IN_RANGE) { go(creep, container.pos, { range:0 }); return; }
+      }
+
+      // Harvest each tick
+      debugSay(creep, '⛏️SRC');
+      debugDraw(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
+      var hr = creep.harvest(src);
+      if (hr === ERR_NOT_IN_RANGE) { go(creep, src, { range:1, reusePath: 5 }); return; }
+
+      // Signal haul requests when container fills up
+      _maybeSignalPickup(src, container, getHomeName(creep), creep.memory);
+
+      // Optional emergency evac if jammed
+      _maybeEmergencyEvac(creep, container, getHomeName(creep), creep.memory);
+
+      return;
     }
 
-    if ((creep.memory._stuck|0) >= STUCK_WINDOW){ go(creep, src, { range:1, reusePath:3 }); debugSay(creep, '🚧'); }
+    // No container yet: if a container site exists, build it (harvest to fuel if empty)
+    if (csite && csite.structureType === STRUCTURE_CONTAINER) {
+      if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+        debugSay(creep, '🔨CON');
+        debugDraw(creep, csite, CFG.DRAW.BUILD_COLOR, "BUILD");
+        var br = creep.build(csite);
+        if (br === ERR_NOT_IN_RANGE) go(creep, csite, { range:3, reusePath:10 });
+      } else {
+        debugSay(creep, '⛏️SRC');
+        debugDraw(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
+        var hr2 = creep.harvest(src);
+        if (hr2 === ERR_NOT_IN_RANGE) go(creep, src, { range:1, reusePath:10 });
+      }
+      return;
+    }
 
+    // No container & no site: pick a good seat and place a container site
+    var seat = _pickSeatPosNearSource(src);
+    if (!creep.pos.isEqualTo(seat)) {
+      debugSay(creep, '⛳SEAT');
+      debugDraw(creep, seat, CFG.DRAW.TRAVEL_COLOR, "SEAT?");
+      go(creep, seat, { range:0, reusePath: 15 });
+      return;
+    }
+
+    // Try to place the site (respect site limit)
+    var totalSites = Object.keys(Game.constructionSites || {}).length|0;
+    if (totalSites < 95) {
+      var mk = creep.pos.createConstructionSite(STRUCTURE_CONTAINER);
+      if (mk === OK) { debugSay(creep, '📍CON'); }
+    }
+
+    // While waiting, harvest to pocket to fuel building
     debugSay(creep, '⛏️SRC');
     debugDraw(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
-    var rc = creep.harvest(src);
-    if (rc===ERR_NOT_IN_RANGE) go(creep, src, { range:1, reusePath:15 });
-    else if (rc===OK){
-      touchSourceActive(creep.room.name, sid);
-    }
+    var hr3 = creep.harvest(src);
+    if (hr3 === ERR_NOT_IN_RANGE) go(creep, src, { range:1, reusePath:10 });
   }
 };
 
