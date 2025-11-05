@@ -64,6 +64,8 @@ function buildSnapshot(room) {
     var snapshot = {
       room: room,
       energyContainers: [],
+      sourceContainers: [],
+      otherContainers: [],
       spawnLikeNeedy: [],
       towerNeedy: [],
       dropped: [],
@@ -74,15 +76,27 @@ function buildSnapshot(room) {
       sites: [],
       repairs: [],
       anchor: null,
-      controllerLink: null
+      controllerLink: null,
+      linksWithEnergy: [],
+      sources: []
     };
     var controller = room.controller || null;
+    var sources = room.find(FIND_SOURCES);
+    for (var si = 0; si < sources.length; si++) snapshot.sources.push(sources[si]);
     var structures = room.find(FIND_STRUCTURES);
     for (var i = 0; i < structures.length; i++) {
       var s = structures[i];
       if (!s || !s.structureType) continue;
-      if (s.structureType === STRUCTURE_CONTAINER && s.store && (s.store[RESOURCE_ENERGY] | 0) > 0) {
-        snapshot.energyContainers.push(s);
+      if (s.structureType === STRUCTURE_CONTAINER && s.store) {
+        var stored = s.store[RESOURCE_ENERGY] | 0;
+        if (stored > 0) {
+          var nearSource = false;
+          for (var sc = 0; sc < sources.length; sc++) {
+            if (s.pos.inRangeTo(sources[sc].pos, 1)) { nearSource = true; break; }
+          }
+          if (nearSource) snapshot.sourceContainers.push(s);
+          else snapshot.otherContainers.push(s);
+        }
       }
       if (s.structureType === STRUCTURE_EXTENSION || s.structureType === STRUCTURE_SPAWN) {
         if ((s.energy | 0) < (s.energyCapacity | 0)) snapshot.spawnLikeNeedy.push(s);
@@ -91,9 +105,14 @@ function buildSnapshot(room) {
         var used = (s.store[RESOURCE_ENERGY] | 0);
         var cap = s.store.getCapacity(RESOURCE_ENERGY) || 1;
         if ((used / cap) <= TOWER_REFILL_AT) snapshot.towerNeedy.push(s);
-      if (s.structureType === STRUCTURE_LINK && controller && controller.pos && s.pos.inRangeTo(controller.pos, 3)) {
-        snapshot.controllerLink = s;
       }
+      if (s.structureType === STRUCTURE_LINK) {
+        if (controller && controller.pos && s.pos.inRangeTo(controller.pos, 3)) {
+          snapshot.controllerLink = s;
+        }
+        if ((s.store && (s.store[RESOURCE_ENERGY] | 0) > 0) || s.energy > 0) {
+          snapshot.linksWithEnergy.push(s);
+        }
       }
       var goal = computeRepairGoal(s);
       if (goal && s.hits < goal) {
@@ -120,12 +139,15 @@ function buildSnapshot(room) {
       var spawns = room.find(FIND_MY_SPAWNS);
       if (spawns && spawns.length) snapshot.anchor = spawns[0];
     }
-    snapshot.energyContainers.sort(byEnergyDesc);
+    snapshot.sourceContainers.sort(byEnergyDesc);
+    snapshot.otherContainers.sort(byEnergyDesc);
+    snapshot.energyContainers = snapshot.sourceContainers.concat(snapshot.otherContainers);
     snapshot.dropped.sort(byEnergyDesc);
     snapshot.tombstones.sort(byEnergyDesc);
     snapshot.ruins.sort(byEnergyDesc);
     snapshot.sites.sort(byBuildPriority);
     snapshot.repairs.sort(byRepairUrgency);
+    snapshot.linksWithEnergy.sort(byEnergyDesc);
     return snapshot;
   });
 }
@@ -164,8 +186,10 @@ var BeeSelectors = {
 
   findBestEnergyContainer: function (room) {
     var snap = buildSnapshot(room);
-    if (!snap || !snap.energyContainers.length) return null;
-    return snap.energyContainers[0];
+    if (!snap) return null;
+    if (snap.sourceContainers.length) return snap.sourceContainers[0];
+    if (snap.otherContainers.length) return snap.otherContainers[0];
+    return null;
   },
 
   findBestEnergyDrop: function (room) {
@@ -201,6 +225,23 @@ var BeeSelectors = {
     if (!snap || !snap.storage) return null;
     if (snap.storage.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) return null;
     return snap.storage;
+  },
+
+  getEnergySourcePriority: function (room) {
+    var snap = buildSnapshot(room);
+    if (!snap) return [];
+    var list = [];
+    var i;
+    for (i = 0; i < snap.tombstones.length; i++) list.push({ kind: 'tomb', target: snap.tombstones[i] });
+    for (i = 0; i < snap.ruins.length; i++) list.push({ kind: 'ruin', target: snap.ruins[i] });
+    for (i = 0; i < snap.dropped.length; i++) list.push({ kind: 'drop', target: snap.dropped[i] });
+    for (i = 0; i < snap.sourceContainers.length; i++) list.push({ kind: 'container', target: snap.sourceContainers[i] });
+    if (snap.storage && (snap.storage.store[RESOURCE_ENERGY] | 0) > 0) list.push({ kind: 'storage', target: snap.storage });
+    if (snap.terminal && (snap.terminal.store[RESOURCE_ENERGY] | 0) > 0) list.push({ kind: 'terminal', target: snap.terminal });
+    for (i = 0; i < snap.otherContainers.length; i++) list.push({ kind: 'container', target: snap.otherContainers[i] });
+    for (i = 0; i < snap.linksWithEnergy.length; i++) list.push({ kind: 'link', target: snap.linksWithEnergy[i] });
+    for (i = 0; i < snap.sources.length; i++) list.push({ kind: 'source', target: snap.sources[i] });
+    return list;
   },
 
   selectClosestByRange: function (pos, list) {

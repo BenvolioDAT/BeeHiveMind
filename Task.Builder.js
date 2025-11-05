@@ -98,6 +98,11 @@ function needNewTask(creep, task) {
       if (!target || target.amount <= 0) return true;
       if (creep.store.getFreeCapacity() === 0) return true;
       break;
+    case 'harvest':
+      if (!target) return true;
+      if (creep.store.getFreeCapacity() === 0) return true;
+      if (target.energy != null && target.energy === 0 && target.ticksToRegeneration > 1) return true;
+      break;
     case 'build':
       if (!target) return true;
       if (creep.store[RESOURCE_ENERGY] === 0) return true;
@@ -124,20 +129,23 @@ function needNewTask(creep, task) {
 
 function pickGatherTask(creep) {
   var room = creep.room;
-  var tomb = BeeSelectors.findTombstoneWithEnergy(room);
-  if (tomb) return { type: 'withdraw', targetId: tomb.id, since: Game.time, data: { source: 'tomb' } };
-  var ruin = BeeSelectors.findRuinWithEnergy(room);
-  if (ruin) return { type: 'withdraw', targetId: ruin.id, since: Game.time, data: { source: 'ruin' } };
-  var drop = BeeSelectors.findBestEnergyDrop(room);
-  if (drop) return { type: 'pickup', targetId: drop.id, since: Game.time, data: { source: 'drop' } };
-  var container = BeeSelectors.findBestEnergyContainer(room);
-  if (container) return { type: 'withdraw', targetId: container.id, since: Game.time, data: { source: 'container' } };
-  var summary = BeeSelectors.getRoomEnergyData(room);
-  if (summary && summary.storage && (summary.storage.store[RESOURCE_ENERGY] | 0) > 0) {
-    return { type: 'withdraw', targetId: summary.storage.id, since: Game.time, data: { source: 'storage' } };
-  }
-  if (summary && summary.terminal && (summary.terminal.store[RESOURCE_ENERGY] | 0) > 0) {
-    return { type: 'withdraw', targetId: summary.terminal.id, since: Game.time, data: { source: 'terminal' } };
+  var list = BeeSelectors.getEnergySourcePriority(room);
+  for (var i = 0; i < list.length; i++) {
+    var entry = list[i];
+    if (!entry || !entry.target) continue;
+    if (entry.kind === 'drop') {
+      return { type: 'pickup', targetId: entry.target.id, since: Game.time, data: { source: 'drop' } };
+    }
+    if (entry.kind === 'tomb') {
+      return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: 'tomb' } };
+    }
+    if (entry.kind === 'ruin') {
+      return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: 'ruin' } };
+    }
+    if (entry.kind === 'source') {
+      return { type: 'harvest', targetId: entry.target.id, since: Game.time, data: { source: 'source' } };
+    }
+    return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: entry.kind || 'energy' } };
   }
   return null;
 }
@@ -242,6 +250,15 @@ function executeTask(creep, task) {
       if (drc === ERR_NOT_ENOUGH_RESOURCES) clearTask(creep);
       if (drc === ERR_INVALID_TARGET) clearTask(creep);
       if (drc === OK && creep.store[RESOURCE_ENERGY] === 0) clearTask(creep);
+      return;
+    case 'harvest':
+      if (!target) { clearTask(creep); return; }
+      drawLine(creep, target, CFG.DRAW.GATHER, 'HAR');
+      debugSay(creep, '⛏️');
+      var hOpts = { priority: CFG.MOVE_PRIORITIES.gather, reusePath: 5 };
+      var hrc = BeeActions.safeHarvest(creep, target, hOpts);
+      if (hrc === OK && creep.store.getFreeCapacity() === 0) clearTask(creep);
+      if (hrc === ERR_INVALID_TARGET) clearTask(creep);
       return;
   }
   clearTask(creep);

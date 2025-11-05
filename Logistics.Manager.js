@@ -2,9 +2,15 @@
 
 /**
  * What changed & why:
- * - Hardened empire logistics by deduping haul intents, attaching TTL metadata, and publishing summaries once per tick.
- * - Added light documentation of threshold rules so callers understand when overflow or refill actions trigger.
- * - Keeps Memory writes namespaced under Memory.__BHM with issued/expiry ticks for downstream consumers (couriers, trade).
+ * - Hardened haul intents with 1-tick TTL maps keyed by room:target so consumers release instantly after completion.
+ * - Documented invariants so MOVE consumers know logistics publishes once per tick before DECIDE work executes.
+ * - Keeps Memory updates deterministic (overwrite each tick) while retaining the existing threshold-based policies.
+ */
+
+/**
+ * Invariants:
+ * - plan() publishes intents once per tick; execute() overwrites Memory.__BHM.haul with {key → request} expiring next tick.
+ * - Keys are "roomName:targetId"; consumers MUST delete keys they satisfy immediately to avoid stale reservations.
  */
 
 if (!global.__BHM) global.__BHM = { caches: {} };
@@ -31,7 +37,7 @@ var THRESHOLDS = {
   MIN_SEND_AMOUNT: 2000
 };
 
-var HAUL_REQUEST_TTL = 10;
+var HAUL_REQUEST_TTL = 1;
 
 function summarizeRoom(room) {
   if (!room) return null;
@@ -88,13 +94,17 @@ function chooseOverflowResource(summary) {
 }
 
 function dedupeHaul(intents, request) {
-  if (!intents._haulSet) intents._haulSet = {};
-  var key = request.room + '|' + request.type + '|' + request.resource;
-  if (intents._haulSet[key]) {
-    intents._haulSet[key].amount = Math.max(intents._haulSet[key].amount, request.amount | 0);
+  if (!request || !request.room || !request.targetId) return;
+  if (!intents._haulMap) intents._haulMap = {};
+  var key = request.room + ':' + request.targetId;
+  var existing = intents._haulMap[key];
+  if (existing) {
+    existing.amount = Math.max(existing.amount | 0, request.amount | 0);
+    existing.reason = existing.reason || request.reason;
     return;
   }
-  intents._haulSet[key] = request;
+  request.key = key;
+  intents._haulMap[key] = request;
   intents.haulRequests.push(request);
 }
 
@@ -132,7 +142,8 @@ var LogisticsManager = {
             type: 'push',
             resource: RESOURCE_ENERGY,
             amount: refillAmount,
-            reason: 'terminal-floor'
+            reason: 'terminal-floor',
+            targetId: summary.terminal.id
           });
         }
       }
@@ -159,7 +170,8 @@ var LogisticsManager = {
             type: 'pull',
             resource: RESOURCE_ENERGY,
             amount: amount,
-            reason: 'storage-floor'
+            reason: 'storage-floor',
+            targetId: receiver.storage ? receiver.storage.id : (receiver.terminal ? receiver.terminal.id : null)
           });
         }
       }
@@ -195,7 +207,8 @@ var LogisticsManager = {
             type: 'pull',
             resource: choice.resource,
             amount: sendAmount,
-            reason: 'overflow'
+            reason: 'overflow',
+            targetId: target.storage ? target.storage.id : (target.terminal ? target.terminal.id : null)
           });
         }
       }
@@ -205,13 +218,32 @@ var LogisticsManager = {
 
   execute: function (intents, context) {
     if (!intents) return;
+    if (!Memory.__BHM) Memory.__BHM = {};
     if (intents.haulRequests && intents.haulRequests.length) {
-      if (!Memory.__BHM) Memory.__BHM = {};
+      var haulMap = {};
+      for (var h = 0; h < intents.haulRequests.length; h++) {
+        var req = intents.haulRequests[h];
+        if (!req || !req.key) continue;
+        req.issued = Game.time;
+        req.expires = Game.time + HAUL_REQUEST_TTL;
+        haulMap[req.key] = {
+          room: req.room,
+          targetId: req.targetId,
+          resource: req.resource,
+          amount: req.amount,
+          type: req.type,
+          reason: req.reason,
+          issued: req.issued,
+          expires: req.expires
+        };
+      }
       Memory.__BHM.haul = {
-        issuedAt: Game.time,
+        tick: Game.time,
         expires: Game.time + HAUL_REQUEST_TTL,
-        requests: intents.haulRequests
+        entries: haulMap
       };
+    } else if (Memory.__BHM.haul) {
+      delete Memory.__BHM.haul;
     }
     if (!intents.terminalSends || !intents.terminalSends.length) return;
     for (var i = 0; i < intents.terminalSends.length; i++) {

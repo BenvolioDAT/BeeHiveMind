@@ -180,35 +180,16 @@ function needsNewTask(creep, task) {
 function pickWithdrawTask(creep) {
   var room = creep.room;
   if (!room) return null;
-
-  var tomb = BeeSelectors.findTombstoneWithEnergy(room);
-  if (tomb) {
-    return createTask('withdraw', tomb.id, { source: 'tomb' });
+  var list = BeeSelectors.getEnergySourcePriority(room);
+  for (var i = 0; i < list.length; i++) {
+    var entry = list[i];
+    if (!entry || !entry.target) continue;
+    if (entry.kind === 'source') continue; // queens haul; harvesting wastes work body slots.
+    if (entry.kind === 'drop') return createTask('pickup', entry.target.id, { source: 'drop' });
+    if (entry.kind === 'tomb') return createTask('withdraw', entry.target.id, { source: 'tomb' });
+    if (entry.kind === 'ruin') return createTask('withdraw', entry.target.id, { source: 'ruin' });
+    return createTask('withdraw', entry.target.id, { source: entry.kind || 'energy' });
   }
-
-  var ruin = BeeSelectors.findRuinWithEnergy(room);
-  if (ruin) {
-    return createTask('withdraw', ruin.id, { source: 'ruin' });
-  }
-
-  var drop = BeeSelectors.findBestEnergyDrop(room);
-  if (drop) {
-    return createTask('pickup', drop.id, { source: 'drop' });
-  }
-
-  var container = BeeSelectors.findBestEnergyContainer(room);
-  if (container) {
-    return createTask('withdraw', container.id, { source: 'container' });
-  }
-
-  if (room.storage && (room.storage.store[RESOURCE_ENERGY] || 0) > 0) {
-    return createTask('withdraw', room.storage.id, { source: 'storage' });
-  }
-
-  if (room.terminal && (room.terminal.store[RESOURCE_ENERGY] || 0) > 0) {
-    return createTask('withdraw', room.terminal.id, { source: 'terminal' });
-  }
-
   return null;
 }
 

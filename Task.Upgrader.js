@@ -98,28 +98,23 @@ function chooseGatherTask(creep) {
       data: { mode: 'withdraw', source: 'controllerLink' }
     };
   }
-  var tomb = BeeSelectors.findTombstoneWithEnergy(room);
-  if (tomb) {
-    return { type: 'gather', targetId: tomb.id, since: Game.time, data: { mode: 'withdraw', source: 'tomb' } };
-  }
-  var ruin = BeeSelectors.findRuinWithEnergy(room);
-  if (ruin) {
-    return { type: 'gather', targetId: ruin.id, since: Game.time, data: { mode: 'withdraw', source: 'ruin' } };
-  }
-  var drop = BeeSelectors.findBestEnergyDrop(room);
-  if (drop) {
-    return { type: 'gather', targetId: drop.id, since: Game.time, data: { mode: 'pickup', source: 'drop' } };
-  }
-  var container = BeeSelectors.findBestEnergyContainer(room);
-  if (container) {
-    return { type: 'gather', targetId: container.id, since: Game.time, data: { mode: 'withdraw', source: 'container' } };
-  }
-  var summary = BeeSelectors.getRoomEnergyData(room);
-  if (summary && summary.storage && (summary.storage.store[RESOURCE_ENERGY] | 0) > 0) {
-    return { type: 'gather', targetId: summary.storage.id, since: Game.time, data: { mode: 'withdraw', source: 'storage' } };
-  }
-  if (summary && summary.terminal && (summary.terminal.store[RESOURCE_ENERGY] | 0) > 0) {
-    return { type: 'gather', targetId: summary.terminal.id, since: Game.time, data: { mode: 'withdraw', source: 'terminal' } };
+  var list = BeeSelectors.getEnergySourcePriority(room);
+  for (var i = 0; i < list.length; i++) {
+    var entry = list[i];
+    if (!entry || !entry.target) continue;
+    if (entry.kind === 'drop') {
+      return { type: 'gather', targetId: entry.target.id, since: Game.time, data: { mode: 'pickup', source: 'drop' } };
+    }
+    if (entry.kind === 'tomb') {
+      return { type: 'gather', targetId: entry.target.id, since: Game.time, data: { mode: 'withdraw', source: 'tomb' } };
+    }
+    if (entry.kind === 'ruin') {
+      return { type: 'gather', targetId: entry.target.id, since: Game.time, data: { mode: 'withdraw', source: 'ruin' } };
+    }
+    if (entry.kind === 'source') {
+      return { type: 'gather', targetId: entry.target.id, since: Game.time, data: { mode: 'harvest', source: 'source' } };
+    }
+    return { type: 'gather', targetId: entry.target.id, since: Game.time, data: { mode: 'withdraw', source: entry.kind || 'energy' } };
   }
   return null;
 }
@@ -139,6 +134,8 @@ function needNewTask(creep, task) {
     if (creep.store.getFreeCapacity() === 0) return true;
     if (task.data.mode === 'pickup') {
       if (!target.amount || target.amount <= 0) return true;
+    } else if (task.data.mode === 'harvest') {
+      if (target.energy != null && target.energy === 0 && target.ticksToRegeneration > 1) return true;
     } else if (target.store && (target.store[RESOURCE_ENERGY] | 0) === 0) {
       return true;
     }
@@ -169,6 +166,8 @@ function executeGather(creep, task) {
   var rc;
   if (task.data.mode === 'pickup') {
     rc = BeeActions.safePickup(creep, target, { reusePath: CFG.GATHER_REUSE });
+  } else if (task.data.mode === 'harvest') {
+    rc = BeeActions.safeHarvest(creep, target, { reusePath: CFG.GATHER_REUSE });
   } else {
     rc = BeeActions.safeWithdraw(creep, target, RESOURCE_ENERGY, { reusePath: CFG.GATHER_REUSE });
   }

@@ -39,6 +39,9 @@ var BeeActions = {
   safeWithdraw: function (creep, target, resource, opts) {
     if (!creep || !target) return ERR_INVALID_TARGET;
     var resType = resource || RESOURCE_ENERGY;
+    if (!target.store || typeof target.store[resType] === 'undefined') return ERR_INVALID_TARGET;
+    if ((target.store[resType] | 0) <= 0) return ERR_NOT_ENOUGH_RESOURCES;
+    if (creep.store.getFreeCapacity(resType) <= 0) return ERR_FULL;
     var rc = creep.withdraw(target, resType);
     return handleResult(creep, rc, target, 1, 'withdraw', opts);
   },
@@ -46,14 +49,20 @@ var BeeActions = {
   safeTransfer: function (creep, target, resource, amount, opts) {
     if (!creep || !target) return ERR_INVALID_TARGET;
     var resType = resource || RESOURCE_ENERGY;
+    var carried = creep.store[resType] | 0;
+    if (carried <= 0) return ERR_NOT_ENOUGH_RESOURCES;
+    var sendAmount = (amount == null) ? carried : Math.min(amount, carried);
+    if (sendAmount <= 0) return ERR_NOT_ENOUGH_RESOURCES;
     var rc = (amount == null)
       ? creep.transfer(target, resType)
-      : creep.transfer(target, resType, amount);
+      : creep.transfer(target, resType, sendAmount);
     return handleResult(creep, rc, target, 1, 'deliver', opts);
   },
 
   safePickup: function (creep, resource, opts) {
     if (!creep || !resource) return ERR_INVALID_TARGET;
+    if (resource.resourceType == null || resource.amount == null) return ERR_INVALID_TARGET;
+    if (resource.amount <= 0) return ERR_NOT_ENOUGH_RESOURCES;
     var rc = creep.pickup(resource);
     return handleResult(creep, rc, resource, 1, 'pickup', opts);
   },

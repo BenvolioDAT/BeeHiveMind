@@ -2,9 +2,16 @@
 
 /**
  * What changed & why:
- * - Documented the intent schema ({target, range, priority, flee, reusePath}) and standardized priority buckets per role type.
- * - Added deterministic FIFO ordering within a priority tier and preserved Traveler-based resolution in MOVE phase.
- * - Provides a single entry-point for all movement, simplifying future upgrades to a matching-based traffic solver.
+ * - Documented deterministic intent ordering (priority → first-request wins → creepId) and ensured MOVE flushes every tick.
+ * - Guarantees one queued intent per creep while routing every move through Traveler for consistency with Harabi-style traffic.
+ * - Drops invalid/outdated intents (room swap, missing target, wrong shard) so MOVE remains idempotent and side-effect free.
+ */
+
+/**
+ * Invariants:
+ * - startTick() MUST be called before queuing intents; resolveAndMove() clears all intents at the end of MOVE.
+ * - Intent order = priority desc, then first queued (order asc), then creepId/name asc for deterministic tie-breaking.
+ * - Only creep.travelTo is used; intents targeting other shards or stale rooms are skipped without side effects.
  */
 
 var MovementManager = {
@@ -26,7 +33,7 @@ var MovementManager = {
   },
 
   _intents: [],
-  _seen: {},
+  _indexByCreep: {},
   _order: 0,
 
   /**
@@ -34,7 +41,7 @@ var MovementManager = {
    */
   startTick: function () {
     this._intents = [];
-    this._seen = {};
+    this._indexByCreep = {};
     this._order = 0;
   },
 
@@ -55,31 +62,55 @@ var MovementManager = {
     if (!pos || pos.x == null || pos.y == null || !pos.roomName) return ERR_INVALID_ARGS;
     var pr = (typeof priority === 'number') ? priority : this._priorityFromOpts(opts);
     var key = creep.name;
-    var intent = {
-      creepName: creep.name,
-      roomName: pos.roomName,
-      x: pos.x,
-      y: pos.y,
-      range: (opts && opts.range != null) ? opts.range : 1,
-      priority: pr,
-      flee: opts && !!opts.flee,
-      reusePath: opts && opts.reusePath,
-      ignoreCreeps: opts && opts.ignoreCreeps,
-      maxOps: opts && opts.maxOps,
-      plainCost: opts && opts.plainCost,
-      swampCost: opts && opts.swampCost,
-      order: this._order++
-    };
-    if (this._seen[key]) {
-      var existing = this._seen[key];
-      if (intent.priority > existing.priority ||
-          (intent.priority === existing.priority && intent.order < existing.order)) {
-        this._seen[key] = intent;
-      }
-    } else {
-      this._seen[key] = intent;
+    var idx = this._indexByCreep[key];
+    var shard = (dest.shard && typeof dest.shard === 'string') ? dest.shard : (pos.shard || null);
+    var targetId = dest.id || null;
+    var intent;
+    if (idx == null || this._intents[idx] == null) {
+      intent = {
+        creepName: creep.name,
+        creepId: creep.id || creep.name,
+        roomName: pos.roomName,
+        x: pos.x,
+        y: pos.y,
+        range: (opts && opts.range != null) ? opts.range : 1,
+        priority: pr,
+        flee: opts && !!opts.flee,
+        reusePath: opts && opts.reusePath,
+        ignoreCreeps: opts && opts.ignoreCreeps,
+        maxOps: opts && opts.maxOps,
+        plainCost: opts && opts.plainCost,
+        swampCost: opts && opts.swampCost,
+        intentType: opts && opts.intentType ? opts.intentType : null,
+        order: this._order++,
+        startRoom: creep.room ? creep.room.name : null,
+        shard: shard,
+        targetId: targetId,
+        createdTick: Game.time
+      };
+      this._indexByCreep[key] = this._intents.length;
       this._intents.push(intent);
+      return OK;
     }
+    intent = this._intents[idx];
+    if (!intent) return ERR_INVALID_ARGS;
+    if (pr < intent.priority) return intent.priority;
+    intent.roomName = pos.roomName;
+    intent.x = pos.x;
+    intent.y = pos.y;
+    intent.range = (opts && opts.range != null) ? opts.range : 1;
+    intent.priority = pr;
+    intent.flee = opts && !!opts.flee;
+    intent.reusePath = opts && opts.reusePath;
+    intent.ignoreCreeps = opts && opts.ignoreCreeps;
+    intent.maxOps = opts && opts.maxOps;
+    intent.plainCost = opts && opts.plainCost;
+    intent.swampCost = opts && opts.swampCost;
+    intent.intentType = opts && opts.intentType ? opts.intentType : intent.intentType;
+    intent.startRoom = intent.startRoom || (creep.room ? creep.room.name : null);
+    intent.shard = shard;
+    intent.targetId = targetId;
+    intent.updatedTick = Game.time;
     return OK;
   },
 
@@ -98,6 +129,10 @@ var MovementManager = {
     this._intents.sort(function (a, b) {
       if (b.priority !== a.priority) return b.priority - a.priority;
       if (a.order !== b.order) return a.order - b.order;
+      var aId = a.creepId || a.creepName;
+      var bId = b.creepId || b.creepName;
+      if (aId < bId) return -1;
+      if (aId > bId) return 1;
       if (a.creepName < b.creepName) return -1;
       if (a.creepName > b.creepName) return 1;
       return 0;
@@ -108,6 +143,10 @@ var MovementManager = {
       var creep = Game.creeps[intent.creepName];
       if (!creep) continue;
       if (creep.fatigue > 0) continue;
+      if (intent.startRoom && creep.room && creep.room.name !== intent.startRoom) continue;
+      if (!intent.roomName || intent.x == null || intent.y == null) continue;
+      if (intent.shard && Game.shard && Game.shard.name !== intent.shard) continue;
+      if (intent.targetId && Game.rooms[intent.roomName] && !Game.getObjectById(intent.targetId)) continue;
       var pos = new RoomPosition(intent.x, intent.y, intent.roomName);
       if (creep.pos.getRangeTo(pos) <= intent.range) continue;
       var travelOpts = {
@@ -119,22 +158,12 @@ var MovementManager = {
         swampCost: intent.swampCost,
         flee: intent.flee || false
       };
-      try {
-        if (typeof creep.travelTo === 'function') {
-          creep.travelTo(pos, travelOpts);
-          continue;
-        }
-      } catch (err) {}
-      if (creep.pos.getRangeTo(pos) > intent.range) {
-        creep.moveTo(pos, {
-          reusePath: travelOpts.reusePath,
-          ignoreCreeps: travelOpts.ignoreCreeps,
-          maxOps: travelOpts.maxOps,
-          plainCost: travelOpts.plainCost,
-          swampCost: travelOpts.swampCost
-        });
+      if (typeof creep.travelTo === 'function') {
+        creep.travelTo(pos, travelOpts);
       }
     }
+    this._intents = [];
+    this._indexByCreep = {};
   }
 };
 

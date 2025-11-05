@@ -59,21 +59,38 @@ function ensureTask(creep) {
   if (!creep.memory._task) creep.memory._task = null;
 }
 
+function releaseHaulKey(key) {
+  if (!key) return;
+  if (!Memory.__BHM || !Memory.__BHM.haul || !Memory.__BHM.haul.entries) return;
+  delete Memory.__BHM.haul.entries[key];
+  var entries = Memory.__BHM.haul.entries;
+  var remaining = false;
+  for (var k in entries) {
+    if (Object.prototype.hasOwnProperty.call(entries, k)) { remaining = true; break; }
+  }
+  if (!remaining) delete Memory.__BHM.haul;
+}
+
 function clearTask(creep) {
-  if (!creep.memory) return;
+  if (!creep || !creep.memory) return;
+  var existing = creep.memory._task;
+  if (existing && existing.data && existing.data.request && existing.data.request.key) {
+    releaseHaulKey(existing.data.request.key);
+  }
   creep.memory._task = null;
 }
 
 function haulMemoryValid(entry) {
   if (!entry) return false;
   if (entry.expires != null && Game.time > entry.expires) return false;
+  if (entry.issued != null && entry.issued < Game.time - 1) return false;
   return true;
 }
 
 function getHaulRequests() {
   if (!Memory.__BHM || !Memory.__BHM.haul) return null;
   var haul = Memory.__BHM.haul;
-  if (!haul || !haul.requests || !haul.requests.length) return null;
+  if (!haul || !haul.entries) return null;
   if (haul.expires != null && Game.time > haul.expires) return null;
   return haul;
 }
@@ -91,13 +108,16 @@ function claimHaulRequest(creep) {
   if (!haul) return null;
   initHaulClaims();
   var claims = global.__BHM.haulClaims;
-  var requests = haul.requests;
-  for (var i = 0; i < requests.length; i++) {
-    var req = requests[i];
-    if (!req) continue;
-    if (req.room !== creep.room.name) continue;
+  var entries = haul.entries;
+  for (var key in entries) {
+    if (!Object.prototype.hasOwnProperty.call(entries, key)) continue;
+    var req = entries[key];
+    if (!req || req.room !== creep.room.name) continue;
     if (req.resource !== RESOURCE_ENERGY) continue;
-    var key = req.room + '|' + req.type + '|' + req.resource + '|' + req.reason;
+    if (!haulMemoryValid(req)) {
+      releaseHaulKey(key);
+      continue;
+    }
     if (claims[key]) continue;
     claims[key] = creep.name;
     return {
@@ -106,7 +126,8 @@ function claimHaulRequest(creep) {
       resource: req.resource,
       amount: req.amount,
       reason: req.reason,
-      expires: (haul.expires != null) ? haul.expires : (Game.time + CFG.HAUL_GRACE),
+      expires: (req.expires != null) ? req.expires : (Game.time + CFG.HAUL_GRACE),
+      targetId: req.targetId,
       key: key
     };
   }
@@ -115,35 +136,29 @@ function claimHaulRequest(creep) {
 
 function pickWithdrawTask(creep) {
   var room = creep.room;
-  var summary = BeeSelectors.getRoomEnergyData(room);
-  if (!summary) return null;
-  var tomb = BeeSelectors.findTombstoneWithEnergy(room);
-  if (tomb) {
-    return { type: 'withdraw', targetId: tomb.id, since: Game.time, data: { source: 'tomb' } };
-  }
-  var ruin = BeeSelectors.findRuinWithEnergy(room);
-  if (ruin) {
-    return { type: 'withdraw', targetId: ruin.id, since: Game.time, data: { source: 'ruin' } };
-  }
-  var drop = BeeSelectors.findBestEnergyDrop(room);
-  if (drop) {
-    return { type: 'pickup', targetId: drop.id, since: Game.time, data: { source: 'drop' } };
-  }
-  var container = BeeSelectors.findBestEnergyContainer(room);
-  if (container) {
-    return { type: 'withdraw', targetId: container.id, since: Game.time, data: { source: 'container' } };
-  }
-  if (summary.terminal && (summary.terminal.store[RESOURCE_ENERGY] | 0) > 0) {
-    return { type: 'withdraw', targetId: summary.terminal.id, since: Game.time, data: { source: 'terminal' } };
-  }
-  if (summary.storage && (summary.storage.store[RESOURCE_ENERGY] | 0) > 0) {
-    return { type: 'withdraw', targetId: summary.storage.id, since: Game.time, data: { source: 'storage' } };
+  var sources = BeeSelectors.getEnergySourcePriority(room);
+  for (var i = 0; i < sources.length; i++) {
+    var entry = sources[i];
+    if (!entry || !entry.target) continue;
+    if (entry.kind === 'source') continue; // couriers lack WORK parts normally; skip harvest fallback.
+    if (entry.kind === 'drop') {
+      return { type: 'pickup', targetId: entry.target.id, since: Game.time, data: { source: 'drop' } };
+    }
+    if (entry.kind === 'tomb') {
+      return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: 'tomb' } };
+    }
+    if (entry.kind === 'ruin') {
+      return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: 'ruin' } };
+    }
+    return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: entry.kind || 'energy' } };
   }
   return null;
 }
 
 function targetFromHaul(room, haul) {
-  if (!haul) return null;
+  if (!haul || !haul.targetId) return null;
+  var obj = Game.getObjectById(haul.targetId);
+  if (obj) return obj;
   if (haul.type === 'pull') return room.storage || room.terminal || null;
   if (haul.type === 'push') return room.terminal || room.storage || null;
   return null;
@@ -183,8 +198,9 @@ function needsNewDueToHaul(task) {
   var haul = task.data.request;
   if (!haulMemoryValid(haul)) return true;
   var mem = getHaulRequests();
-  if (!mem) return true;
-  if (mem.expires != null && Game.time > mem.expires) return true;
+  if (!mem || !mem.entries) return true;
+  if (!haul.key) return true;
+  if (!mem.entries[haul.key]) return true;
   return false;
 }
 
@@ -254,6 +270,7 @@ var TaskCourier = {
     ensureTask(creep);
     var task = creep.memory._task;
     if (needNewTask(creep, task)) {
+      clearTask(creep);
       var newTask = null;
       if (creep.store[RESOURCE_ENERGY] > 0) {
         newTask = pickDeliverTask(creep);
