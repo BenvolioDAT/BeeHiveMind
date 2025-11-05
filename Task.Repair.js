@@ -59,8 +59,6 @@ function ensureTask(creep) {
   if (!creep.memory._task) creep.memory._task = null;
 }
 
-}
-
 function clearTask(creep) {
   if (!creep.memory) return;
   var existing = creep.memory._task;
