@@ -4,6 +4,7 @@
  * What changed & why:
  * - Centralized per-room scans (containers, drops, needy structures) so roles reuse cached data instead of re-running room.find.
  * - Provides reusable selectors for common economic intents (best container, towers needing energy, etc.).
+ * - Added construction/repair helpers and idle anchors so builder-style roles share a single cached view of work targets.
  */
 
 if (!global.__BHM) global.__BHM = { caches: {} };
@@ -21,6 +22,33 @@ if (typeof global.__BHM.getCached !== 'function') {
 }
 
 var TOWER_REFILL_AT = 0.8;
+var BUILD_PRIORITY = {
+  spawn: 6,
+  extension: 5,
+  tower: 4,
+  storage: 3,
+  terminal: 3,
+  container: 2,
+  link: 2,
+  road: 1
+};
+
+function computeRepairGoal(structure) {
+  if (!structure || structure.hits == null || structure.hitsMax == null) return null;
+  var type = structure.structureType;
+  if (type === STRUCTURE_WALL) return null;
+  if (type === STRUCTURE_RAMPART) {
+    if (structure.hits >= 50000) return null;
+    return Math.min(structure.hitsMax, 50000);
+  }
+  if (type === STRUCTURE_ROAD) {
+    return Math.min(structure.hitsMax, Math.floor(structure.hitsMax * 0.75));
+  }
+  if (type === STRUCTURE_CONTAINER) {
+    return Math.min(structure.hitsMax, Math.floor(structure.hitsMax * 0.9));
+  }
+  return Math.min(structure.hitsMax, Math.floor(structure.hitsMax * 0.9));
+}
 
 function computeRoomEnergyData(room) {
   return global.__BHM.getCached('selectors:energy:' + room.name, 0, function () {
@@ -65,10 +93,50 @@ function computeRoomEnergyData(room) {
   });
 }
 
+function computeRoomWorkData(room) {
+  return global.__BHM.getCached('selectors:work:' + room.name, 0, function () {
+    var data = {
+      sites: [],
+      repairs: []
+    };
+    var sites = room.find(FIND_CONSTRUCTION_SITES);
+    for (var i = 0; i < sites.length; i++) {
+      data.sites.push(sites[i]);
+    }
+    var structures = room.find(FIND_STRUCTURES);
+    for (var s = 0; s < structures.length; s++) {
+      var structure = structures[s];
+      if (!structure) continue;
+      if (structure.hits == null || structure.hitsMax == null) continue;
+      if (structure.hits >= structure.hitsMax) continue;
+      var goal = computeRepairGoal(structure);
+      if (goal && structure.hits < goal) {
+        data.repairs.push({ target: structure, goalHits: goal });
+      }
+    }
+    return data;
+  });
+}
+
 function byEnergyDesc(a, b) {
   var ae = (a.store && a.store[RESOURCE_ENERGY]) || (a.amount || 0);
   var be = (b.store && b.store[RESOURCE_ENERGY]) || (b.amount || 0);
   return be - ae;
+}
+
+function byBuildPriority(a, b) {
+  var pa = BUILD_PRIORITY[a.structureType] || 0;
+  var pb = BUILD_PRIORITY[b.structureType] || 0;
+  if (pb !== pa) return pb - pa;
+  return a.progress - b.progress;
+}
+
+function byRepairUrgency(a, b) {
+  var ar = a.target ? (a.target.hits / Math.max(1, a.goalHits)) : 1;
+  var br = b.target ? (b.target.hits / Math.max(1, b.goalHits)) : 1;
+  if (ar !== br) return ar - br;
+  if (!a.target || !b.target) return 0;
+  return a.target.hits - b.target.hits;
 }
 
 var BeeSelectors = {
@@ -136,6 +204,33 @@ var BeeSelectors = {
       }
     }
     return best;
+  },
+
+  findBestConstructionSite: function (room) {
+    if (!room) return null;
+    var data = computeRoomWorkData(room);
+    if (!data || !data.sites.length) return null;
+    data.sites.sort(byBuildPriority);
+    return data.sites[0];
+  },
+
+  findBestRepairTarget: function (room) {
+    if (!room) return null;
+    var data = computeRoomWorkData(room);
+    if (!data || !data.repairs.length) return null;
+    data.repairs.sort(byRepairUrgency);
+    return data.repairs[0];
+  },
+
+  findRoomAnchor: function (room) {
+    if (!room) return null;
+    return global.__BHM.getCached('selectors:anchor:' + room.name, 0, function () {
+      if (room.storage) return room.storage;
+      if (room.terminal) return room.terminal;
+      var spawns = room.find(FIND_MY_SPAWNS);
+      if (spawns && spawns.length) return spawns[0];
+      return null;
+    });
   }
 };
 
