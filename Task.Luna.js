@@ -33,6 +33,40 @@ function ensureRemoteMemory() {
   if (!Memory.__BHM.seatReservations) Memory.__BHM.seatReservations = {};
 }
 
+// Attempts to rebuild a Luna's critical remote metadata if it was lost between spawn and the first tick.
+// Uses pending source claims first, then falls back to inspecting the assigned source object.
+function tryRestoreLunaMemory(creep, mem) {
+  if (!creep || !mem) return false;
+  var restored = false;
+  ensureRemoteMemory();
+  var claims = Memory.__BHM.remoteSourceClaims || {};
+  for (var sid in claims) {
+    if (!Object.prototype.hasOwnProperty.call(claims, sid)) continue;
+    var claim = claims[sid];
+    if (!claim || claim.creepName !== creep.name) continue;
+    if (!mem.sourceId) mem.sourceId = sid;
+    if (!mem.remoteRoom && claim.remoteRoom) mem.remoteRoom = claim.remoteRoom;
+    if (!mem.homeRoom && claim.homeRoom) mem.homeRoom = claim.homeRoom;
+    restored = true;
+    break;
+  }
+  if ((!mem.remoteRoom || !mem.sourceId) && mem.sourceId) {
+    var fallbackSource = Game.getObjectById(mem.sourceId);
+    if (fallbackSource && fallbackSource.pos) {
+      if (!mem.remoteRoom) mem.remoteRoom = fallbackSource.pos.roomName;
+      restored = true;
+    }
+  }
+  if (!mem.homeRoom) {
+    var inferredHome = inferHome(creep);
+    if (inferredHome) {
+      mem.homeRoom = inferredHome;
+      restored = true;
+    }
+  }
+  return restored || (!!mem.remoteRoom && !!mem.sourceId);
+}
+
 function inferHome(creep) {
   if (!creep) return null;
   if (creep.memory && creep.memory.homeRoom) return creep.memory.homeRoom;
@@ -401,23 +435,23 @@ function handleHarvestLoop(creep, task) {
   var seatPos = seatPosFromTask(task);
   if (!seatPos) {
     if (creep.memory) creep.memory.state = 'seat';
+    if (task.state !== 'seat') creep.say('seat');
     task.state = 'seat';
-    creep.say('seat');
     queueMove(creep, source.pos, MOVE_PRIORITY, 1);
     return;
   }
   var seatReserved = tryReserveSeat(task, seatPos);
   if (!seatReserved && !creep.pos.isEqualTo(seatPos)) {
     if (creep.memory) creep.memory.state = 'seat';
+    if (task.state !== 'seat') creep.say('seat');
     task.state = 'seat';
-    creep.say('seat');
     queueMove(creep, seatPos, MOVE_PRIORITY, 1);
     return;
   }
   if (!creep.pos.isEqualTo(seatPos)) {
     if (creep.memory) creep.memory.state = 'seat';
+    if (task.state !== 'seat') creep.say('seat');
     task.state = 'seat';
-    creep.say('seat');
     queueMove(creep, seatPos, MOVE_PRIORITY, 0);
     return;
   }
@@ -428,8 +462,8 @@ function handleHarvestLoop(creep, task) {
   var seatInfoSource = Game.getObjectById(task.sourceId);
   if (container) {
     if (creep.memory) creep.memory.state = 'harvest';
+    if (task.state !== 'harvest') creep.say('harvest');
     task.state = 'harvest';
-    creep.say('harvest');
     safeHarvest(creep, seatInfoSource);
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
       safeTransfer(creep, container);
@@ -443,8 +477,8 @@ function handleHarvestLoop(creep, task) {
     if (site) {
       if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.memory) creep.memory.state = 'build';
+        if (task.state !== 'build') creep.say('build');
         task.state = 'build';
-        creep.say('build');
         safeBuild(creep, site);
       } else {
         if (creep.memory) creep.memory.state = 'harvest';
@@ -507,6 +541,29 @@ var TaskLuna = {
   run: function (creep) {
     if (!creep) return;
     try { require('Traveler'); } catch (travErr) {}
+    // Normalize the creep's memory up-front so Task logic and spawn-time wiring share the same schema.
+    var mem = creep.memory;
+    if (!mem) {
+      mem = {};
+      creep.memory = mem;
+    }
+    // Canonical Lunas track state using `state`; default to 'init' until the task advances.
+    if (!mem.state) mem.state = 'init';
+    // Migrate legacy `targetRoom` assignments into the canonical `remoteRoom` key once.
+    if (!mem.remoteRoom && mem.targetRoom) {
+      mem.remoteRoom = mem.targetRoom;
+      delete mem.targetRoom;
+    }
+    // If the remote metadata is missing, attempt to self-heal using spawn claims and cached source intel.
+    if ((!mem.remoteRoom || !mem.sourceId) && tryRestoreLunaMemory(creep, mem)) {
+      // restored from claims or source object
+    }
+    // Without a remote room or source id we cannot safely continue; surface the problem and bail early.
+    if (!mem.remoteRoom || !mem.sourceId) {
+      mem.state = 'no-remote';
+      creep.say('no-remote');
+      return;
+    }
     var task = ensureTask(creep);
     if (!task) return;
     task.creepName = creep.name;

@@ -437,23 +437,27 @@ function releasePendingLunaClaim(sourceId, creepName) {
 
 function prepareLunaSpawnMemory(spawn, name, memory) {
   ensureRemoteSpawnMemory();
+  // Ensure we always mutate a concrete memory object before wiring spawn metadata.
+  if (!memory) memory = {};
   var homeRoom = null;
-  if (memory && memory.homeRoom) homeRoom = memory.homeRoom;
+  if (memory.homeRoom) homeRoom = memory.homeRoom;
   if (!homeRoom && spawn && spawn.room && spawn.room.name) homeRoom = spawn.room.name;
   if (!homeRoom && spawn && spawn.roomName) homeRoom = spawn.roomName;
   if (!homeRoom) return { abort: true };
   memory.homeRoom = homeRoom;
   var preferredRemote = null;
-  if (memory && memory.remoteRoom) preferredRemote = memory.remoteRoom;
-  else if (memory && memory.remote) preferredRemote = memory.remote;
-  else if (memory && memory.targetRoom) preferredRemote = memory.targetRoom;
+  if (memory.remoteRoom) preferredRemote = memory.remoteRoom;
+  else if (memory.remote) preferredRemote = memory.remote;
+  else if (memory.targetRoom) preferredRemote = memory.targetRoom;
   var selection = selectLunaAssignmentForSpawn(homeRoom, preferredRemote);
-  if (!selection) {
+  if (!selection || !selection.roomName || !selection.sourceId) {
     return { abort: true };
   }
   memory.remoteRoom = selection.roomName;
+  if (memory.targetRoom) delete memory.targetRoom;
   memory.sourceId = selection.sourceId;
-  memory.state = 'travel';
+  // Lunas start in a neutral state and let Task.Luna advance them once pathing begins.
+  memory.state = 'init';
   registerPendingLunaClaim(selection.sourceId, name, homeRoom, selection.roomName, spawn ? spawn.name : null);
   return { sourceId: selection.sourceId, remoteRoom: selection.roomName };
 }
@@ -499,7 +503,13 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
   }
   if (result === OK) {
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
-      spawnLog.info('🟢 Spawned', roleName + ':', name);
+      if (roleName === 'luna') {
+        var memDump = memory || {};
+        // Emit the exact remote assignment so debugging live spawns is trivial.
+        spawnLog.info('🟢 Spawned', roleName + ':', name, 'home=', memDump.homeRoom || 'n/a', 'remote=', memDump.remoteRoom || 'n/a', 'source=', memDump.sourceId || 'n/a');
+      } else {
+        spawnLog.info('🟢 Spawned', roleName + ':', name);
+      }
     }
     return true;
   }
