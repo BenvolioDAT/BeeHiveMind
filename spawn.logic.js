@@ -437,29 +437,35 @@ function releasePendingLunaClaim(sourceId, creepName) {
 
 function prepareLunaSpawnMemory(spawn, name, memory) {
   ensureRemoteSpawnMemory();
-  // Ensure we always mutate a concrete memory object before wiring spawn metadata.
   if (!memory) memory = {};
+  var warnings = [];
+  if (memory.remoteRoom) {
+    warnings.push('remoteRoom');
+    delete memory.remoteRoom;
+  }
+  if (memory.sourceId) {
+    warnings.push('sourceId');
+    delete memory.sourceId;
+  }
+  if (memory.remote) {
+    warnings.push('remote');
+    delete memory.remote;
+  }
+  if (memory.targetRoom) {
+    warnings.push('targetRoom');
+    delete memory.targetRoom;
+  }
+  if (warnings.length && spawnLog && typeof spawnLog.warn === 'function') {
+    spawnLog.warn('Luna spawn ignored preset fields', name || 'unknown', 'fields=' + warnings.join(','));
+  }
   var homeRoom = null;
   if (memory.homeRoom) homeRoom = memory.homeRoom;
   if (!homeRoom && spawn && spawn.room && spawn.room.name) homeRoom = spawn.room.name;
   if (!homeRoom && spawn && spawn.roomName) homeRoom = spawn.roomName;
   if (!homeRoom) return { abort: true };
   memory.homeRoom = homeRoom;
-  var preferredRemote = null;
-  if (memory.remoteRoom) preferredRemote = memory.remoteRoom;
-  else if (memory.remote) preferredRemote = memory.remote;
-  else if (memory.targetRoom) preferredRemote = memory.targetRoom;
-  var selection = selectLunaAssignmentForSpawn(homeRoom, preferredRemote);
-  if (!selection || !selection.roomName || !selection.sourceId) {
-    return { abort: true };
-  }
-  memory.remoteRoom = selection.roomName;
-  if (memory.targetRoom) delete memory.targetRoom;
-  memory.sourceId = selection.sourceId;
-  // Lunas start in a neutral state and let Task.Luna advance them once pathing begins.
   memory.state = 'init';
-  registerPendingLunaClaim(selection.sourceId, name, homeRoom, selection.roomName, spawn ? spawn.name : null);
-  return { sourceId: selection.sourceId, remoteRoom: selection.roomName };
+  return {};
 }
 
 // Spawns a role using a provided body-gen function; merges memory.role automatically.
