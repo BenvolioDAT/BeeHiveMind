@@ -2,7 +2,11 @@
 const Logger = require('core.logger');
 const LOG_LEVEL = Logger.LOG_LEVEL;
 const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
-try { require('BeeSelectors'); } catch (beeErr) {}
+var BeeSelectors = null;
+var TaskLuna = null;
+
+try { BeeSelectors = require('BeeSelectors'); } catch (beeErr) {}
+try { TaskLuna = require('Task.Luna'); } catch (lunaErr) {}
 
 // ---------- Shorthand Body Builders ----------
 // B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
@@ -477,11 +481,12 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
   const name = Generate_Creep_Name(roleName);
   if (!name) return false;
 
+  var lunaReservation = null;
   if (roleName === 'luna') {
-    var lunaSetup = prepareLunaSpawnMemory(spawn, memory);
-    if (lunaSetup && lunaSetup.abort) {
+    lunaReservation = prepareLunaSpawnMemory(spawn, name, memory);
+    if (lunaReservation && lunaReservation.abort) {
       if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-        spawnLog.debug('Luna spawn skipped (missing homeRoom)', spawn.name || 'unknown');
+        spawnLog.debug('Luna spawn skipped (no remote assignment)', spawn.name || 'unknown');
       }
       return false;
     }
@@ -492,6 +497,9 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
 
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('Result', roleName + '/' + name + ':', result);
+  }
+  if (result !== OK && lunaReservation && lunaReservation.sourceId) {
+    releasePendingLunaClaim(lunaReservation.sourceId, name);
   }
   if (result === OK) {
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
