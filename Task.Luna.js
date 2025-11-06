@@ -38,25 +38,48 @@ function ensureClaimMemory() {
   if (!Memory.__BHM.lunaClaims) Memory.__BHM.lunaClaims = {};
 }
 
-function sweepExpiredClaims() {
-  ensureClaimMemory();
-  var claims = Memory.__BHM.lunaClaims;
+// Attempts to rebuild a Luna's critical remote metadata if it was lost between spawn and the first tick.
+// Uses pending source claims first, then falls back to inspecting the assigned source object.
+function tryRestoreLunaMemory(creep, mem) {
+  if (!creep || !mem) return false;
+  var restored = false;
+  ensureRemoteMemory();
+  var claims = Memory.__BHM.remoteSourceClaims || {};
   for (var sid in claims) {
     if (!Object.prototype.hasOwnProperty.call(claims, sid)) continue;
     var claim = claims[sid];
-    if (!claim) {
-      delete claims[sid];
-      continue;
-    }
-    if (typeof claim.until !== 'number' || claim.until < Game.time) {
-      delete claims[sid];
-      continue;
-    }
-    if (!claim.creep || !Game.creeps[claim.creep]) {
-      delete claims[sid];
-      continue;
+    if (!claim || claim.creepName !== creep.name) continue;
+    if (!mem.sourceId) mem.sourceId = sid;
+    if (!mem.remoteRoom && claim.remoteRoom) mem.remoteRoom = claim.remoteRoom;
+    if (!mem.homeRoom && claim.homeRoom) mem.homeRoom = claim.homeRoom;
+    restored = true;
+    break;
+  }
+  if ((!mem.remoteRoom || !mem.sourceId) && mem.sourceId) {
+    var fallbackSource = Game.getObjectById(mem.sourceId);
+    if (fallbackSource && fallbackSource.pos) {
+      if (!mem.remoteRoom) mem.remoteRoom = fallbackSource.pos.roomName;
+      restored = true;
     }
   }
+  if (!mem.homeRoom) {
+    var inferredHome = inferHome(creep);
+    if (inferredHome) {
+      mem.homeRoom = inferredHome;
+      restored = true;
+    }
+  }
+  return restored || (!!mem.remoteRoom && !!mem.sourceId);
+}
+
+function inferHome(creep) {
+  if (!creep) return null;
+  if (creep.memory && creep.memory.homeRoom) return creep.memory.homeRoom;
+  if (creep.memory && creep.memory.home) return creep.memory.home;
+  if (creep.room && creep.room.controller && creep.room.controller.my) return creep.room.name;
+  var names = Object.keys(Game.spawns || {});
+  if (names.length) return Game.spawns[names[0]].room.name;
+  return null;
 }
 
 function activeClaimantsBySource() {
@@ -467,28 +490,66 @@ function runSeat(creep, mem) {
   moveToTarget(creep, source.pos, 1);
 }
 
-function runHarvest(creep, mem) {
-  var source = Game.getObjectById(mem.sourceId);
-  if (!source) {
-    clearAssignment(creep, mem);
-    transitionState(creep, mem, 'init', 'init');
+function handleHarvestLoop(creep, task) {
+  var source = Game.getObjectById(task.sourceId);
+  if (!source) return;
+  var seatPos = seatPosFromTask(task);
+  if (!seatPos) {
+    if (creep.memory) creep.memory.state = 'seat';
+    if (task.state !== 'seat') creep.say('seat');
+    task.state = 'seat';
+    queueMove(creep, source.pos, MOVE_PRIORITY, 1);
     return;
   }
-  if (!creep.room || creep.room.name !== mem.remoteRoom) {
-    transitionState(creep, mem, 'travel', 'travel');
+  var seatReserved = tryReserveSeat(task, seatPos);
+  if (!seatReserved && !creep.pos.isEqualTo(seatPos)) {
+    if (creep.memory) creep.memory.state = 'seat';
+    if (task.state !== 'seat') creep.say('seat');
+    task.state = 'seat';
+    queueMove(creep, seatPos, MOVE_PRIORITY, 1);
     return;
   }
-  var seatPos = seatPositionFor(source, mem);
-  refreshSeatMemo(mem, seatPos);
-  if (!seatPos || !creep.pos.isEqualTo(seatPos.x, seatPos.y)) {
-    transitionState(creep, mem, 'seat', 'seat');
+  if (!creep.pos.isEqualTo(seatPos)) {
+    if (creep.memory) creep.memory.state = 'seat';
+    if (task.state !== 'seat') creep.say('seat');
+    task.state = 'seat';
+    queueMove(creep, seatPos, MOVE_PRIORITY, 0);
     return;
   }
   var container = locateContainer(source);
   if (!container && mem.containerId) container = Game.getObjectById(mem.containerId);
   if (container) {
-    mem.containerId = container.id;
-    rememberSourceMetadata(source, container, container.pos);
+    if (creep.memory) creep.memory.state = 'harvest';
+    if (task.state !== 'harvest') creep.say('harvest');
+    task.state = 'harvest';
+    safeHarvest(creep, seatInfoSource);
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      safeTransfer(creep, container);
+    }
+  } else {
+    var site = null;
+    if (creep.room && creep.room.name === seatPos.roomName) {
+      var sites = creep.room.lookForAt(LOOK_CONSTRUCTION_SITES, seatPos.x, seatPos.y);
+      if (sites && sites.length) site = sites[0];
+    }
+    if (site) {
+      if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+        if (creep.memory) creep.memory.state = 'build';
+        if (task.state !== 'build') creep.say('build');
+        task.state = 'build';
+        safeBuild(creep, site);
+      } else {
+        if (creep.memory) creep.memory.state = 'harvest';
+        task.state = 'harvest';
+        creep.say('harvest');
+        safeHarvest(creep, seatInfoSource);
+      }
+    } else {
+      if (creep.memory) creep.memory.state = 'harvest';
+      task.state = 'harvest';
+      creep.say('harvest');
+      safeHarvest(creep, seatInfoSource);
+    }
   }
   var site = locateContainerSite(source);
   if (!container && site) {
@@ -524,11 +585,74 @@ function run(creep) {
   if (!mem.sourceId || !mem.remoteRoom) {
     if (!acquireAssignment(creep, mem)) return;
   }
-  switch (mem.state) {
-    case 'init':
-      if (!mem.sourceId || !mem.remoteRoom) {
-        if (!acquireAssignment(creep, mem)) return;
-        break;
+}
+
+var TaskLuna = {
+  run: function (creep) {
+    if (!creep) return;
+    try { require('Traveler'); } catch (travErr) {}
+    // Normalize the creep's memory up-front so Task logic and spawn-time wiring share the same schema.
+    var mem = creep.memory;
+    if (!mem) {
+      mem = {};
+      creep.memory = mem;
+    }
+    // Canonical Lunas track state using `state`; default to 'init' until the task advances.
+    if (!mem.state) mem.state = 'init';
+    // Migrate legacy `targetRoom` assignments into the canonical `remoteRoom` key once.
+    if (!mem.remoteRoom && mem.targetRoom) {
+      mem.remoteRoom = mem.targetRoom;
+      delete mem.targetRoom;
+    }
+    // If the remote metadata is missing, attempt to self-heal using spawn claims and cached source intel.
+    if ((!mem.remoteRoom || !mem.sourceId) && tryRestoreLunaMemory(creep, mem)) {
+      // restored from claims or source object
+    }
+    // Without a remote room or source id we cannot safely continue; surface the problem and bail early.
+    if (!mem.remoteRoom || !mem.sourceId) {
+      mem.state = 'no-remote';
+      creep.say('no-remote');
+      return;
+    }
+    var task = ensureTask(creep);
+    if (!task) return;
+    task.creepName = creep.name;
+    if (!bodyHasCarry(creep) && !task.warnedNoCarry) {
+      console.log('⚠️ Luna ' + creep.name + ' lacks CARRY parts; add at least one to avoid idle harvesting.');
+      task.warnedNoCarry = true;
+    }
+    maintainAssignment(creep, task);
+    var remoteRoom = task.remoteRoom || (creep.memory ? creep.memory.remoteRoom : null) || null;
+    if (!remoteRoom && task.sourceId) {
+      var guessSource = Game.getObjectById(task.sourceId);
+      if (guessSource && guessSource.pos) remoteRoom = guessSource.pos.roomName;
+    }
+    if (remoteRoom) {
+      task.remoteRoom = remoteRoom;
+      if (creep.memory) creep.memory.remoteRoom = remoteRoom;
+    }
+    if (!remoteRoom) {
+      if (creep.memory) creep.memory.state = 'no-remote';
+      task.state = 'no-remote';
+      creep.say('no-remote');
+      return;
+    }
+    if (creep.pos.roomName !== remoteRoom) {
+      if (creep.memory) creep.memory.state = 'travel';
+      task.state = 'travel';
+      creep.say('travel:' + remoteRoom);
+      var travelTarget = new RoomPosition(25, 25, remoteRoom);
+      var travelOpts = {
+        range: 20,
+        preferHighway: true,
+        maxOps: 4000,
+        stuckValue: 2,
+        routeCallback: buildRouteCallback()
+      };
+      if (typeof creep.travelTo === 'function') {
+        creep.travelTo(travelTarget, travelOpts);
+      } else {
+        queueMove(creep, { x: travelTarget.x, y: travelTarget.y, roomName: remoteRoom }, MOVE_PRIORITY, 20);
       }
       transitionState(creep, mem, 'travel', 'travel');
       break;

@@ -337,23 +337,125 @@ function Generate_Creep_Name(role, max = 70) {
 }
 
 // ---------- Spawn Helpers ----------
-function prepareLunaSpawnMemory(spawn, memory) {
+// Remote Luna assignment helpers keep spawn-time memory aligned with Task.Luna.
+function ensureRemoteSpawnMemory() {
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Memory.__BHM.remotesByHome) Memory.__BHM.remotesByHome = {};
+  if (!Memory.__BHM.remoteSourceClaims) Memory.__BHM.remoteSourceClaims = {};
+  if (!Memory.__BHM.avoidSources) Memory.__BHM.avoidSources = {};
+}
+
+function spawnClaimIsActive(claim) {
+  if (!claim) return false;
+  if (claim.creepName && Game.creeps[claim.creepName]) return true;
+  if (claim.spawnName) {
+    var spawnObj = Game.spawns[claim.spawnName];
+    if (spawnObj && spawnObj.spawning && spawnObj.spawning.name === claim.creepName) return true;
+  }
+  if (claim.pending && typeof claim.pendingTick === 'number') {
+    if ((Game.time - claim.pendingTick) <= 200) return true;
+  }
+  return false;
+}
+
+function selectLunaAssignmentForSpawn(homeRoomName, preferredRemote) {
+  ensureRemoteSpawnMemory();
+  if (!homeRoomName) return null;
+  var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
+  if (!remotes.length) return null;
+  if (!BeeSelectors || typeof BeeSelectors.getRemoteSourcesSnapshot !== 'function') return null;
+  var snapshot = BeeSelectors.getRemoteSourcesSnapshot(homeRoomName) || [];
+  var claims = Memory.__BHM.remoteSourceClaims;
+  var avoid = Memory.__BHM.avoidSources || {};
+  var flagged = [];
+  var unflagged = [];
+  for (var i = 0; i < snapshot.length; i++) {
+    var entry = snapshot[i];
+    if (!entry || !entry.sourceId) continue;
+    if (remotes.indexOf(entry.roomName) === -1) continue;
+    if (avoid[entry.sourceId] && avoid[entry.sourceId] > Game.time) continue;
+    var claim = claims[entry.sourceId];
+    if (claim) {
+      if (!spawnClaimIsActive(claim)) {
+        delete claims[entry.sourceId];
+      } else {
+        continue;
+      }
+    }
+    if (entry.flag) flagged.push(entry);
+    else unflagged.push(entry);
+  }
+  var ordered = [];
+  if (preferredRemote) {
+    for (var pf = 0; pf < flagged.length; pf++) {
+      if (flagged[pf] && flagged[pf].roomName === preferredRemote) ordered.push(flagged[pf]);
+    }
+    for (var pu = 0; pu < unflagged.length; pu++) {
+      if (unflagged[pu] && unflagged[pu].roomName === preferredRemote) ordered.push(unflagged[pu]);
+    }
+  }
+  for (var ff = 0; ff < flagged.length; ff++) {
+    if (!flagged[ff]) continue;
+    if (preferredRemote && flagged[ff].roomName === preferredRemote) continue;
+    ordered.push(flagged[ff]);
+  }
+  for (var uu = 0; uu < unflagged.length; uu++) {
+    if (!unflagged[uu]) continue;
+    if (preferredRemote && unflagged[uu].roomName === preferredRemote) continue;
+    ordered.push(unflagged[uu]);
+  }
+  if (!ordered.length) return null;
+  return ordered[0];
+}
+
+function registerPendingLunaClaim(sourceId, creepName, homeRoom, remoteRoom, spawn) {
+  if (!sourceId || !creepName) return;
+  ensureRemoteSpawnMemory();
+  Memory.__BHM.remoteSourceClaims[sourceId] = {
+    creepName: creepName,
+    homeRoom: homeRoom,
+    remoteRoom: remoteRoom,
+    since: Game.time,
+    spawnName: spawn || null,
+    pending: true,
+    pendingTick: Game.time
+  };
+}
+
+function releasePendingLunaClaim(sourceId, creepName) {
+  if (!sourceId || !creepName) return;
+  ensureRemoteSpawnMemory();
+  var claim = Memory.__BHM.remoteSourceClaims[sourceId];
+  if (claim && claim.creepName === creepName && claim.pending) {
+    delete Memory.__BHM.remoteSourceClaims[sourceId];
+  }
+}
+
+function prepareLunaSpawnMemory(spawn, name, memory) {
+  ensureRemoteSpawnMemory();
+  // Ensure we always mutate a concrete memory object before wiring spawn metadata.
   if (!memory) memory = {};
-  var homeRoom = memory.homeRoom;
+  var homeRoom = null;
+  if (memory.homeRoom) homeRoom = memory.homeRoom;
   if (!homeRoom && spawn && spawn.room && spawn.room.name) homeRoom = spawn.room.name;
   if (!homeRoom && spawn && spawn.roomName) homeRoom = spawn.roomName;
-  if (!homeRoom) {
+  if (!homeRoom) return { abort: true };
+  memory.homeRoom = homeRoom;
+  var preferredRemote = null;
+  if (memory.remoteRoom) preferredRemote = memory.remoteRoom;
+  else if (memory.remote) preferredRemote = memory.remote;
+  else if (memory.targetRoom) preferredRemote = memory.targetRoom;
+  var selection = selectLunaAssignmentForSpawn(homeRoom, preferredRemote);
+  if (!selection || !selection.roomName || !selection.sourceId) {
     return { abort: true };
   }
-  memory.homeRoom = homeRoom;
-  if (memory.remoteRoom || memory.sourceId) {
-    spawnLog.warn('Luna spawn memory provided remote/source; dropping keys for self-assignment.', 'spawn=', spawn ? spawn.name : 'n/a', 'remote=', memory.remoteRoom || 'n/a', 'source=', memory.sourceId || 'n/a');
-    delete memory.remoteRoom;
-    delete memory.sourceId;
-  }
-  memory.state = memory.state || 'init';
+  memory.remoteRoom = selection.roomName;
   if (memory.targetRoom) delete memory.targetRoom;
-  return { abort: false };
+  memory.sourceId = selection.sourceId;
+  // Lunas start in a neutral state and let Task.Luna advance them once pathing begins.
+  memory.state = 'init';
+  registerPendingLunaClaim(selection.sourceId, name, homeRoom, selection.roomName, spawn ? spawn.name : null);
+  return { sourceId: selection.sourceId, remoteRoom: selection.roomName };
 }
 
 // Spawns a role using a provided body-gen function; merges memory.role automatically.
@@ -395,6 +497,7 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       if (roleName === 'luna') {
         var memDump = memory || {};
+        // Emit the exact remote assignment so debugging live spawns is trivial.
         spawnLog.info('🟢 Spawned', roleName + ':', name, 'home=', memDump.homeRoom || 'n/a', 'remote=', memDump.remoteRoom || 'n/a', 'source=', memDump.sourceId || 'n/a');
       } else {
         spawnLog.info('🟢 Spawned', roleName + ':', name);
