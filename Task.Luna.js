@@ -1,36 +1,41 @@
 'use strict';
 
-/**
- * What changed & why:
- * - Rebuilt Luna into a remote container miner that sticks to one source, reserves its container tile, and feeds Truckers.
- * - Added hostile avoidance, seat reservations, and container construction so miners never wander or double-stack.
- * - Persisted metadata (seat position/container id) in room memory while keeping every movement request inside Movement.Manager.
- */
+// Task.Luna.js — autonomous remote miner assignment & seat management
+// ------------------------------------------------------------------
+// This rewrite makes every Luna creep self-assign to a remote source that
+// scouts have mapped into Memory.rooms[room].sources. The spawn only wires
+// role + homeRoom; Lunas claim sources dynamically, defend that claim with
+// TTL heartbeats, and gracefully yield if another miner contests the same
+// node. Movement, seating, container upkeep, and harvesting loops remain
+// aligned with the previous behavior, but the remote routing is now fully
+// creep-driven and resilient to race conditions.
 
 var BeeSelectors = null;
 var BeeActions = null;
-var Movement = null;
-var TaskLunaRoutePenaltyCache = null;
 
 try { BeeSelectors = require('BeeSelectors'); } catch (err) {}
 try { BeeActions = require('BeeActions'); } catch (err2) {}
-try { Movement = require('Movement.Manager'); } catch (err3) {}
 
-var AVOID_RANGE = 5;
-var AVOID_TTL = 30;
-var MOVE_PRIORITY = 95;
-var HARVEST_PRIORITY = 100;
-var TRANSFER_PRIORITY = 96;
-var BUILD_PRIORITY = 94;
-var IDLE_PRIORITY = 20;
-var STUCK_WINDOW = 3;
+var REMOTE_RADIUS = 1;              // maximum room linear distance from home
+var MAX_LUNA_PER_SOURCE = 1;        // enforced quota per source
+var CLAIM_TTL = 150;                // claim expiry in ticks unless refreshed
+var CLAIM_REFRESH_INTERVAL = 50;    // refresh cadence while alive
+var COLLISION_CHECK_INTERVAL = 5;   // spacing between collision checks
 
-function ensureRemoteMemory() {
+// --------------------------------------------------------------------------
+// Traveler guard — load once per tick if travelTo has not yet been injected.
+// --------------------------------------------------------------------------
+function ensureTraveler() {
+  if (typeof Creep.prototype.travelTo === 'function') return;
+  try { require('Traveler'); } catch (err) {}
+}
+
+// --------------------------------------------------------
+// Memory helpers for autonomous source claim bookkeeping.
+// --------------------------------------------------------
+function ensureClaimMemory() {
   if (!Memory.__BHM) Memory.__BHM = {};
-  if (!Memory.__BHM.remotesByHome) Memory.__BHM.remotesByHome = {};
-  if (!Memory.__BHM.remoteSourceClaims) Memory.__BHM.remoteSourceClaims = {};
-  if (!Memory.__BHM.avoidSources) Memory.__BHM.avoidSources = {};
-  if (!Memory.__BHM.seatReservations) Memory.__BHM.seatReservations = {};
+  if (!Memory.__BHM.lunaClaims) Memory.__BHM.lunaClaims = {};
 }
 
 // Attempts to rebuild a Luna's critical remote metadata if it was lost between spawn and the first tick.
@@ -77,90 +82,193 @@ function inferHome(creep) {
   return null;
 }
 
-function ensureTask(creep) {
-  if (!creep || !creep.memory) return null;
-  if (!creep.memory._task || creep.memory._task.type !== 'luna') {
-    creep.memory._task = {
-      type: 'luna',
-      homeRoom: inferHome(creep),
-      remoteRoom: creep.memory && creep.memory.remoteRoom ? creep.memory.remoteRoom : null,
-      sourceId: null,
-      containerId: null,
-      seatPos: null,
-      since: Game.time,
-      stuckSince: null,
-      seatKey: null,
-      state: creep.memory && creep.memory.state ? creep.memory.state : 'travel'
-    };
+function activeClaimantsBySource() {
+  ensureClaimMemory();
+  var claims = Memory.__BHM.lunaClaims;
+  var out = {};
+  for (var sid in claims) {
+    if (!Object.prototype.hasOwnProperty.call(claims, sid)) continue;
+    var claim = claims[sid];
+    if (!claim) continue;
+    if (typeof claim.until !== 'number' || claim.until < Game.time) continue;
+    if (!claim.creep || !Game.creeps[claim.creep]) continue;
+    out[sid] = claim.creep;
   }
-  var task = creep.memory._task;
-  if (!task.homeRoom && creep.memory.homeRoom) task.homeRoom = creep.memory.homeRoom;
-  if (!task.remoteRoom && creep.memory.remoteRoom) task.remoteRoom = creep.memory.remoteRoom;
-  if (!task.sourceId && creep.memory.sourceId) task.sourceId = creep.memory.sourceId;
-  if (!task.state && creep.memory.state) task.state = creep.memory.state;
-  if (task.homeRoom && !creep.memory.homeRoom) creep.memory.homeRoom = task.homeRoom;
-  if (task.remoteRoom && (!creep.memory.remoteRoom || creep.memory.remoteRoom !== task.remoteRoom)) {
-    creep.memory.remoteRoom = task.remoteRoom;
-  }
-  if (task.sourceId && (!creep.memory.sourceId || creep.memory.sourceId !== task.sourceId)) {
-    creep.memory.sourceId = task.sourceId;
-  }
-  if (task.state && (!creep.memory.state || creep.memory.state !== task.state)) {
-    creep.memory.state = task.state;
-  }
-  return task;
+  return out;
 }
 
-function bodyHasCarry(creep) {
-  if (!creep || !creep.body) return false;
-  for (var i = 0; i < creep.body.length; i++) {
-    if (creep.body[i].type === CARRY) return true;
+function claimSource(sourceId, creep, remoteRoom, homeRoom) {
+  if (!sourceId || !creep) return;
+  ensureClaimMemory();
+  var claims = Memory.__BHM.lunaClaims;
+  claims[sourceId] = {
+    creep: creep.name,
+    home: homeRoom || (creep.memory && creep.memory.homeRoom) || null,
+    remote: remoteRoom || null,
+    until: Game.time + CLAIM_TTL
+  };
+}
+
+function releaseClaim(sourceId, creepName) {
+  if (!sourceId || !creepName) return;
+  ensureClaimMemory();
+  var claim = Memory.__BHM.lunaClaims[sourceId];
+  if (claim && claim.creep === creepName) {
+    delete Memory.__BHM.lunaClaims[sourceId];
   }
-  return false;
 }
 
-function seatKeyFromPos(pos) {
-  if (!pos) return null;
-  return pos.roomName + ':' + pos.x + ',' + pos.y;
+function clearAssignment(creep, mem) {
+  if (!mem) return;
+  if (mem.sourceId) releaseClaim(mem.sourceId, creep ? creep.name : null);
+  mem.sourceId = null;
+  mem.remoteRoom = null;
+  mem.containerId = null;
+  mem.lastClaimRefresh = null;
+  refreshSeatMemo(mem, null);
 }
 
-function queueMove(creep, pos, priority, range) {
+// ------------------------------------------------------------------
+// Room/source discovery based on scout-populated Memory.rooms intel.
+// ------------------------------------------------------------------
+function candidateFromSourceRecord(roomName, sourceId, record) {
+  if (!roomName || !sourceId) return null;
+  var seat = null;
+  if (record && record.seat && record.seat.x != null && record.seat.y != null && record.seat.roomName) {
+    seat = { x: record.seat.x, y: record.seat.y, roomName: record.seat.roomName };
+  }
+  var containerId = null;
+  if (record && record.container && record.container.containerId) {
+    containerId = record.container.containerId;
+  }
+  return {
+    roomName: roomName,
+    sourceId: sourceId,
+    seat: seat,
+    containerId: containerId
+  };
+}
+
+function pickCandidateSources(homeRoom, radius) {
+  var out = [];
+  if (!homeRoom || !Memory.rooms) return out;
+  for (var rn in Memory.rooms) {
+    if (!Object.prototype.hasOwnProperty.call(Memory.rooms, rn)) continue;
+    var data = Memory.rooms[rn];
+    if (!data || !data.sources) continue;
+    var distance = null;
+    try {
+      distance = Game.map.getRoomLinearDistance(homeRoom, rn, true);
+    } catch (err) {
+      distance = null;
+    }
+    if (distance == null || distance > radius) continue;
+    var intel = data.intel;
+    if (intel) {
+      if (intel.owner && intel.owner !== 'Invader') continue;
+      if (intel.reservation && intel.reservation !== 'Invader') continue;
+    }
+    for (var sid in data.sources) {
+      if (!Object.prototype.hasOwnProperty.call(data.sources, sid)) continue;
+      var record = data.sources[sid];
+      var candidate = candidateFromSourceRecord(rn, sid, record);
+      if (candidate) out.push(candidate);
+    }
+  }
+  return out;
+}
+
+function pickUnclaimedSource(homeRoom) {
+  sweepExpiredClaims();
+  var candidates = pickCandidateSources(homeRoom, REMOTE_RADIUS);
+  if (!candidates.length) return null;
+  var active = activeClaimantsBySource();
+  var best = null;
+  var bestScore = -9999;
+  for (var i = 0; i < candidates.length; i++) {
+    var cand = candidates[i];
+    if (!cand) continue;
+    var claimedCount = active[cand.sourceId] ? 1 : 0;
+    if (claimedCount >= MAX_LUNA_PER_SOURCE) continue;
+    var score = 0;
+    if (cand.containerId) score += 2;
+    if (cand.seat) score += 1;
+    if (!best || score > bestScore) {
+      best = cand;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+// ----------------------------------------------------
+// Utility helpers reused by the seat/harvest workflow.
+// ----------------------------------------------------
+function inferHomeRoom(creep) {
+  if (!creep) return null;
+  if (creep.memory && creep.memory.homeRoom) return creep.memory.homeRoom;
+  if (creep.room && creep.room.controller && creep.room.controller.my) return creep.room.name;
+  var names = Object.keys(Game.spawns || {});
+  if (names.length) {
+    var spawnObj = Game.spawns[names[0]];
+    if (spawnObj && spawnObj.room) return spawnObj.room.name;
+  }
+  return null;
+}
+
+function transitionState(creep, mem, next, utterance) {
+  if (!mem) return;
+  if (mem.state === next) return;
+  mem.state = next;
+  if (creep && utterance) creep.say(utterance);
+}
+
+function moveToTarget(creep, pos, range) {
   if (!creep || !pos) return;
-  var opts = { range: (range != null) ? range : 1, intentType: 'harvest', reusePath: 10 };
-  if (Movement && Movement.request) {
-    Movement.request(creep, { x: pos.x, y: pos.y, roomName: pos.roomName }, priority || MOVE_PRIORITY, opts);
-  } else if (typeof creep.travelTo === 'function') {
-    creep.travelTo(new RoomPosition(pos.x, pos.y, pos.roomName), { range: opts.range });
+  ensureTraveler();
+  var rp = pos.pos ? pos.pos : new RoomPosition(pos.x, pos.y, pos.roomName);
+  var desiredRange = (range == null) ? 1 : range;
+  if (typeof creep.travelTo === 'function') {
+    creep.travelTo(rp, {
+      range: desiredRange,
+      preferHighway: true,
+      maxOps: 4000,
+      stuckValue: 2,
+      reusePath: 10
+    });
   } else {
-    creep.moveTo(pos.x, pos.y, { range: opts.range });
+    creep.moveTo(rp, { range: desiredRange, reusePath: 10 });
   }
 }
 
 function safeHarvest(creep, source) {
+  if (!creep || !source) return;
   if (BeeActions && BeeActions.safeHarvest) {
-    return BeeActions.safeHarvest(creep, source, HARVEST_PRIORITY);
+    BeeActions.safeHarvest(creep, source, 100);
+    return;
   }
-  var res = creep.harvest(source);
-  if (res === ERR_NOT_IN_RANGE && source && source.pos) queueMove(creep, source.pos, HARVEST_PRIORITY, 1);
-  return res;
+  var result = creep.harvest(source);
+  if (result === ERR_NOT_IN_RANGE) moveToTarget(creep, source.pos, 1);
 }
 
 function safeTransfer(creep, target) {
+  if (!creep || !target) return;
   if (BeeActions && BeeActions.safeTransfer) {
-    return BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, null, TRANSFER_PRIORITY);
+    BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, null, 96);
+    return;
   }
-  var res = creep.transfer(target, RESOURCE_ENERGY);
-  if (res === ERR_NOT_IN_RANGE && target && target.pos) queueMove(creep, target.pos, TRANSFER_PRIORITY, 1);
-  return res;
+  var result = creep.transfer(target, RESOURCE_ENERGY);
+  if (result === ERR_NOT_IN_RANGE) moveToTarget(creep, target.pos, 1);
 }
 
 function safeBuild(creep, site) {
+  if (!creep || !site) return;
   if (BeeActions && BeeActions.safeBuild) {
-    return BeeActions.safeBuild(creep, site, BUILD_PRIORITY);
+    BeeActions.safeBuild(creep, site, 94);
+    return;
   }
-  var res = creep.build(site);
-  if (res === ERR_NOT_IN_RANGE && site && site.pos) queueMove(creep, site.pos, BUILD_PRIORITY, 1);
-  return res;
+  var result = creep.build(site);
+  if (result === ERR_NOT_IN_RANGE) moveToTarget(creep, site.pos, 1);
 }
 
 function rememberSourceMetadata(source, container, seatPos) {
@@ -181,252 +289,205 @@ function rememberSourceMetadata(source, container, seatPos) {
   }
 }
 
-function cleanupClaims() {
-  ensureRemoteMemory();
-  var claims = Memory.__BHM.remoteSourceClaims;
-  for (var sid in claims) {
-    if (!Object.prototype.hasOwnProperty.call(claims, sid)) continue;
-    var claim = claims[sid];
-    if (!claim) { delete claims[sid]; continue; }
-    if (claim.creepName && !Game.creeps[claim.creepName]) {
-      var keep = false;
-      if (claim.spawnName) {
-        var spawnObj = Game.spawns[claim.spawnName];
-        if (spawnObj && spawnObj.spawning && spawnObj.spawning.name === claim.creepName) {
-          keep = true;
-        }
+function locateContainer(source) {
+  if (!source || !source.pos || !source.room) return null;
+  var structs = source.room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER && s.pos.getRangeTo(source.pos) <= 1;
+    }
+  });
+  if (structs && structs.length) return structs[0];
+  return null;
+}
+
+function locateContainerSite(source) {
+  if (!source || !source.pos || !source.room) return null;
+  var sites = source.room.find(FIND_CONSTRUCTION_SITES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER && s.pos.getRangeTo(source.pos) <= 1;
+    }
+  });
+  if (sites && sites.length) return sites[0];
+  return null;
+}
+
+function seatPositionFor(source, memo) {
+  if (!source || !source.pos) return null;
+  if (memo && memo.seat && memo.seat.x != null && memo.seat.y != null) {
+    return new RoomPosition(memo.seat.x, memo.seat.y, memo.seat.roomName);
+  }
+  var container = locateContainer(source);
+  if (container) {
+    rememberSourceMetadata(source, container, container.pos);
+    return container.pos;
+  }
+  if (BeeSelectors && typeof BeeSelectors.getSourceContainerOrSite === 'function') {
+    var info = BeeSelectors.getSourceContainerOrSite(source);
+    if (info) {
+      if (info.container) {
+        rememberSourceMetadata(source, info.container, info.container.pos);
+        return info.container.pos;
       }
-      if (claim.pending && typeof claim.pendingTick === 'number') {
-        if ((Game.time - claim.pendingTick) <= 200) keep = true;
-      }
-      if (!keep) {
-        delete claims[sid];
-        continue;
+      if (info.seatPos) {
+        rememberSourceMetadata(source, info.container || null, info.seatPos);
+        return new RoomPosition(info.seatPos.x, info.seatPos.y, info.seatPos.roomName);
       }
     }
   }
-}
-
-function releaseAssignment(task, reason) {
-  if (!task || !task.sourceId) return;
-  ensureRemoteMemory();
-  var claims = Memory.__BHM.remoteSourceClaims;
-  if (claims[task.sourceId] && claims[task.sourceId].creepName === task.creepName) {
-    delete claims[task.sourceId];
+  if (Memory.rooms && Memory.rooms[source.pos.roomName]) {
+    var rec = Memory.rooms[source.pos.roomName].sources;
+    if (rec && rec[source.id] && rec[source.id].seat) {
+      var seatMem = rec[source.id].seat;
+      if (seatMem.x != null && seatMem.y != null && seatMem.roomName) {
+        return new RoomPosition(seatMem.x, seatMem.y, seatMem.roomName);
+      }
+    }
   }
-  if (reason === 'avoid') {
-    Memory.__BHM.avoidSources[task.sourceId] = Game.time + AVOID_TTL;
+  return source.pos;
+}
+
+function refreshSeatMemo(mem, seatPos) {
+  if (!mem) return;
+  if (!seatPos) {
+    delete mem.seat;
+    return;
   }
-  task.sourceId = null;
-  task.containerId = null;
-  task.seatPos = null;
-  task.since = Game.time;
-  task.stuckSince = null;
-  task.seatKey = null;
+  mem.seat = { x: seatPos.x, y: seatPos.y, roomName: seatPos.roomName };
 }
 
-function detectThreat(source) {
-  if (!source || !source.pos || !source.room) return false;
-  var pos = source.pos;
-  var hostiles = pos.findInRange(FIND_HOSTILE_CREEPS, AVOID_RANGE);
-  if (hostiles && hostiles.length) return true;
-  var cores = pos.findInRange(FIND_HOSTILE_STRUCTURES, AVOID_RANGE, {
-    filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; }
-  });
-  if (cores && cores.length) return true;
-  return false;
-}
-
-function controllerOwnedByOther(room) {
-  if (!room || !room.controller) return false;
-  if (!room.controller.owner) return false;
-  return !room.controller.my;
-}
-
-function tryReserveSeat(task, seatPos) {
-  if (!seatPos) return true;
-  ensureRemoteMemory();
-  var key = seatKeyFromPos(seatPos);
-  if (!key) return true;
-  var reservations = Memory.__BHM.seatReservations;
-  var existing = reservations[key];
-  if (existing && existing === Game.time && task.seatKey !== key) {
+function resolveCollision(creep, mem) {
+  if (!creep || !mem || !mem.sourceId) return false;
+  if (Game.time % COLLISION_CHECK_INTERVAL !== 0) return false;
+  var rivals = [];
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    if (name === creep.name) continue;
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (c.memory.role !== 'Luna') continue;
+    if (c.memory.sourceId !== mem.sourceId) continue;
+    rivals.push(name);
+  }
+  if (!rivals.length) return false;
+  rivals.push(creep.name);
+  rivals.sort();
+  var winner = rivals[0];
+  if (creep.name === winner) {
+    // Ensure the claim reflects the winner; refresh immediately so losers notice.
+    claimSource(mem.sourceId, creep, mem.remoteRoom, mem.homeRoom);
+    mem.lastClaimRefresh = Game.time;
     return false;
   }
-  reservations[key] = Game.time;
-  task.seatKey = key;
+  clearAssignment(creep, mem);
+  transitionState(creep, mem, 'init', 'yield');
   return true;
 }
 
-function seatPosFromTask(task) {
-  if (!task || !task.seatPos) return null;
-  return new RoomPosition(task.seatPos.x, task.seatPos.y, task.seatPos.roomName);
-}
-
-function buildRouteCallback() {
-  if (TaskLunaRoutePenaltyCache && TaskLunaRoutePenaltyCache.tick === Game.time) {
-    return TaskLunaRoutePenaltyCache.cb;
-  }
-  var callback = function (roomName) {
-    var cost = 1;
-    var roomsMem = Memory.rooms || {};
-    var entry = roomsMem[roomName];
-    if (entry) {
-      if (entry.hostile) cost += 3;
-      if (entry._avoid) cost += 2;
-      if (entry.avoid) cost += 2;
-      if (entry._invaderLock && entry._invaderLock.locked) cost += 4;
-    }
-    if (Memory.__BHM && Memory.__BHM.avoidRooms && Memory.__BHM.avoidRooms[roomName]) {
-      cost += 2;
-    }
-    if (cost < 1) cost = 1;
-    return cost;
-  };
-  TaskLunaRoutePenaltyCache = { tick: Game.time, cb: callback };
-  return callback;
-}
-
-function assignSource(creep, task) {
-  ensureRemoteMemory();
-  cleanupClaims();
-  var homeRoom = task.homeRoom || inferHome(creep);
-  task.homeRoom = homeRoom;
-  if (!homeRoom || !BeeSelectors || typeof BeeSelectors.getRemoteSourcesSnapshot !== 'function') return;
-  var entries = BeeSelectors.getRemoteSourcesSnapshot(homeRoom) || [];
-  var claims = Memory.__BHM.remoteSourceClaims;
-  var avoid = Memory.__BHM.avoidSources;
-  var preferredRemote = null;
-  if (creep.memory && creep.memory.remoteRoom) preferredRemote = creep.memory.remoteRoom;
-  if (!preferredRemote && task.remoteRoom) preferredRemote = task.remoteRoom;
-  var flagged = [];
-  var unflagged = [];
-  for (var i = 0; i < entries.length; i++) {
-    var entry = entries[i];
-    if (!entry || !entry.sourceId) continue;
-    if (avoid[entry.sourceId] && avoid[entry.sourceId] > Game.time) continue;
-    var claim = claims[entry.sourceId];
-    if (claim && claim.creepName && claim.creepName !== creep.name) continue;
-    if (entry.flag) flagged.push(entry);
-    else unflagged.push(entry);
-  }
-  var order = [];
-  if (preferredRemote) {
-    for (var pr = 0; pr < flagged.length; pr++) {
-      if (flagged[pr] && flagged[pr].roomName === preferredRemote) order.push(flagged[pr]);
-    }
-    for (var pu = 0; pu < unflagged.length; pu++) {
-      if (unflagged[pu] && unflagged[pu].roomName === preferredRemote) order.push(unflagged[pu]);
-    }
-  }
-  for (var ff = 0; ff < flagged.length; ff++) {
-    if (!flagged[ff]) continue;
-    if (preferredRemote && flagged[ff].roomName === preferredRemote) continue;
-    order.push(flagged[ff]);
-  }
-  for (var uu = 0; uu < unflagged.length; uu++) {
-    if (!unflagged[uu]) continue;
-    if (preferredRemote && unflagged[uu].roomName === preferredRemote) continue;
-    order.push(unflagged[uu]);
-  }
-  for (var j = 0; j < order.length; j++) {
-    var pick = order[j];
-    if (!pick) continue;
-    var sourceObj = pick.source || Game.getObjectById(pick.sourceId);
-    if (sourceObj && sourceObj.room && controllerOwnedByOther(sourceObj.room)) continue;
-    claims[pick.sourceId] = {
-      creepName: creep.name,
-      homeRoom: homeRoom,
-      remoteRoom: pick.roomName,
-      since: Game.time
-    };
-    task.sourceId = pick.sourceId;
-    task.seatPos = pick.seatPos ? { x: pick.seatPos.x, y: pick.seatPos.y, roomName: pick.seatPos.roomName } : null;
-    task.containerId = (pick.container && pick.container.id) ? pick.container.id : null;
-    task.since = Game.time;
-    task.stuckSince = null;
-    task.seatKey = task.seatPos ? seatKeyFromPos(task.seatPos) : null;
-    task.remoteRoom = pick.roomName;
-    task.state = 'travel';
-    if (creep.memory) {
-      creep.memory.remoteRoom = pick.roomName;
-      creep.memory.sourceId = pick.sourceId;
-      creep.memory.state = 'travel';
-    }
-    return;
+function refreshClaimHeartbeat(creep, mem) {
+  if (!mem || !mem.sourceId) return;
+  if (!mem.lastClaimRefresh || (Game.time - mem.lastClaimRefresh >= CLAIM_REFRESH_INTERVAL)) {
+    claimSource(mem.sourceId, creep, mem.remoteRoom, mem.homeRoom);
+    mem.lastClaimRefresh = Game.time;
   }
 }
 
-function refreshSeatInfo(task) {
-  if (!task || !task.sourceId) return;
-  var source = Game.getObjectById(task.sourceId);
-  if (!source) return;
-  if (!BeeSelectors || typeof BeeSelectors.getSourceContainerOrSite !== 'function') return;
-  var info = BeeSelectors.getSourceContainerOrSite(source);
-  if (info && info.seatPos) {
-    task.seatPos = { x: info.seatPos.x, y: info.seatPos.y, roomName: info.seatPos.roomName };
-    task.seatKey = seatKeyFromPos(task.seatPos);
-  }
-  if (info && info.container) {
-    task.containerId = info.container.id;
-    rememberSourceMetadata(source, info.container, info.seatPos || info.container.pos);
-  } else if (info && info.site) {
-    task.containerId = null;
-    rememberSourceMetadata(source, null, info.seatPos);
-  } else if (info && info.seatPos) {
-    rememberSourceMetadata(source, null, info.seatPos);
-  }
+function logAssignment(creep, homeRoom, assignment) {
+  if (!assignment) return;
+  console.log('[Luna] assigned', creep.name, 'home=', homeRoom || 'n/a', 'remote=', assignment.roomName || 'n/a', 'source=', assignment.sourceId);
 }
 
-function maintainAssignment(creep, task) {
-  if (!task.sourceId) {
-    assignSource(creep, task);
-    return;
+function logNoSource(creep, homeRoom) {
+  var candidates = pickCandidateSources(homeRoom, REMOTE_RADIUS);
+  var rooms = {};
+  for (var i = 0; i < candidates.length; i++) {
+    var cand = candidates[i];
+    if (cand && cand.roomName) rooms[cand.roomName] = true;
   }
-  ensureRemoteMemory();
-  var claims = Memory.__BHM.remoteSourceClaims;
-  var claim = claims[task.sourceId];
-  if (!claim || claim.creepName !== creep.name) {
-    releaseAssignment(task, null);
-    if (creep.memory) creep.memory.sourceId = null;
-    assignSource(creep, task);
-    return;
-  }
-  if (claim.remoteRoom && (!task.remoteRoom || task.remoteRoom !== claim.remoteRoom)) {
-    task.remoteRoom = claim.remoteRoom;
-    if (creep.memory) creep.memory.remoteRoom = claim.remoteRoom;
-  }
-  if (claim.pending) {
-    claim.pending = false;
-    claim.pendingTick = null;
-    claim.spawnName = null;
-  }
-  var source = Game.getObjectById(task.sourceId);
-  if (!source) return;
-  if (source.room && controllerOwnedByOther(source.room)) {
-    releaseAssignment(task, 'avoid');
-    if (creep.memory) creep.memory.sourceId = null;
-    return;
-  }
-  if (detectThreat(source)) {
-    releaseAssignment(task, 'avoid');
-    if (creep.memory) creep.memory.sourceId = null;
-    return;
-  }
-  if (creep.memory) {
-    creep.memory.sourceId = task.sourceId;
-    if (task.remoteRoom) creep.memory.remoteRoom = task.remoteRoom;
-  }
-  refreshSeatInfo(task);
+  var roomCount = 0;
+  for (var rn in rooms) if (Object.prototype.hasOwnProperty.call(rooms, rn)) roomCount++;
+  console.log('[Luna] no-src', creep.name, 'home=', homeRoom || 'n/a', 'rooms=', roomCount, 'sources=', candidates.length);
 }
 
-function buildContainerIfNeeded(creep, task, seatPos) {
-  if (!seatPos || !creep.room || creep.room.name !== seatPos.roomName) return;
-  var site = creep.room.lookForAt(LOOK_CONSTRUCTION_SITES, seatPos.x, seatPos.y);
-  if (site && site.length) return;
-  var structures = creep.room.lookForAt(LOOK_STRUCTURES, seatPos.x, seatPos.y);
-  if (structures && structures.length) return;
-  creep.room.createConstructionSite(seatPos.x, seatPos.y, STRUCTURE_CONTAINER);
+function acquireAssignment(creep, mem) {
+  var home = mem.homeRoom || inferHomeRoom(creep);
+  if (!home) home = creep.room ? creep.room.name : null;
+  mem.homeRoom = home;
+  var assignment = pickUnclaimedSource(home);
+  if (!assignment) {
+    logNoSource(creep, home);
+    creep.say('no-src');
+    return false;
+  }
+  refreshSeatMemo(mem, null);
+  mem.containerId = null;
+  mem.remoteRoom = assignment.roomName;
+  mem.sourceId = assignment.sourceId;
+  mem.state = 'travel';
+  mem.lastClaimRefresh = Game.time;
+  claimSource(assignment.sourceId, creep, assignment.roomName, home);
+  logAssignment(creep, home, assignment);
+  creep.say('travel');
+  return true;
+}
+
+function ensureHome(mem, creep) {
+  if (mem.homeRoom) return;
+  var inferred = inferHomeRoom(creep);
+  if (inferred) mem.homeRoom = inferred;
+}
+
+function ensureState(mem) {
+  if (!mem.state) mem.state = 'init';
+}
+
+function runTravel(creep, mem) {
+  if (!mem.remoteRoom || !mem.sourceId) {
+    clearAssignment(creep, mem);
+    transitionState(creep, mem, 'init', 'init');
+    return;
+  }
+  if (creep.room && creep.room.name === mem.remoteRoom) {
+    transitionState(creep, mem, 'seat', 'seat');
+    return;
+  }
+  var center = new RoomPosition(25, 25, mem.remoteRoom);
+  moveToTarget(creep, center, 20);
+}
+
+function runSeat(creep, mem) {
+  var source = Game.getObjectById(mem.sourceId);
+  if (!source) {
+    clearAssignment(creep, mem);
+    transitionState(creep, mem, 'init', 'init');
+    return;
+  }
+  if (!creep.room || creep.room.name !== mem.remoteRoom) {
+    transitionState(creep, mem, 'travel', 'travel');
+    return;
+  }
+  var seatPos = seatPositionFor(source, mem);
+  refreshSeatMemo(mem, seatPos);
+  var container = null;
+  if (seatPos && seatPos.roomName === creep.room.name) {
+    container = locateContainer(source);
+    if (!container && mem.containerId) {
+      container = Game.getObjectById(mem.containerId);
+    }
+    if (container) {
+      mem.containerId = container.id;
+      rememberSourceMetadata(source, container, container.pos);
+    }
+  }
+  if (seatPos) {
+    var atSeat = creep.pos.isEqualTo(seatPos.x, seatPos.y);
+    if (!atSeat) {
+      moveToTarget(creep, seatPos, 0);
+      return;
+    }
+    transitionState(creep, mem, 'harvest', 'harvest');
+    return;
+  }
+  moveToTarget(creep, source.pos, 1);
 }
 
 function handleHarvestLoop(creep, task) {
@@ -455,11 +516,8 @@ function handleHarvestLoop(creep, task) {
     queueMove(creep, seatPos, MOVE_PRIORITY, 0);
     return;
   }
-  var container = task.containerId ? Game.getObjectById(task.containerId) : null;
-  if (!container) {
-    buildContainerIfNeeded(creep, task, seatPos);
-  }
-  var seatInfoSource = Game.getObjectById(task.sourceId);
+  var container = locateContainer(source);
+  if (!container && mem.containerId) container = Game.getObjectById(mem.containerId);
   if (container) {
     if (creep.memory) creep.memory.state = 'harvest';
     if (task.state !== 'harvest') creep.say('harvest');
@@ -493,47 +551,39 @@ function handleHarvestLoop(creep, task) {
       safeHarvest(creep, seatInfoSource);
     }
   }
-  task.stuckSince = null;
-}
-
-function handleTravel(creep, task) {
-  var source = task.sourceId ? Game.getObjectById(task.sourceId) : null;
-  if (source) {
-    var seatPos = seatPosFromTask(task);
-    if (seatPos) {
-      if (creep.memory) creep.memory.state = 'seat';
-      task.state = 'seat';
-      creep.say('seat');
-      queueMove(creep, seatPos, MOVE_PRIORITY, 0);
-      return;
-    }
-    if (creep.memory) creep.memory.state = 'seat';
-    task.state = 'seat';
-    creep.say('seat');
-    queueMove(creep, source.pos, MOVE_PRIORITY, 1);
-    return;
+  var site = locateContainerSite(source);
+  if (!container && site) {
+    safeBuild(creep, site);
   }
-  var home = task.homeRoom || inferHome(creep);
-  if (home && creep.pos.roomName !== home) {
-    if (creep.memory) creep.memory.state = 'travel';
-    task.state = 'travel';
-    creep.say('travel:' + home);
-    queueMove(creep, { x: 25, y: 25, roomName: home }, IDLE_PRIORITY, 1);
+  safeHarvest(creep, source);
+  if (container && creep.store && creep.store[RESOURCE_ENERGY] > 0) {
+    safeTransfer(creep, container);
+  } else if (!container && creep.store && creep.store.getFreeCapacity && creep.store.getFreeCapacity() === 0) {
+    creep.drop(RESOURCE_ENERGY);
   }
 }
 
-function updateStuckState(creep, task) {
-  if (!task) return;
-  var last = task._lastPos;
-  if (!last || last.x !== creep.pos.x || last.y !== creep.pos.y || last.roomName !== creep.pos.roomName) {
-    task._lastPos = { x: creep.pos.x, y: creep.pos.y, roomName: creep.pos.roomName, tick: Game.time };
-    task.stuckSince = null;
+function run(creep) {
+  if (!creep) return;
+  var mem = creep.memory = creep.memory || {};
+  sweepExpiredClaims();
+  ensureState(mem);
+  ensureHome(mem, creep);
+  if (mem.targetRoom && !mem.remoteRoom) {
+    mem.remoteRoom = mem.targetRoom;
+    delete mem.targetRoom;
+  }
+  var retiring = creep.ticksToLive != null && creep.ticksToLive < 5;
+  if (retiring && mem.sourceId) {
+    releaseClaim(mem.sourceId, creep.name);
+  } else if (mem.sourceId && mem.remoteRoom) {
+    refreshClaimHeartbeat(creep, mem);
+  }
+  if (resolveCollision(creep, mem)) {
     return;
   }
-  if (!task.stuckSince) {
-    task.stuckSince = Game.time;
-  } else if (Game.time - task.stuckSince >= STUCK_WINDOW) {
-    releaseAssignment(task, null);
+  if (!mem.sourceId || !mem.remoteRoom) {
+    if (!acquireAssignment(creep, mem)) return;
   }
 }
 
@@ -604,44 +654,23 @@ var TaskLuna = {
       } else {
         queueMove(creep, { x: travelTarget.x, y: travelTarget.y, roomName: remoteRoom }, MOVE_PRIORITY, 20);
       }
-      return;
-    }
-    if (!task.sourceId) {
-      handleTravel(creep, task);
-      if (creep.memory) creep.memory.state = 'no-source';
-      task.state = 'no-source';
-      creep.say('no-source');
-      return;
-    }
-    var source = Game.getObjectById(task.sourceId);
-    if (!source) {
-      handleTravel(creep, task);
-      if (creep.memory) creep.memory.state = 'no-source';
-      task.state = 'no-source';
-      creep.say('no-source');
-      return;
-    }
-    rememberSourceMetadata(source, task.containerId ? Game.getObjectById(task.containerId) : null, task.seatPos);
-    if (source.room && controllerOwnedByOther(source.room)) {
-      releaseAssignment(task, 'avoid');
-      if (creep.memory) creep.memory.state = 'no-source';
-      task.state = 'no-source';
-      creep.say('no-source');
-      return;
-    }
-    if (detectThreat(source)) {
-      releaseAssignment(task, 'avoid');
-      if (creep.memory) creep.memory.state = 'no-source';
-      task.state = 'no-source';
-      creep.say('no-source');
-      return;
-    }
-    handleHarvestLoop(creep, task);
-    updateStuckState(creep, task);
-    if (creep.memory && task.state) creep.memory.state = task.state;
+      transitionState(creep, mem, 'travel', 'travel');
+      break;
+    case 'travel':
+      runTravel(creep, mem);
+      break;
+    case 'seat':
+      runSeat(creep, mem);
+      break;
+    case 'harvest':
+      runHarvest(creep, mem);
+      break;
+    default:
+      transitionState(creep, mem, 'init', 'init');
+      break;
   }
+}
+
+module.exports = {
+  run: run,
 };
-
-TaskLuna.MAX_LUNA_PER_SOURCE = 1;
-
-module.exports = TaskLuna;
