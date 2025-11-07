@@ -29,6 +29,9 @@ var TaskLuna = require('Task.Luna');
 var BeeSelectors = require('BeeSelectors');
 var MovementManager = require('Movement.Manager');
 var LogisticsManager = require('Logistics.Manager');
+var TaskExpandManager = require('Task.Expand.Manager');
+var ConfigExpansion = require('Config.Expansion');
+var ExpandSelector = require('Task.Expand.Selector');
 
 // Map role -> run fn (extend as roles migrate).
 var creepRoles = { Worker_Bee: roleWorker_Bee.run };
@@ -80,6 +83,7 @@ var ROLE_MIN_ENERGY = {
 // --------------------------- Global Tick Cache ---------------------------
 if (!global.__BHM) global.__BHM = {};
 if (!global.__BHM.caches) global.__BHM.caches = {};
+if (!global.__BHM.spawnIntentSequence) global.__BHM.spawnIntentSequence = 0;
 
 function resetTickCacheIfNeeded() {
   if (global.__BHM.tick !== Game.time) {
@@ -167,7 +171,13 @@ function enqueue(roomName, role, opts) {
 function pruneOverfilledQueue(roomName, quotas, C) {
   var q = ensureRoomQueue(roomName);
   var before = q.length;
-  q.sort(function (a, b) { return (b.priority - a.priority) || (a.created - b.created); });
+  q.sort(function (a, b) {
+    var prio = (b.priority - a.priority);
+    if (prio !== 0) return prio;
+    var aOrder = (typeof a.intentOrder === 'number') ? a.intentOrder : a.created;
+    var bOrder = (typeof b.intentOrder === 'number') ? b.intentOrder : b.created;
+    return aOrder - bOrder;
+  });
   var remaining = {};
   for (var role in quotas) {
     if (!Object.prototype.hasOwnProperty.call(quotas, role)) continue;
@@ -302,10 +312,16 @@ function dequeueAndSpawn(spawner) {
     if (tickEvery(DBG_EVERY)) dlog('🕳️ [Queue]', roomName, 'empty (energy', energyStatus(room) + ')');
     return false;
   }
-  q.sort(function (a, b) { return (b.priority - a.priority) || (a.created - b.created); });
+  q.sort(function (a, b) {
+    var prio = (b.priority - a.priority);
+    if (prio !== 0) return prio;
+    var aOrder = (typeof a.intentOrder === 'number') ? a.intentOrder : a.created;
+    var bOrder = (typeof b.intentOrder === 'number') ? b.intentOrder : b.created;
+    return aOrder - bOrder;
+  });
   var headPriority = q[0].priority;
   var headRole = q[0].role;
-  var needed = minEnergyFor(headRole);
+  var needed = energyNeededForQueueItem(q[0]);
   if ((room.energyAvailable | 0) < needed) {
     if (tickEvery(DBG_EVERY)) dlog('⛽ [QueueHold]', roomName, 'prio', headPriority, 'role', headRole,
                                    'need', needed, 'have', room.energyAvailable);
@@ -325,14 +341,18 @@ function dequeueAndSpawn(spawner) {
     return false;
   }
   var item = q[pickIndex];
+  var age = Game.time - item.created;
+  if (typeof item.intentOrder === 'number') age = Math.max(0, Game.time - item.created);
   dlog('🎬 [SpawnTry]', roomName, 'role=', item.role, 'prio=', item.priority,
-       'age=', (Game.time - item.created), 'energy=', energyStatus(room));
+       'age=', age, 'energy=', energyStatus(room));
   var spawnResource = null;
   if (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function') {
     spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
   }
   var ok = false;
-  if (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function') {
+  if (item.intentSpec && spawnLogic && typeof spawnLogic.Spawn_From_Intent === 'function') {
+    ok = spawnLogic.Spawn_From_Intent(spawner, item.intentSpec, spawnResource);
+  } else if (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function') {
     ok = spawnLogic.Spawn_Worker_Bee(spawner, item.role, spawnResource, item);
   }
   if (ok) {
@@ -469,8 +489,12 @@ var BeeHiveMind = {
       BeeVisualsSpawnPanel.drawVisuals();
     }
     BeeHiveMind.runPlanners(context);
+    if (TaskExpandManager && typeof TaskExpandManager.run === 'function') {
+      TaskExpandManager.run();
+    }
     BeeHiveMind.runCreeps(context);
     BeeHiveMind.manageSpawns(context);
+    BeeHiveMind.drawExpansionPanel(context);
     LogisticsManager.execute(context.logisticsIntents, context);
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
       TradeEnergy.runAll();
@@ -482,6 +506,7 @@ var BeeHiveMind = {
   },
 
   run: function () {
+    BeeHiveMind.prepareSpawnIntents();
     MovementManager.startTick();
     var context = BeeHiveMind.sense();
     BeeHiveMind.decide(context);
@@ -529,6 +554,7 @@ var BeeHiveMind = {
       ensureRoomQueue(room.name);
       fillQueueForRoom(context, room);
     }
+    BeeHiveMind.mergeSpawnIntents(context);
     var squadHandled = false;
     for (var s = 0; s < context.spawns.length; s++) {
       var spawner = context.spawns[s];
@@ -552,7 +578,197 @@ var BeeHiveMind = {
         if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
       }
     }
+  },
+
+  prepareSpawnIntents: function () {
+    if (typeof global === 'undefined') return;
+    if (!global.__BHM) global.__BHM = {};
+    if (!global.__BHM.spawnIntents || global.__BHM.spawnIntentsTick !== Game.time) {
+      global.__BHM.spawnIntents = [];
+      global.__BHM.spawnIntentsTick = Game.time;
+    }
+  },
+
+  drawExpansionPanel: function (context) {
+    // Draw a compact summary so operators can see expansion status without opening Memory.
+    var roomName = null;
+    if (ConfigExpansion && typeof ConfigExpansion.MAIN_ROOM_SELECTOR === 'function') {
+      try {
+        roomName = ConfigExpansion.MAIN_ROOM_SELECTOR();
+      } catch (selectorErr) {
+        roomName = null;
+      }
+    }
+    if (!roomName && context && context.roomsOwned && context.roomsOwned.length) {
+      roomName = context.roomsOwned[0].name;
+    }
+    if (!roomName || !Game.rooms || !Game.rooms[roomName]) return;
+    var panelRoom = Game.rooms[roomName];
+    if (!panelRoom.visual) return;
+
+    if (!Memory.__BHM) Memory.__BHM = {};
+    if (!Memory.__BHM.expand) Memory.__BHM.expand = {};
+    var state = Memory.__BHM.expand;
+    var phase = state.phase || 'idle';
+    var target = state.target || '-';
+
+    var lines = [];
+    lines.push('Expand: ' + phase);
+    lines.push('Target: ' + target);
+
+    if (phase === 'idle') {
+      var blockers = null;
+      if (ExpandSelector && typeof ExpandSelector.explainBlockers === 'function') {
+        try {
+          blockers = ExpandSelector.explainBlockers();
+        } catch (blockErr) {
+          blockers = ['error'];
+        }
+      }
+      if (typeof blockers === 'string') blockers = [blockers];
+      if (!Array.isArray(blockers)) blockers = [];
+      if (blockers.length) {
+        lines.push('Block: ' + blockers.join(', '));
+      } else {
+        lines.push('Block: none');
+      }
+    }
+
+    var x = 1;
+    var y = 1;
+    var lineHeight = 0.8;
+    var opts = { align: 'left', opacity: 0.85, font: 0.6, color: '#98fb98' };
+    var i;
+    for (i = 0; i < lines.length; i++) {
+      panelRoom.visual.text(lines[i], x, y + (i * lineHeight), opts);
+    }
+  },
+
+  mergeSpawnIntents: function (context) {
+    if (typeof global === 'undefined' || !global.__BHM || !Array.isArray(global.__BHM.spawnIntents)) return;
+    if (!global.__BHM.spawnIntents.length) return;
+    var intents = global.__BHM.spawnIntents.slice();
+    global.__BHM.spawnIntents.length = 0;
+    var sequence = global.__BHM.spawnIntentSequence | 0;
+    for (var i = 0; i < intents.length; i++) {
+      var raw = intents[i];
+      if (!raw) continue;
+      var spec = cloneIntentSpec(raw);
+      if (!spec) continue;
+      sequence++;
+      var home = resolveIntentHome(spec, context);
+      if (!home) continue;
+      var queue = ensureRoomQueue(home);
+      if (!queue) continue;
+      if (spec.intentId && queueHasIntent(queue, spec.intentId)) continue;
+      if (!spec.home) spec.home = home;
+      if (!spec.homeRoom) spec.homeRoom = home;
+      var queueItem = buildQueueItemFromIntent(spec, sequence);
+      if (!queueItem) continue;
+      queue.push(queueItem);
+      dlog('📨 [Intent]', home, 'queued intent for', queueItem.role, 'prio', queueItem.priority, 'target', queueItem.targetRoom || 'n/a');
+    }
+    global.__BHM.spawnIntentSequence = sequence;
   }
 };
+
+function cloneIntentSpec(spec) {
+  try {
+    if (typeof _ !== 'undefined' && _.cloneDeep) return _.cloneDeep(spec);
+  } catch (cloneErr) {}
+  try {
+    return JSON.parse(JSON.stringify(spec));
+  } catch (jsonErr) {}
+  var copy = {};
+  for (var key in spec) {
+    if (!Object.prototype.hasOwnProperty.call(spec, key)) continue;
+    copy[key] = spec[key];
+  }
+  return copy;
+}
+
+function resolveIntentHome(spec, context) {
+  var home = null;
+  if (spec.home) home = spec.home;
+  if (!home && spec.homeRoom) home = spec.homeRoom;
+  if (!home && spec.memory && spec.memory.homeRoom) home = spec.memory.homeRoom;
+  if (!home && context && context.roomsOwned && context.roomsOwned.length) home = context.roomsOwned[0].name;
+  if (!home && spec.memory && spec.memory.home) home = spec.memory.home;
+  return home;
+}
+
+function queueHasIntent(queue, intentId) {
+  if (!intentId) return false;
+  for (var i = 0; i < queue.length; i++) {
+    var entry = queue[i];
+    if (!entry) continue;
+    if (entry.intentId && entry.intentId === intentId) return true;
+  }
+  return false;
+}
+
+function buildQueueItemFromIntent(spec, sequence) {
+  var role = canonicalIntentRole(spec.role || spec.task || null);
+  if (!role) return null;
+  var item = {
+    role: role,
+    task: spec.task || role,
+    home: spec.home || spec.homeRoom || null,
+    created: Game.time,
+    intentOrder: sequence,
+    priority: convertIntentPriority(spec.priority),
+    retryAt: 0,
+    intentId: spec.intentId || null,
+    targetRoom: spec.targetRoom || spec.target || null,
+    intentSpec: spec
+  };
+  if (spec.memory && spec.memory.targetRoom && !item.targetRoom) item.targetRoom = spec.memory.targetRoom;
+  if (Array.isArray(spec.body)) item.body = spec.body.slice();
+  return item;
+}
+
+function canonicalIntentRole(role) {
+  if (!role) return null;
+  if (typeof role !== 'string') return role;
+  if (role === 'hauler') return 'courier';
+  if (role === 'Hauler' || role === 'HAULER') return 'courier';
+  if (role === 'claimer') return 'Claimer';
+  if (role === 'claimerTask') return 'Claimer';
+  if (role === 'builder') return 'builder';
+  if (role === 'Builder') return 'builder';
+  if (role === 'courier') return 'courier';
+  if (role === 'Courier') return 'courier';
+  if (role === 'Claimer' || role === 'builder' || role === 'courier') return role;
+  return role;
+}
+
+function convertIntentPriority(raw) {
+  var base = (typeof raw === 'number') ? raw : 50;
+  if (base < 0) base = 0;
+  if (base > 999) base = 999;
+  return 1000 - base;
+}
+
+function energyNeededForQueueItem(item) {
+  if (!item) return 0;
+  if (Array.isArray(item.body) && item.body.length) return bodyCost(item.body);
+  if (item.intentSpec && Array.isArray(item.intentSpec.body) && item.intentSpec.body.length) {
+    return bodyCost(item.intentSpec.body);
+  }
+  var role = item.role || (item.intentSpec ? item.intentSpec.role : null);
+  if (!role && item.intentSpec && item.intentSpec.task) role = item.intentSpec.task;
+  role = canonicalIntentRole(role);
+  return minEnergyFor(role);
+}
+
+function bodyCost(body) {
+  if (!Array.isArray(body)) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    total += BODYPART_COST[part] || 0;
+  }
+  return total;
+}
 
 module.exports = BeeHiveMind;
