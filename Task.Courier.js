@@ -59,6 +59,221 @@ function ensureTask(creep) {
   if (!creep.memory._task) creep.memory._task = null;
 }
 
+// Expansion helper: detect haulers earmarked for forward base work.
+function isExpansionAssignment(creep) {
+  if (!creep || !creep.memory) return false;
+  if (creep.memory.task === 'expand' && creep.memory.target) return true;
+  if (creep.memory.expand && creep.memory.expand.target) {
+    if (!creep.memory.target) creep.memory.target = creep.memory.expand.target;
+    creep.memory.task = 'expand';
+    return true;
+  }
+  return false;
+}
+
+// Expansion helper: centralized room-to-room routing with Traveler if available.
+function travelToRoomCenter(creep, roomName) {
+  if (!creep || !roomName) return;
+  var targetPos = new RoomPosition(25, 25, roomName);
+  if (creep.travelTo) {
+    creep.travelTo(targetPos, { range: 20, reusePath: 40 });
+  } else {
+    creep.moveTo(targetPos, { reusePath: 40 });
+  }
+}
+
+// Expansion helper: identify any spawn asset (structure/site) in the target room.
+function locateExpansionSpawn(room) {
+  if (!room) return null;
+  var built = room.find(FIND_MY_STRUCTURES, {
+    filter: function (s) { return s.structureType === STRUCTURE_SPAWN; }
+  });
+  if (built && built.length > 0) return built[0];
+  var sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+    filter: function (s) { return s.structureType === STRUCTURE_SPAWN; }
+  });
+  if (sites && sites.length > 0) return sites[0];
+  return null;
+}
+
+// Expansion helper: return true once a real spawn exists so couriers fall back to normal logic.
+function expansionRoomStable(room) {
+  if (!room) return false;
+  var spawn = room.find(FIND_MY_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_SPAWN;
+    }
+  });
+  return !!(spawn && spawn.length > 0);
+}
+
+// Expansion helper: pick the best home-side withdrawal target so couriers stay efficient.
+function chooseHomeEnergySource(room) {
+  if (!room) return null;
+  if (room.storage && room.storage.store && room.storage.store[RESOURCE_ENERGY] > 0) {
+    return { target: room.storage, action: 'withdraw' };
+  }
+  if (room.terminal && room.terminal.store && room.terminal.store[RESOURCE_ENERGY] > 0) {
+    return { target: room.terminal, action: 'withdraw' };
+  }
+  var spawns = room.find(FIND_MY_STRUCTURES, {
+    filter: function (s) { return s.structureType === STRUCTURE_SPAWN && s.store[RESOURCE_ENERGY] > 0; }
+  });
+  if (spawns && spawns.length > 0) return { target: spawns[0], action: 'withdraw' };
+  var containers = room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER && s.store && s.store[RESOURCE_ENERGY] > 0;
+    }
+  });
+  if (containers && containers.length > 0) return { target: containers[0], action: 'withdraw' };
+  var drops = room.find(FIND_DROPPED_RESOURCES, {
+    filter: function (r) { return r.resourceType === RESOURCE_ENERGY && r.amount > 100; }
+  });
+  if (drops && drops.length > 0) return { target: drops[0], action: 'pickup' };
+  return null;
+}
+
+// Expansion helper: provide a sink inside the target room (spawn, builders, or a drop spot).
+function deliverExpansionEnergy(creep, room, expansionAnchor) {
+  if (!creep || !room) return true;
+  var spawnAsset = locateExpansionSpawn(room);
+  if (spawnAsset && spawnAsset.structureType === STRUCTURE_SPAWN) {
+    if (!creep.pos.inRangeTo(spawnAsset, 1)) {
+      if (creep.travelTo) {
+        creep.travelTo(spawnAsset, { range: 1, reusePath: 15 });
+      } else {
+        creep.moveTo(spawnAsset, { reusePath: 15 });
+      }
+      return true;
+    }
+    BeeActions.safeTransfer(creep, spawnAsset, RESOURCE_ENERGY);
+    return true;
+  }
+  var builders = room.find(FIND_MY_CREEPS, {
+    filter: function (c) {
+      if (c === creep) return false;
+      if (!isExpansionAssignment(c)) return false;
+      if (!c.store || c.store.getFreeCapacity(RESOURCE_ENERGY) === 0) return false;
+      if (c.memory.expand && c.memory.expand.role && c.memory.expand.role !== 'builder') return false;
+      return true;
+    }
+  });
+  if (builders && builders.length > 0) {
+    var buddy = builders[0];
+    if (!creep.pos.inRangeTo(buddy, 1)) {
+      if (creep.travelTo) {
+        creep.travelTo(buddy, { range: 1, reusePath: 10 });
+      } else {
+        creep.moveTo(buddy, { reusePath: 10 });
+      }
+      return true;
+    }
+    creep.transfer(buddy, RESOURCE_ENERGY);
+    return true;
+  }
+  if (spawnAsset && spawnAsset.pos) {
+    if (!creep.pos.inRangeTo(spawnAsset.pos, 1)) {
+      if (creep.travelTo) {
+        creep.travelTo(spawnAsset.pos, { range: 1, reusePath: 10 });
+      } else {
+        creep.moveTo(spawnAsset.pos, { reusePath: 10 });
+      }
+      return true;
+    }
+  } else if (expansionAnchor) {
+    if (!creep.pos.inRangeTo(expansionAnchor, 1)) {
+      if (creep.travelTo) {
+        creep.travelTo(expansionAnchor, { range: 1, reusePath: 10 });
+      } else {
+        creep.moveTo(expansionAnchor, { reusePath: 10 });
+      }
+      return true;
+    }
+  }
+  creep.drop(RESOURCE_ENERGY);
+  return true;
+}
+
+// Expansion-specific behavior: shuttle energy from home to target until the spawn is online and controller is steady.
+function handleExpansionCourier(creep) {
+  if (!isExpansionAssignment(creep)) return false;
+  var targetRoomName = creep.memory.target;
+  if (!targetRoomName) return false;
+  var targetRoom = Game.rooms[targetRoomName];
+  if (expansionRoomStable(targetRoom)) return false;
+  var anchor = null;
+  if (targetRoom) {
+    var spawnAsset = locateExpansionSpawn(targetRoom);
+    if (spawnAsset && spawnAsset.pos) {
+      anchor = spawnAsset.pos;
+    } else if (targetRoom.controller) {
+      anchor = targetRoom.controller.pos;
+    }
+  }
+  var homeName = creep.memory.home;
+  if (!homeName) {
+    if (creep.memory.expand && creep.memory.expand.home) {
+      homeName = creep.memory.expand.home;
+      creep.memory.home = homeName;
+    } else if (creep.memory.homeRoom) {
+      homeName = creep.memory.homeRoom;
+    }
+  }
+  if (creep.store[RESOURCE_ENERGY] === 0) {
+    if (homeName && creep.room.name !== homeName) {
+      travelToRoomCenter(creep, homeName);
+      return true;
+    }
+    var homeRoom = homeName ? Game.rooms[homeName] : creep.room;
+    if (!homeRoom) {
+      if (homeName) travelToRoomCenter(creep, homeName);
+      return true;
+    }
+    var source = chooseHomeEnergySource(homeRoom);
+    if (!source || !source.target) {
+      if (homeRoom.controller) {
+        if (!creep.pos.inRangeTo(homeRoom.controller, 3)) {
+          travelToRoomCenter(creep, homeRoom.name);
+        }
+      }
+      return true;
+    }
+    var target = source.target;
+    if (source.action === 'pickup') {
+      if (!creep.pos.inRangeTo(target, 1)) {
+        if (creep.travelTo) {
+          creep.travelTo(target, { range: 1, reusePath: 10 });
+        } else {
+          creep.moveTo(target, { reusePath: 10 });
+        }
+        return true;
+      }
+      BeeActions.safePickup(creep, target);
+      return true;
+    }
+    if (!creep.pos.inRangeTo(target, 1)) {
+      if (creep.travelTo) {
+        creep.travelTo(target, { range: 1, reusePath: 10 });
+      } else {
+        creep.moveTo(target, { reusePath: 10 });
+      }
+      return true;
+    }
+    BeeActions.safeWithdraw(creep, target, RESOURCE_ENERGY);
+    return true;
+  }
+  if (creep.room.name !== targetRoomName) {
+    travelToRoomCenter(creep, targetRoomName);
+    return true;
+  }
+  if (!targetRoom) {
+    travelToRoomCenter(creep, targetRoomName);
+    return true;
+  }
+  deliverExpansionEnergy(creep, targetRoom, anchor);
+  return true;
+}
+
 function releaseHaulKey(key) {
   if (!key) return;
   if (!Memory.__BHM || !Memory.__BHM.haul || !Memory.__BHM.haul.entries) return;
@@ -267,6 +482,7 @@ function executeTask(creep, task) {
 var TaskCourier = {
   run: function (creep) {
     if (!creep || creep.spawning) return;
+    if (handleExpansionCourier(creep)) return;
     ensureTask(creep);
     var task = creep.memory._task;
     if (needNewTask(creep, task)) {
