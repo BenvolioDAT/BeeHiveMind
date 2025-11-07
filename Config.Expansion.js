@@ -13,12 +13,14 @@ var CFG = {
 
     // Selects the main room name for expansion planning.
     MAIN_ROOM_SELECTOR: function () {
+        var gameRef = typeof Game !== 'undefined' ? Game : { spawns: {}, rooms: {} };
+
         // Prefer the room containing the first available spawn.
-        for (var spawnName in Game.spawns) {
-            if (!Game.spawns.hasOwnProperty(spawnName)) {
+        for (var spawnName in gameRef.spawns) {
+            if (!gameRef.spawns.hasOwnProperty(spawnName)) {
                 continue;
             }
-            var spawn = Game.spawns[spawnName];
+            var spawn = gameRef.spawns[spawnName];
             if (spawn && spawn.room && spawn.room.name) {
                 return spawn.room.name;
             }
@@ -27,11 +29,11 @@ var CFG = {
         // Fallback to the owned room with the highest controller level.
         var bestRoomName = null;
         var bestLevel = -1;
-        for (var roomName in Game.rooms) {
-            if (!Game.rooms.hasOwnProperty(roomName)) {
+        for (var roomName in gameRef.rooms) {
+            if (!gameRef.rooms.hasOwnProperty(roomName)) {
                 continue;
             }
-            var room = Game.rooms[roomName];
+            var room = gameRef.rooms[roomName];
             if (!room || !room.controller || !room.controller.my) {
                 continue;
             }
