@@ -544,6 +544,191 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
 }
 
 
+function normalizeIntentTask(role) {
+  if (!role) return role;
+  if (typeof role !== 'string') return role;
+  if (role === 'hauler' || role === 'Hauler') return 'courier';
+  if (role === 'HAULER') return 'courier';
+  if (role === 'claimer') return 'Claimer';
+  if (role === 'CLAIMER') return 'Claimer';
+  if (role === 'Builder') return 'builder';
+  if (role === 'Courier') return 'courier';
+  return role;
+}
+
+function pickBodyForIntent(role, energyAvailable) {
+  var taskKey = normalizeIntentTask(role);
+  if (!taskKey) return [];
+  var body = getBodyForTask(taskKey, energyAvailable);
+  if (body && body.length) return body;
+  if (typeof taskKey === 'string') {
+    var altKey = taskKey.charAt(0).toUpperCase() + taskKey.slice(1);
+    var alt = getBodyForTask(altKey, energyAvailable);
+    if (alt && alt.length) return alt;
+  }
+  return [];
+}
+
+function deepClone(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    var arr = [];
+    for (var i = 0; i < value.length; i++) {
+      arr[i] = deepClone(value[i]);
+    }
+    return arr;
+  }
+  var out = {};
+  for (var key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    out[key] = deepClone(value[key]);
+  }
+  return out;
+}
+
+function Spawn_From_Intent(spawn, intent, availableEnergy) {
+  if (!spawn || !intent) return false;
+  var energyBudget = availableEnergy;
+  if (energyBudget === null || energyBudget === undefined) {
+    energyBudget = Calculate_Spawn_Resource(spawn);
+  }
+  var roleKey = intent.role || intent.task || (intent.memory && intent.memory.task);
+  var body = null;
+  if (Array.isArray(intent.body) && intent.body.length) {
+    body = intent.body.slice();
+  } else {
+    body = pickBodyForIntent(roleKey, energyBudget);
+  }
+  if (!body || !body.length) return false;
+  var bodyCost = _.sum(body, function (part) { return BODYPART_COST[part] || 0; });
+  if (bodyCost > energyBudget) return false;
+  var name = intent.name;
+  if (!name) {
+    var nameRole = normalizeIntentTask(roleKey) || 'Worker';
+    name = Generate_Creep_Name(nameRole);
+  }
+  if (!name) return false;
+  var memory = deepClone(intent.memory) || {};
+  if (!memory.role) {
+    if (intent.role) memory.role = intent.role;
+    else memory.role = 'Worker_Bee';
+  }
+  if (!memory.task && intent.task) memory.task = intent.task;
+  if (!memory.task && memory.role && typeof memory.role === 'string') {
+    memory.task = normalizeTask(memory.role);
+  }
+  if (!memory.bornTask && memory.task) memory.bornTask = memory.task;
+  if (!memory.birthBody) memory.birthBody = body.slice();
+  if (!memory.home && intent.home) memory.home = intent.home;
+  if (!memory.home && intent.homeRoom) memory.home = intent.homeRoom;
+  if (!memory.homeRoom && intent.homeRoom) memory.homeRoom = intent.homeRoom;
+  if (!memory.homeRoom && memory.home) memory.homeRoom = memory.home;
+  if (!memory.target && intent.target) memory.target = intent.target;
+  if (!memory.target && intent.targetRoom) memory.target = intent.targetRoom;
+  if (!memory.targetRoom && intent.targetRoom) memory.targetRoom = intent.targetRoom;
+  if (!memory.targetRoom && memory.target) memory.targetRoom = memory.target;
+  var result = spawn.spawnCreep(body, name, { memory: memory });
+  if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+    spawnLog.debug('Intent spawn', memory.role || 'unknown', name, 'result', result);
+  }
+  return result === OK;
+}
+
+function getIntentHome(intent) {
+  if (!intent) return null;
+  if (intent.home) return intent.home;
+  if (intent.homeRoom) return intent.homeRoom;
+  if (intent.memory) {
+    if (intent.memory.homeRoom) return intent.memory.homeRoom;
+    if (intent.memory.home) return intent.memory.home;
+  }
+  return null;
+}
+
+function getIntentTarget(intent) {
+  if (!intent) return null;
+  if (intent.target) return intent.target;
+  if (intent.targetRoom) return intent.targetRoom;
+  if (intent.memory) {
+    if (intent.memory.targetRoom) return intent.memory.targetRoom;
+    if (intent.memory.target) return intent.memory.target;
+  }
+  return null;
+}
+
+function getIntentRole(intent) {
+  if (!intent) return 'Worker';
+  if (intent.role) return intent.role;
+  if (intent.task) return intent.task;
+  if (intent.memory) {
+    if (intent.memory.role) return intent.memory.role;
+    if (intent.memory.task) return intent.memory.task;
+  }
+  return 'Worker';
+}
+
+function ensureIntentBody(intent, energyBudget) {
+  if (!intent) return null;
+  if (Array.isArray(intent.body) && intent.body.length) {
+    return intent.body.slice();
+  }
+  var intentRole = getIntentRole(intent);
+  var fallback = pickBodyForIntent(intentRole, energyBudget);
+  if (fallback && fallback.length) {
+    return fallback;
+  }
+  return null;
+}
+
+function Consume_Spawn_Intents(spawn) {
+  if (!spawn || spawn.spawning) return false;
+  if (typeof global === 'undefined' || !global.__BHM) return false;
+  var queue = global.__BHM.spawnIntents;
+  if (!Array.isArray(queue) || !queue.length) return false;
+  var energyBudget = Calculate_Spawn_Resource(spawn);
+  if (!energyBudget) return false;
+  var roomName = null;
+  if (spawn.room && spawn.room.name) {
+    roomName = spawn.room.name;
+  }
+  for (var i = 0; i < queue.length; i++) {
+    var raw = queue[i];
+    if (!raw) {
+      queue.splice(i, 1);
+      i--;
+      continue;
+    }
+    var home = getIntentHome(raw);
+    if (home && roomName && home !== roomName) {
+      continue;
+    }
+    var role = getIntentRole(raw);
+    var body = ensureIntentBody(raw, energyBudget);
+    if (!body || !body.length) {
+      queue.splice(i, 1);
+      i--;
+      continue;
+    }
+    var bodyCost = _.sum(body, function (part) { return BODYPART_COST[part] || 0; });
+    if (bodyCost > energyBudget) {
+      return false;
+    }
+    var attempt = deepClone(raw);
+    attempt.body = body;
+    var target = getIntentTarget(attempt);
+    if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+      spawnLog.info('ExpansionIntent role=' + role + ' target=' + (target || 'n/a'));
+    }
+    var ok = Spawn_From_Intent(spawn, attempt, energyBudget);
+    if (ok) {
+      queue.splice(i, 1);
+    }
+    return ok;
+  }
+  return false;
+}
+
+
 // --- REPLACE your existing Spawn_Squad with this hardened version ---
 function Spawn_Squad(spawn, squadId = 'Alpha') {
   if (!spawn || spawn.spawning) return false;
@@ -680,4 +865,6 @@ module.exports = {
   // existing helpers
   getBodyForTask,
   Spawn_Worker_Bee,
+  Spawn_From_Intent,
+  Consume_Spawn_Intents,
 };

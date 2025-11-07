@@ -1,5 +1,7 @@
 // Task.Scout.js — ring-based exploration with Debug_say & Debug_draw
 var BeeToolbox = require('BeeToolbox');
+var IntelRoom = require('Intel.Room');
+var ConfigExpansion = require('Config.Expansion');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 
 /** =========================
@@ -478,6 +480,165 @@ function tryClaimRoomThisTick(creep, roomName) {
   return cur === creep.name;
 }
 
+// ---------- Targeted sweep queue (shared in Memory.__BHM) ----------
+function getExpansionMainRoom() {
+  // Ask Config.Expansion which room acts as the expansion hub; swallow errors so scouts stay resilient.
+  if (!ConfigExpansion) return null;
+  var selector = ConfigExpansion.MAIN_ROOM_SELECTOR;
+  if (typeof selector !== 'function') return null;
+  try {
+    var sel = selector();
+    return (typeof sel === 'string' && sel.length) ? sel : null;
+  } catch (e) {
+    return null;
+  }
+}
+function getExpansionMaxDistance() {
+  // Respect configuration but clamp to sensible defaults so the queue never explodes.
+  var dist = ConfigExpansion && ConfigExpansion.MAX_EXPANSION_DISTANCE;
+  if (typeof dist !== 'number' || dist < 1) dist = 2;
+  return dist;
+}
+function ensureGlobalScoutQueue() {
+  // Ensure the shared queue exists for all creeps to pull from.
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Array.isArray(Memory.__BHM.scoutQueue)) Memory.__BHM.scoutQueue = [];
+  return Memory.__BHM.scoutQueue;
+}
+function ensureScoutQueueMeta() {
+  // Meta stores BFS bookkeeping (main room, seen rooms, processed rooms, distance mapping).
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Memory.__BHM.scoutQueueMeta) Memory.__BHM.scoutQueueMeta = {};
+  var meta = Memory.__BHM.scoutQueueMeta;
+  if (!meta.seen) meta.seen = {};
+  if (!meta.distances) meta.distances = {};
+  if (!meta.processed) meta.processed = {};
+  if (typeof meta.main !== 'string') meta.main = null;
+  return meta;
+}
+function resetScoutQueue(mainRoom) {
+  // Reset the queue + metadata when the main room changes or when we recycle the sweep.
+  var queue = ensureGlobalScoutQueue();
+  var meta = ensureScoutQueueMeta();
+  queue.length = 0;
+  meta.seen = {};
+  meta.distances = {};
+  meta.processed = {};
+  meta.main = (typeof mainRoom === 'string' && mainRoom.length) ? mainRoom : null;
+  if (meta.main) {
+    meta.seen[meta.main] = true;
+    meta.distances[meta.main] = 0;
+    meta.processed[meta.main] = false;
+    enqueueNeighborsForRoom(meta.main);
+  }
+  return queue;
+}
+function ensureScoutQueueSeeded() {
+  // Seed (or reseed) the queue with neighbors when empty so scouts always have work.
+  var queue = ensureGlobalScoutQueue();
+  var meta = ensureScoutQueueMeta();
+  var main = getExpansionMainRoom();
+  if (meta.main !== main) {
+    return resetScoutQueue(main);
+  }
+  if (!queue.length && main) {
+    return resetScoutQueue(main);
+  }
+  if (!main && meta.main) {
+    return resetScoutQueue(null);
+  }
+  return queue;
+}
+function enqueueNeighborsForRoom(roomName) {
+  // Expand BFS frontier from a room once to discover fresh targets up to the configured distance.
+  if (!roomName) return;
+  var meta = ensureScoutQueueMeta();
+  var queue = ensureGlobalScoutQueue();
+  if (!meta.main) return;
+  if (meta.processed[roomName]) return;
+
+  var baseDist = meta.distances[roomName];
+  if (baseDist == null) {
+    if (roomName === meta.main) baseDist = 0;
+    else {
+      try {
+        baseDist = Game.map.getRoomLinearDistance(meta.main, roomName);
+      } catch (e) {
+        baseDist = Infinity;
+      }
+      if (typeof baseDist !== 'number' || baseDist < 0) baseDist = Infinity;
+    }
+    meta.distances[roomName] = baseDist;
+  }
+  meta.processed[roomName] = true;
+  if (baseDist === Infinity || baseDist >= getExpansionMaxDistance()) return;
+
+  var exits;
+  try {
+    exits = Game.map.describeExits(roomName) || {};
+  } catch (e2) {
+    exits = {};
+  }
+  for (var dir in exits) {
+    if (!exits.hasOwnProperty(dir)) continue;
+    var rn = exits[dir];
+    if (!rn || meta.seen[rn]) continue;
+    var nextDist = baseDist + 1;
+    if (nextDist > getExpansionMaxDistance()) continue;
+    meta.seen[rn] = true;
+    meta.distances[rn] = nextDist;
+    meta.processed[rn] = false;
+    queue.push(rn);
+  }
+}
+function pullNextScoutQueueTarget(queue) {
+  // Shift the next viable queue entry while skipping invalid/blocked rooms gracefully.
+  if (!queue || !queue.length) return null;
+  var meta = ensureScoutQueueMeta();
+  var main = meta.main;
+  var maxDist = getExpansionMaxDistance();
+  while (queue.length) {
+    var candidate = queue.shift();
+    if (!candidate) continue;
+    if (main) {
+      var dist;
+      try {
+        dist = Game.map.getRoomLinearDistance(main, candidate);
+      } catch (e) {
+        dist = Infinity;
+      }
+      if (typeof dist !== 'number') dist = Infinity;
+      if (dist === Infinity || dist > maxDist) continue;
+    }
+    if (!okRoomName(candidate) || isBlockedRecently(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function marchToRoomCenter(creep, roomName) {
+  // Encourage the scout to step toward the room's midpoint so visuals/intel cover the whole room.
+  if (!creep || !roomName) return false;
+  if (creep.pos.roomName !== roomName) return false;
+
+  var center = new RoomPosition(25, 25, roomName);
+  var desiredRange = 5;
+  var dist = creep.pos.getRangeTo(center);
+  if (dist > desiredRange) {
+    debugSay(creep, '⚑');
+    if (CFG.DEBUG_DRAW && creep.room) {
+      debugLabel(creep.room, center, 'CENTER', CFG.DRAW.TEXT);
+      debugDrawLine(creep, center, CFG.DRAW.TRAVEL, 'center');
+    }
+    go(creep, center, { range: desiredRange, reusePath: PATH_REUSE });
+    return true;
+  }
+  if (CFG.DEBUG_DRAW && creep.room) {
+    debugRing(creep.room, center, CFG.DRAW.TARGET, 'CENTER');
+  }
+  return false;
+}
+
 // ---------- Queue building (ALL rings up to radius) ----------
 function rebuildQueueAllRings(mem, creep) {
   var home = mem.home;
@@ -604,6 +765,7 @@ var TaskScout = {
 
   run: function (creep) {
     var M = ensureScoutMem(creep); // {home, queue, prevRoom?}
+    var scoutQueue = ensureScoutQueueSeeded();
     if (!creep.memory.lastRoom) creep.memory.lastRoom = creep.room.name;
 
     // leash: if we're outside radius, step one room inward first
@@ -626,6 +788,10 @@ var TaskScout = {
 
       stampVisit(creep.room.name);
       logRoomIntel(creep.room);
+      if (IntelRoom && typeof IntelRoom.collectRoomIntel === 'function') {
+        try { IntelRoom.collectRoomIntel(creep.room); } catch (e1) {}
+      }
+      enqueueNeighborsForRoom(creep.room.name);
 
       // draw arrival mark
       if (CFG.DEBUG_DRAW) {
@@ -642,6 +808,22 @@ var TaskScout = {
     } else {
       stampVisit(creep.room.name);
       if (shouldLogIntel(creep.room)) logRoomIntel(creep.room);
+      if (IntelRoom && typeof IntelRoom.collectRoomIntel === 'function') {
+        try { IntelRoom.collectRoomIntel(creep.room); } catch (e2) {}
+      }
+      enqueueNeighborsForRoom(creep.room.name);
+    }
+
+    // Adopt a queued scout target (BFS sweep) before falling back to the legacy ring shuffle.
+    if (!creep.memory.targetRoom) {
+      var queuedTarget = pullNextScoutQueueTarget(scoutQueue);
+      if (queuedTarget) {
+        creep.memory.targetRoom = queuedTarget;
+        creep.memory.nextHop = computeNextHop(creep.room.name, queuedTarget);
+        if (CFG.DEBUG_DRAW && Game.rooms[creep.room.name]) {
+          debugLabel(Game.rooms[creep.room.name], creep.pos, '🎯 ' + queuedTarget, CFG.DRAW.TARGET);
+        }
+      }
     }
 
     // If we have a target, ensure nextHop is set and go via waypoint
@@ -683,32 +865,34 @@ var TaskScout = {
     }
 
     // No target (or we just arrived) — ensure a queue spanning all rings
-    if (!M.queue.length) {
-      rebuildQueueAllRings(M, creep);
-    }
-
-    // Choose next target with same-tick claim — but allow shared gateways if home has ≤2 exits
-    var allowGatewayShare = isGatewayHome(M.home);
-    while (M.queue.length) {
-      var next = M.queue.shift();
-      if (!okRoomName(next) || isBlockedRecently(next)) continue;
-      if (Game.map.getRoomLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
-      if (next === (M.prevRoom || null) && M.queue.length) continue;
-
-      var claimOK = tryClaimRoomThisTick(creep, next);
-      if (!claimOK) {
-        // If this is an adjacent gateway off a low-exit home, allow sharing
-        if (!(allowGatewayShare && isAdjToHome(M.home, next))) continue; // still skip if not a gateway
+    if (!creep.memory.targetRoom) {
+      if (!M.queue.length) {
+        rebuildQueueAllRings(M, creep);
       }
 
-      creep.memory.targetRoom = next;
-      creep.memory.nextHop = computeNextHop(creep.room.name, next);
+      // Choose next target with same-tick claim — but allow shared gateways if home has ≤2 exits
+      var allowGatewayShare = isGatewayHome(M.home);
+      while (M.queue.length) {
+        var next = M.queue.shift();
+        if (!okRoomName(next) || isBlockedRecently(next)) continue;
+        if (Game.map.getRoomLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
+        if (next === (M.prevRoom || null) && M.queue.length) continue;
 
-      // visuals for chosen target (if visible)
-      if (CFG.DEBUG_DRAW && Game.rooms[creep.room.name]) {
-        debugLabel(Game.rooms[creep.room.name], creep.pos, '🎯 ' + next, CFG.DRAW.TARGET);
+        var claimOK = tryClaimRoomThisTick(creep, next);
+        if (!claimOK) {
+          // If this is an adjacent gateway off a low-exit home, allow sharing
+          if (!(allowGatewayShare && isAdjToHome(M.home, next))) continue; // still skip if not a gateway
+        }
+
+        creep.memory.targetRoom = next;
+        creep.memory.nextHop = computeNextHop(creep.room.name, next);
+
+        // visuals for chosen target (if visible)
+        if (CFG.DEBUG_DRAW && Game.rooms[creep.room.name]) {
+          debugLabel(Game.rooms[creep.room.name], creep.pos, '🎯 ' + next, CFG.DRAW.TARGET);
+        }
+        break;
       }
-      break;
     }
 
     // If still nothing to do, idle slightly off-center
@@ -740,6 +924,9 @@ var TaskScout = {
       debugSay(creep, '➡');
       go(creep, new RoomPosition(25, 25, nh), { range: 20, reusePath: PATH_REUSE });
     } else {
+      if (marchToRoomCenter(creep, creep.memory.targetRoom)) {
+        return;
+      }
       creep.memory.targetRoom = null; // arrived
       creep.memory.nextHop = null;
     }
