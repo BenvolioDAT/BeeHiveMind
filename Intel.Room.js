@@ -1,38 +1,5 @@
 // Intel.Room.js — lightweight room intel helpers for scouting & planning (ES5 compliant)
 
-// Cached reference to our username (avoid repeated Game lookups)
-var _cachedUsername = null;
-
-/**
- * Resolve the player's username once so we can distinguish friendly reservations/ownership.
- * We attempt to read it from our spawns or owned controllers; falls back to null if unknown.
- */
-function getMyUsername() {
-  if (_cachedUsername) return _cachedUsername;
-  if (typeof Game === 'undefined') return null;
-
-  var name;
-  for (name in Game.spawns) {
-    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
-    var spawn = Game.spawns[name];
-    if (spawn && spawn.owner && spawn.owner.username) {
-      _cachedUsername = spawn.owner.username;
-      return _cachedUsername;
-    }
-  }
-
-  for (name in Game.rooms) {
-    if (!Object.prototype.hasOwnProperty.call(Game.rooms, name)) continue;
-    var room = Game.rooms[name];
-    if (room && room.controller && room.controller.my && room.controller.owner && room.controller.owner.username) {
-      _cachedUsername = room.controller.owner.username;
-      return _cachedUsername;
-    }
-  }
-
-  return null;
-}
-
 /**
  * Small helper to normalise room arguments (Room|string|Structure|Creep) into a room name.
  */
@@ -85,12 +52,12 @@ function collectRoomIntel(room) {
   // Timestamp to know when intel was captured
   mem.ts = (typeof Game !== 'undefined' && typeof Game.time === 'number') ? Game.time : 0;
 
-  // Minimal source intel: ids plus quick count for distribution work
+  // Minimal source intel: expose just the ids we can currently see
   var sourceIds = [];
   for (i = 0; i < sources.length; i++) {
     if (sources[i] && sources[i].id) sourceIds.push(sources[i].id);
   }
-  mem.sources = { count: sourceIds.length, ids: sourceIds };
+  mem.sources = sourceIds;
 
   // Ownership and reservation snapshot (only what we can currently see)
   mem.owner = (controller && controller.owner && controller.owner.username) ? controller.owner.username : null;
@@ -126,18 +93,13 @@ function collectRoomIntel(room) {
 
 /**
  * Returns true if the room has no owner and is not reserved by other players.
- * Friendly reservations (our own username) are treated as neutral for expansion logic.
  */
 function isRoomNeutral(room) {
   if (!room) return true;
   var controller = room.controller || null;
   if (!controller) return true;
   if (controller.owner) return false;
-  if (controller.reservation) {
-    var username = controller.reservation.username || null;
-    var mine = controller.my || (username && username === getMyUsername());
-    if (!mine) return false;
-  }
+  if (controller.reservation) return false;
   return true;
 }
 
