@@ -10,79 +10,6 @@
 var BeeSelectors = require('BeeSelectors');
 var BeeActions = require('BeeActions');
 var MovementManager = require('Movement.Manager');
-var SpawnPlacement = require('Planner.SpawnPlacement');
-
-// Expansion helper: detect builders earmarked for forward operating base work.
-function isExpansionAssignment(creep) {
-  if (!creep || !creep.memory) return false;
-  if (creep.memory.task === 'expand' && creep.memory.target) return true;
-  if (creep.memory.expand && creep.memory.expand.target) {
-    if (!creep.memory.target) creep.memory.target = creep.memory.expand.target;
-    creep.memory.task = 'expand';
-    return true;
-  }
-  return false;
-}
-
-// Expansion helper: use Traveler routing toward a room's approximate center.
-function travelToRoomCenter(creep, roomName) {
-  if (!creep || !roomName) return;
-  var targetPos = new RoomPosition(25, 25, roomName);
-  if (creep.travelTo) {
-    creep.travelTo(targetPos, { range: 20, reusePath: 40 });
-  } else {
-    creep.moveTo(targetPos, { reusePath: 40 });
-  }
-}
-
-// Expansion helper: reuse an existing spawn (structure/site) if one is already present.
-function findExpansionSpawnTarget(room) {
-  if (!room) return null;
-  var built = room.find(FIND_MY_STRUCTURES, {
-    filter: function (s) { return s.structureType === STRUCTURE_SPAWN; }
-  });
-  if (built && built.length > 0) return built[0];
-  var sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
-    filter: function (s) { return s.structureType === STRUCTURE_SPAWN; }
-  });
-  if (sites && sites.length > 0) return sites[0];
-  return null;
-}
-
-// Expansion helper: delegate spawn placement to Planner.SpawnPlacement for idempotent placement.
-function ensureExpansionSpawnSite(room) {
-  if (!room) return null;
-  var existing = findExpansionSpawnTarget(room);
-  if (existing) return existing;
-  if (!SpawnPlacement.placeInitialSpawnSite(room)) return null;
-  return findExpansionSpawnTarget(room);
-}
-
-// Expansion-specific behavior: travel, drop a spawn site, and focus build orders when flagged.
-function handleExpansionBuilder(creep) {
-  if (!isExpansionAssignment(creep)) return false;
-  var targetRoom = creep.memory.target;
-  if (!targetRoom) return false;
-  if (creep.room.name !== targetRoom) {
-    travelToRoomCenter(creep, targetRoom);
-    return true;
-  }
-  var room = creep.room;
-  var spawnTarget = ensureExpansionSpawnSite(room);
-  if (!spawnTarget) return false;
-  if (spawnTarget.structureType === STRUCTURE_SPAWN) {
-    return false;
-  }
-  if (!creep.memory._task || creep.memory._task.targetId !== spawnTarget.id || creep.memory._task.type !== 'build') {
-    creep.memory._task = {
-      type: 'build',
-      targetId: spawnTarget.id,
-      since: Game.time,
-      data: { structureType: STRUCTURE_SPAWN }
-    };
-  }
-  return false;
-}
 
 var CFG = Object.freeze({
   DEBUG_SAY: false,
@@ -349,7 +276,6 @@ function idle(creep) {
 var TaskBuilder = {
   run: function (creep) {
     if (!creep || creep.spawning) return;
-    if (handleExpansionBuilder(creep)) return;
     ensureTask(creep);
     var task = creep.memory._task;
     if (needNewTask(creep, task)) {
