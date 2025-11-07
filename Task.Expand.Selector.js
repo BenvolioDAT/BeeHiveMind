@@ -2,6 +2,14 @@
 
 var ConfigExpansion = require('Config.Expansion');
 var IntelRoom = require('Intel.Room');
+var BeeToolbox = require('BeeToolbox');
+
+var normRoomName = (BeeToolbox && typeof BeeToolbox.normRoomName === 'function')
+    ? BeeToolbox.normRoomName
+    : function (value) {
+        if (value === undefined || value === null) return null;
+        return String(value).toUpperCase();
+    };
 
 // Resolve Screeps' energy constant when available so the selector works in sim/test contexts.
 var ENERGY_KEY = (typeof RESOURCE_ENERGY !== 'undefined') ? RESOURCE_ENERGY : 'energy';
@@ -24,7 +32,8 @@ function pickMainRoom() {
     if (!ConfigExpansion || typeof ConfigExpansion.MAIN_ROOM_SELECTOR !== 'function') return null;
     try {
         var name = ConfigExpansion.MAIN_ROOM_SELECTOR();
-        return name || null;
+        if (!name) return null;
+        return normRoomName(name);
     } catch (err) {
         return null;
     }
@@ -199,7 +208,8 @@ function selectExpansionTarget() {
         }
     }
 
-    return best ? best.room : null;
+    if (!best || !best.room) return null;
+    return normRoomName(best.room);
 }
 
 /**

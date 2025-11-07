@@ -10,6 +10,15 @@ try {
     require('Traveler');
 } catch (e) {}
 
+var BeeToolbox = require('BeeToolbox');
+
+var normRoomName = (BeeToolbox && typeof BeeToolbox.normRoomName === 'function')
+    ? BeeToolbox.normRoomName
+    : function (value) {
+        if (value === undefined || value === null) return null;
+        return String(value).toUpperCase();
+    };
+
 var CFG = {
     DEBUG_SAY: false,
     DEBUG_DRAW: false
@@ -59,25 +68,32 @@ function getTargetRoom(creep) {
         return null;
     }
     var tgt = creep.memory.target;
-    if (typeof tgt !== 'string') {
-        return null;
+    if (!tgt && creep.memory.targetRoom) {
+        tgt = creep.memory.targetRoom;
     }
-    return tgt;
+    var normalized = normRoomName(tgt);
+    if (normalized) {
+        creep.memory.target = normalized;
+        creep.memory.targetRoom = normalized;
+    }
+    return normalized;
 }
 
 function moveToTargetRoom(creep, roomName) {
     if (!creep || !roomName) {
         return;
     }
+    var normalized = normRoomName(roomName);
+    if (!normalized) return;
     // Aim for the room center to avoid edge bouncing while we seek the controller.
-    var center = new RoomPosition(25, 25, roomName);
+    var center = new RoomPosition(25, 25, normalized);
     if (typeof creep.travelTo === 'function') {
         creep.travelTo(center);
     } else {
         creep.moveTo(center);
     }
-    debugSay(creep, 'to ' + roomName);
-    drawBreadcrumb(creep, '» ' + roomName);
+    debugSay(creep, 'to ' + normalized);
+    drawBreadcrumb(creep, '» ' + normalized);
 }
 
 function claimOrApproach(creep, controller) {
@@ -135,6 +151,14 @@ var roleExpandClaimer = {
             return;
         }
 
+        if (!creep.memory._expandAnnounce) {
+            try {
+                creep.say('EX-CLM', true);
+            } catch (announceErr) {}
+            var stamp = (typeof Game !== 'undefined' && typeof Game.time === 'number') ? Game.time : true;
+            creep.memory._expandAnnounce = stamp;
+        }
+
         // Core decision tree:
         // 1. Without a target, we deliberately idle so the manager can recycle/retask us.
         // 2. If we have a target but are outside the room, march toward the center to
@@ -151,7 +175,8 @@ var roleExpandClaimer = {
             return;
         }
 
-        var inTargetRoom = creep.room && creep.room.name === targetRoom;
+        var currentRoom = (creep.room && creep.room.name) ? normRoomName(creep.room.name) : null;
+        var inTargetRoom = currentRoom && targetRoom && currentRoom === targetRoom;
         if (!inTargetRoom) {
             moveToTargetRoom(creep, targetRoom);
             return;

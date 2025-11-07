@@ -21,6 +21,14 @@
 
 var ConfigExpansion = require('Config.Expansion');
 var ExpandSelector = require('Task.Expand.Selector');
+var BeeToolbox = require('BeeToolbox');
+
+var normRoomName = (BeeToolbox && typeof BeeToolbox.normRoomName === 'function')
+    ? BeeToolbox.normRoomName
+    : function (value) {
+        if (value === undefined || value === null) return null;
+        return String(value).toUpperCase();
+    };
 
 var PHASE_IDLE = 'idle';
 var PHASE_CLAIMING = 'claiming';
@@ -58,6 +66,8 @@ function getMemoryRoot() {
     if (!state.lastHaulerRequest) state.lastHaulerRequest = 0;
     if (!state.status) state.status = '';
     if (!state.inProgress) state.inProgress = {};
+    if (state.target) state.target = normRoomName(state.target);
+    if (state.mainRoom) state.mainRoom = normRoomName(state.mainRoom);
     return state;
 }
 
@@ -66,7 +76,9 @@ function getMainRoomName() {
         return null;
     }
     try {
-        return ConfigExpansion.MAIN_ROOM_SELECTOR();
+        var name = ConfigExpansion.MAIN_ROOM_SELECTOR();
+        if (!name) return null;
+        return normRoomName(name);
     } catch (err) {
         return null;
     }
@@ -81,26 +93,71 @@ function getSpawnQueue() {
 
 function countQueued(queue, target, role) {
     if (!queue || !queue.length) return 0;
+    var desired = normRoomName(target);
     var count = 0;
     for (var i = 0; i < queue.length; i++) {
         var intent = queue[i];
         if (!intent) continue;
-        if (intent.target !== target) continue;
         if (role && intent.role !== role) continue;
+        if (desired) {
+            var intentTarget = null;
+            if (intent.target) intentTarget = intent.target;
+            else if (intent.targetRoom) intentTarget = intent.targetRoom;
+            else if (intent.memory) {
+                if (intent.memory.target) intentTarget = intent.memory.target;
+                else if (intent.memory.targetRoom) intentTarget = intent.memory.targetRoom;
+            }
+            if (normRoomName(intentTarget) !== desired) continue;
+        }
         count++;
     }
     return count;
 }
 
+function countRoomQueuedClaimer(homeRoom, target) {
+    if (!homeRoom || !Memory || !Memory.rooms) return 0;
+    var roomName = normRoomName(homeRoom);
+    if (!roomName) return 0;
+    var roomMem = Memory.rooms[roomName];
+    if (!roomMem || !Array.isArray(roomMem.spawnQueue)) return 0;
+    var desired = normRoomName(target);
+    var total = 0;
+    for (var i = 0; i < roomMem.spawnQueue.length; i++) {
+        var entry = roomMem.spawnQueue[i];
+        if (!entry) continue;
+        var entryRole = null;
+        if (entry.role) entryRole = entry.role;
+        else if (entry.intentSpec && entry.intentSpec.role) entryRole = entry.intentSpec.role;
+        if (!entryRole) continue;
+        if (entryRole !== 'claimer' && entryRole !== 'Claimer') continue;
+        var entryTarget = null;
+        if (entry.target) entryTarget = entry.target;
+        else if (entry.targetRoom) entryTarget = entry.targetRoom;
+        else if (entry.intentSpec && entry.intentSpec.target) entryTarget = entry.intentSpec.target;
+        else if (entry.intentSpec && entry.intentSpec.targetRoom) entryTarget = entry.intentSpec.targetRoom;
+        if (desired && normRoomName(entryTarget) !== desired) continue;
+        total++;
+    }
+    return total;
+}
+
 function findExpandCreeps(target, role) {
     var matches = [];
+    var desired = normRoomName(target);
     if (typeof Game === 'undefined' || !Game.creeps) return matches;
     for (var name in Game.creeps) {
         if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
         var creep = Game.creeps[name];
         if (!creep || !creep.memory) continue;
         if (creep.memory.task !== 'expand') continue;
-        if (creep.memory.target !== target) continue;
+        var memoryTarget = null;
+        if (creep.memory.target) memoryTarget = creep.memory.target;
+        else if (creep.memory.targetRoom) memoryTarget = creep.memory.targetRoom;
+        var normalized = normRoomName(memoryTarget);
+        if (normalized && creep.memory.target !== normalized) {
+            creep.memory.target = normalized;
+        }
+        if (desired && normalized !== desired) continue;
         if (role && creep.memory.role !== role) continue;
         matches.push(creep);
     }
@@ -108,22 +165,26 @@ function findExpandCreeps(target, role) {
 }
 
 function buildIntent(role, mainRoom, target, priority, body) {
+    var homeName = normRoomName(mainRoom);
+    var targetName = normRoomName(target);
     var memory = {
         role: role,
         task: 'expand',
-        home: mainRoom,
-        target: target,
+        home: homeName,
+        target: targetName,
         expand: {
-            home: mainRoom,
-            target: target,
+            home: homeName,
+            target: targetName,
             role: role
         }
     };
     return {
         role: role,
         priority: priority,
-        home: mainRoom,
-        target: target,
+        home: homeName,
+        homeRoom: homeName,
+        target: targetName,
+        targetRoom: targetName,
         body: body,
         memory: memory
     };
@@ -132,6 +193,16 @@ function buildIntent(role, mainRoom, target, priority, body) {
 function queueIntent(intent) {
     var queue = getSpawnQueue();
     if (!queue || !intent) return false;
+    if (intent.home) intent.home = normRoomName(intent.home);
+    if (intent.homeRoom) intent.homeRoom = normRoomName(intent.homeRoom);
+    if (intent.target) intent.target = normRoomName(intent.target);
+    if (intent.targetRoom) intent.targetRoom = normRoomName(intent.targetRoom);
+    if (intent.memory) {
+        if (intent.memory.home) intent.memory.home = normRoomName(intent.memory.home);
+        if (intent.memory.homeRoom) intent.memory.homeRoom = normRoomName(intent.memory.homeRoom);
+        if (intent.memory.target) intent.memory.target = normRoomName(intent.memory.target);
+        if (intent.memory.targetRoom) intent.memory.targetRoom = normRoomName(intent.memory.targetRoom);
+    }
     queue.push(intent);
     return true;
 }
@@ -150,16 +221,18 @@ function recordInProgress(state, phase) {
 }
 
 function beginClaiming(state, mainRoom, target) {
+    var homeName = normRoomName(mainRoom);
+    var targetName = normRoomName(target);
     state.phase = PHASE_CLAIMING;
-    state.target = target;
+    state.target = targetName;
     state.created = (typeof Game !== 'undefined' && Game.time) ? Game.time : 0;
     state.bootStarted = 0;
     state.claimerId = null;
     state.lastClaimerRequest = 0;
     state.lastBuilderRequest = 0;
     state.lastHaulerRequest = 0;
-    state.status = 'Claiming ' + target;
-    state.mainRoom = mainRoom;
+    state.status = 'Claiming ' + targetName;
+    state.mainRoom = homeName;
     recordInProgress(state, PHASE_CLAIMING);
 }
 
@@ -228,29 +301,56 @@ function claimSucceeded(target) {
 }
 
 function ensureClaimer(state, mainRoom) {
-    var target = state.target;
     var queue = getSpawnQueue();
-    var alive = findExpandCreeps(target, 'claimer');
+    var targetName = normRoomName(state.target);
+    if (!targetName) return;
+    state.target = targetName;
+    var alive = findExpandCreeps(targetName, 'claimer');
     if (alive.length > 0) {
         state.claimerId = alive[0].name;
         return;
     }
     state.claimerId = null;
-    var queued = countQueued(queue, target, 'claimer');
+    var homeName = normRoomName(mainRoom || state.mainRoom);
+    var queued = countQueued(queue, targetName, 'claimer');
     if (queued > 0) return;
+    if (homeName && countRoomQueuedClaimer(homeName, targetName) > 0) return;
     if (typeof Game === 'undefined' || !Game.time) return;
     if (Game.time - state.lastClaimerRequest < CLAIMER_REQUEUE_TICKS) {
         return;
     }
-    if (!mainRoom) {
+    if (!homeName) {
         state.status = 'No main room for claimer';
         return;
     }
+    var hops = 0;
+    if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
+        try {
+            hops = Game.map.getRoomLinearDistance(homeName, targetName, true) || 0;
+        } catch (mapErr) {
+            hops = 0;
+        }
+    }
     var body = [CLAIM, MOVE, MOVE];
-    var intent = buildIntent('claimer', mainRoom, target, 5, body);
+    if (typeof hops === 'number' && hops >= 2) {
+        body = [CLAIM, MOVE, MOVE, MOVE];
+    }
+    var intentMemory = { role: 'claimer', task: 'expand', home: homeName, target: targetName };
+    intentMemory.targetRoom = targetName;
+    var intent = {
+        role: 'claimer',
+        task: 'expand',
+        home: homeName,
+        homeRoom: homeName,
+        target: targetName,
+        targetRoom: targetName,
+        priority: 5,
+        body: body,
+        memory: intentMemory
+    };
     if (queueIntent(intent) && typeof Game !== 'undefined') {
         state.lastClaimerRequest = Game.time;
-        state.status = 'Queued claimer for ' + target;
+        state.status = 'Queued claimer for ' + targetName;
     }
 }
 

@@ -587,7 +587,7 @@ function deepClone(value) {
 }
 
 function Spawn_From_Intent(spawn, intent, availableEnergy) {
-  if (!spawn || !intent) return false;
+  if (!spawn || !intent) return ERR_INVALID_ARGS;
   var energyBudget = availableEnergy;
   if (energyBudget === null || energyBudget === undefined) {
     energyBudget = Calculate_Spawn_Resource(spawn);
@@ -599,15 +599,15 @@ function Spawn_From_Intent(spawn, intent, availableEnergy) {
   } else {
     body = pickBodyForIntent(roleKey, energyBudget);
   }
-  if (!body || !body.length) return false;
+  if (!body || !body.length) return ERR_INVALID_ARGS;
   var bodyCost = _.sum(body, function (part) { return BODYPART_COST[part] || 0; });
-  if (bodyCost > energyBudget) return false;
+  if (bodyCost > energyBudget) return ERR_NOT_ENOUGH_ENERGY;
   var name = intent.name;
   if (!name) {
     var nameRole = normalizeIntentTask(roleKey) || 'Worker';
     name = Generate_Creep_Name(nameRole);
   }
-  if (!name) return false;
+  if (!name) return ERR_NAME_EXISTS;
   var memory = deepClone(intent.memory) || {};
   if (!memory.role) {
     if (intent.role) memory.role = intent.role;
@@ -631,7 +631,7 @@ function Spawn_From_Intent(spawn, intent, availableEnergy) {
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('Intent spawn', memory.role || 'unknown', name, 'result', result);
   }
-  return result === OK;
+  return result;
 }
 
 function getIntentHome(intent) {
@@ -716,14 +716,23 @@ function Consume_Spawn_Intents(spawn) {
     var attempt = deepClone(raw);
     attempt.body = body;
     var target = getIntentTarget(attempt);
-    if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
-      spawnLog.info('ExpansionIntent role=' + role + ' target=' + (target || 'n/a'));
-    }
-    var ok = Spawn_From_Intent(spawn, attempt, energyBudget);
-    if (ok) {
+    var result = Spawn_From_Intent(spawn, attempt, energyBudget);
+    if (result === OK) {
       queue.splice(i, 1);
+      if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+        spawnLog.info('[ExpansionIntent] spawned ' + role + ' → ' + (target || 'n/a'));
+      }
+      return true;
     }
-    return ok;
+    if (result === ERR_NOT_ENOUGH_ENERGY || result === ERR_BUSY) {
+      return false;
+    }
+    if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
+      spawnLog.warn('[ExpansionIntent] drop ' + role + ' → ' + (target || 'n/a') + ' (' + result + ')');
+    }
+    queue.splice(i, 1);
+    i--;
+    continue;
   }
   return false;
 }

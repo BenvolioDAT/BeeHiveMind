@@ -4,6 +4,12 @@ var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+// Normalize room identifiers to uppercase to keep cross-module comparisons stable.
+function normRoomName(name) {
+  if (name === undefined || name === null) return null;
+  return String(name).toUpperCase();
+}
+
 function _isInvaderCreep(obj) { return !!(obj && obj.owner && obj.owner.username === 'Invader'); }
 function _isInvaderStruct(obj) { return !!(obj && obj.owner && obj.owner.username === 'Invader'); }
 
@@ -13,6 +19,8 @@ function _isInvaderStruct(obj) { return !!(obj && obj.owner && obj.owner.usernam
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
 
 var BeeToolbox = {
+
+  normRoomName: normRoomName,
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL

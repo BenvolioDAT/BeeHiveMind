@@ -22,6 +22,7 @@ var hiveLog = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 var BeeVisualsSpawnPanel = require('BeeVisuals.SpawnPanel');
 var spawnLogic = require('spawn.logic');
 var roleWorker_Bee = require('role.Worker_Bee');
+var roleExpandClaimer = require('role.ExpandClaimer');
 var RoomPlanner = require('Planner.Room');
 var RoadPlanner = require('Planner.Road');
 var TradeEnergy = require('Trade.Energy');
@@ -34,7 +35,7 @@ var ConfigExpansion = require('Config.Expansion');
 var ExpandSelector = require('Task.Expand.Selector');
 
 // Map role -> run fn (extend as roles migrate).
-var creepRoles = { Worker_Bee: roleWorker_Bee.run };
+var creepRoles = { Worker_Bee: roleWorker_Bee.run, claimer: roleExpandClaimer.run };
 
 // --------------------------- Tunables & Constants ------------------------
 var DYING_SOON_TTL = 60;            // Skip creeps about to expire when counting quotas
@@ -351,7 +352,8 @@ function spawnFromPrimaryQueue(spawner) {
   }
   var ok = false;
   if (item.intentSpec && spawnLogic && typeof spawnLogic.Spawn_From_Intent === 'function') {
-    ok = spawnLogic.Spawn_From_Intent(spawner, item.intentSpec, spawnResource);
+    var intentResult = spawnLogic.Spawn_From_Intent(spawner, item.intentSpec, spawnResource);
+    ok = (intentResult === OK);
   } else if (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function') {
     ok = spawnLogic.Spawn_Worker_Bee(spawner, item.role, spawnResource, item);
   }
@@ -499,9 +501,6 @@ var BeeHiveMind = {
       BeeVisualsSpawnPanel.drawVisuals();
     }
     BeeHiveMind.runPlanners(context);
-    if (TaskExpandManager && typeof TaskExpandManager.run === 'function') {
-      TaskExpandManager.run();
-    }
     BeeHiveMind.mergeSpawnIntents(context);
     BeeHiveMind.runCreeps(context);
     BeeHiveMind.manageSpawns(context);
@@ -520,6 +519,17 @@ var BeeHiveMind = {
     if (typeof global !== 'undefined') {
       if (!global.__BHM) global.__BHM = {};
       if (!Array.isArray(global.__BHM.spawnIntents)) global.__BHM.spawnIntents = [];
+      if (typeof Game !== 'undefined' && typeof Game.time === 'number') {
+        global.__BHM.spawnIntentsTick = Game.time;
+      }
+    }
+    if (TaskExpandManager && typeof TaskExpandManager.run === 'function') {
+      try {
+        TaskExpandManager.run();
+      } catch (expandErr) {
+        try { hiveLog.info('[Expand] manager error:', expandErr && expandErr.stack ? expandErr.stack : expandErr); }
+        catch (logErr) {}
+      }
     }
     BeeHiveMind.prepareSpawnIntents();
     MovementManager.startTick();
