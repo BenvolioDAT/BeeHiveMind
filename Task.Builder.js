@@ -1,575 +1,314 @@
-'use strict';
+// Task.Builder.mini.js — with Debug_say & Debug_draw (ES5-safe, Screeps-friendly)
+var BeeToolbox = require('BeeToolbox');
+try { require('Traveler'); } catch (e) {} // use if available
 
-/**
- * What changed & why:
- * - Reworked builder logic around persistent _task envelopes to prevent per-tick target churn.
- * - Adopted BeeSelectors/BeeActions plus centralized movement intents so refuel/build/repair phases reuse caches.
- * - Added guarded debug breadcrumbs and idle anchoring that respects the MOVE phase resolver.
- */
-
-var BeeSelectors = require('BeeSelectors');
-var BeeActions = require('BeeActions');
-var MovementManager = require('Movement.Manager');
-var SpawnPlacement = require('Planner.SpawnPlacement');
-
-try { require('Traveler'); } catch (e) {}
-
-var REFILL_MIN_AMOUNT = 150;
-var REFILL_COOLDOWN_TICKS = 10;
-
-function ensureExpansionSticky(creep) {
-  if (!creep || !creep.memory) return false;
-
-  var tgt = null;
-  if (creep.memory.expand && creep.memory.expand.target) tgt = creep.memory.expand.target;
-  if (!tgt && creep.memory.task === 'expand' && creep.memory.target) tgt = creep.memory.target;
-  if (!tgt && creep.memory.task === 'expand' && creep.memory.targetRoom) tgt = creep.memory.targetRoom;
-
-  if (!tgt) return false;
-
-  if (!creep.memory._expand) {
-    creep.memory._expand = { room: tgt, csiteId: null, lock: true, since: Game.time };
-  } else {
-    if (creep.memory._expand.room !== tgt) {
-      creep.memory._expand.room = tgt;
-    }
-  }
-  return true;
-}
-
-function isExpansionAssignment(creep) {
-  if (!creep || !creep.memory) return false;
-  if (creep.memory.expand && creep.memory.expand.target) return true;
-  if (creep.memory.task === 'expand' && creep.memory.target) return true;
-  if (creep.memory.task === 'expand' && creep.memory.targetRoom) return true;
-  if (creep.memory._expand && creep.memory._expand.room) return true;
-  return false;
-}
-
-function forbidGatherOutsideTarget(creep) {
-  if (!isExpansionAssignment(creep)) return false;
-  var roomName = null;
-  if (creep.memory._expand && creep.memory._expand.room) roomName = creep.memory._expand.room;
-  else if (creep.memory.target) roomName = creep.memory.target;
-  else if (creep.memory.targetRoom) roomName = creep.memory.targetRoom;
-  else if (creep.memory.expand && creep.memory.expand.target) roomName = creep.memory.expand.target;
-  if (!roomName || !creep.room) return false;
-  return creep.room.name !== roomName;
-}
-
-// Travel convenience; keep ES5 and your Traveler usage if available
-function travelToRoomCenter(creep, roomName) {
-  if (!creep || !roomName) return;
-  var pos = new RoomPosition(25, 25, roomName);
-  if (creep.moveTo) {
-    if (creep.travelTo) creep.travelTo(pos, { reusePath: 15 });
-    else creep.moveTo(pos, { reusePath: 15 });
-  }
-}
-
-// Expansion helper: reuse an existing spawn (structure/site) if one is already present.
-function findExpansionSpawnTarget(room) {
-  if (!room) return null;
-  var built = room.find(FIND_MY_STRUCTURES, {
-    filter: function (s) { return s.structureType === STRUCTURE_SPAWN; }
-  });
-  if (built && built.length > 0) return built[0];
-  var sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
-    filter: function (s) { return s.structureType === STRUCTURE_SPAWN; }
-  });
-  if (sites && sites.length > 0) return sites[0];
-  return null;
-}
-
-// Expansion helper: delegate spawn placement to Planner.SpawnPlacement for idempotent placement.
-function ensureExpansionSpawnSite(room) {
-  if (!room) return null;
-  var existing = findExpansionSpawnTarget(room);
-  if (existing) return existing;
-  if (!SpawnPlacement.placeInitialSpawnSite(room)) return null;
-  return findExpansionSpawnTarget(room);
-}
-
-function isInExpansionTargetRoom(creep) {
-  if (!isExpansionAssignment(creep)) return false;
-  var roomName = null;
-  if (creep.memory._expand && creep.memory._expand.room) roomName = creep.memory._expand.room;
-  else if (creep.memory.task === 'expand' && creep.memory.target) roomName = creep.memory.target;
-  else if (creep.memory.task === 'expand' && creep.memory.targetRoom) roomName = creep.memory.targetRoom;
-  else if (creep.memory.expand && creep.memory.expand.target) roomName = creep.memory.expand.target;
-  if (!roomName) return false;
-  return creep.room && creep.room.name === roomName;
-}
-
-function isSourceContainer(structure) {
-  if (!structure || !structure.pos) return false;
-  var sources = structure.pos.findInRange(FIND_SOURCES, 1);
-  return sources && sources.length > 0;
-}
-
-function pickExpansionGatherTask(creep) {
-  var room = creep.room;
-  if (!room) return null;
-  var list = BeeSelectors.getEnergySourcePriority(room);
-  var i;
-  for (i = 0; i < list.length; i++) {
-    var entry = list[i];
-    if (!entry || !entry.target) continue;
-    if (entry.kind === 'drop') {
-      return { type: 'pickup', targetId: entry.target.id, since: Game.time, data: { source: 'drop' } };
-    }
-  }
-  var containerTarget = null;
-  for (i = 0; i < list.length; i++) {
-    var entry2 = list[i];
-    if (!entry2 || !entry2.target) continue;
-    if (entry2.kind === 'container' && entry2.target.structureType === STRUCTURE_CONTAINER && isSourceContainer(entry2.target)) {
-      containerTarget = entry2.target;
-      break;
-    }
-  }
-  if (containerTarget) {
-    return { type: 'withdraw', targetId: containerTarget.id, since: Game.time, data: { source: 'container' } };
-  }
-  for (i = 0; i < list.length; i++) {
-    var entry3 = list[i];
-    if (!entry3 || !entry3.target) continue;
-    if (entry3.kind === 'ruin') {
-      return { type: 'withdraw', targetId: entry3.target.id, since: Game.time, data: { source: 'ruin' } };
-    }
-  }
-  for (i = 0; i < list.length; i++) {
-    var entry4 = list[i];
-    if (!entry4 || !entry4.target) continue;
-    if (entry4.kind === 'tomb') {
-      return { type: 'withdraw', targetId: entry4.target.id, since: Game.time, data: { source: 'tomb' } };
-    }
-  }
-  for (i = 0; i < list.length; i++) {
-    var entry5 = list[i];
-    if (!entry5 || !entry5.target) continue;
-    if (entry5.kind === 'source') {
-      return { type: 'harvest', targetId: entry5.target.id, since: Game.time, data: { source: 'source' } };
-    }
-  }
-  return null;
-}
-
-// Expansion-specific behavior: travel, drop a spawn site, and focus build orders when flagged.
-function handleExpansionBuilder(creep) {
-  if (!isExpansionAssignment(creep)) return 'noop';
-
-  ensureExpansionSticky(creep);
-  var targetRoom = creep.memory._expand ? creep.memory._expand.room : (creep.memory.target || creep.memory.targetRoom || null);
-  if (!targetRoom) return 'noop';
-
-  if (creep.room.name !== targetRoom) {
-    clearTask(creep);
-    debugSay(creep, '➡️ ' + targetRoom);
-    travelToRoomCenter(creep, targetRoom);
-    return 'traveling';
-  }
-
-  var remembered = null;
-  if (creep.memory._expand && creep.memory._expand.csiteId) {
-    remembered = Game.getObjectById(creep.memory._expand.csiteId);
-    if (!remembered) {
-      creep.memory._expand.csiteId = null;
-      remembered = null;
-    }
-  }
-
-  var spawnTarget = remembered || ensureExpansionSpawnSite(creep.room);
-  if (!spawnTarget) return 'setup';
-
-  if (spawnTarget.structureType === STRUCTURE_SPAWN && spawnTarget.progressTotal == null) {
-    return 'target';
-  }
-
-  if (creep.memory._expand) creep.memory._expand.csiteId = spawnTarget.id;
-
-  drawLine(creep, spawnTarget, CFG.DRAW.BUILD, 'EXPAND');
-
-  if (!creep.memory._task || creep.memory._task.targetId !== spawnTarget.id || creep.memory._task.type !== 'build') {
-    creep.memory._task = {
-      type: 'build',
-      targetId: spawnTarget.id,
-      since: Game.time,
-      data: { structureType: STRUCTURE_SPAWN }
-    };
-    debugSay(creep, '🏗️ spawn');
-  }
-
-  return 'setup';
-}
-
+// ==============================
+// Debug UI toggles & styling
+// ==============================
 var CFG = Object.freeze({
-  DEBUG_SAY: true,
-  DEBUG_DRAW: true,
+  DEBUG_SAY: false,   // creep.say breadcrumbs
+  DEBUG_DRAW: true,  // RoomVisual lines/labels
   DRAW: {
-    GATHER: '#6ec1ff',
-    BUILD: '#e6c16e',
-    REPAIR: '#ffa36e',
-    DELIVER: '#6effa1',
-    IDLE: '#bfbfbf',
+    TRAVEL_COLOR:  "#8ab6ff",
+    PICKUP_COLOR:  "#ffe66e",
+    WITHDRAW_COLOR:"#ffd16e",
+    TOMBSTONE_COLOR:"#e6a6ff",
+    RUIN_COLOR:    "#c6b3ff",
+    SRC_CONT_COLOR:"#ffa36e",
+    STORELIKE_COLOR:"#6ee7ff",
+    BUILD_COLOR:   "#e6c16e",
+    SINK_COLOR:    "#6effa1",
+    IDLE_COLOR:    "#bfbfbf",
     WIDTH: 0.12,
     OPACITY: 0.45,
     FONT: 0.6
-  },
-  STUCK_TICKS: 6,
-  MOVE_PRIORITIES: {
-    gather: 55,
-    build: 35,
-    repair: 30,
-    deliver: 20,
-    idle: 5
   }
 });
 
+// ==============================
+// Tunables
+// ==============================
+var ALLOW_HARVEST_FALLBACK = false; // flip true if you really want last-resort mining
+var PICKUP_MIN = 50;                // ignore tiny crumbs
+var SRC_CONTAINER_MIN = 100;        // minimum energy to bother at source containers
+
+// ==============================
+// Debug helpers
+// ==============================
 function debugSay(creep, msg) {
   if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
 }
-
-function drawLine(creep, target, color, label) {
+function _posOf(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
+}
+function debugDraw(creep, target, color, label) {
   if (!CFG.DEBUG_DRAW || !creep || !target) return;
-  var room = creep.room;
-  if (!room || !room.visual) return;
-  var pos = target.pos || target;
-  if (!pos || pos.roomName !== room.name) return;
+  var room = creep.room; if (!room || !room.visual) return;
+  var tpos = _posOf(target); if (!tpos || tpos.roomName !== room.name) return;
+
   try {
-    room.visual.line(creep.pos, pos, {
+    room.visual.line(creep.pos, tpos, {
       color: color,
       width: CFG.DRAW.WIDTH,
       opacity: CFG.DRAW.OPACITY,
-      lineStyle: 'solid'
+      lineStyle: "solid"
     });
     if (label) {
-      room.visual.text(label, pos.x, pos.y - 0.3, {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
         color: color,
         opacity: CFG.DRAW.OPACITY,
         font: CFG.DRAW.FONT,
-        align: 'center'
+        align: "center"
       });
     }
   } catch (e) {}
 }
-
-function ensureTask(creep) {
-  if (!creep.memory) return;
-  if (!creep.memory._task) creep.memory._task = null;
+function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
+  try {
+    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
+  } catch (e) {}
 }
 
-function clearTask(creep) {
-  if (!creep.memory) return;
-  creep.memory._task = null;
+// ==============================
+// Tiny movement helper
+// ==============================
+function go(creep, dest, range, reuse) {
+  range = (range != null) ? range : 1;
+  reuse = (reuse != null) ? reuse : 25;
+
+  var dpos = (dest && dest.pos) ? dest.pos : dest;
+  if (dpos) debugDraw(creep, dpos, CFG.DRAW.TRAVEL_COLOR, "GO");
+
+  try {
+    if (BeeToolbox && BeeToolbox.BeeTravel) {
+      BeeToolbox.BeeTravel(creep, (dest.pos || dest), { range: range, reusePath: reuse });
+      return;
+    }
+    if (typeof creep.travelTo === 'function') {
+      creep.travelTo((dest.pos || dest), { range: range, reusePath: reuse, ignoreCreeps: false, maxOps: 4000 });
+      return;
+    }
+  } catch (e) {}
+  if (creep.pos.getRangeTo(dest) > range) creep.moveTo(dest, { reusePath: reuse, maxOps: 1500 });
 }
 
-function updateStuckTracker(task, creep) {
-  if (!task.data) task.data = {};
-  if (task.data.lastX === creep.pos.x && task.data.lastY === creep.pos.y) {
-    task.data.stuckFor = (task.data.stuckFor | 0) + 1;
-  } else {
-    task.data.stuckFor = 0;
-    task.data.lastX = creep.pos.x;
-    task.data.lastY = creep.pos.y;
+// ==============================
+// Energy intake (prefer floor snacks)
+// ==============================
+function collectEnergy(creep) {
+  // 1) Tombstones / Ruins
+  var tomb = creep.pos.findClosestByRange(FIND_TOMBSTONES, { filter: function (t) { return (t.store[RESOURCE_ENERGY] | 0) > 0; } });
+  if (tomb) {
+    debugSay(creep, '🪦');
+    debugDraw(creep, tomb, CFG.DRAW.TOMBSTONE_COLOR, "TOMB");
+    var tr = creep.withdraw(tomb, RESOURCE_ENERGY);
+    if (tr === ERR_NOT_IN_RANGE) go(creep, tomb, 1, 20);
+    return true;
   }
-  return task.data.stuckFor >= CFG.STUCK_TICKS;
-}
-
-function needNewTask(creep, task) {
-  if (!task) return true;
-  var target = task.targetId ? Game.getObjectById(task.targetId) : null;
-  if (task.type === 'idle') return false;
-  if (!target && task.type !== 'deliver') return true;
-  switch (task.type) {
-    case 'withdraw':
-      if (!target || !target.store || (target.store[RESOURCE_ENERGY] | 0) === 0) return true;
-      if (creep.store.getFreeCapacity() === 0) return true;
-      break;
-    case 'pickup':
-      if (!target || target.amount <= 0) return true;
-      if (creep.store.getFreeCapacity() === 0) return true;
-      break;
-    case 'harvest':
-      if (!target) return true;
-      if (creep.store.getFreeCapacity() === 0) return true;
-      if (target.energy != null && target.energy === 0 && target.ticksToRegeneration > 1) return true;
-      break;
-    case 'build':
-      if (!target) return true;
-      if (creep.store[RESOURCE_ENERGY] === 0) return true;
-      break;
-    case 'repair':
-      if (!target) return true;
-      if (creep.store[RESOURCE_ENERGY] === 0) return true;
-      if (task.data && task.data.goalHits && target.hits >= task.data.goalHits) return true;
-      if (target.hits >= target.hitsMax) return true;
-      break;
-    case 'deliver':
-      if (creep.store[RESOURCE_ENERGY] === 0) return true;
-      if (!target) return true;
-      if (!target.store) {
-        if (target.energyCapacity != null && (target.energy | 0) >= (target.energyCapacity | 0)) return true;
-      } else if (target.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
-        return true;
-      }
-      break;
+  var ruin = creep.pos.findClosestByRange(FIND_RUINS, { filter: function (r) { return (r.store[RESOURCE_ENERGY] | 0) > 0; } });
+  if (ruin) {
+    debugSay(creep, '🏚️');
+    debugDraw(creep, ruin, CFG.DRAW.RUIN_COLOR, "RUIN");
+    var rr = creep.withdraw(ruin, RESOURCE_ENERGY);
+    if (rr === ERR_NOT_IN_RANGE) go(creep, ruin, 1, 20);
+    return true;
   }
-  // Do NOT treat stationary work as "stuck"
-  if (task.type === 'harvest' || task.type === 'build' || task.type === 'repair') return false;
-  if (updateStuckTracker(task, creep)) return true;
+
+  // 2) Dropped
+  var dropped = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
+    filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) >= PICKUP_MIN; }
+  });
+  if (dropped) {
+    debugSay(creep, '🍪');
+    debugDraw(creep, dropped, CFG.DRAW.PICKUP_COLOR, "DROP");
+    if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) go(creep, dropped, 1, 15);
+    return true;
+  }
+
+  // 3) Source-adjacent container
+  var srcCont = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+    filter: function (s) {
+      if (s.structureType !== STRUCTURE_CONTAINER || !s.store) return false;
+      if (s.pos.findInRange(FIND_SOURCES, 1).length === 0) return false;
+      return (s.store[RESOURCE_ENERGY] | 0) >= SRC_CONTAINER_MIN;
+    }
+  });
+  if (srcCont) {
+    debugSay(creep, '📦');
+    debugDraw(creep, srcCont, CFG.DRAW.SRC_CONT_COLOR, "SRC•CONT");
+    var cr = creep.withdraw(srcCont, RESOURCE_ENERGY);
+    if (cr === ERR_NOT_IN_RANGE) go(creep, srcCont, 1, 25);
+    return true;
+  }
+
+  // 4) Any store (container/link/storage/terminal)
+  var storeLike = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+    filter: function (s) {
+      if (!s.store) return false;
+      var t = s.structureType;
+      if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_LINK && t !== STRUCTURE_STORAGE && t !== STRUCTURE_TERMINAL) return false;
+      return (s.store[RESOURCE_ENERGY] | 0) > 0;
+    }
+  });
+  if (storeLike) {
+    debugSay(creep, '🏦');
+    debugDraw(creep, storeLike, CFG.DRAW.STORELIKE_COLOR, "WITHDRAW");
+    var sr = creep.withdraw(storeLike, RESOURCE_ENERGY);
+    if (sr === ERR_NOT_IN_RANGE) go(creep, storeLike, 1, 25);
+    return true;
+  }
+
+  // 5) Optional last resort: harvest
+  if (ALLOW_HARVEST_FALLBACK) {
+    var src = creep.pos.findClosestByRange(FIND_SOURCES_ACTIVE);
+    if (src) {
+      debugSay(creep, '⛏️');
+      debugDraw(creep, src, CFG.DRAW.SRC_CONT_COLOR, "MINE");
+      var hr = creep.harvest(src);
+      if (hr === ERR_NOT_IN_RANGE) go(creep, src, 1, 20);
+      return true;
+    }
+  }
+
+  // Idle near something useful
+  var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
+  if (anchor && anchor.pos) {
+    debugSay(creep, '🧘');
+    debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
+    go(creep, anchor, 2, 20);
+  }
   return false;
 }
 
-function pickGatherTask(creep) {
-  var isExpansion = isExpansionAssignment(creep);
-  var inTargetRoom = isInExpansionTargetRoom(creep);
-  var energyCarried = 0;
-  if (creep.store && creep.store[RESOURCE_ENERGY] != null) energyCarried = creep.store[RESOURCE_ENERGY] | 0;
-  else if (creep.carry && creep.carry[RESOURCE_ENERGY] != null) energyCarried = creep.carry[RESOURCE_ENERGY] | 0;
-
-  if (isExpansion && !inTargetRoom && energyCarried === 0) {
-    var onCooldown = false;
-    if (creep.memory && creep.memory._expandRefillTs != null) {
-      onCooldown = (Game.time - creep.memory._expandRefillTs) < REFILL_COOLDOWN_TICKS;
+// ==============================
+// Pick a build target (simple + sticky)
+// ==============================
+function pickBuildSite(creep) {
+  // sticky
+  var id = creep.memory.siteId;
+  if (id) {
+    var stick = Game.constructionSites[id];
+    if (stick) {
+      debugRing(creep.room, stick.pos, CFG.DRAW.BUILD_COLOR, "STICK");
+      return stick;
     }
-    if (!onCooldown) {
-      var roomHasEnergy = BeeSelectors.roomHasAnyEnergy(creep.room, REFILL_MIN_AMOUNT);
-      if (!roomHasEnergy) {
-        var homeStorage = BeeSelectors.findHomeStorageWithEnergy(creep, REFILL_MIN_AMOUNT);
-        if (homeStorage) {
-          if (creep.memory) creep.memory._expandRefillTs = Game.time;
-          debugSay(creep, '🏠🔋');
-          drawLine(creep, homeStorage, CFG.DRAW.GATHER, 'REFILL');
-          return {
-            type: 'withdraw',
-            targetId: homeStorage.id,
-            since: Game.time,
-            data: { source: 'homeStorage', room: homeStorage.pos ? homeStorage.pos.roomName : null }
-          };
-        }
-      }
-    }
+    creep.memory.siteId = null;
   }
 
-  if (forbidGatherOutsideTarget(creep)) {
-    return null;
+  // prefer current room
+  var local = creep.room.find(FIND_CONSTRUCTION_SITES);
+  if (local.length) {
+    // light priority: spawn/ext/tower first, else nearest
+    var prio = { 'spawn': 5, 'extension': 4, 'tower': 3, 'container': 2, 'road': 1 };
+    var best = null, bestScore = -1, bestD = 1e9;
+    for (var i = 0; i < local.length; i++) {
+      var s = local[i], sc = (prio[s.structureType] | 0), d = creep.pos.getRangeTo(s.pos);
+      if (sc > bestScore || (sc === bestScore && d < bestD)) { best = s; bestScore = sc; bestD = d; }
+    }
+    if (best) {
+      creep.memory.siteId = best.id;
+      debugRing(creep.room, best.pos, CFG.DRAW.BUILD_COLOR, best.structureType.toUpperCase());
+      return best;
+    }
   }
-  var room = creep.room;
-  if (inTargetRoom) {
-    var expansionTask = pickExpansionGatherTask(creep);
-    if (expansionTask) return expansionTask;
-  }
-  var list = BeeSelectors.getEnergySourcePriority(room);
 
-  for (var i = 0; i < list.length; i++) {
-    var entry = list[i];
-    if (!entry || !entry.target) continue;
-    if (isExpansionAssignment(creep)) {
-      if (entry.kind === 'storage' || entry.kind === 'terminal') continue;
-    }
-    if (entry.kind === 'drop') {
-      return { type: 'pickup', targetId: entry.target.id, since: Game.time, data: { source: 'drop' } };
-    }
-    if (entry.kind === 'tomb') {
-      return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: 'tomb' } };
-    }
-    if (entry.kind === 'ruin') {
-      return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: 'ruin' } };
-    }
-    if (entry.kind === 'source') {
-      return { type: 'harvest', targetId: entry.target.id, since: Game.time, data: { source: 'source' } };
-    }
-    return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: entry.kind || 'energy' } };
+  // otherwise, nearest room with a site (visible or not)
+  var any = null, bestDist = 1e9;
+  for (var sid in Game.constructionSites) {
+    if (!Game.constructionSites.hasOwnProperty(sid)) continue;
+    var s2 = Game.constructionSites[sid];
+    var d2 = Game.map.getRoomLinearDistance(creep.pos.roomName, s2.pos.roomName);
+    if (d2 < bestDist) { bestDist = d2; any = s2; }
   }
+  if (any) { creep.memory.siteId = any.id; debugRing(creep.room, any.pos, CFG.DRAW.BUILD_COLOR, "NEAR"); return any; }
+
   return null;
 }
 
-function pickWorkTask(creep) {
-  if (isExpansionAssignment(creep)) {
-    var targetRoom = null;
-    if (creep.memory._expand && creep.memory._expand.room) targetRoom = creep.memory._expand.room;
-    else if (creep.memory.task === 'expand' && creep.memory.target) targetRoom = creep.memory.target;
-    else if (creep.memory.task === 'expand' && creep.memory.targetRoom) targetRoom = creep.memory.targetRoom;
-    else if (creep.memory.expand && creep.memory.expand.target) targetRoom = creep.memory.expand.target;
-    if (targetRoom && creep.room.name !== targetRoom) {
-      return null;
-    }
+// ==============================
+// Build work
+// ==============================
+function doBuild(creep, site) {
+  if (!site) return false;
+
+  if (creep.pos.inRangeTo(site.pos, 3)) {
+    debugSay(creep, '🔨');
+    debugDraw(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
+    var r = creep.build(site);
+    if (r === ERR_NOT_ENOUGH_RESOURCES) return false;
+    if (r === ERR_INVALID_TARGET) { creep.memory.siteId = null; return false; }
+    return true;
   }
-  var room = creep.room;
-  var site = BeeSelectors.findBestConstructionSite(room);
-  if (site) {
-    return { type: 'build', targetId: site.id, since: Game.time, data: { structureType: site.structureType } };
-  }
-  if (room && creep && creep.memory) {
-    var remoteRoomName = BeeSelectors.findAdjacentRoomWithConstruction(room.name);
-    if (remoteRoomName && !isExpansionAssignment(creep)) {
-      if (!creep.memory.expand) creep.memory.expand = {};
-      creep.memory.expand.target = remoteRoomName;
-      return null;
-    }
-  }
-  var repair = BeeSelectors.findBestRepairTarget(room);
-  if (repair && repair.target) {
-    return {
-      type: 'repair',
-      targetId: repair.target.id,
-      since: Game.time,
-      data: { goalHits: repair.goalHits, structureType: repair.target.structureType }
-    };
-  }
-  var sinks = BeeSelectors.findSpawnLikeNeedingEnergy(room);
-  var deliverTarget = BeeSelectors.selectClosestByRange(creep.pos, sinks);
-  if (deliverTarget) {
-    return { type: 'deliver', targetId: deliverTarget.id, since: Game.time, data: { sink: 'spawnLike' } };
-  }
-  var towers = BeeSelectors.findTowersNeedingEnergy(room);
-  var towerTarget = BeeSelectors.selectClosestByRange(creep.pos, towers);
-  if (towerTarget) {
-    return { type: 'deliver', targetId: towerTarget.id, since: Game.time, data: { sink: 'tower' } };
-  }
-  var storage = BeeSelectors.findStorageNeedingEnergy(room);
-  if (storage) {
-    return { type: 'deliver', targetId: storage.id, since: Game.time, data: { sink: 'storage' } };
-  }
-  return null;
+
+  debugDraw(creep, site, CFG.DRAW.TRAVEL_COLOR, "TO•SITE");
+  go(creep, site, 3, 15);
+  return true;
 }
 
-function describeTask(task) {
-  if (!task) return 'idle';
-  if (task.type === 'build') return 'build';
-  if (task.type === 'repair') return 'repair';
-  if (task.type === 'deliver') return 'deliver';
-  if (task.type === 'withdraw') return 'refuel';
-  if (task.type === 'pickup') return 'refuel';
-  return task.type;
-}
-
-function executeTask(creep, task) {
-  if (!task) return;
-
-  //var target = task.targetId ? Game.getObjectById(task.targetId) : null;
-
-  var target;
-    if (task.targetId) {
-      target = Game.getObjectById(task.targetId);
-    } else {
-      target = null;
-    }
-
-  if (!target && task.type !== 'deliver') {
-    clearTask(creep);
-    return;
-  }
-  switch (task.type) {
-    case 'withdraw':
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.GATHER, 'WD');
-      debugSay(creep, '📦');
-      var wOpts = { priority: CFG.MOVE_PRIORITIES.gather, reusePath: 20 };
-      var wrc = BeeActions.safeWithdraw(creep, target, RESOURCE_ENERGY, wOpts);
-      if (wrc === OK && creep.store.getFreeCapacity() === 0) clearTask(creep);
-      if (wrc === ERR_NOT_ENOUGH_RESOURCES || wrc === ERR_INVALID_TARGET) clearTask(creep);
-      return;
-    case 'pickup':
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.GATHER, 'PICK');
-      debugSay(creep, '🍪');
-      var pOpts = { priority: CFG.MOVE_PRIORITIES.gather, reusePath: 10 };
-      var prc = BeeActions.safePickup(creep, target, pOpts);
-      if (prc === OK && creep.store.getFreeCapacity() === 0) clearTask(creep);
-      if (prc === ERR_INVALID_TARGET) clearTask(creep);
-      return;
-    case 'build':
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.BUILD, 'BUILD');
-      debugSay(creep, '🔨');
-      var bOpts = { priority: CFG.MOVE_PRIORITIES.build, reusePath: 15 };
-      var brc = BeeActions.safeBuild(creep, target, bOpts);
-      if (brc === ERR_NOT_ENOUGH_RESOURCES) clearTask(creep);
-      if (brc === ERR_INVALID_TARGET) clearTask(creep);
-      if (brc === OK && target.progress >= target.progressTotal) clearTask(creep);
-      return;
-    case 'repair':
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.REPAIR, 'FIX');
-      debugSay(creep, '🛠️');
-      var rOpts = { priority: CFG.MOVE_PRIORITIES.repair, reusePath: 15 };
-      var rrc = BeeActions.safeRepair(creep, target, rOpts);
-      if (rrc === ERR_NOT_ENOUGH_RESOURCES) clearTask(creep);
-      if (rrc === ERR_INVALID_TARGET) clearTask(creep);
-      if (rrc === OK) {
-        var goal = (task.data && task.data.goalHits) || target.hitsMax;
-        if (target.hits >= goal) clearTask(creep);
-      }
-      return;
-    case 'deliver':
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.DELIVER, 'DEL');
-      debugSay(creep, '📤');
-      var dOpts = { priority: CFG.MOVE_PRIORITIES.deliver, reusePath: 20 };
-      var drc = BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, null, dOpts);
-      if (drc === ERR_NOT_ENOUGH_RESOURCES) clearTask(creep);
-      if (drc === ERR_INVALID_TARGET) clearTask(creep);
-      if (drc === OK && creep.store[RESOURCE_ENERGY] === 0) clearTask(creep);
-      return;
-    case 'harvest':
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.GATHER, 'HAR');
-      debugSay(creep, '⛏️');
-      var hOpts = { priority: CFG.MOVE_PRIORITIES.gather, reusePath: 5 };
-      var hrc = BeeActions.safeHarvest(creep, target, hOpts);
-      if (hrc === OK && creep.store.getFreeCapacity() === 0) clearTask(creep);
-      if (hrc === ERR_INVALID_TARGET) clearTask(creep);
-      return;
-  }
-  clearTask(creep);
-}
-
-function idle(creep) {
-  var anchor = BeeSelectors.findRoomAnchor(creep.room);
-  if (anchor && anchor.pos) {
-    drawLine(creep, anchor, CFG.DRAW.IDLE, 'IDLE');
-    MovementManager.request(creep, anchor, CFG.MOVE_PRIORITIES.idle, { range: 2, reusePath: 30 });
-  }
-  debugSay(creep, '🧘');
-}
-
+// ==============================
+// Public API
+// ==============================
 var TaskBuilder = {
   run: function (creep) {
-    if (!creep || creep.spawning) return;
-    var expansionState = handleExpansionBuilder(creep);
-    if (expansionState === 'traveling') return;
-    ensureTask(creep);
-    var task = creep.memory._task;
-    if (isExpansionAssignment(creep)) {
-      var expandRoom = null;
-      if (creep.memory._expand && creep.memory._expand.room) expandRoom = creep.memory._expand.room;
-      else if (creep.memory.task === 'expand' && creep.memory.target) expandRoom = creep.memory.target;
-      else if (creep.memory.task === 'expand' && creep.memory.targetRoom) expandRoom = creep.memory.targetRoom;
-      else if (creep.memory.expand && creep.memory.expand.target) expandRoom = creep.memory.expand.target;
-      if (expandRoom && creep.room.name !== expandRoom) {
-        clearTask(creep);
+    // state flip
+    if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
+      creep.memory.building = false;
+      debugSay(creep, '⤵️REFUEL');
+    }
+    if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
+      creep.memory.building = true;
+      debugSay(creep, '⤴️BUILD');
+    }
+
+    if (creep.memory.building) {
+      var site = pickBuildSite(creep);
+      if (site) {
+        if (!doBuild(creep, site)) {
+          if ((creep.store[RESOURCE_ENERGY] | 0) === 0) creep.memory.building = false;
+          else creep.memory.siteId = null;
+        }
         return;
       }
-    }
-    if (needNewTask(creep, task)) {
-      clearTask(creep);
-      task = (creep.store[RESOURCE_ENERGY] === 0)
-        ? pickGatherTask(creep)
-        : pickWorkTask(creep);
-      if (task) {
-        task.since = Game.time;
-        creep.memory._task = task;
-        debugSay(creep, describeTask(task));
+
+      // no sites: dump energy into anything useful, then idle
+      if ((creep.store[RESOURCE_ENERGY] | 0) > 0) {
+        var sink = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+          filter: function (s) {
+            if (!s.store) return false;
+            return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0 &&
+                   (s.structureType === STRUCTURE_STORAGE   ||
+                    s.structureType === STRUCTURE_TERMINAL  ||
+                    s.structureType === STRUCTURE_SPAWN     ||
+                    s.structureType === STRUCTURE_EXTENSION ||
+                    s.structureType === STRUCTURE_TOWER     ||
+                    s.structureType === STRUCTURE_CONTAINER ||
+                    s.structureType === STRUCTURE_LINK);
+          }
+        });
+        if (sink) {
+          debugSay(creep, '➡️SINK');
+          debugDraw(creep, sink, CFG.DRAW.SINK_COLOR, "SINK");
+          if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) go(creep, sink, 1, 20);
+          return;
+        }
       }
-    }
-    task = creep.memory._task;
-    if (task) {
-      executeTask(creep, task);
+
+      var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
+      if (anchor && anchor.pos) {
+        debugSay(creep, '🧘');
+        debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
+        go(creep, anchor, 2, 20);
+      }
       return;
     }
-    idle(creep);
+
+    // refuel phase (no mining unless allowed)
+    collectEnergy(creep);
   }
 };
 

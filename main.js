@@ -1,8 +1,4 @@
 
-/**
- * PIB (Per-tick Intent Buffer) lives on global.__BHM.pib and resets every tick to queue intents.
- */
-
 const CoreConfig = require('core.config');
 const Logger = require('core.logger');
 
@@ -30,39 +26,6 @@ Object.defineProperty(global, 'currentLogLevel', {
 });
 
 const mainLog = Logger.createLogger('Main', LOG_LEVEL.BASIC);
-
-function ensurePerTickIntentBuffer() {
-    if (typeof global === 'undefined') return null;
-    if (!global.__BHM) {
-        global.__BHM = {};
-    }
-    var pib = global.__BHM.pib;
-    if (!pib || pib._t !== Game.time) {
-        pib = { _t: Game.time, spawns: [], moves: [] };
-        global.__BHM.pib = pib;
-    }
-    return pib;
-}
-
-function installIntentHelpers() {
-    if (typeof global === 'undefined') return;
-    ensurePerTickIntentBuffer();
-    if (typeof global.__BHM.pushSpawnIntent !== 'function') {
-        global.__BHM.pushSpawnIntent = function (roomName, role, body, memory) {
-            var pib = ensurePerTickIntentBuffer();
-            if (!pib) return null;
-            pib.spawns.push({
-                roomName: roomName,
-                role: role,
-                body: body,
-                memory: memory
-            });
-            return pib;
-        };
-    }
-}
-
-installIntentHelpers();
 
 function ensureFirstSpawnMemory() {
     if (Memory.GameTickCounter === undefined) Memory.GameTickCounter = 0;
@@ -125,8 +88,6 @@ function maybeGeneratePixel() {
 }
 
 module.exports.loop = function () {
-    ensurePerTickIntentBuffer();
-
     refreshSourceIntel();
     BeeMaintenance.cleanUpMemory();
     BeeHiveMind.run();

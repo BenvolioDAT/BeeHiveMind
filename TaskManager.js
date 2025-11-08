@@ -1,25 +1,25 @@
 
-var Logger = require('core.logger');
-var LOG_LEVEL = Logger.LOG_LEVEL;
-var taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
+const Logger = require('core.logger');
+const LOG_LEVEL = Logger.LOG_LEVEL;
+const taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
 
-var TaskIdle = require('./Task.Idle');
-var TaskBaseHarvest = require('./Task.BaseHarvest');
-var TaskLuna = require('./Task.Luna');
-var TaskBuilder = require('./Task.Builder');
-var TaskCourier = require('./Task.Courier');
-var TaskQueen = require('./Task.Queen');
-var TaskScout = require('./Task.Scout');
-var TaskRepair = require('./Task.Repair');
-var TaskUpgrader = require('./Task.Upgrader');
-var TaskCombatArcher = require('./Task.CombatArcher');
-var TaskCombatMedic = require('./Task.CombatMedic');
-var TaskCombatMelee = require('./Task.CombatMelee');
-var TaskDismantler = require('./Task.Dismantler');
-var TaskTrucker = require('Task.Trucker');
-var TaskClaimer = require('Task.Claimer');
+const TaskIdle = require('./Task.Idle');
+const TaskBaseHarvest = require('./Task.BaseHarvest');
+const TaskLuna = require('./Task.Luna');
+const TaskBuilder = require('./Task.Builder');
+const TaskCourier = require('./Task.Courier');
+const TaskQueen = require('./Task.Queen');
+const TaskScout = require('./Task.Scout');
+const TaskRepair = require('./Task.Repair');
+const TaskUpgrader = require('./Task.Upgrader');
+const TaskCombatArcher = require('./Task.CombatArcher');
+const TaskCombatMedic = require('./Task.CombatMedic');
+const TaskCombatMelee = require('./Task.CombatMelee');
+const TaskDismantler = require('./Task.Dismantler');
+const TaskTrucker = require('Task.Trucker');
+const TaskClaimer = require('Task.Claimer');
 
-var DEFAULT_NEEDS = Object.freeze({
+const DEFAULT_NEEDS = Object.freeze({
   baseharvest: 2,
   builder: 2,
   repair: 1,
@@ -28,7 +28,7 @@ var DEFAULT_NEEDS = Object.freeze({
   scout: 1,
 });
 
-var DEFAULT_PRIORITY = Object.freeze([
+const DEFAULT_PRIORITY = Object.freeze([
   'baseharvest',
   'repair',
   'builder',
@@ -36,7 +36,7 @@ var DEFAULT_PRIORITY = Object.freeze([
   'upgrader',
 ]);
 
-var TASK_REGISTRY = Object.create(null);
+const TASK_REGISTRY = Object.create(null);
 
 function registerTask(name, module) {
   if (!name || !module || typeof module.run !== 'function') {
@@ -64,7 +64,7 @@ registerTask('idle', TaskIdle);
 registerTask('Trucker', TaskTrucker);
 registerTask('Claimer', TaskClaimer);
 
-var cache = (global.__taskManagerCache = global.__taskManagerCache || {
+const cache = (global.__taskManagerCache = global.__taskManagerCache || {
   tick: -1,
   counts: null,
   needs: null,
@@ -136,11 +136,7 @@ function getPriorityList() {
 }
 
 module.exports = {
-  /**
-   * Execute the assigned task for the provided creep.
-   * @param {Creep} creep
-   */
-  run: function (creep) {
+  run(creep) {
     if (!creep) return;
     var taskName = creep.memory && creep.memory.task;
     var taskModule = getTaskModule(taskName);
@@ -155,22 +151,12 @@ module.exports = {
     }
   },
 
-  /**
-   * Determine whether the colony currently lacks creeps for the task.
-   * @param {string} taskName
-   * @returns {boolean}
-   */
-  isTaskNeeded: function (taskName) {
+  isTaskNeeded(taskName) {
     var needs = colonyNeeds();
     return (needs[taskName] || 0) > 0;
   },
 
-  /**
-   * Get the highest priority task that still has unmet demand.
-   * @param {Creep} creep
-   * @returns {string}
-   */
-  getHighestPriorityTask: function (creep) {
+  getHighestPriorityTask(creep) {
     var needs = colonyNeeds();
     var priorityList = getPriorityList();
     for (var i = 0; i < priorityList.length; i++) {
@@ -180,11 +166,7 @@ module.exports = {
     return 'idle';
   },
 
-  /**
-   * Remove task-related memory fields from the creep.
-   * @param {Creep} creep
-   */
-  clearTaskMemory: function (creep) {
+  clearTaskMemory(creep) {
     if (!creep || !creep.memory) return;
     delete creep.memory.assignedSource;
     delete creep.memory.targetRoom;

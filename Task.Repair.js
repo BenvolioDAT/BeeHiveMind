@@ -1,205 +1,196 @@
-'use strict';
+// Task.Repair.js — with Debug_say & Debug_draw
+var BeeToolbox = require('BeeToolbox');
 
-var BeeSelectors = require('BeeSelectors');
-var BeeActions = require('BeeActions');
-var MovementManager = require('Movement.Manager');
-
+// =============== Config ===============
 var CFG = Object.freeze({
   DEBUG_SAY: false,
   DEBUG_DRAW: true,
-  DRAW: {
-    GATHER: '#ffd480',
-    REPAIR: '#2ad1c9',
-    IDLE: '#bfbfbf',
-    WIDTH: 0.12,
-    OPACITY: 0.45,
-    FONT: 0.6
+
+  TRAVEL_REUSE: 16,
+
+  COLORS: {
+    PATH:  "#7ac7ff",
+    REPAIR:"#2ad1c9",
+    ENERGY:"#ffd480",
+    TEXT:  "#e6e6e6"
   },
-  STUCK_TICKS: 4,
-  GATHER_REUSE: 15,
-  REPAIR_REUSE: 10
+  WIDTH: 0.12,
+  OPAC:  0.45,
+  FONT:  0.7
 });
 
-function debugSay(creep, msg) {
-  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+// Optional log levels (kept from original)
+var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
+var currentLogLevel = LOG_LEVEL.NONE;
+
+// =============== Tiny Debug Helpers ===============
+function _posOf(t){ return t && t.pos ? t.pos : t; }
+function _roomOf(p){ return p && Game.rooms[p.roomName]; }
+
+function debugSay(creep, msg){
+  if (CFG.DEBUG_SAY && creep && typeof creep.say === 'function') creep.say(msg, true);
+}
+function debugLine(from, to, color, label){
+  if (!CFG.DEBUG_DRAW || !from || !to) return;
+  var f=_posOf(from), t=_posOf(to); if(!f||!t||f.roomName!==t.roomName) return;
+  var R=_roomOf(f); if(!R||!R.visual) return;
+  R.visual.line(f, t, { color: color, width: CFG.WIDTH, opacity: CFG.OPAC });
+  if (label){
+    var mx=(f.x+t.x)/2, my=(f.y+t.y)/2;
+    R.visual.text(label, mx, my-0.25,
+      { color: color, opacity: 0.95, font: CFG.FONT, align:"center",
+        backgroundColor:"#000", backgroundOpacity:0.25 });
+  }
+}
+function debugRing(target, color, text){
+  if (!CFG.DEBUG_DRAW || !target) return;
+  var p=_posOf(target); if(!p) return;
+  var R=_roomOf(p); if(!R||!R.visual) return;
+  R.visual.circle(p, { radius: 0.6, fill:"transparent", stroke: color, opacity: CFG.OPAC, width: CFG.WIDTH });
+  if (text) R.visual.text(text, p.x, p.y-0.8, { color: color, font: CFG.FONT, opacity: 0.95, align:"center" });
+}
+function hud(creep, text){
+  if (!CFG.DEBUG_DRAW) return;
+  var R=creep.room; if(!R||!R.visual) return;
+  R.visual.text(text, creep.pos.x, creep.pos.y-1.2, {
+    color: CFG.COLORS.TEXT, font: CFG.FONT, opacity: 0.95, align: "center",
+    backgroundColor:"#000", backgroundOpacity:0.25
+  });
 }
 
-function drawLine(creep, target, color, label) {
-  if (!CFG.DEBUG_DRAW || !creep || !target) return;
-  var room = creep.room;
-  if (!room || !room.visual) return;
-  var pos = target.pos || target;
-  if (!pos || pos.roomName !== room.name) return;
+// =============== Travel Wrapper ===============
+function go(creep, dest, range){
+  var R = (range != null) ? range : 1;
+  var dpos = _posOf(dest) || dest;
+  if (creep.pos.roomName === dpos.roomName && creep.pos.getRangeTo(dpos) > R){
+    debugLine(creep.pos, dpos, CFG.COLORS.PATH, "→");
+  }
+  if (creep.pos.getRangeTo(dpos) <= R) return OK;
   try {
-    room.visual.line(creep.pos, pos, {
-      color: color,
-      width: CFG.DRAW.WIDTH,
-      opacity: CFG.DRAW.OPACITY
-    });
-    if (label) {
-      room.visual.text(label, pos.x, pos.y - 0.3, {
-        color: color,
-        font: CFG.DRAW.FONT,
-        opacity: CFG.DRAW.OPACITY,
-        align: 'center'
-      });
+    if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function'){
+      return BeeToolbox.BeeTravel(creep, dpos, { range: R, reusePath: CFG.TRAVEL_REUSE });
     }
-  } catch (e) {}
+  } catch(e){}
+  if (typeof creep.travelTo === 'function'){
+    return creep.travelTo(dpos, { range: R, reusePath: CFG.TRAVEL_REUSE, ignoreCreeps: false, maxOps: 4000 });
+  }
+  return creep.moveTo(dpos, { reusePath: CFG.TRAVEL_REUSE, maxOps: 1500 });
 }
 
-function ensureTask(creep) {
-  if (!creep.memory) return;
-  if (!creep.memory._task) creep.memory._task = null;
+// =============== Safe Memory Accessors ===============
+function getRepairQueue(room){
+  Memory.rooms = Memory.rooms || {};
+  Memory.rooms[room.name] = Memory.rooms[room.name] || {};
+  var rm = Memory.rooms[room.name];
+  rm.repairTargets = Array.isArray(rm.repairTargets) ? rm.repairTargets : [];
+  return rm.repairTargets;
+}
+function popInvalidHead(room){
+  var q = getRepairQueue(room);
+  if (!q.length) return null;
+  var head = q[0];
+  if (!head || !head.id) { q.shift(); return null; }
+  var obj = Game.getObjectById(head.id);
+  if (!obj || !obj.hits || obj.hits >= obj.hitsMax){ q.shift(); return null; }
+  return obj;
 }
 
-function clearTask(creep) {
-  if (!creep.memory) return;
-  var existing = creep.memory._task;
-  if (existing && existing.type === 'repair') {
-    BeeSelectors.releaseRepairTarget(creep.room.name, existing.targetId);
-  }
-  creep.memory._task = null;
+// =============== Energy Sourcing ===============
+function findDroppedEnergy(creep){
+  return creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
+    filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount|0) > 0; }
+  });
 }
-
-function chooseGatherTask(creep) {
-  var room = creep.room;
-  var tomb = BeeSelectors.findTombstoneWithEnergy(room);
-  if (tomb) {
-    return { type: 'gather', targetId: tomb.id, since: Game.time, data: { mode: 'withdraw', source: 'tomb' } };
-  }
-  var ruin = BeeSelectors.findRuinWithEnergy(room);
-  if (ruin) {
-    return { type: 'gather', targetId: ruin.id, since: Game.time, data: { mode: 'withdraw', source: 'ruin' } };
-  }
-  var drop = BeeSelectors.findBestEnergyDrop(room);
-  if (drop) {
-    return { type: 'gather', targetId: drop.id, since: Game.time, data: { mode: 'pickup', source: 'drop' } };
-  }
-  var container = BeeSelectors.findBestEnergyContainer(room);
-  if (container) {
-    return { type: 'gather', targetId: container.id, since: Game.time, data: { mode: 'withdraw', source: 'container' } };
-  }
-  var summary = BeeSelectors.getRoomEnergyData(room);
-  if (summary && summary.storage && (summary.storage.store[RESOURCE_ENERGY] | 0) > 0) {
-    return { type: 'gather', targetId: summary.storage.id, since: Game.time, data: { mode: 'withdraw', source: 'storage' } };
-  }
-  if (summary && summary.terminal && (summary.terminal.store[RESOURCE_ENERGY] | 0) > 0) {
-    return { type: 'gather', targetId: summary.terminal.id, since: Game.time, data: { mode: 'withdraw', source: 'terminal' } };
-  }
-  return null;
-}
-
-function chooseRepairTask(creep) {
-  var entry = BeeSelectors.reserveRepairTarget(creep.room, creep.name);
-  if (!entry || !entry.target) return null;
-  return {
-    type: 'repair',
-    targetId: entry.target.id,
-    since: Game.time,
-    data: { goalHits: entry.goalHits }
-  };
-}
-
-function needNewTask(creep, task) {
-  if (!task) return true;
-  if (!task.data) task.data = {};
-  var target = Game.getObjectById(task.targetId);
-  if (task.type === 'gather') {
-    if (!target) return true;
-    if (creep.store.getFreeCapacity() === 0) return true;
-    if (task.data.mode === 'pickup') {
-      if (!target.amount || target.amount <= 0) return true;
-    } else if (target.store && (target.store[RESOURCE_ENERGY] | 0) === 0) {
-      return true;
+function findWithdrawSource(creep){
+  return creep.pos.findClosestByPath(FIND_STRUCTURES, {
+    filter: function(s){
+      if (!s.store) return false;
+      var t = s.structureType;
+      if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN) return false;
+      return (s.store[RESOURCE_ENERGY] | 0) > 0;
     }
-  } else if (task.type === 'repair') {
-    if (creep.store[RESOURCE_ENERGY] === 0) return true;
-    if (!target) return true;
-    var goal = task.data.goalHits || target.hitsMax;
-    if (target.hits >= goal) return true;
-  }
-  if (task.data.lastPosX === creep.pos.x && task.data.lastPosY === creep.pos.y) {
-    task.data.stuck = (task.data.stuck | 0) + 1;
-    if (task.data.stuck >= CFG.STUCK_TICKS) return true;
-  } else {
-    task.data.stuck = 0;
-    task.data.lastPosX = creep.pos.x;
-    task.data.lastPosY = creep.pos.y;
-  }
-  return false;
+  });
 }
 
-function executeGather(creep, task) {
-  var target = Game.getObjectById(task.targetId);
-  if (!target) {
-    clearTask(creep);
-    return;
-  }
-  drawLine(creep, target, CFG.DRAW.GATHER, 'ENERGY');
-  debugSay(creep, '🔄');
-  var rc;
-  if (task.data.mode === 'pickup') {
-    rc = BeeActions.safePickup(creep, target, { reusePath: CFG.GATHER_REUSE });
-  } else {
-    rc = BeeActions.safeWithdraw(creep, target, RESOURCE_ENERGY, { reusePath: CFG.GATHER_REUSE });
-  }
-  if (rc === OK && creep.store.getFreeCapacity() === 0) clearTask(creep);
-}
-
-function executeRepair(creep, task) {
-  var target = Game.getObjectById(task.targetId);
-  if (!target) {
-    clearTask(creep);
-    return;
-  }
-  drawLine(creep, target, CFG.DRAW.REPAIR, 'FIX');
-  debugSay(creep, '🔧');
-  var rc = BeeActions.safeRepair(creep, target, { reusePath: CFG.REPAIR_REUSE });
-  if (rc === OK) {
-    if (task.data.goalHits && target.hits >= task.data.goalHits) {
-      BeeSelectors.releaseRepairTarget(creep.room.name, target.id);
-      clearTask(creep);
-    }
-  }
-  if (creep.store[RESOURCE_ENERGY] === 0) clearTask(creep);
-}
-
+// =============== Main Role ===============
 var TaskRepair = {
-  run: function (creep) {
-    if (!creep || creep.spawning) return;
-    ensureTask(creep);
-    var task = creep.memory._task;
-    if (needNewTask(creep, task)) {
-      if (task && task.type === 'repair') BeeSelectors.releaseRepairTarget(creep.room.name, task.targetId);
-      var newTask = null;
-      if (creep.store[RESOURCE_ENERGY] === 0) {
-        newTask = chooseGatherTask(creep);
-      } else {
-        newTask = chooseRepairTask(creep);
-      }
-      if (!newTask && creep.store[RESOURCE_ENERGY] > 0) newTask = chooseRepairTask(creep);
-      if (!newTask) {
-        debugSay(creep, '🧘');
-        var anchor = BeeSelectors.findRoomAnchor(creep.room);
-        if (anchor) {
-          MovementManager.request(creep, anchor, MovementManager.PRIORITIES.idle, { range: 2, reusePath: CFG.REPAIR_REUSE, intentType: 'idle' });
-        }
-        clearTask(creep);
+  run: function(creep){
+    // Status HUD
+    var e = creep.store[RESOURCE_ENERGY] | 0;
+    hud(creep, "🔧 " + e + "/" + creep.store.getCapacity(RESOURCE_ENERGY));
+
+    if ((creep.store[RESOURCE_ENERGY] | 0) > 0){
+      // — Have energy: repair flow —
+      var target = popInvalidHead(creep.room);
+      if (!target){
+        // queue empty or invalid → clear task (caller can reassign)
+        if (currentLogLevel >= LOG_LEVEL.BASIC) {}
+        creep.memory.task = undefined;
+        debugSay(creep, "✅ done");
         return;
       }
-      creep.memory._task = newTask;
-      task = newTask;
-    }
-    if (!task) return;
-    if (task.type === 'gather') {
-      executeGather(creep, task);
+
+      // Visuals for the target
+      creep.room.visual.text(
+        "Repair " + target.structureType + " " + target.hits + "/" + target.hitsMax,
+        target.pos.x, target.pos.y - 1,
+        { align: 'center', color: '#ffffff', opacity: 0.9 }
+      );
+      debugRing(target, CFG.COLORS.REPAIR, "fix");
+
+      // Attempt repair
+      var rr = creep.repair(target);
+      if (rr === OK){
+        if (currentLogLevel >= LOG_LEVEL.DEBUG){
+          console.log("Creep "+creep.name+" repairing "+target.structureType+" @("+target.pos.x+","+target.pos.y+")");
+        }
+        debugSay(creep, "🔧");
+        // Done? pop and move on
+        if (target.hits >= target.hitsMax){
+          getRepairQueue(creep.room).shift();
+          debugSay(creep, "✔");
+        }
+        return;
+      }
+      if (rr === ERR_NOT_IN_RANGE){
+        debugLine(creep, target, CFG.COLORS.REPAIR, "to repair");
+        go(creep, target, 3);
+        return;
+      }
+
+      // Other errors → log & skip this target
+      if (currentLogLevel >= LOG_LEVEL.DEBUG){
+        console.log("Repair error for "+creep.name+": "+rr);
+      }
+      getRepairQueue(creep.room).shift();
       return;
     }
-    if (task.type === 'repair') {
-      executeRepair(creep, task);
+
+    // — No energy: acquire —
+    var pile = findDroppedEnergy(creep);
+    if (pile){
+      debugRing(pile, CFG.COLORS.ENERGY, "💧"+(pile.amount|0));
+      debugLine(creep, pile, CFG.COLORS.ENERGY, "pickup");
+      var pr = creep.pickup(pile);
+      if (pr === ERR_NOT_IN_RANGE) go(creep, pile, 1);
+      else if (pr === OK) debugSay(creep, "💼");
       return;
     }
-    clearTask(creep);
+
+    var source = findWithdrawSource(creep);
+    if (source){
+      debugRing(source, CFG.COLORS.ENERGY, "ENERGY");
+      debugLine(creep, source, CFG.COLORS.ENERGY, "withdraw");
+      var wr = creep.withdraw(source, RESOURCE_ENERGY);
+      if (wr === ERR_NOT_IN_RANGE) go(creep, source, 1);
+      else if (wr === OK) debugSay(creep, "⛽");
+      return;
+    }
+
+    if (currentLogLevel >= LOG_LEVEL.DEBUG){
+      console.log("No available energy source for "+creep.name);
+    }
+    debugSay(creep, "😮‍💨");
   }
 };
 
