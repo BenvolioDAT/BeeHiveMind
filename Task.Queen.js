@@ -173,6 +173,11 @@ function needsNewTask(creep, task) {
 function pickWithdrawTask(creep) {
   var room = creep.room;
   if (!room) return null;
+
+  if (room.storage && (room.storage.store[RESOURCE_ENERGY] | 0) > 0) {
+    return createTask('withdraw', room.storage.id, { source: 'storage' });
+  }
+
   var list = BeeSelectors.getEnergySourcePriority(room);
   for (var i = 0; i < list.length; i++) {
     var entry = list[i];

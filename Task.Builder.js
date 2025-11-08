@@ -203,9 +203,17 @@ function needNewTask(creep, task) {
 function pickGatherTask(creep) {
   var room = creep.room;
   var list = BeeSelectors.getEnergySourcePriority(room);
+
+    //if (room.storage && (room.storage.store[RESOURCE_ENERGY] | 0) > 0) {
+    //return createTask('withdraw', room.storage.id, { source: 'storage' });
+  //}
+  
   for (var i = 0; i < list.length; i++) {
     var entry = list[i];
     if (!entry || !entry.target) continue;
+     if (entry.kind === 'storage') {
+      return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: 'storage' } };
+    }
     if (entry.kind === 'drop') {
       return { type: 'pickup', targetId: entry.target.id, since: Game.time, data: { source: 'drop' } };
     }
@@ -267,7 +275,16 @@ function describeTask(task) {
 
 function executeTask(creep, task) {
   if (!task) return;
-  var target = task.targetId ? Game.getObjectById(task.targetId) : null;
+
+  //var target = task.targetId ? Game.getObjectById(task.targetId) : null;
+
+  var target;
+    if (task.targetId) {
+      target = Game.getObjectById(task.targetId);
+    } else {
+      target = null;
+    }
+
   if (!target && task.type !== 'deliver') {
     clearTask(creep);
     return;
