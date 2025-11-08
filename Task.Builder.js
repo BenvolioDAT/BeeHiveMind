@@ -20,6 +20,7 @@ function ensureExpansionSticky(creep) {
   var tgt = null;
   if (creep.memory.expand && creep.memory.expand.target) tgt = creep.memory.expand.target;
   if (!tgt && creep.memory.task === 'expand' && creep.memory.target) tgt = creep.memory.target;
+  if (!tgt && creep.memory.task === 'expand' && creep.memory.targetRoom) tgt = creep.memory.targetRoom;
 
   if (!tgt) return false;
 
@@ -37,6 +38,7 @@ function isExpansionAssignment(creep) {
   if (!creep || !creep.memory) return false;
   if (creep.memory.expand && creep.memory.expand.target) return true;
   if (creep.memory.task === 'expand' && creep.memory.target) return true;
+  if (creep.memory.task === 'expand' && creep.memory.targetRoom) return true;
   if (creep.memory._expand && creep.memory._expand.room) return true;
   return false;
 }
@@ -46,6 +48,7 @@ function forbidGatherOutsideTarget(creep) {
   var roomName = null;
   if (creep.memory._expand && creep.memory._expand.room) roomName = creep.memory._expand.room;
   else if (creep.memory.target) roomName = creep.memory.target;
+  else if (creep.memory.targetRoom) roomName = creep.memory.targetRoom;
   if (!roomName || !creep.room) return false;
   return creep.room.name !== roomName;
 }
@@ -88,6 +91,7 @@ function isInExpansionTargetRoom(creep) {
   var roomName = null;
   if (creep.memory._expand && creep.memory._expand.room) roomName = creep.memory._expand.room;
   else if (creep.memory.task === 'expand' && creep.memory.target) roomName = creep.memory.target;
+  else if (creep.memory.task === 'expand' && creep.memory.targetRoom) roomName = creep.memory.targetRoom;
   else if (creep.memory.expand && creep.memory.expand.target) roomName = creep.memory.expand.target;
   if (!roomName) return false;
   return creep.room && creep.room.name === roomName;
@@ -152,7 +156,7 @@ function handleExpansionBuilder(creep) {
   if (!isExpansionAssignment(creep)) return 'noop';
 
   ensureExpansionSticky(creep);
-  var targetRoom = creep.memory._expand ? creep.memory._expand.room : (creep.memory.target || null);
+  var targetRoom = creep.memory._expand ? creep.memory._expand.room : (creep.memory.target || creep.memory.targetRoom || null);
   if (!targetRoom) return 'noop';
 
   if (creep.room.name !== targetRoom) {
@@ -350,6 +354,7 @@ function pickWorkTask(creep) {
     var targetRoom = null;
     if (creep.memory._expand && creep.memory._expand.room) targetRoom = creep.memory._expand.room;
     else if (creep.memory.task === 'expand' && creep.memory.target) targetRoom = creep.memory.target;
+    else if (creep.memory.task === 'expand' && creep.memory.targetRoom) targetRoom = creep.memory.targetRoom;
     else if (creep.memory.expand && creep.memory.expand.target) targetRoom = creep.memory.expand.target;
     if (targetRoom && creep.room.name !== targetRoom) {
       return null;
@@ -497,6 +502,7 @@ var TaskBuilder = {
       var expandRoom = null;
       if (creep.memory._expand && creep.memory._expand.room) expandRoom = creep.memory._expand.room;
       else if (creep.memory.task === 'expand' && creep.memory.target) expandRoom = creep.memory.target;
+      else if (creep.memory.task === 'expand' && creep.memory.targetRoom) expandRoom = creep.memory.targetRoom;
       else if (creep.memory.expand && creep.memory.expand.target) expandRoom = creep.memory.expand.target;
       if (expandRoom && creep.room.name !== expandRoom) {
         clearTask(creep);
