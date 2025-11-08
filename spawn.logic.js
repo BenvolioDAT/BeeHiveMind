@@ -33,6 +33,7 @@ const A  = (t,a,r,h,w,c,m)=>[
 // C(c,m) = [CLAIM x c, MOVE x m]
 const C  = (c, m) => [...Array(c).fill(CLAIM), ...Array(m).fill(MOVE)];
 
+
 // ---------- Role Configs (largest first is preferred) ----------
 const CONFIGS = {
   // Workers
@@ -70,21 +71,16 @@ const CONFIGS = {
     CM(2,2), 
     CM(1,1),
   ],
-  builder: [ 
-    B(6,12,18),
-    // Long-haul “road layer” — balanced for 2–3 rooms out
-    B(4, 8, 12),   // 1200 energy, 24 parts, 400 carry
-    // Mid-range — solid for 1–2 rooms out
-    B(3, 6, 9),    // 900 energy, 18 parts, 300 carry
-    // Budget scout/seed — starter road + container drop
-    B(2, 4, 6),    // 600 energy, 12 parts, 200 carry
-    // Emergency mini — drops a container + token road
-    B(2, 2, 4),     // 400 energy, 8 parts, 100 carry
+  builder: [
+    B(3,6,9),
+    B(2,4,6),
+    B(2,2,4),
     B(1,1,2),
     B(1,1,1),
   ],
   upgrader: [
-    //B(4,1,5), 
+    B(3,2,5),
+    B(2,2,4), 
     B(2,1,3),
     B(1,1,2),
     B(1,1,1),
