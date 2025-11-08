@@ -152,6 +152,29 @@ function buildSnapshot(room) {
   });
 }
 
+function findConstructionSiteInRoomImpl(room) {
+  if (!room) return null;
+  var snap = buildSnapshot(room);
+  if (!snap || !snap.sites || !snap.sites.length) return null;
+  return snap.sites[0];
+}
+
+function findAdjacentRoomWithConstructionImpl(originRoomName) {
+  if (!originRoomName || !Game || !Game.map || !Game.map.describeExits) return null;
+  var exits = Game.map.describeExits(originRoomName);
+  if (!exits) return null;
+  var directions = [TOP, TOP_RIGHT, RIGHT, BOTTOM_RIGHT, BOTTOM, BOTTOM_LEFT, LEFT, TOP_LEFT];
+  for (var i = 0; i < directions.length; i++) {
+    var dir = directions[i];
+    var roomName = exits[dir];
+    if (!roomName) continue;
+    var room = Game.rooms[roomName];
+    if (!room) continue;
+    if (findConstructionSiteInRoomImpl(room)) return roomName;
+  }
+  return null;
+}
+
 function byEnergyDesc(a, b) {
   var ae = (a.store && a.store[RESOURCE_ENERGY]) || (a.amount || 0);
   var be = (b.store && b.store[RESOURCE_ENERGY]) || (b.amount || 0);
@@ -501,6 +524,14 @@ var BeeSelectors = {
     var snap = buildSnapshot(room);
     if (!snap || !snap.sites.length) return null;
     return snap.sites[0];
+  },
+
+  findConstructionSiteInRoom: function (room) {
+    return findConstructionSiteInRoomImpl(room);
+  },
+
+  findAdjacentRoomWithConstruction: function (originRoomName) {
+    return findAdjacentRoomWithConstructionImpl(originRoomName);
   },
 
   findBestRepairTarget: function (room) {
