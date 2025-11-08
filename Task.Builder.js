@@ -61,20 +61,84 @@ function ensureExpansionSpawnSite(room) {
   return findExpansionSpawnTarget(room);
 }
 
+function isInExpansionTargetRoom(creep) {
+  if (!isExpansionAssignment(creep)) return false;
+  if (!creep.memory || !creep.memory.target) return false;
+  return creep.room && creep.room.name === creep.memory.target;
+}
+
+function isSourceContainer(structure) {
+  if (!structure || !structure.pos) return false;
+  var sources = structure.pos.findInRange(FIND_SOURCES, 1);
+  return sources && sources.length > 0;
+}
+
+function pickExpansionGatherTask(creep) {
+  var room = creep.room;
+  if (!room) return null;
+  var list = BeeSelectors.getEnergySourcePriority(room);
+  var i;
+  for (i = 0; i < list.length; i++) {
+    var entry = list[i];
+    if (!entry || !entry.target) continue;
+    if (entry.kind === 'drop') {
+      return { type: 'pickup', targetId: entry.target.id, since: Game.time, data: { source: 'drop' } };
+    }
+  }
+  var containerTarget = null;
+  for (i = 0; i < list.length; i++) {
+    var entry2 = list[i];
+    if (!entry2 || !entry2.target) continue;
+    if (entry2.kind === 'container' && entry2.target.structureType === STRUCTURE_CONTAINER && isSourceContainer(entry2.target)) {
+      containerTarget = entry2.target;
+      break;
+    }
+  }
+  if (containerTarget) {
+    return { type: 'withdraw', targetId: containerTarget.id, since: Game.time, data: { source: 'container' } };
+  }
+  for (i = 0; i < list.length; i++) {
+    var entry3 = list[i];
+    if (!entry3 || !entry3.target) continue;
+    if (entry3.kind === 'ruin') {
+      return { type: 'withdraw', targetId: entry3.target.id, since: Game.time, data: { source: 'ruin' } };
+    }
+  }
+  for (i = 0; i < list.length; i++) {
+    var entry4 = list[i];
+    if (!entry4 || !entry4.target) continue;
+    if (entry4.kind === 'tomb') {
+      return { type: 'withdraw', targetId: entry4.target.id, since: Game.time, data: { source: 'tomb' } };
+    }
+  }
+  for (i = 0; i < list.length; i++) {
+    var entry5 = list[i];
+    if (!entry5 || !entry5.target) continue;
+    if (entry5.kind === 'source') {
+      return { type: 'harvest', targetId: entry5.target.id, since: Game.time, data: { source: 'source' } };
+    }
+  }
+  return null;
+}
+
 // Expansion-specific behavior: travel, drop a spawn site, and focus build orders when flagged.
 function handleExpansionBuilder(creep) {
-  if (!isExpansionAssignment(creep)) return false;
+  if (!isExpansionAssignment(creep)) return 'noop';
   var targetRoom = creep.memory.target;
-  if (!targetRoom) return false;
+  if (!targetRoom) return 'noop';
   if (creep.room.name !== targetRoom) {
+    debugSay(creep, '➡️ ' + targetRoom);
+    clearTask(creep);
     travelToRoomCenter(creep, targetRoom);
-    return true;
+    return 'traveling';
   }
   var room = creep.room;
+  var center = new RoomPosition(25, 25, targetRoom);
+  drawLine(creep, center, CFG.DRAW.BUILD, 'EXPAND');
   var spawnTarget = ensureExpansionSpawnSite(room);
-  if (!spawnTarget) return false;
+  if (!spawnTarget) return 'setup';
   if (spawnTarget.structureType === STRUCTURE_SPAWN) {
-    return false;
+    return 'target';
   }
   if (!creep.memory._task || creep.memory._task.targetId !== spawnTarget.id || creep.memory._task.type !== 'build') {
     creep.memory._task = {
@@ -83,8 +147,9 @@ function handleExpansionBuilder(creep) {
       since: Game.time,
       data: { structureType: STRUCTURE_SPAWN }
     };
+    debugSay(creep, '🏗️ spawn');
   }
-  return false;
+  return 'setup';
 }
 
 var CFG = Object.freeze({
@@ -205,17 +270,17 @@ function needNewTask(creep, task) {
 
 function pickGatherTask(creep) {
   var room = creep.room;
+  if (isInExpansionTargetRoom(creep)) {
+    var expansionTask = pickExpansionGatherTask(creep);
+    if (expansionTask) return expansionTask;
+  }
   var list = BeeSelectors.getEnergySourcePriority(room);
 
-    //if (room.storage && (room.storage.store[RESOURCE_ENERGY] | 0) > 0) {
-    //return createTask('withdraw', room.storage.id, { source: 'storage' });
-  //}
-  
   for (var i = 0; i < list.length; i++) {
     var entry = list[i];
     if (!entry || !entry.target) continue;
-     if (entry.kind === 'storage') {
-      return { type: 'withdraw', targetId: entry.target.id, since: Game.time, data: { source: 'storage' } };
+    if (isExpansionAssignment(creep)) {
+      if (entry.kind === 'storage' || entry.kind === 'terminal') continue;
     }
     if (entry.kind === 'drop') {
       return { type: 'pickup', targetId: entry.target.id, since: Game.time, data: { source: 'drop' } };
@@ -235,6 +300,12 @@ function pickGatherTask(creep) {
 }
 
 function pickWorkTask(creep) {
+  if (isExpansionAssignment(creep)) {
+    var targetRoom = creep.memory.target;
+    if (targetRoom && creep.room.name !== targetRoom) {
+      return null;
+    }
+  }
   var room = creep.room;
   var site = BeeSelectors.findBestConstructionSite(room);
   if (site) {
@@ -369,9 +440,14 @@ function idle(creep) {
 var TaskBuilder = {
   run: function (creep) {
     if (!creep || creep.spawning) return;
-    if (handleExpansionBuilder(creep)) return;
+    var expansionState = handleExpansionBuilder(creep);
+    if (expansionState === 'traveling') return;
     ensureTask(creep);
     var task = creep.memory._task;
+    if (isExpansionAssignment(creep) && creep.memory.target && creep.room.name !== creep.memory.target) {
+      clearTask(creep);
+      return;
+    }
     if (needNewTask(creep, task)) {
       clearTask(creep);
       task = (creep.store[RESOURCE_ENERGY] === 0)
