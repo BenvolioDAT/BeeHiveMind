@@ -152,6 +152,19 @@ function buildSnapshot(room) {
   });
 }
 
+function getRoomSources(roomOrName) {
+  var room = null;
+  if (!roomOrName) return [];
+  if (typeof roomOrName === 'string') room = Game.rooms[roomOrName] || null;
+  else room = roomOrName;
+  if (!room) return [];
+  var snap = buildSnapshot(room);
+  if (!snap || !snap.sources) return [];
+  var out = [];
+  for (var i = 0; i < snap.sources.length; i++) out.push(snap.sources[i]);
+  return out;
+}
+
 function findConstructionSiteInRoomImpl(room) {
   if (!room) return null;
   var snap = buildSnapshot(room);
@@ -476,6 +489,8 @@ var BeeSelectors = {
     if (!room) return null;
     return buildSnapshot(room);
   },
+
+  getRoomSources: getRoomSources,
 
   getRoomEnergyData: function (room) {
     if (!room) return null;

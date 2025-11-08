@@ -52,6 +52,14 @@ var QUEUE_HARD_LIMIT = 20;          // per-room queue sanity cap
 var DEBUG_SPAWN_QUEUE = true;
 var DBG_EVERY = 5;
 
+var DEFAULT_BASE_HARVESTER_PER_SOURCE = 1;
+var BOOTSTRAP_MAX_BASEHARVESTERS = 2;
+var BOOTSTRAP_MAX_COURIERS = 1;
+var BOOTSTRAP_ALLOWED_ROLES = {
+  baseharvest: true,
+  courier: true
+};
+
 var ROLE_PRIORITY = {
   baseharvest: 100,
   courier:      95,
@@ -141,12 +149,66 @@ function energyStatus(room) {
   return a + '/' + c;
 }
 
-// ------------------------------ Spawn Queue ------------------------------
-function ensureRoomQueue(roomName) {
+function ensureRoomMemory(roomName) {
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  if (!Memory.rooms[roomName].spawnQueue) Memory.rooms[roomName].spawnQueue = [];
-  return Memory.rooms[roomName].spawnQueue;
+  return Memory.rooms[roomName];
+}
+
+function ensureRoomSpawnConfig(roomName) {
+  var mem = ensureRoomMemory(roomName);
+  if (!mem.spawnConfig) mem.spawnConfig = {};
+  if (mem.spawnConfig.baseHarvesterPerSource === undefined || mem.spawnConfig.baseHarvesterPerSource === null) {
+    mem.spawnConfig.baseHarvesterPerSource = DEFAULT_BASE_HARVESTER_PER_SOURCE;
+  }
+  if (mem.spawnConfig.allowRemoteBootstrap === undefined || mem.spawnConfig.allowRemoteBootstrap === null) {
+    mem.spawnConfig.allowRemoteBootstrap = true;
+  }
+  return mem.spawnConfig;
+}
+
+function copyCounts(source) {
+  var out = {};
+  if (!source) return out;
+  for (var key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    out[key] = source[key];
+  }
+  return out;
+}
+
+function countQueueByRole(queue) {
+  var counts = {};
+  if (!queue) return counts;
+  for (var i = 0; i < queue.length; i++) {
+    var entry = queue[i];
+    if (!entry || !entry.role) continue;
+    counts[entry.role] = (counts[entry.role] || 0) + 1;
+  }
+  return counts;
+}
+
+function compareQueueEntries(a, b) {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  var prio = (b.priority - a.priority);
+  if (prio !== 0) return prio;
+  var aOrder = (typeof a.intentOrder === 'number') ? a.intentOrder : a.created;
+  var bOrder = (typeof b.intentOrder === 'number') ? b.intentOrder : b.created;
+  return aOrder - bOrder;
+}
+
+function sortQueueByPriority(queue) {
+  if (!Array.isArray(queue)) return;
+  queue.sort(compareQueueEntries);
+}
+
+// ------------------------------ Spawn Queue ------------------------------
+function ensureRoomQueue(roomName) {
+  var mem = ensureRoomMemory(roomName);
+  if (!mem.spawnQueue) mem.spawnQueue = [];
+  return mem.spawnQueue;
 }
 function queuedCount(roomName, role) {
   var q = ensureRoomQueue(roomName);
@@ -165,6 +227,7 @@ function enqueue(roomName, role, opts) {
   var item = {
     role: role,
     home: roomName,
+    homeRoom: roomName,
     created: Game.time,
     priority: ROLE_PRIORITY[role] || 0,
     retryAt: 0
@@ -176,23 +239,16 @@ function enqueue(roomName, role, opts) {
   dlog('➕ [Queue]', roomName, 'enqueued', role, '(prio', item.priority + ')');
   return true;
 }
-function pruneOverfilledQueue(roomName, quotas, C) {
+function pruneOverfilledQueue(roomName, quotas, activeCounts, spawningCounts) {
   var q = ensureRoomQueue(roomName);
   var before = q.length;
-  q.sort(function (a, b) {
-    var prio = (b.priority - a.priority);
-    if (prio !== 0) return prio;
-    var aOrder = (typeof a.intentOrder === 'number') ? a.intentOrder : a.created;
-    var bOrder = (typeof b.intentOrder === 'number') ? b.intentOrder : b.created;
-    return aOrder - bOrder;
-  });
+  sortQueueByPriority(q);
   var remaining = {};
   for (var role in quotas) {
     if (!Object.prototype.hasOwnProperty.call(quotas, role)) continue;
-    var active = (role === 'luna')
-      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) | 0)
-      : ((C.roleCounts[role]) | 0);
-    remaining[role] = Math.max(0, (quotas[role] | 0) - active);
+    var active = (activeCounts && activeCounts[role]) || 0;
+    var spawning = (spawningCounts && spawningCounts[role]) || 0;
+    remaining[role] = Math.max(0, (quotas[role] | 0) - active - spawning);
   }
   var kept = [];
   var used = {};
@@ -206,7 +262,7 @@ function pruneOverfilledQueue(roomName, quotas, C) {
       used[it.role] = usedSoFar + 1;
     }
   }
-  Memory.rooms[roomName].spawnQueue = kept;
+  ensureRoomMemory(roomName).spawnQueue = kept;
   var dropped = before - kept.length;
   if (dropped > 0 || tickEvery(DBG_EVERY)) {
     dlog('🧹 [Queue]', roomName, 'prune:',
@@ -301,15 +357,46 @@ function determineLunaQuota(C, room) {
   return desired;
 }
 function computeRoomQuotas(C, room) {
+  var roomName = room.name;
+  var config = ensureRoomSpawnConfig(roomName);
+  var snapshot = (C.roomSnapshots && C.roomSnapshots[roomName]) || null;
+  var sourceCount = 0;
+  if (snapshot && snapshot.sources && snapshot.sources.length) {
+    sourceCount = snapshot.sources.length;
+  } else if (BeeSelectors && typeof BeeSelectors.getRoomSources === 'function') {
+    try {
+      var list = BeeSelectors.getRoomSources(room);
+      if (list && list.length) sourceCount = list.length;
+    } catch (sourceErr) {
+      sourceCount = 0;
+    }
+  }
+  if (!sourceCount) {
+    var liveSources = room.find(FIND_SOURCES);
+    sourceCount = liveSources ? liveSources.length : 0;
+  }
+  if (!sourceCount && Memory.rooms && Memory.rooms[roomName] && Memory.rooms[roomName].sources) {
+    for (var sid in Memory.rooms[roomName].sources) {
+      if (Object.prototype.hasOwnProperty.call(Memory.rooms[roomName].sources, sid)) sourceCount++;
+    }
+  }
+  if (sourceCount <= 0) sourceCount = 1;
+  var perSource = config.baseHarvesterPerSource || DEFAULT_BASE_HARVESTER_PER_SOURCE;
+  var hasSpawn = (C.roomHasSpawn && C.roomHasSpawn[roomName]) || false;
+  var baseharvest = Math.ceil(sourceCount * perSource);
+  if (baseharvest < 1) baseharvest = 1;
+  if (!hasSpawn && baseharvest > BOOTSTRAP_MAX_BASEHARVESTERS) baseharvest = BOOTSTRAP_MAX_BASEHARVESTERS;
+  var courier = Math.max(1, Math.ceil(baseharvest / 2));
+  if (!hasSpawn && courier > BOOTSTRAP_MAX_COURIERS) courier = BOOTSTRAP_MAX_COURIERS;
   var quotas = {
-    baseharvest:  2,
-    courier:      1,
-    queen:        1,
-    upgrader:     2,
-    builder:      getBuilderNeed(C, room),
-    scout:        1,
+    baseharvest:  baseharvest,
+    courier:      courier,
+    queen:        hasSpawn ? 1 : 0,
+    upgrader:     hasSpawn ? 2 : 0,
+    builder:      hasSpawn ? getBuilderNeed(C, room) : 0,
+    scout:        hasSpawn ? 1 : 0,
     luna:         0,
-    repair:       0,
+    repair:       hasSpawn ? 0 : 0,
     CombatArcher: 0,
     CombatMelee:  0,
     CombatMedic:  0,
@@ -318,6 +405,8 @@ function computeRoomQuotas(C, room) {
     Claimer:      0,
     ExpandClaimer: 0
   };
+  var lunaQuota = determineLunaQuota(C, room);
+  if (lunaQuota > 0) quotas.luna = lunaQuota;
   // Expansion manager publishes spawn intents with canonical role names; bump
   // quotas here so queue pruning keeps those items alive until spawns fire.
   var expansionBoost = getExpansionQuotaBoost(room);
@@ -336,21 +425,56 @@ function computeRoomQuotas(C, room) {
   return quotas;
 }
 function fillQueueForRoom(C, room) {
-  var quotas = computeRoomQuotas(C, room);
   var roomName = room.name;
-  pruneOverfilledQueue(roomName, quotas, C);
-  for (var role in quotas) {
+  var quotas = null;
+  if (C.roomPlans && C.roomPlans[roomName]) quotas = C.roomPlans[roomName];
+  if (!quotas) quotas = computeRoomQuotas(C, room);
+  var activeCounts = (C.roleCountsByHome && C.roleCountsByHome[roomName]) || {};
+  var spawningCounts = (C.spawningRoleCountsByHome && C.spawningRoleCountsByHome[roomName]) || {};
+  pruneOverfilledQueue(roomName, quotas, activeCounts, spawningCounts);
+  var queue = ensureRoomQueue(roomName);
+  var queueCounts = countQueueByRole(queue);
+  var role;
+  for (role in quotas) {
     if (!Object.prototype.hasOwnProperty.call(quotas, role)) continue;
     var limit = quotas[role] | 0;
-    var active = (role === 'luna')
-      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) | 0)
-      : ((C.roleCounts[role]) | 0);
-    var queued = queuedCount(roomName, role);
+    var active = (activeCounts[role] || 0) + (spawningCounts[role] || 0);
+    var queued = queueCounts[role] || 0;
     var deficit = Math.max(0, limit - active - queued);
     if (deficit > 0 && tickEvery(DBG_EVERY)) {
-      dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit, 'active=', active, 'queued=', queued, 'deficit=', deficit);
+      dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit, 'active=', active, 'spawning=', spawningCounts[role] || 0,
+        'queued=', queued, 'deficit=', deficit);
     }
     for (var i = 0; i < deficit; i++) enqueue(roomName, role);
+  }
+  queue = ensureRoomQueue(roomName);
+  queueCounts = countQueueByRole(queue);
+  var mem = ensureRoomMemory(roomName);
+  mem.quotas = copyCounts(quotas);
+  if (!mem.census) mem.census = {};
+  mem.census.tick = Game.time;
+  mem.census.alive = copyCounts((C.censusAliveByHome && C.censusAliveByHome[roomName]) || {});
+  mem.census.active = copyCounts(activeCounts);
+  mem.census.spawning = copyCounts(spawningCounts);
+  mem.census.queued = copyCounts(queueCounts);
+  if (!C.roomCensus) C.roomCensus = {};
+  C.roomCensus[roomName] = {
+    alive: copyCounts(mem.census.alive),
+    active: copyCounts(activeCounts),
+    spawning: copyCounts(spawningCounts),
+    queued: copyCounts(queueCounts),
+    quotas: copyCounts(quotas)
+  };
+  var config = ensureRoomSpawnConfig(roomName);
+  var hasSpawn = (C.roomHasSpawn && C.roomHasSpawn[roomName]) || false;
+  if (!hasSpawn && config.allowRemoteBootstrap) {
+    if (!C.bootstrapRooms) C.bootstrapRooms = {};
+    C.bootstrapRooms[roomName] = {
+      quotas: copyCounts(quotas),
+      active: copyCounts(activeCounts),
+      spawning: copyCounts(spawningCounts),
+      queued: copyCounts(queueCounts)
+    };
   }
 }
 function spawnFromPrimaryQueue(spawner) {
@@ -362,13 +486,7 @@ function spawnFromPrimaryQueue(spawner) {
     if (tickEvery(DBG_EVERY)) dlog('🕳️ [Queue]', roomName, 'empty (energy', energyStatus(room) + ')');
     return false;
   }
-  q.sort(function (a, b) {
-    var prio = (b.priority - a.priority);
-    if (prio !== 0) return prio;
-    var aOrder = (typeof a.intentOrder === 'number') ? a.intentOrder : a.created;
-    var bOrder = (typeof b.intentOrder === 'number') ? b.intentOrder : b.created;
-    return aOrder - bOrder;
-  });
+  sortQueueByPriority(q);
   var headPriority = q[0].priority;
   var headRole = q[0].role;
   var needed = energyNeededForQueueItem(q[0]);
@@ -415,10 +533,104 @@ function spawnFromPrimaryQueue(spawner) {
   return false;
 }
 
-function dequeueAndSpawn(spawner) {
+function spawnFromRoomQueueFiltered(spawner, roomName, allowedRoles, label) {
+  if (!spawner || !roomName) return false;
+  var queue = ensureRoomQueue(roomName);
+  if (!queue.length) return false;
+  sortQueueByPriority(queue);
+  var available = (spawner.room && spawner.room.energyAvailable) | 0;
+  var selectedPriority = null;
+  var pickIndex = -1;
+  var i;
+  for (i = 0; i < queue.length; i++) {
+    var entry = queue[i];
+    if (!entry) continue;
+    if (allowedRoles && !allowedRoles[entry.role]) continue;
+    if (entry.retryAt && Game.time < entry.retryAt) continue;
+    var needed = energyNeededForQueueItem(entry);
+    if (available < needed) continue;
+    if (selectedPriority === null) selectedPriority = entry.priority;
+    if (selectedPriority !== null && entry.priority < selectedPriority) break;
+    pickIndex = i;
+    break;
+  }
+  if (pickIndex === -1) return false;
+  var item = queue[pickIndex];
+  var targetLabel = label || 'Spawn';
+  dlog('🎬 [' + targetLabel + 'Try]', spawner.room.name, '→', roomName, 'role=', item.role, 'prio=', item.priority,
+       'energy=', energyStatus(spawner.room));
+  var spawnResource = null;
+  if (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function') {
+    spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
+  }
+  var ok = false;
+  if (item.intentSpec && spawnLogic && typeof spawnLogic.Spawn_From_Intent === 'function') {
+    ok = spawnLogic.Spawn_From_Intent(spawner, item.intentSpec, spawnResource);
+  } else if (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function') {
+    ok = spawnLogic.Spawn_Worker_Bee(spawner, item.role, spawnResource, item);
+  }
+  if (ok) {
+    dlog('✅ [' + targetLabel + 'OK]', spawner.room.name, 'spawned', item.role, 'for', roomName, 'at', spawner.name);
+    queue.splice(pickIndex, 1);
+    return true;
+  }
+  item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
+  dlog('⏳ [' + targetLabel + 'Wait]', spawner.room.name, item.role, '→', roomName, 'retryAt', item.retryAt);
+  return false;
+}
+
+function attemptBootstrapSpawn(spawner, context) {
+  if (!spawner || !context || !context.bootstrapRooms) return false;
+  var spawnRoomName = spawner.room && spawner.room.name;
+  if (!spawnRoomName) return false;
+  var bestRoom = null;
+  var bestDist = null;
+  for (var roomName in context.bootstrapRooms) {
+    if (!Object.prototype.hasOwnProperty.call(context.bootstrapRooms, roomName)) continue;
+    var info = context.bootstrapRooms[roomName];
+    if (!info) continue;
+    var queue = ensureRoomQueue(roomName);
+    if (!queue || !queue.length) continue;
+    var quotas = info.quotas || {};
+    var active = info.active || {};
+    var spawning = info.spawning || {};
+    var queueCounts = info.queued || countQueueByRole(queue);
+    var allowed = false;
+    for (var role in BOOTSTRAP_ALLOWED_ROLES) {
+      if (!BOOTSTRAP_ALLOWED_ROLES[role]) continue;
+      var limit = quotas[role] || 0;
+      if (limit <= 0) continue;
+      if (!queueCounts[role]) continue;
+      var cap = limit;
+      if (role === 'baseharvest' && cap > BOOTSTRAP_MAX_BASEHARVESTERS) cap = BOOTSTRAP_MAX_BASEHARVESTERS;
+      if (role === 'courier' && cap > BOOTSTRAP_MAX_COURIERS) cap = BOOTSTRAP_MAX_COURIERS;
+      if ((active[role] || 0) + (spawning[role] || 0) >= cap) continue;
+      allowed = true;
+      break;
+    }
+    if (!allowed) continue;
+    var dist = 0;
+    if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
+      dist = Game.map.getRoomLinearDistance(spawnRoomName, roomName, true) || 0;
+    }
+    if (bestRoom === null || dist < bestDist) {
+      bestRoom = roomName;
+      bestDist = dist;
+    }
+  }
+  if (!bestRoom) return false;
+  return spawnFromRoomQueueFiltered(spawner, bestRoom, BOOTSTRAP_ALLOWED_ROLES, 'Bootstrap');
+}
+
+function dequeueAndSpawn(spawner, context) {
   if (!spawner || spawner.spawning) return false;
   var handled = spawnFromPrimaryQueue(spawner);
   if (handled) return true;
+  var localQueue = ensureRoomQueue(spawner.room.name);
+  if (localQueue && localQueue.length) {
+    return false;
+  }
+  if (attemptBootstrapSpawn(spawner, context)) return true;
   if (spawnLogic && typeof spawnLogic.Consume_Spawn_Intents === 'function') {
     return spawnLogic.Consume_Spawn_Intents(spawner);
   }
@@ -449,32 +661,120 @@ function getAllSpawns() {
     return out;
   });
 }
+
+function findClosestRoomName(origin, candidates) {
+  if (!candidates || !candidates.length) return null;
+  if (!origin) return candidates[0];
+  var best = candidates[0];
+  var bestDist = null;
+  for (var i = 0; i < candidates.length; i++) {
+    var target = candidates[i];
+    var dist = 0;
+    if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
+      dist = Game.map.getRoomLinearDistance(origin, target, true) || 0;
+    }
+    if (bestDist === null || dist < bestDist) {
+      bestDist = dist;
+      best = target;
+    }
+  }
+  return best;
+}
+
+function ensureCreepHomeData(ownedRooms) {
+  var owned = [];
+  for (var i = 0; i < ownedRooms.length; i++) {
+    owned.push(ownedRooms[i].name);
+  }
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep.memory) creep.memory = {};
+    var mem = creep.memory;
+    if (mem.home || mem.homeRoom) continue;
+    var inferred = null;
+    if (mem._home) inferred = mem._home;
+    if (!inferred && creep.room && creep.room.controller && creep.room.controller.my) inferred = creep.room.name;
+    if (!inferred && owned.length) {
+      var origin = null;
+      if (creep.pos && creep.pos.roomName) origin = creep.pos.roomName;
+      inferred = findClosestRoomName(origin, owned);
+    }
+    if (inferred) {
+      mem.home = inferred;
+      if (!mem.homeRoom) mem.homeRoom = inferred;
+      if (!mem._home) mem._home = inferred;
+    }
+  }
+}
+
+function computeSpawningReservations(spawns) {
+  var byHome = {};
+  var totals = {};
+  for (var i = 0; i < spawns.length; i++) {
+    var spawn = spawns[i];
+    if (!spawn || !spawn.spawning) continue;
+    var data = spawn.spawning;
+    if (!data || !data.name) continue;
+    var mem = Memory.creeps && Memory.creeps[data.name];
+    if (!mem) continue;
+    var home = mem.home || mem.homeRoom || null;
+    if (!home && spawn.room) home = spawn.room.name;
+    if (!home) continue;
+    var role = mem.task || mem.role || mem.bornTask || null;
+    if (role === 'remoteharvest') role = 'luna';
+    if (!role) continue;
+    totals[role] = (totals[role] || 0) + 1;
+    if (!byHome[home]) byHome[home] = {};
+    byHome[home][role] = (byHome[home][role] || 0) + 1;
+  }
+  return { byHome: byHome, totals: totals };
+}
+
 function buildCreepAndRoleCounts() {
   return cacheValue('creepScan', 0, function () {
     var creeps = [];
     var roleCounts = {};
+    var roleCountsByHome = {};
+    var censusAlive = {};
     var lunaCountsByHome = {};
     for (var name in Game.creeps) {
       if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
       var c = Game.creeps[name];
+      if (!c.memory) c.memory = {};
       creeps.push(c);
+      var mem = c.memory;
+      var home = mem.home || mem.homeRoom || mem._home || null;
+      if (!home && c.room && c.room.controller && c.room.controller.my) home = c.room.name;
+      var rawTask = mem.task || mem.role || mem.bornTask || null;
+      if (rawTask === 'remoteharvest') {
+        rawTask = 'luna';
+        mem.task = 'luna';
+      }
+      var censusRole = rawTask || 'unknown';
+      if (home) {
+        if (!censusAlive[home]) censusAlive[home] = {};
+        censusAlive[home][censusRole] = (censusAlive[home][censusRole] || 0) + 1;
+      }
       var ttl = c.ticksToLive;
       if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
-      var task = c.memory && c.memory.task;
-      if (task === 'remoteharvest' && c.memory) {
-        task = 'luna';
-        c.memory.task = 'luna';
+      if (!rawTask) continue;
+      roleCounts[rawTask] = (roleCounts[rawTask] || 0) + 1;
+      if (home) {
+        if (!roleCountsByHome[home]) roleCountsByHome[home] = {};
+        roleCountsByHome[home][rawTask] = (roleCountsByHome[home][rawTask] || 0) + 1;
       }
-      if (!task) continue;
-      roleCounts[task] = (roleCounts[task] || 0) + 1;
-      if (task === 'luna') {
-        var home = (c.memory && c.memory.home) || null;
-        if (!home && c.memory && c.memory._home) home = c.memory._home;
-        if (!home && c.room) home = c.room.name;
-        if (home) lunaCountsByHome[home] = (lunaCountsByHome[home] || 0) + 1;
+      if (rawTask === 'luna' && home) {
+        lunaCountsByHome[home] = (lunaCountsByHome[home] || 0) + 1;
       }
     }
-    return { creeps: creeps, roleCounts: roleCounts, lunaCountsByHome: lunaCountsByHome };
+    return {
+      creeps: creeps,
+      roleCounts: roleCounts,
+      roleCountsByHome: roleCountsByHome,
+      censusAlive: censusAlive,
+      lunaCountsByHome: lunaCountsByHome
+    };
   });
 }
 function computeConstructionSiteCounts() {
@@ -513,17 +813,27 @@ var BeeHiveMind = {
     var context = {};
     context.tick = Game.time;
     context.roomsOwned = getOwnedRooms();
+    ensureCreepHomeData(context.roomsOwned);
     context.roomsMap = indexByName(context.roomsOwned);
     context.roomSnapshots = {};
+    context.roomHasSpawn = {};
+    context.bootstrapRooms = {};
     for (var rs = 0; rs < context.roomsOwned.length; rs++) {
       var senseRoom = context.roomsOwned[rs];
       context.roomSnapshots[senseRoom.name] = BeeSelectors.prepareRoomSnapshot(senseRoom);
+      var spawnList = senseRoom.find(FIND_MY_SPAWNS) || [];
+      context.roomHasSpawn[senseRoom.name] = spawnList.length > 0;
     }
     context.spawns = getAllSpawns();
+    var spawningScan = computeSpawningReservations(context.spawns);
     var creepScan = buildCreepAndRoleCounts();
     context.creeps = creepScan.creeps;
     context.roleCounts = creepScan.roleCounts;
+    context.roleCountsByHome = creepScan.roleCountsByHome;
+    context.censusAliveByHome = creepScan.censusAlive;
     context.lunaCountsByHome = creepScan.lunaCountsByHome;
+    context.spawningRoleCountsByHome = spawningScan.byHome;
+    context.spawningRoleTotals = spawningScan.totals;
     var sites = computeConstructionSiteCounts();
     context.roomSiteCounts = sites.byRoom;
     context.totalSiteCount = sites.total;
@@ -615,7 +925,6 @@ var BeeHiveMind = {
     if (!context || !context.spawns || !context.roomsOwned) return;
     for (var i = 0; i < context.roomsOwned.length; i++) {
       var room = context.roomsOwned[i];
-      if (!room.find(FIND_MY_SPAWNS).length) continue;
       ensureRoomQueue(room.name);
       fillQueueForRoom(context, room);
     }
@@ -631,7 +940,7 @@ var BeeHiveMind = {
           continue;
         }
       }
-      dequeueAndSpawn(spawner);
+      dequeueAndSpawn(spawner, context);
     }
   },
 
