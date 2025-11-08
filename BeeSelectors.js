@@ -205,6 +205,95 @@ function ensureRemoteMemory() {
   if (!Memory.__BHM.haulRequests) Memory.__BHM.haulRequests = {};
 }
 
+function getStructureEnergy(structure) {
+  if (!structure) return 0;
+  if (structure.store && structure.store[RESOURCE_ENERGY] != null) {
+    return structure.store[RESOURCE_ENERGY] | 0;
+  }
+  if (structure.energy != null) return structure.energy | 0;
+  return 0;
+}
+
+function getResourceEnergy(resource) {
+  if (!resource) return 0;
+  if (resource.amount != null) return resource.amount | 0;
+  return 0;
+}
+
+function roomHasAnyEnergy(room, minAmount) {
+  if (!room) return false;
+  var threshold = minAmount || 100;
+  var snap = buildSnapshot(room);
+  if (!snap) return false;
+
+  var i;
+  for (i = 0; i < snap.dropped.length; i++) {
+    if (getResourceEnergy(snap.dropped[i]) >= threshold) return true;
+  }
+  for (i = 0; i < snap.tombstones.length; i++) {
+    if (getStructureEnergy(snap.tombstones[i]) >= threshold) return true;
+  }
+  for (i = 0; i < snap.ruins.length; i++) {
+    if (getStructureEnergy(snap.ruins[i]) >= threshold) return true;
+  }
+  for (i = 0; i < snap.sourceContainers.length; i++) {
+    if (getStructureEnergy(snap.sourceContainers[i]) >= threshold) return true;
+  }
+  for (i = 0; i < snap.otherContainers.length; i++) {
+    if (getStructureEnergy(snap.otherContainers[i]) >= threshold) return true;
+  }
+  for (i = 0; i < snap.linksWithEnergy.length; i++) {
+    if (getStructureEnergy(snap.linksWithEnergy[i]) >= threshold) return true;
+  }
+  if (snap.storage && getStructureEnergy(snap.storage) >= threshold) return true;
+  if (snap.terminal && getStructureEnergy(snap.terminal) >= threshold) return true;
+  return false;
+}
+
+function findStorageLikeWithEnergy(room, minAmount) {
+  if (!room) return null;
+  var threshold = minAmount || 100;
+  if (room.storage && getStructureEnergy(room.storage) >= threshold) return room.storage;
+  if (room.terminal && getStructureEnergy(room.terminal) >= threshold) return room.terminal;
+  return null;
+}
+
+function findHomeStorageWithEnergy(creep, minAmount) {
+  var threshold = minAmount || 100;
+  if (!creep) return null;
+  var homeRoomName = null;
+  if (creep.memory) {
+    if (creep.memory.home) homeRoomName = creep.memory.home;
+    else if (creep.memory.homeRoom) homeRoomName = creep.memory.homeRoom;
+  }
+
+  if (homeRoomName) {
+    var homeRoom = Game.rooms[homeRoomName];
+    var homeStorage = findStorageLikeWithEnergy(homeRoom, threshold);
+    if (homeStorage) return homeStorage;
+  }
+
+  var name;
+  for (name in Game.rooms) {
+    if (!Object.prototype.hasOwnProperty.call(Game.rooms, name)) continue;
+    var room = Game.rooms[name];
+    if (!room || !room.controller || !room.controller.my) continue;
+    var storage = findStorageLikeWithEnergy(room, threshold);
+    if (storage) return storage;
+  }
+
+  for (var spawnName in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, spawnName)) continue;
+    var spawn = Game.spawns[spawnName];
+    if (!spawn || !spawn.my) continue;
+    var spawnRoom = spawn.room;
+    var spawnStorage = findStorageLikeWithEnergy(spawnRoom, threshold);
+    if (spawnStorage) return spawnStorage;
+  }
+
+  return null;
+}
+
 function posToSeat(pos) {
   if (!pos) return null;
   return { x: pos.x, y: pos.y, roomName: pos.roomName };
@@ -573,7 +662,11 @@ var BeeSelectors = {
   findControllerLink: function (room) {
     var snap = buildSnapshot(room);
     return snap ? snap.controllerLink : null;
-  }
+  },
+
+  roomHasAnyEnergy: roomHasAnyEnergy,
+
+  findHomeStorageWithEnergy: findHomeStorageWithEnergy
 };
 
 module.exports = BeeSelectors;

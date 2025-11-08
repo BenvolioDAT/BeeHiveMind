@@ -14,6 +14,9 @@ var SpawnPlacement = require('Planner.SpawnPlacement');
 
 try { require('Traveler'); } catch (e) {}
 
+var REFILL_MIN_AMOUNT = 150;
+var REFILL_COOLDOWN_TICKS = 10;
+
 function ensureExpansionSticky(creep) {
   if (!creep || !creep.memory) return false;
 
@@ -317,11 +320,41 @@ function needNewTask(creep, task) {
 }
 
 function pickGatherTask(creep) {
+  var isExpansion = isExpansionAssignment(creep);
+  var inTargetRoom = isInExpansionTargetRoom(creep);
+  var energyCarried = 0;
+  if (creep.store && creep.store[RESOURCE_ENERGY] != null) energyCarried = creep.store[RESOURCE_ENERGY] | 0;
+  else if (creep.carry && creep.carry[RESOURCE_ENERGY] != null) energyCarried = creep.carry[RESOURCE_ENERGY] | 0;
+
+  if (isExpansion && !inTargetRoom && energyCarried === 0) {
+    var onCooldown = false;
+    if (creep.memory && creep.memory._expandRefillTs != null) {
+      onCooldown = (Game.time - creep.memory._expandRefillTs) < REFILL_COOLDOWN_TICKS;
+    }
+    if (!onCooldown) {
+      var roomHasEnergy = BeeSelectors.roomHasAnyEnergy(creep.room, REFILL_MIN_AMOUNT);
+      if (!roomHasEnergy) {
+        var homeStorage = BeeSelectors.findHomeStorageWithEnergy(creep, REFILL_MIN_AMOUNT);
+        if (homeStorage) {
+          if (creep.memory) creep.memory._expandRefillTs = Game.time;
+          debugSay(creep, '🏠🔋');
+          drawLine(creep, homeStorage, CFG.DRAW.GATHER, 'REFILL');
+          return {
+            type: 'withdraw',
+            targetId: homeStorage.id,
+            since: Game.time,
+            data: { source: 'homeStorage', room: homeStorage.pos ? homeStorage.pos.roomName : null }
+          };
+        }
+      }
+    }
+  }
+
   if (forbidGatherOutsideTarget(creep)) {
     return null;
   }
   var room = creep.room;
-  if (isInExpansionTargetRoom(creep)) {
+  if (inTargetRoom) {
     var expansionTask = pickExpansionGatherTask(creep);
     if (expansionTask) return expansionTask;
   }
