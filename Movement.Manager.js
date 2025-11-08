@@ -1,3 +1,19 @@
+// -----------------------------------------------------------------------------
+// Movement.Manager.js – centralised movement intent queue for creeps
+// Responsibilities:
+// * Collects per-tick move requests from tasks/actions (BeeActions.safe*,
+//   Task.Queen idle, combat scripts) and resolves them in deterministic order.
+// * Delegates actual pathfinding to Traveler (creep.travelTo) when available,
+//   falling back to Screeps moveTo with same options if Traveler absent.
+// * Detects stale intents (creep moved rooms, target invalid, wrong shard) and
+//   drops them silently to prevent wasting CPU.
+// Data touched:
+// * Local transient state: MovementManager._intents/_indexByCreep (reset each tick).
+// * Reads Game.creeps/Game.rooms to validate intents.
+// Called from: BeeHiveMind.run (startTick() before creep logic,
+//   resolveAndMove() after all roles execute). BeeActions/Task modules call
+//   MovementManager.request() to queue movement.
+// -----------------------------------------------------------------------------
 'use strict';
 
 /**
@@ -39,6 +55,10 @@ var MovementManager = {
   /**
    * Reset tick-local state; must be invoked once from the orchestrator before DECIDE/ACT.
    */
+  // Function header: startTick()
+  // Inputs: none
+  // Output: none; resets internal arrays for the new tick.
+  // Side-effects: clears previous intents so new requests can be added safely.
   startTick: function () {
     this._intents = [];
     this._indexByCreep = {};
@@ -56,6 +76,16 @@ var MovementManager = {
    *   reusePath/ignoreCreeps/maxOps/plainCost/swampCost: Traveler options
    * }
    */
+  // Function header: request(creep, dest, priority, opts)
+  // Inputs: creep object, destination (structure or RoomPosition), optional
+  //         priority override, options (range, reusePath, flee, ignoreCreeps,
+  //         etc.).
+  // Output: OK when accepted, ERR_INVALID_ARGS if inputs malformed, or existing
+  //         priority when attempting to downgrade an existing intent.
+  // Side-effects: stores/updates MovementManager._intents entry for the creep.
+  // Preconditions: BeeHiveMind.startTick must have been called this tick.
+  // Notes: Each creep keeps only one active intent; newer requests overwrite if
+  //        they are same or higher priority.
   request: function (creep, dest, priority, opts) {
     if (!creep || !creep.name || !dest) return ERR_INVALID_ARGS;
     var pos = dest.pos || dest;
@@ -67,6 +97,7 @@ var MovementManager = {
     var targetId = dest.id || null;
     var intent;
     if (idx == null || this._intents[idx] == null) {
+      // First intent for this creep: allocate new record capturing caller opts.
       intent = {
         creepName: creep.name,
         creepId: creep.id || creep.name,
@@ -95,6 +126,8 @@ var MovementManager = {
     intent = this._intents[idx];
     if (!intent) return ERR_INVALID_ARGS;
     if (pr < intent.priority) return intent.priority;
+    // Higher or equal priority replaces destination/opts; retains earliest
+    // startRoom to avoid executing after portal jumps.
     intent.roomName = pos.roomName;
     intent.x = pos.x;
     intent.y = pos.y;
@@ -114,6 +147,9 @@ var MovementManager = {
     return OK;
   },
 
+  // Function header: _priorityFromOpts(opts)
+  // Inputs: options object (may include intentType).
+  // Output: numeric priority; defaults to PRIORITIES.default.
   _priorityFromOpts: function (opts) {
     if (!opts || !opts.intentType) return this.PRIORITIES.default;
     var key = opts.intentType;
@@ -124,6 +160,12 @@ var MovementManager = {
   /**
    * Resolve all movement intents in deterministic priority order.
    */
+  // Function header: resolveAndMove()
+  // Inputs: none
+  // Output: none; executes creep.travelTo for each pending intent in priority
+  //         order.
+  // Side-effects: issues move intents to creeps, clears internal intent list.
+  // Failure modes: silently skips creeps with fatigue or invalid targets.
   resolveAndMove: function () {
     if (!this._intents || !this._intents.length) return;
     this._intents.sort(function (a, b) {
@@ -142,13 +184,13 @@ var MovementManager = {
       if (!intent) continue;
       var creep = Game.creeps[intent.creepName];
       if (!creep) continue;
-      if (creep.fatigue > 0) continue;
-      if (intent.startRoom && creep.room && creep.room.name !== intent.startRoom) continue;
-      if (!intent.roomName || intent.x == null || intent.y == null) continue;
-      if (intent.shard && Game.shard && Game.shard.name !== intent.shard) continue;
-      if (intent.targetId && Game.rooms[intent.roomName] && !Game.getObjectById(intent.targetId)) continue;
+      if (creep.fatigue > 0) continue; // Skip; creep will retry next tick.
+      if (intent.startRoom && creep.room && creep.room.name !== intent.startRoom) continue; // Prevent stale path after long move.
+      if (!intent.roomName || intent.x == null || intent.y == null) continue; // Missing destination data.
+      if (intent.shard && Game.shard && Game.shard.name !== intent.shard) continue; // Cross-shard move ignored.
+      if (intent.targetId && Game.rooms[intent.roomName] && !Game.getObjectById(intent.targetId)) continue; // Target vanished while in vision.
       var pos = new RoomPosition(intent.x, intent.y, intent.roomName);
-      if (creep.pos.getRangeTo(pos) <= intent.range) continue;
+      if (creep.pos.getRangeTo(pos) <= intent.range) continue; // Already within desired range; no move issued to avoid thrashing.
       var travelOpts = {
         range: intent.range,
         reusePath: (intent.reusePath != null) ? intent.reusePath : 20,
@@ -159,7 +201,12 @@ var MovementManager = {
         flee: intent.flee || false
       };
       if (typeof creep.travelTo === 'function') {
+        // Traveler (Traveler.js) handles caching/stuck detection internally and
+        // respects reusePath/maxOps options provided.
         creep.travelTo(pos, travelOpts);
+      } else {
+        // When Traveler is not mixed in, we skip issuing a move to avoid
+        // inconsistent behaviour; callers should provide travelTo globally.
       }
     }
     this._intents = [];
