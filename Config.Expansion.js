@@ -3,10 +3,10 @@ var CFG = {
     ENABLE_EXPANSION: true,
 
     // Maximum number of simultaneous expansion targets to pursue.
-    MAX_EXPANSIONS: 1,
+    MAX_EXPANSIONS: 3,
 
     // Maximum number of room-to-room hops allowed between main room and expansion.
-    MAX_EXPANSION_DISTANCE: 2,
+    MAX_EXPANSION_DISTANCE: 8,
 
     // Minimum time between finishing one expansion and starting the next.
     EXPANSION_COOLDOWN_TICKS: 500,

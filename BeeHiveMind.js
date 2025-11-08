@@ -38,8 +38,8 @@ var ExpandSelector = require('Task.Expand.Selector');
 var creepRoles = {
   Worker_Bee: roleWorker_Bee.run,
   claimer: roleExpandClaimer.run,
-  Claimer: roleExpandClaimer.run,
-  ExpandClaimer: roleExpandClaimer.run
+  ExpandClaimer: roleExpandClaimer.run,
+  Claimer: roleExpandClaimer.run
 };
 
 // --------------------------- Tunables & Constants ------------------------
@@ -61,6 +61,7 @@ var ROLE_PRIORITY = {
   luna:         70,
   repair:       60,
   Claimer:      55,
+  ExpandClaimer: 55,
   scout:        40,
   Trucker:      35,
   Dismantler:   30,
@@ -78,6 +79,7 @@ var ROLE_MIN_ENERGY = {
   luna:        250,
   repair:      200,
   Claimer:     650,
+  ExpandClaimer: 650,
   scout:       50,
   Trucker:     200,
   Dismantler:  150,
@@ -240,14 +242,14 @@ function getExpansionQuotaBoost(room) {
   }
   if (!mainRoom || mainRoom !== room.name) return null;
   var phase = state.phase || 'idle';
-  var boost = { claimer: 0, builder: 0, courier: 0 };
+  var boost = { expandClaimer: 0, builder: 0, courier: 0 };
   if (phase === 'claiming') {
-    boost.claimer = 1;
+    boost.expandClaimer = 1;
   } else if (phase === 'bootstrapping') {
     boost.builder = 2;
     boost.courier = 1;
   }
-  if (!boost.claimer && !boost.builder && !boost.courier) return null;
+  if (!boost.expandClaimer && !boost.builder && !boost.courier) return null;
   return boost;
 }
 function determineLunaQuota(C, room) {
@@ -306,21 +308,23 @@ function computeRoomQuotas(C, room) {
     upgrader:     1,
     builder:      getBuilderNeed(C, room),
     scout:        1,
-    luna:         3,
+    luna:         0,
     repair:       0,
     CombatArcher: 0,
     CombatMelee:  0,
     CombatMedic:  0,
     Dismantler:   0,
     Trucker:      0,
-    Claimer:      0
+    Claimer:      0,
+    ExpandClaimer: 0
   };
   // Expansion manager publishes spawn intents with canonical role names; bump
   // quotas here so queue pruning keeps those items alive until spawns fire.
   var expansionBoost = getExpansionQuotaBoost(room);
   if (expansionBoost) {
-    if (expansionBoost.claimer > 0) {
-      if ((quotas.Claimer | 0) < expansionBoost.claimer) quotas.Claimer = expansionBoost.claimer;
+    var claimerBoost = expansionBoost.expandClaimer || expansionBoost.ExpandClaimer || expansionBoost.claimer || 0;
+    if (claimerBoost > 0) {
+      if ((quotas.ExpandClaimer | 0) < claimerBoost) quotas.ExpandClaimer = claimerBoost;
     }
     if (expansionBoost.builder > 0) quotas.builder = (quotas.builder | 0) + expansionBoost.builder;
     if (expansionBoost.courier > 0) quotas.courier = (quotas.courier | 0) + expansionBoost.courier;
@@ -792,7 +796,9 @@ function canonicalIntentRole(role) {
   if (typeof role !== 'string') return role;
   if (role === 'hauler') return 'courier';
   if (role === 'Hauler' || role === 'HAULER') return 'courier';
-  if (role === 'claimer') return 'Claimer';
+  if (role === 'ExpandClaimer') return 'ExpandClaimer';
+  if (role === 'claimer') return 'ExpandClaimer';
+  if (role === 'CLAIMER') return 'Claimer';
   if (role === 'claimerTask') return 'Claimer';
   if (role === 'builder') return 'builder';
   if (role === 'Builder') return 'builder';

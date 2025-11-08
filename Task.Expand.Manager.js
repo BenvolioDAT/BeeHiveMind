@@ -21,10 +21,12 @@
 
 var ConfigExpansion = require('Config.Expansion');
 var ExpandSelector = require('Task.Expand.Selector');
+var SpawnPlacement = require('Planner.SpawnPlacement');
 
 var PHASE_IDLE = 'idle';
 var PHASE_CLAIMING = 'claiming';
 var PHASE_BOOTSTRAPPING = 'bootstrapping';
+var EXPAND_CLAIMER_ROLE = 'ExpandClaimer'; // dedicated module for managed expansions
 
 var DESIRED_BUILDERS = 2;   // bootstrap requires two builders for rapid spawn bring-up
 var DESIRED_HAULERS = 1;    // single courier keeps builders supplied with energy
@@ -79,6 +81,15 @@ function getSpawnQueue() {
     return global.__BHM.spawnIntents;
 }
 
+function roleMatchesIntent(role, intentRole) {
+    if (!role) return intentRole === null || intentRole === undefined;
+    if (!intentRole) return false;
+    if (role === intentRole) return true;
+    if (role === EXPAND_CLAIMER_ROLE && intentRole === 'claimer') return true;
+    if (role === 'claimer' && intentRole === EXPAND_CLAIMER_ROLE) return true;
+    return false;
+}
+
 function countQueued(queue, target, role) {
     if (!queue || !queue.length) return 0;
     var count = 0;
@@ -86,7 +97,7 @@ function countQueued(queue, target, role) {
         var intent = queue[i];
         if (!intent) continue;
         if (intent.target !== target) continue;
-        if (role && intent.role !== role) continue;
+        if (role && !roleMatchesIntent(role, intent.role)) continue;
         count++;
     }
     return count;
@@ -101,7 +112,21 @@ function findExpandCreeps(target, role) {
         if (!creep || !creep.memory) continue;
         if (creep.memory.task !== 'expand') continue;
         if (creep.memory.target !== target) continue;
-        if (role && creep.memory.role !== role) continue;
+        if (role) {
+            var cRole = creep.memory.role;
+            if (cRole !== role) {
+                if (role === EXPAND_CLAIMER_ROLE && cRole === 'claimer') {
+                    // tolerate legacy role string while transitioning intents
+                    matches.push(creep);
+                    continue;
+                }
+                if (role === 'claimer' && cRole === EXPAND_CLAIMER_ROLE) {
+                    matches.push(creep);
+                    continue;
+                }
+                if (cRole !== role) continue;
+            }
+        }
         matches.push(creep);
     }
     return matches;
@@ -230,13 +255,13 @@ function claimSucceeded(target) {
 function ensureClaimer(state, mainRoom) {
     var target = state.target;
     var queue = getSpawnQueue();
-    var alive = findExpandCreeps(target, 'claimer');
+    var alive = findExpandCreeps(target, EXPAND_CLAIMER_ROLE);
     if (alive.length > 0) {
         state.claimerId = alive[0].name;
         return;
     }
     state.claimerId = null;
-    var queued = countQueued(queue, target, 'claimer');
+    var queued = countQueued(queue, target, EXPAND_CLAIMER_ROLE);
     if (queued > 0) return;
     if (typeof Game === 'undefined' || !Game.time) return;
     if (Game.time - state.lastClaimerRequest < CLAIMER_REQUEUE_TICKS) {
@@ -247,7 +272,7 @@ function ensureClaimer(state, mainRoom) {
         return;
     }
     var body = [CLAIM, MOVE, MOVE];
-    var intent = buildIntent('claimer', mainRoom, target, 5, body);
+    var intent = buildIntent(EXPAND_CLAIMER_ROLE, mainRoom, target, 5, body);
     if (queueIntent(intent) && typeof Game !== 'undefined') {
         state.lastClaimerRequest = Game.time;
         state.status = 'Queued claimer for ' + target;
@@ -265,6 +290,23 @@ function countStructures(target) {
     });
     if (found && found.length) return found.length;
     return 0;
+}
+
+function ensureSpawnSite(state) {
+    if (!state || !state.target) return;
+    if (typeof Game === 'undefined' || !Game.rooms) return;
+    if (!SpawnPlacement || typeof SpawnPlacement.placeInitialSpawnSite !== 'function') return;
+    var room = Game.rooms[state.target];
+    if (!room || !room.controller || !room.controller.my) return;
+    var existing = room.find(FIND_MY_STRUCTURES, {
+        filter: function (s) { return s.structureType === STRUCTURE_SPAWN; }
+    });
+    if (existing && existing.length) return;
+    var sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: function (site) { return site.structureType === STRUCTURE_SPAWN; }
+    });
+    if (sites && sites.length) return;
+    SpawnPlacement.placeInitialSpawnSite(room);
 }
 
 function ensureBuilders(state, mainRoom) {
@@ -328,6 +370,7 @@ function handleClaiming(state, mainRoom) {
 }
 
 function handleBootstrapping(state, mainRoom) {
+    ensureSpawnSite(state);
     ensureBuilders(state, mainRoom);
     ensureHauler(state, mainRoom);
     if (!state.status || state.status.indexOf('No main room') !== 0) {

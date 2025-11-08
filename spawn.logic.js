@@ -549,6 +549,7 @@ function normalizeIntentTask(role) {
   if (typeof role !== 'string') return role;
   if (role === 'hauler' || role === 'Hauler') return 'courier';
   if (role === 'HAULER') return 'courier';
+  if (role === 'ExpandClaimer') return 'Claimer';
   if (role === 'claimer') return 'Claimer';
   if (role === 'CLAIMER') return 'Claimer';
   if (role === 'Builder') return 'builder';
