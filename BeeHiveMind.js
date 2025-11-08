@@ -308,7 +308,7 @@ function computeRoomQuotas(C, room) {
     upgrader:     1,
     builder:      getBuilderNeed(C, room),
     scout:        1,
-    luna:         3,
+    luna:         0,
     repair:       0,
     CombatArcher: 0,
     CombatMelee:  0,
