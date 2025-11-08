@@ -3,7 +3,9 @@ var CFG = {
     ENABLE_EXPANSION: true,
 
     // Maximum number of simultaneous expansion targets to pursue.
-    MAX_EXPANSIONS: 3,
+    // This controls how many expansions may run in parallel regardless of how
+    // many rooms we already own (that limit is enforced separately via GCL).
+    MAX_PARALLEL_EXPANSIONS: 3,
 
     // Maximum number of room-to-room hops allowed between main room and expansion.
     MAX_EXPANSION_DISTANCE: 8,
@@ -51,5 +53,10 @@ var CFG = {
     // Minimum stored energy (storage + terminal) before expansion is allowed.
     ENERGY_BOOTSTRAP_MIN: 8000,
 };
+
+// Legacy alias for backwards compatibility while consumers migrate to the
+// clearer MAX_PARALLEL_EXPANSIONS name. Both represent the same concurrency
+// limit for expansion orchestration.
+CFG.MAX_EXPANSIONS = CFG.MAX_PARALLEL_EXPANSIONS;
 
 module.exports = CFG;

@@ -112,14 +112,24 @@ function gatherBlockers() {
     if (!mainRoom) blockers.push('No main room');
 
     var ownedRooms = countOwnedRooms();
-    var maxOwned = (ConfigExpansion && typeof ConfigExpansion.MAX_EXPANSIONS === 'number') ? ConfigExpansion.MAX_EXPANSIONS : 1;
-    if (ownedRooms >= maxOwned) blockers.push('Owned room limit (' + ownedRooms + '/' + maxOwned + ')');
-
     var gclLevel = (Game.gcl && typeof Game.gcl.level === 'number') ? Game.gcl.level : 1;
     if (ownedRooms >= gclLevel) blockers.push('GCL limit (' + ownedRooms + '/' + gclLevel + ')');
 
+    // Parallel slot cap: how many expansions may run at once, independent of
+    // how many rooms we already control. Fall back to the legacy MAX_EXPANSIONS
+    // knob if the new name is unavailable to preserve compatibility.
+    var parallelCap = 1;
+    if (ConfigExpansion) {
+        if (typeof ConfigExpansion.MAX_PARALLEL_EXPANSIONS === 'number') {
+            parallelCap = ConfigExpansion.MAX_PARALLEL_EXPANSIONS;
+        } else if (typeof ConfigExpansion.MAX_EXPANSIONS === 'number') {
+            parallelCap = ConfigExpansion.MAX_EXPANSIONS;
+        }
+    }
     var inProgress = getExpansionsInProgress();
-    if (inProgress >= maxOwned) blockers.push('Expansion slots busy');
+    if (parallelCap >= 0 && inProgress >= parallelCap) {
+        blockers.push('Expansion slots busy');
+    }
 
     if (mainRoom) {
         var visible = (Game.rooms && Game.rooms[mainRoom]) ? true : false;
