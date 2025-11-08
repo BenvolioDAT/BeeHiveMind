@@ -265,6 +265,7 @@ function logRoomIntel(room) {
   intel.lastVisited = Game.time;
   intel.lastScanAt  = Game.time;
 
+  // TODO: standardize intel.sources to an array so downstream consumers don't need type checks.
   intel.sources = room.find(FIND_SOURCES).length;
 
   var c = room.controller;
