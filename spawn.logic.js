@@ -1,4 +1,8 @@
 
+/**
+ * PIB (Per-tick Intent Buffer) queues spawn intents on global.__BHM.pib for same-tick consumption.
+ */
+
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
@@ -876,15 +880,46 @@ function ensureIntentBody(intent, energyBudget) {
  */
 function Consume_Spawn_Intents(spawn) {
   if (!spawn || spawn.spawning) return false;
-  if (typeof global === 'undefined' || !global.__BHM) return false;
-  var queue = global.__BHM.spawnIntents;
-  if (!Array.isArray(queue) || !queue.length) return false;
   var energyBudget = Calculate_Spawn_Resource(spawn);
   if (!energyBudget) return false;
   var roomName = null;
   if (spawn.room && spawn.room.name) {
     roomName = spawn.room.name;
   }
+  var hasGlobal = typeof global !== 'undefined' && global.__BHM;
+  if (hasGlobal) {
+    var pib = global.__BHM.pib;
+    if (pib && pib._t === Game.time && Array.isArray(pib.spawns) && pib.spawns.length) {
+      for (var j = 0; j < pib.spawns.length; j++) {
+        var pibIntent = pib.spawns[j];
+        if (!pibIntent) {
+          pib.spawns.splice(j, 1);
+          j--;
+          continue;
+        }
+        if (roomName && pibIntent.roomName && pibIntent.roomName !== roomName) {
+          continue;
+        }
+        var intentWrapper = {
+          role: pibIntent.role,
+          task: pibIntent.role,
+          body: Array.isArray(pibIntent.body) ? pibIntent.body.slice() : null,
+          memory: deepClone(pibIntent.memory) || {}
+        };
+        if (pibIntent.roomName && !intentWrapper.home) intentWrapper.home = pibIntent.roomName;
+        if (pibIntent.roomName && !intentWrapper.homeRoom) intentWrapper.homeRoom = pibIntent.roomName;
+        var consumed = Spawn_From_Intent(spawn, intentWrapper, energyBudget);
+        pib.spawns.splice(j, 1);
+        j--;
+        if (consumed) {
+          return true;
+        }
+      }
+    }
+  }
+  if (!hasGlobal) return false;
+  var queue = global.__BHM.spawnIntents;
+  if (!Array.isArray(queue) || !queue.length) return false;
   for (var i = 0; i < queue.length; i++) {
     var raw = queue[i];
     if (!raw) {
