@@ -21,6 +21,7 @@
 
 var ConfigExpansion = require('Config.Expansion');
 var ExpandSelector = require('Task.Expand.Selector');
+var SpawnPlacement = require('Planner.SpawnPlacement');
 
 var PHASE_IDLE = 'idle';
 var PHASE_CLAIMING = 'claiming';
@@ -291,6 +292,23 @@ function countStructures(target) {
     return 0;
 }
 
+function ensureSpawnSite(state) {
+    if (!state || !state.target) return;
+    if (typeof Game === 'undefined' || !Game.rooms) return;
+    if (!SpawnPlacement || typeof SpawnPlacement.placeInitialSpawnSite !== 'function') return;
+    var room = Game.rooms[state.target];
+    if (!room || !room.controller || !room.controller.my) return;
+    var existing = room.find(FIND_MY_STRUCTURES, {
+        filter: function (s) { return s.structureType === STRUCTURE_SPAWN; }
+    });
+    if (existing && existing.length) return;
+    var sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: function (site) { return site.structureType === STRUCTURE_SPAWN; }
+    });
+    if (sites && sites.length) return;
+    SpawnPlacement.placeInitialSpawnSite(room);
+}
+
 function ensureBuilders(state, mainRoom) {
     var target = state.target;
     var queue = getSpawnQueue();
@@ -352,6 +370,7 @@ function handleClaiming(state, mainRoom) {
 }
 
 function handleBootstrapping(state, mainRoom) {
+    ensureSpawnSite(state);
     ensureBuilders(state, mainRoom);
     ensureHauler(state, mainRoom);
     if (!state.status || state.status.indexOf('No main room') !== 0) {
