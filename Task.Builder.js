@@ -12,6 +12,8 @@ var BeeActions = require('BeeActions');
 var MovementManager = require('Movement.Manager');
 var SpawnPlacement = require('Planner.SpawnPlacement');
 
+try { require('Traveler'); } catch (e) {}
+
 // Expansion helper: detect builders earmarked for forward operating base work.
 function isExpansionAssignment(creep) {
   if (!creep || !creep.memory) return false;
@@ -31,6 +33,7 @@ function travelToRoomCenter(creep, roomName) {
   if (creep.travelTo) {
     creep.travelTo(targetPos, { range: 20, reusePath: 40 });
   } else {
+    // Traveler preferred; fallback to moveTo if unavailable.
     creep.moveTo(targetPos, { reusePath: 40 });
   }
 }
