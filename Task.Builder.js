@@ -49,6 +49,7 @@ function forbidGatherOutsideTarget(creep) {
   if (creep.memory._expand && creep.memory._expand.room) roomName = creep.memory._expand.room;
   else if (creep.memory.target) roomName = creep.memory.target;
   else if (creep.memory.targetRoom) roomName = creep.memory.targetRoom;
+  else if (creep.memory.expand && creep.memory.expand.target) roomName = creep.memory.expand.target;
   if (!roomName || !creep.room) return false;
   return creep.room.name !== roomName;
 }
@@ -364,6 +365,14 @@ function pickWorkTask(creep) {
   var site = BeeSelectors.findBestConstructionSite(room);
   if (site) {
     return { type: 'build', targetId: site.id, since: Game.time, data: { structureType: site.structureType } };
+  }
+  if (room && creep && creep.memory) {
+    var remoteRoomName = BeeSelectors.findAdjacentRoomWithConstruction(room.name);
+    if (remoteRoomName && !isExpansionAssignment(creep)) {
+      if (!creep.memory.expand) creep.memory.expand = {};
+      creep.memory.expand.target = remoteRoomName;
+      return null;
+    }
   }
   var repair = BeeSelectors.findBestRepairTarget(room);
   if (repair && repair.target) {
