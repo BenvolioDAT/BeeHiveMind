@@ -11,6 +11,9 @@ const { LOG_LEVEL }  = CoreLogger;
 const hiveLog        = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
 const BeeVisualsSpawnPanel = require('BeeVisuals.SpawnPanel');
+const BeeSelectors   = require('BeeSelectors');
+const BeeActions     = require('BeeActions');
+const MovementManager= require('Movement.Manager');
 const spawnLogic     = require('spawn.logic');
 const roleWorker_Bee = require('role.Worker_Bee');
 const TaskBuilder    = require('Task.Builder');       // kept for your ecosystem
@@ -93,6 +96,7 @@ function prepareTickCaches() {
   C.tick = now;
   C.roomsOwned       = getOwnedRooms();
   C.roomsMap         = indexByName(C.roomsOwned);
+  C.roomSnapshots    = Object.create(null);
   C.spawns           = getAllSpawns();
   const creepScan    = buildCreepAndRoleCounts();
   C.creeps           = creepScan.creeps;
@@ -104,6 +108,17 @@ function prepareTickCaches() {
   C.totalSites       = sites.total;
 
   C.remotesByHome    = computeRemotesByHome(C.roomsOwned);
+
+  if (BeeSelectors && typeof BeeSelectors.prepareRoomSnapshot === 'function') {
+    for (const room of C.roomsOwned) {
+      if (!room || !room.name) continue;
+      try {
+        C.roomSnapshots[room.name] = BeeSelectors.prepareRoomSnapshot(room);
+      } catch (err) {
+        hiveLog.debug('⚠️ Selector snapshot failed for', fmt(room), err);
+      }
+    }
+  }
 
   return C;
 }
@@ -453,6 +468,14 @@ const BeeHiveMind = {
   /** Top-level tick entrypoint. */
   run() {
     BeeHiveMind.initializeMemory();
+
+    if (BeeActions) global.BeeActions = BeeActions;
+    if (BeeSelectors) global.BeeSelectors = BeeSelectors;
+
+    if (MovementManager && typeof MovementManager.startTick === 'function') {
+      MovementManager.startTick();
+    }
+
     // Visual overlays (spawn HUD + queue)
     if (BeeVisualsSpawnPanel && typeof BeeVisualsSpawnPanel.drawVisuals === 'function') {
       BeeVisualsSpawnPanel.drawVisuals();
@@ -465,6 +488,10 @@ const BeeHiveMind = {
 
     // 2) Per-creep behavior
     BeeHiveMind.runCreeps(C);
+
+    if (MovementManager && typeof MovementManager.resolveAndMove === 'function') {
+      MovementManager.resolveAndMove();
+    }
 
     // 3) Spawning (queue-based)
     BeeHiveMind.manageSpawns(C);
