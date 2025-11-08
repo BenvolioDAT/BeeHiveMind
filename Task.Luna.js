@@ -27,6 +27,7 @@ var REMOTE_RADIUS = 1;                // remote rooms must be within this linear
 var MAX_LUNA_PER_SOURCE = 1;          // enforce exactly one miner per source
 var CLAIM_TTL = 150;                  // base lifetime for a claim before it must be refreshed
 var CLAIM_REFRESH_INTERVAL = 50;      // refresh cadence while actively using the source
+var CLAIM_SWEEP_INTERVAL = 50;        // cadence for clearing expired claims
 var STUCK_WINDOW = 3;                 // if the creep does not move for this many ticks, reset
 var COLLISION_CHECK_INTERVAL = 3;     // spacing for collision checks; low to react quickly
 
@@ -60,6 +61,10 @@ function inferHome(creep) {
 }
 
 function sweepExpiredClaims() {
+  if (sweepExpiredClaims._lastSweepTick != null && Game.time - sweepExpiredClaims._lastSweepTick < CLAIM_SWEEP_INTERVAL) {
+    return;
+  }
+  sweepExpiredClaims._lastSweepTick = Game.time;
   ensureLunaMemory();
   var claims = Memory.__BHM.lunaClaims;
   for (var sid in claims) {
@@ -497,7 +502,9 @@ function attemptAssignment(creep, mem) {
   var pick = pickUnclaimedSource(home);
   if (!pick || !pick.selection) {
     if (!mem._lastNoSourceLog || Game.time - mem._lastNoSourceLog >= 10) {
-      console.log('Luna ' + creep.name + ' no-src home=' + home + ' radius=' + REMOTE_RADIUS + ' rooms=' + (pick && pick.stats ? pick.stats.rooms : 0) + ' sources=' + (pick && pick.stats ? pick.stats.sources : 0) + ' open=' + (pick && pick.stats ? pick.stats.open : 0));
+      if (typeof console !== 'undefined' && console.log) {
+        console.log('Luna ' + creep.name + ' no-src home=' + home + ' radius=' + REMOTE_RADIUS + ' rooms=' + (pick && pick.stats ? pick.stats.rooms : 0) + ' sources=' + (pick && pick.stats ? pick.stats.sources : 0) + ' open=' + (pick && pick.stats ? pick.stats.open : 0));
+      }
       mem._lastNoSourceLog = Game.time;
     }
     creep.say('no-src');
@@ -515,7 +522,9 @@ function attemptAssignment(creep, mem) {
   mem.lastClaimRefresh = Game.time;
   mem.lastAssigned = Game.time;
   claim(selection.sourceId, creep, selection.remoteRoom);
-  console.log('Luna ' + creep.name + ' assigned source ' + selection.sourceId + ' in ' + selection.remoteRoom + ' (home ' + home + ')');
+  if (typeof console !== 'undefined' && console.log) {
+    console.log('Luna ' + creep.name + ' assigned source ' + selection.sourceId + ' in ' + selection.remoteRoom + ' (home ' + home + ')');
+  }
   setState(creep, mem, 'travel', 'travel');
   return true;
 }
