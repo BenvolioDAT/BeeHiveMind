@@ -326,14 +326,29 @@ function pickGatherTask(creep) {
   if (creep.store && creep.store[RESOURCE_ENERGY] != null) energyCarried = creep.store[RESOURCE_ENERGY] | 0;
   else if (creep.carry && creep.carry[RESOURCE_ENERGY] != null) energyCarried = creep.carry[RESOURCE_ENERGY] | 0;
 
-  if (isExpansion && !inTargetRoom && energyCarried === 0) {
+  var expansionGather = null;
+  if (isExpansion && inTargetRoom) {
+    expansionGather = pickExpansionGatherTask(creep);
+  }
+
+  if (isExpansion && energyCarried === 0) {
     var onCooldown = false;
     if (creep.memory && creep.memory._expandRefillTs != null) {
       onCooldown = (Game.time - creep.memory._expandRefillTs) < REFILL_COOLDOWN_TICKS;
     }
     if (!onCooldown) {
-      var roomHasEnergy = BeeSelectors.roomHasAnyEnergy(creep.room, REFILL_MIN_AMOUNT);
-      if (!roomHasEnergy) {
+      var shouldRefillAtHome = false;
+      if (!inTargetRoom) shouldRefillAtHome = true;
+      else if (creep.room) {
+        var hasLocalEnergy = false;
+        if (expansionGather && expansionGather.type !== 'harvest') {
+          hasLocalEnergy = true;
+        } else {
+          hasLocalEnergy = BeeSelectors.roomHasAnyEnergy(creep.room, REFILL_MIN_AMOUNT);
+        }
+        if (!hasLocalEnergy) shouldRefillAtHome = true;
+      }
+      if (shouldRefillAtHome) {
         var homeStorage = BeeSelectors.findHomeStorageWithEnergy(creep, REFILL_MIN_AMOUNT);
         if (homeStorage) {
           if (creep.memory) creep.memory._expandRefillTs = Game.time;
@@ -354,9 +369,8 @@ function pickGatherTask(creep) {
     return null;
   }
   var room = creep.room;
-  if (inTargetRoom) {
-    var expansionTask = pickExpansionGatherTask(creep);
-    if (expansionTask) return expansionTask;
+  if (inTargetRoom && expansionGather) {
+    return expansionGather;
   }
   var list = BeeSelectors.getEnergySourcePriority(room);
 
