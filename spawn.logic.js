@@ -133,16 +133,16 @@ var CONFIGS = {
     A(0,0,0,0,0,4,3),
     A(0,0,0,0,0,2,2)
   ],
-  builder: [ 
-    B(6,12,18),
-    // Long-haul “road layer” — balanced for 2–3 rooms out
-    B(4, 8, 12),   // 1200 energy, 24 parts, 400 carry
-    // Mid-range — solid for 1–2 rooms out
-    B(3, 6, 9),    // 900 energy, 18 parts, 300 carry
-    // Budget scout/seed — starter road + container drop
-    B(2, 4, 6),    // 600 energy, 12 parts, 200 carry
-    // Emergency mini — drops a container + token road
-    B(2, 2, 4),     // 400 energy, 8 parts, 100 carry
+  builder: [
+    B(3,10,13),
+    B(3,9,12),
+    B(3,8,11),
+    B(3,7,10),
+    B(3,6,9),
+    B(3,5,8), 
+    B(3,4,7),
+    B(2,4,6),
+    B(2,2,4),
     B(1,1,2),
     B(1,1,1),
   ],

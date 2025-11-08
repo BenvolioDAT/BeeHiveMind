@@ -305,7 +305,7 @@ function computeRoomQuotas(C, room) {
     baseharvest:  2,
     courier:      1,
     queen:        1,
-    upgrader:     4,
+    upgrader:     2,
     builder:      getBuilderNeed(C, room),
     scout:        1,
     luna:         0,
