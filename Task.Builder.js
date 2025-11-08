@@ -14,27 +14,49 @@ var SpawnPlacement = require('Planner.SpawnPlacement');
 
 try { require('Traveler'); } catch (e) {}
 
-// Expansion helper: detect builders earmarked for forward operating base work.
+function ensureExpansionSticky(creep) {
+  if (!creep || !creep.memory) return false;
+
+  var tgt = null;
+  if (creep.memory.expand && creep.memory.expand.target) tgt = creep.memory.expand.target;
+  if (!tgt && creep.memory.task === 'expand' && creep.memory.target) tgt = creep.memory.target;
+
+  if (!tgt) return false;
+
+  if (!creep.memory._expand) {
+    creep.memory._expand = { room: tgt, csiteId: null, lock: true, since: Game.time };
+  } else {
+    if (creep.memory._expand.room !== tgt) {
+      creep.memory._expand.room = tgt;
+    }
+  }
+  return true;
+}
+
 function isExpansionAssignment(creep) {
   if (!creep || !creep.memory) return false;
+  if (creep.memory.expand && creep.memory.expand.target) return true;
   if (creep.memory.task === 'expand' && creep.memory.target) return true;
-  if (creep.memory.expand && creep.memory.expand.target) {
-    if (!creep.memory.target) creep.memory.target = creep.memory.expand.target;
-    creep.memory.task = 'expand';
-    return true;
-  }
+  if (creep.memory._expand && creep.memory._expand.room) return true;
   return false;
 }
 
-// Expansion helper: use Traveler routing toward a room's approximate center.
+function forbidGatherOutsideTarget(creep) {
+  if (!isExpansionAssignment(creep)) return false;
+  var roomName = null;
+  if (creep.memory._expand && creep.memory._expand.room) roomName = creep.memory._expand.room;
+  else if (creep.memory.target) roomName = creep.memory.target;
+  if (!roomName || !creep.room) return false;
+  return creep.room.name !== roomName;
+}
+
+// Travel convenience; keep ES5 and your Traveler usage if available
 function travelToRoomCenter(creep, roomName) {
   if (!creep || !roomName) return;
-  var targetPos = new RoomPosition(25, 25, roomName);
-  if (creep.travelTo) {
-    creep.travelTo(targetPos, { range: 20, reusePath: 40 });
-  } else {
-    // Traveler preferred; fallback to moveTo if unavailable.
-    creep.moveTo(targetPos, { reusePath: 40 });
+  var pos = new RoomPosition(25, 25, roomName);
+  if (creep.moveTo) {
+    if (creep.travelTo) creep.travelTo(pos, { reusePath: 15 });
+    else creep.moveTo(pos, { reusePath: 15 });
   }
 }
 
@@ -63,8 +85,12 @@ function ensureExpansionSpawnSite(room) {
 
 function isInExpansionTargetRoom(creep) {
   if (!isExpansionAssignment(creep)) return false;
-  if (!creep.memory || !creep.memory.target) return false;
-  return creep.room && creep.room.name === creep.memory.target;
+  var roomName = null;
+  if (creep.memory._expand && creep.memory._expand.room) roomName = creep.memory._expand.room;
+  else if (creep.memory.task === 'expand' && creep.memory.target) roomName = creep.memory.target;
+  else if (creep.memory.expand && creep.memory.expand.target) roomName = creep.memory.expand.target;
+  if (!roomName) return false;
+  return creep.room && creep.room.name === roomName;
 }
 
 function isSourceContainer(structure) {
@@ -124,22 +150,38 @@ function pickExpansionGatherTask(creep) {
 // Expansion-specific behavior: travel, drop a spawn site, and focus build orders when flagged.
 function handleExpansionBuilder(creep) {
   if (!isExpansionAssignment(creep)) return 'noop';
-  var targetRoom = creep.memory.target;
+
+  ensureExpansionSticky(creep);
+  var targetRoom = creep.memory._expand ? creep.memory._expand.room : (creep.memory.target || null);
   if (!targetRoom) return 'noop';
+
   if (creep.room.name !== targetRoom) {
-    debugSay(creep, '➡️ ' + targetRoom);
     clearTask(creep);
+    debugSay(creep, '➡️ ' + targetRoom);
     travelToRoomCenter(creep, targetRoom);
     return 'traveling';
   }
-  var room = creep.room;
-  var center = new RoomPosition(25, 25, targetRoom);
-  drawLine(creep, center, CFG.DRAW.BUILD, 'EXPAND');
-  var spawnTarget = ensureExpansionSpawnSite(room);
+
+  var remembered = null;
+  if (creep.memory._expand && creep.memory._expand.csiteId) {
+    remembered = Game.getObjectById(creep.memory._expand.csiteId);
+    if (!remembered) {
+      creep.memory._expand.csiteId = null;
+      remembered = null;
+    }
+  }
+
+  var spawnTarget = remembered || ensureExpansionSpawnSite(creep.room);
   if (!spawnTarget) return 'setup';
-  if (spawnTarget.structureType === STRUCTURE_SPAWN) {
+
+  if (spawnTarget.structureType === STRUCTURE_SPAWN && spawnTarget.progressTotal == null) {
     return 'target';
   }
+
+  if (creep.memory._expand) creep.memory._expand.csiteId = spawnTarget.id;
+
+  drawLine(creep, spawnTarget, CFG.DRAW.BUILD, 'EXPAND');
+
   if (!creep.memory._task || creep.memory._task.targetId !== spawnTarget.id || creep.memory._task.type !== 'build') {
     creep.memory._task = {
       type: 'build',
@@ -149,6 +191,7 @@ function handleExpansionBuilder(creep) {
     };
     debugSay(creep, '🏗️ spawn');
   }
+
   return 'setup';
 }
 
@@ -269,6 +312,9 @@ function needNewTask(creep, task) {
 }
 
 function pickGatherTask(creep) {
+  if (forbidGatherOutsideTarget(creep)) {
+    return null;
+  }
   var room = creep.room;
   if (isInExpansionTargetRoom(creep)) {
     var expansionTask = pickExpansionGatherTask(creep);
@@ -301,7 +347,10 @@ function pickGatherTask(creep) {
 
 function pickWorkTask(creep) {
   if (isExpansionAssignment(creep)) {
-    var targetRoom = creep.memory.target;
+    var targetRoom = null;
+    if (creep.memory._expand && creep.memory._expand.room) targetRoom = creep.memory._expand.room;
+    else if (creep.memory.task === 'expand' && creep.memory.target) targetRoom = creep.memory.target;
+    else if (creep.memory.expand && creep.memory.expand.target) targetRoom = creep.memory.expand.target;
     if (targetRoom && creep.room.name !== targetRoom) {
       return null;
     }
@@ -444,9 +493,15 @@ var TaskBuilder = {
     if (expansionState === 'traveling') return;
     ensureTask(creep);
     var task = creep.memory._task;
-    if (isExpansionAssignment(creep) && creep.memory.target && creep.room.name !== creep.memory.target) {
-      clearTask(creep);
-      return;
+    if (isExpansionAssignment(creep)) {
+      var expandRoom = null;
+      if (creep.memory._expand && creep.memory._expand.room) expandRoom = creep.memory._expand.room;
+      else if (creep.memory.task === 'expand' && creep.memory.target) expandRoom = creep.memory.target;
+      else if (creep.memory.expand && creep.memory.expand.target) expandRoom = creep.memory.expand.target;
+      if (expandRoom && creep.room.name !== expandRoom) {
+        clearTask(creep);
+        return;
+      }
     }
     if (needNewTask(creep, task)) {
       clearTask(creep);
