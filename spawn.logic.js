@@ -1,45 +1,88 @@
 
-const Logger = require('core.logger');
-const LOG_LEVEL = Logger.LOG_LEVEL;
-const spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
+var Logger = require('core.logger');
+var LOG_LEVEL = Logger.LOG_LEVEL;
+var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 var BeeSelectors = null;
 var TaskLuna = null;
 
 try { BeeSelectors = require('BeeSelectors'); } catch (beeErr) {}
 try { TaskLuna = require('Task.Luna'); } catch (lunaErr) {}
 
+// ---------- Body Helpers ----------
+function pushParts(body, part, count) {
+  var safeCount = count | 0;
+  if (safeCount < 0) {
+    safeCount = 0;
+  }
+  for (var i = 0; i < safeCount; i++) {
+    body.push(part);
+  }
+}
+
+function buildBodyFromPairs() {
+  var body = [];
+  for (var i = 0; i < arguments.length; i += 2) {
+    var part = arguments[i];
+    var count = arguments[i + 1];
+    if (!part) {
+      continue;
+    }
+    pushParts(body, part, count);
+  }
+  return body;
+}
+
 // ---------- Shorthand Body Builders ----------
 // B(w,c,m) creates [WORK x w, CARRY x c, MOVE x m]
-const B  = (w, c, m) => [
-  ...Array(w).fill(WORK),
-  ...Array(c).fill(CARRY),
-  ...Array(m).fill(MOVE),
-];
+function B(w, c, m) {
+  return buildBodyFromPairs(WORK, w, CARRY, c, MOVE, m);
+}
+
 // CM(c,m) = [CARRY x c, MOVE x m]
-const CM = (c, m) => [...Array(c).fill(CARRY), ...Array(m).fill(MOVE)];
+function CM(c, m) {
+  return buildBodyFromPairs(CARRY, c, MOVE, m);
+}
+
 // WM(w,m) = [WORK x w, MOVE x m]
-const WM = (w, m) => [...Array(w).fill(WORK), ...Array(m).fill(MOVE)];
+function WM(w, m) {
+  return buildBodyFromPairs(WORK, w, MOVE, m);
+}
+
 // MH(m,h) = [MOVE x m, HEAL x h]
-const MH = (m, h) => [...Array(m).fill(MOVE), ...Array(h).fill(HEAL)];
+function MH(m, h) {
+  return buildBodyFromPairs(MOVE, m, HEAL, h);
+}
+
 // TAM(t,a,m) = [TOUGH x t, ATTACK x a, MOVE x m]
-const TAM = (t, a, m) => [...Array(t).fill(TOUGH), ...Array(a).fill(ATTACK), ...Array(m).fill(MOVE)];
+function TAM(t, a, m) {
+  return buildBodyFromPairs(TOUGH, t, ATTACK, a, MOVE, m);
+}
+
 // R(t,r,m) = [TOUGH x t, RANGED_ATTACK x r, MOVE x m]
-const R  = (t, r, m) => [...Array(t).fill(TOUGH), ...Array(r).fill(RANGED_ATTACK), ...Array(m).fill(MOVE)];
+function R(t, r, m) {
+  return buildBodyFromPairs(TOUGH, t, RANGED_ATTACK, r, MOVE, m);
+}
+
 // A(...) = mixed arms builder for quick experiments
-const A  = (t,a,r,h,w,c,m)=>[
-  ...Array(t).fill(TOUGH),
-  ...Array(a).fill(ATTACK),
-  ...Array(r).fill(RANGED_ATTACK),
-  ...Array(h).fill(HEAL),
-  ...Array(w).fill(WORK),
-  ...Array(c).fill(CARRY),
-  ...Array(m).fill(MOVE),
-];
+function A(t, a, r, h, w, c, m) {
+  return buildBodyFromPairs(
+    TOUGH, t,
+    ATTACK, a,
+    RANGED_ATTACK, r,
+    HEAL, h,
+    WORK, w,
+    CARRY, c,
+    MOVE, m
+  );
+}
+
 // C(c,m) = [CLAIM x c, MOVE x m]
-const C  = (c, m) => [...Array(c).fill(CLAIM), ...Array(m).fill(MOVE)];
+function C(c, m) {
+  return buildBodyFromPairs(CLAIM, c, MOVE, m);
+}
 
 // ---------- Role Configs (largest first is preferred) ----------
-const CONFIGS = {
+var CONFIGS = {
   // Workers
   baseharvest: [
     B(6,1,5), 
@@ -205,7 +248,7 @@ const CONFIGS = {
 
 // ---------- Task Aliases (normalize user-facing names) ----------
 // This lets getBodyForTask('Trucker') resolve to courier configs, etc.
-const TASK_ALIAS = {
+var TASK_ALIAS = {
   queen: 'Queen',
   scout: 'Scout',
   claimer: 'Claimer',
@@ -218,34 +261,41 @@ const TASK_ALIAS = {
 // Returns energy available for spawning.
 // - If you pass a spawn, room, or roomName => returns that ROOM's energy (spawns + extensions).
 // - If you pass nothing => falls back to empire-wide total (old behavior).
+/**
+ * Calculates how much energy is available for spawning creeps.
+ * @param {StructureSpawn|Room|string} [spawnOrRoom] Target spawn, room, or room name.
+ * @returns {number} Amount of energy available for spawning.
+ */
 function Calculate_Spawn_Resource(spawnOrRoom) {
   // Per-room mode
   if (spawnOrRoom) {
-    let room =
-      (spawnOrRoom.room && spawnOrRoom.room) ||           // a spawn (or structure)
-      (typeof spawnOrRoom === 'string' ? Game.rooms[spawnOrRoom] : spawnOrRoom); // roomName or Room
-    if (!room) return 0;
+    var room =
+      (spawnOrRoom.room && spawnOrRoom.room) ||
+      (typeof spawnOrRoom === 'string' ? Game.rooms[spawnOrRoom] : spawnOrRoom);
+    if (!room) {
+      return 0;
+    }
 
     // Fast, built-in sum of spawns+extensions for this room
     return room.energyAvailable;
 
     // If you ever want the manual sum instead, uncomment:
     /*
-    let spawnEnergy = _.sum(room.find(FIND_MY_SPAWNS), s => s.store[RESOURCE_ENERGY] || 0);
-    let extEnergy   = _.sum(room.find(FIND_MY_STRUCTURES, {filter: s => s.structureType === STRUCTURE_EXTENSION}),
-                            s => s.store[RESOURCE_ENERGY] || 0);
+    var spawnEnergy = _.sum(room.find(FIND_MY_SPAWNS), function (s) { return s.store[RESOURCE_ENERGY] || 0; });
+    var extEnergy   = _.sum(room.find(FIND_MY_STRUCTURES, {filter: function (s) { return s.structureType === STRUCTURE_EXTENSION; }}),
+                            function (s) { return s.store[RESOURCE_ENERGY] || 0; });
     return spawnEnergy + extEnergy;
     */
   }
 
   // ---- Backward-compat (empire-wide) ----
-  let spawnEnergy = 0;
-  for (const name in Game.spawns) {
+  var spawnEnergy = 0;
+  for (var name in Game.spawns) {
     spawnEnergy += Game.spawns[name].store[RESOURCE_ENERGY] || 0;
   }
-  const extensionEnergy = _.sum(Game.structures, s =>
-    s.structureType === STRUCTURE_EXTENSION ? (s.store[RESOURCE_ENERGY] || 0) : 0
-  );
+  var extensionEnergy = _.sum(Game.structures, function (s) {
+    return s.structureType === STRUCTURE_EXTENSION ? (s.store[RESOURCE_ENERGY] || 0) : 0;
+  });
   return spawnEnergy + extensionEnergy;
 }
 
@@ -258,16 +308,23 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 
 // ---------- Body Selection ----------
 // Returns the largest body from CONFIGS[taskKey] that fits energyAvailable.
+/**
+ * Selects the largest creep body for a task that fits within the energy budget.
+ * @param {string} taskKey Task identifier used in CONFIGS.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
 function Generate_Body_From_Config(taskKey, energyAvailable) {
-  const list = CONFIGS[taskKey];
+  var list = CONFIGS[taskKey];
   if (!list) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       spawnLog.debug('No config for task:', taskKey);
     }
     return [];
   }
-  for (const body of list) {
-    const cost = _.sum(body, part => BODYPART_COST[part]); // Screeps global
+  for (var i = 0; i < list.length; i++) {
+    var body = list[i];
+    var cost = _.sum(body, function (part) { return BODYPART_COST[part]; });
     if (cost <= energyAvailable) {
       if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
         spawnLog.debug('Picked', taskKey, 'body:', '[' + body + ']', 'cost', cost, '(avail', energyAvailable + ')');
@@ -276,7 +333,7 @@ function Generate_Body_From_Config(taskKey, energyAvailable) {
     }
   }
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-    spawnLog.debug('Insufficient energy for', taskKey, '(need at least', _.sum(_.last(list), p => BODYPART_COST[p]), ')');
+    spawnLog.debug('Insufficient energy for', taskKey, '(need at least', _.sum(_.last(list), function (p) { return BODYPART_COST[p]; }), ')');
   }
   return [];
 }
@@ -284,29 +341,116 @@ function Generate_Body_From_Config(taskKey, energyAvailable) {
 // Helper to normalize a requested task into a CONFIGS key.
 function normalizeTask(task) {
   if (!task) return task;
-  const key = TASK_ALIAS[task] || TASK_ALIAS[task.toLowerCase()] || task;
+  var lower = null;
+  if (typeof task === 'string') {
+    lower = task.toLowerCase();
+  }
+  var key = TASK_ALIAS[task] || (lower ? TASK_ALIAS[lower] : null) || task;
   return key;
 }
 
 // ---------- Role-specific wrappers (kept for API compatibility) ----------
-const Generate_Courier_Body          = (e) => Generate_Body_From_Config('courier', e);
-const Generate_Trucker_Body          = (e) => Generate_Body_From_Config('trucker', e);
-const Generate_BaseHarvest_Body      = (e) => Generate_Body_From_Config('baseharvest', e);
-const Generate_Builder_Body          = (e) => Generate_Body_From_Config('builder', e);
-const Generate_Repair_Body           = (e) => Generate_Body_From_Config('repair', e);
-const Generate_Queen_Body            = (e) => Generate_Body_From_Config('Queen', e);
-const Generate_Luna_Body             = (e) => Generate_Body_From_Config('luna', e);
-const Generate_Upgrader_Body         = (e) => Generate_Body_From_Config('upgrader', e);
-const Generate_Scout_Body            = (e) => Generate_Body_From_Config('Scout', e);
-const Generate_CombatMelee_Body      = (e) => Generate_Body_From_Config('CombatMelee', e);
-const Generate_CombatArcher_Body     = (e) => Generate_Body_From_Config('CombatArcher', e);
-const Generate_CombatMedic_Body      = (e) => Generate_Body_From_Config('CombatMedic', e);
-const Generate_Dismantler_Config_Body= (e) => Generate_Body_From_Config('Dismantler', e);
-const Generate_Claimer_Body          = (e) => Generate_Body_From_Config('Claimer', e);
+/**
+ * Generates a courier body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Courier_Body(e) { return Generate_Body_From_Config('courier', e); }
+/**
+ * Generates a trucker body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Trucker_Body(e) { return Generate_Body_From_Config('trucker', e); }
+/**
+ * Generates a base harvest body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_BaseHarvest_Body(e) { return Generate_Body_From_Config('baseharvest', e); }
+/**
+ * Generates a builder body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Builder_Body(e) { return Generate_Body_From_Config('builder', e); }
+/**
+ * Generates a repair body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Repair_Body(e) { return Generate_Body_From_Config('repair', e); }
+/**
+ * Generates a Queen body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Queen_Body(e) { return Generate_Body_From_Config('Queen', e); }
+/**
+ * Generates a Luna body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Luna_Body(e) { return Generate_Body_From_Config('luna', e); }
+/**
+ * Generates an upgrader body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Upgrader_Body(e) { return Generate_Body_From_Config('upgrader', e); }
+/**
+ * Generates a scout body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Scout_Body(e) { return Generate_Body_From_Config('Scout', e); }
+/**
+ * Generates a melee combat body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_CombatMelee_Body(e) { return Generate_Body_From_Config('CombatMelee', e); }
+/**
+ * Generates a ranged combat body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_CombatArcher_Body(e) { return Generate_Body_From_Config('CombatArcher', e); }
+/**
+ * Generates a combat medic body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_CombatMedic_Body(e) { return Generate_Body_From_Config('CombatMedic', e); }
+/**
+ * Generates a dismantler body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Dismantler_Config_Body(e) { return Generate_Body_From_Config('Dismantler', e); }
+/**
+ * Generates a claimer body using the configured templates.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array.
+ */
+function Generate_Claimer_Body(e) { return Generate_Body_From_Config('Claimer', e); }
+
+var CONFIGURATION_LIST = [];
+for (var configKey in CONFIGS) {
+  if (Object.prototype.hasOwnProperty.call(CONFIGS, configKey)) {
+    CONFIGURATION_LIST.push({ task: configKey, body: CONFIGS[configKey] });
+  }
+}
 
 // ---------- Task → Body helper (kept for API compatibility) ----------
+/**
+ * Resolves a task identifier to a spawnable body using the configuration maps.
+ * @param {string} task Task or role identifier.
+ * @param {number} energyAvailable Energy available for spawning.
+ * @returns {string[]} Body definition array; empty array if none fit.
+ */
 function getBodyForTask(task, energyAvailable) {
-  const key = normalizeTask(task);
+  var key = normalizeTask(task);
   switch (key) {
     case 'builder':        return Generate_Builder_Body(energyAvailable);
     case 'repair':         return Generate_Repair_Body(energyAvailable);
@@ -332,10 +476,21 @@ function getBodyForTask(task, energyAvailable) {
 }
 
 // ---------- Naming ----------
-function Generate_Creep_Name(role, max = 70) {
-  for (let i = 1; i <= max; i++) {
-    const name = `${role}_${i}`;
-    if (!Game.creeps[name]) return name;
+/**
+ * Generates a unique creep name for the requested role.
+ * @param {string} role Role name prefix.
+ * @param {number} [max] Maximum numeric suffix to consider.
+ * @returns {string|null} Available creep name or null if exhausted.
+ */
+function Generate_Creep_Name(role, max) {
+  if (typeof max !== 'number') {
+    max = 70;
+  }
+  for (var i = 1; i <= max; i++) {
+    var name = role + '_' + i;
+    if (!Game.creeps[name]) {
+      return name;
+    }
   }
   return null; // ran out of slots
 }
@@ -469,9 +624,21 @@ function prepareLunaSpawnMemory(spawn, name, memory) {
 }
 
 // Spawns a role using a provided body-gen function; merges memory.role automatically.
-function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory = {}) {
-  const body = generateBodyFn(availableEnergy);
-  const bodyCost = _.sum(body, p => BODYPART_COST[p]) || 0;
+/**
+ * Spawns a creep using a provided body generator and merges role memory.
+ * @param {StructureSpawn} spawn Spawn structure issuing the request.
+ * @param {string} roleName Role identifier to stamp into memory.
+ * @param {function(number): string[]} generateBodyFn Body generator function.
+ * @param {number} availableEnergy Energy budget for the spawn.
+ * @param {Object} [memory] Optional creep memory overrides.
+ * @returns {boolean} True if spawning started, false otherwise.
+ */
+function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memory) {
+  if (!memory) {
+    memory = {};
+  }
+  var body = generateBodyFn(availableEnergy);
+  var bodyCost = _.sum(body, function (p) { return BODYPART_COST[p]; }) || 0;
 
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('Attempt', roleName, 'body=[' + body + ']', 'cost=' + bodyCost, 'avail=' + availableEnergy);
@@ -484,7 +651,7 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
     return false;
   }
 
-  const name = Generate_Creep_Name(roleName);
+  var name = Generate_Creep_Name(roleName);
   if (!name) return false;
 
   var lunaReservation = null;
@@ -499,7 +666,7 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
   }
 
   memory.role = roleName; // ensure role is set
-  const result = spawn.spawnCreep(body, name, { memory });
+  var result = spawn.spawnCreep(body, name, { memory: memory });
 
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('Result', roleName + '/' + name + ':', result);
@@ -523,17 +690,31 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
 }
 
 // Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
+/**
+ * Spawns a Worker_Bee configured for the requested task.
+ * @param {StructureSpawn} spawn Spawn issuing the request.
+ * @param {string} neededTask Task identifier to derive the body from.
+ * @param {number} availableEnergy Energy budget for the spawn.
+ * @param {Object} [extraMemory] Optional extra memory fields to merge.
+ * @returns {boolean} True if the spawn was successful.
+ */
 function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
-  const body = getBodyForTask(neededTask, availableEnergy);
-  const name = Generate_Creep_Name(neededTask || 'Worker');
-  const memory = {
+  var body = getBodyForTask(neededTask, availableEnergy);
+  var name = Generate_Creep_Name(neededTask || 'Worker');
+  var memory = {
     role: 'Worker_Bee',
     task: neededTask,
     bornTask: neededTask,
     birthBody: body.slice(),
   };
-  if (extraMemory) Object.assign(memory, extraMemory);
-  const res = spawn.spawnCreep(body, name, { memory });
+  if (extraMemory) {
+    for (var extraKey in extraMemory) {
+      if (Object.prototype.hasOwnProperty.call(extraMemory, extraKey)) {
+        memory[extraKey] = extraMemory[extraKey];
+      }
+    }
+  }
+  var res = spawn.spawnCreep(body, name, { memory: memory });
   if (res === OK) {
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('🟢 Spawned Creep:', name, 'for task', neededTask);
@@ -587,6 +768,13 @@ function deepClone(value) {
   return out;
 }
 
+/**
+ * Spawns a creep based on a serialized expansion intent.
+ * @param {StructureSpawn} spawn Spawn issuing the request.
+ * @param {Object} intent Intent payload describing the spawn request.
+ * @param {number} availableEnergy Energy budget for the spawn attempt.
+ * @returns {boolean} True if the intent resulted in a spawn.
+ */
 function Spawn_From_Intent(spawn, intent, availableEnergy) {
   if (!spawn || !intent) return false;
   var energyBudget = availableEnergy;
@@ -681,6 +869,11 @@ function ensureIntentBody(intent, energyBudget) {
   return null;
 }
 
+/**
+ * Processes queued spawn intents for the provided spawn structure.
+ * @param {StructureSpawn} spawn Spawn to operate on.
+ * @returns {boolean} True if an intent was consumed and spawned.
+ */
 function Consume_Spawn_Intents(spawn) {
   if (!spawn || spawn.spawning) return false;
   if (typeof global === 'undefined' || !global.__BHM) return false;
@@ -731,27 +924,36 @@ function Consume_Spawn_Intents(spawn) {
 
 
 // --- REPLACE your existing Spawn_Squad with this hardened version ---
-function Spawn_Squad(spawn, squadId = 'Alpha') {
+/**
+ * Maintains balanced combat squad spawning near the provided spawn.
+ * @param {StructureSpawn} spawn Spawn coordinating the squad.
+ * @param {string} [squadId] Identifier for the squad grouping.
+ * @returns {boolean} True if a squad member was spawned.
+ */
+function Spawn_Squad(spawn, squadId) {
+  if (!squadId) {
+    squadId = 'Alpha';
+  }
   if (!spawn || spawn.spawning) return false;
 
   // Per-squad memory book-keeping to avoid rapid duplicate spawns
   if (!Memory.squads) Memory.squads = {};
   if (!Memory.squads[squadId]) Memory.squads[squadId] = {};
-  const S = Memory.squads[squadId];
-  const COOLDOWN_TICKS = 1;                  // don’t spawn same-squad twice within 5 ticks
+  var S = Memory.squads[squadId];
+  var COOLDOWN_TICKS = 1;                  // don’t spawn same-squad twice within 5 ticks
 
   function desiredLayout(score) {
-    const threat = score | 0;
-    let melee = 2;
-    let medic = 1;
-    let archer = 0;
+    var threat = score | 0;
+    var melee = 2;
+    var medic = 1;
+    var archer = 0;
 
     if (threat >= 12) melee = 2;
     if (threat >= 18) medic = 2;
     if (threat >= 10 && threat < 22) archer = 1;
     else if (threat >= 22) archer = 2;
 
-    const order = [
+    var order = [
       { role: 'CombatMelee', need: melee },
     ];
     if (archer > 0) order.push({ role: 'CombatArcher', need: archer });
@@ -759,31 +961,31 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
     return order;
   }
 
-  const flagName = 'Squad' + squadId;
-  const altFlagName = 'Squad_' + squadId;
-  const flag = Game.flags[flagName] || Game.flags[altFlagName] || Game.flags[squadId] || null;
-  const squadFlagsMem = Memory.squadFlags || {};
-  const bindings = squadFlagsMem.bindings || {};
+  var flagName = 'Squad' + squadId;
+  var altFlagName = 'Squad_' + squadId;
+  var flag = Game.flags[flagName] || Game.flags[altFlagName] || Game.flags[squadId] || null;
+  var squadFlagsMem = Memory.squadFlags || {};
+  var bindings = squadFlagsMem.bindings || {};
 
-  let targetRoom = bindings[flagName] || bindings[altFlagName] || bindings[squadId] || null;
+  var targetRoom = bindings[flagName] || bindings[altFlagName] || bindings[squadId] || null;
   if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
   if (!targetRoom) return false;
 
   if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
-    const dist = Game.map.getRoomLinearDistance(spawn.room.name, targetRoom, true);
+    var dist = Game.map.getRoomLinearDistance(spawn.room.name, targetRoom, true);
     if (typeof dist === 'number' && dist > 3) return false; // too far to be considered "nearby"
   }
 
-  const roomInfo = (squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom]) || null;
-  const threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
-  const layout = desiredLayout(threatScore);
+  var roomInfo = (squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom]) || null;
+  var threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
+  var layout = desiredLayout(threatScore);
   if (!layout.length) return false;
 
   S.targetRoom = targetRoom;
   S.lastKnownScore = threatScore;
   S.flagName = flag ? flag.name : null;
   S.desiredCounts = {};
-  for (let li = 0; li < layout.length; li++) {
+  for (var li = 0; li < layout.length; li++) {
     S.desiredCounts[layout[li].role] = layout[li].need | 0;
   }
   S.lastEvaluated = Game.time;
@@ -810,17 +1012,17 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
     return false;
   }
 
-  const avail = Calculate_Spawn_Resource(spawn);
+  var avail = Calculate_Spawn_Resource(spawn);
 
   // Find the first underfilled slot (in order) and spawn exactly one
-  for (let i = 0; i < layout.length; i++) {
-    const plan = layout[i];
+  for (var i = 0; i < layout.length; i++) {
+    var plan = layout[i];
     if ((plan.need | 0) <= 0) continue;
-    const have = haveCount(plan.role);
+    var have = haveCount(plan.role);
 
     if (have < plan.need) {
-      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: targetRoom };
-      const ok = Spawn_Worker_Bee(spawn, plan.role, avail, extraMemory);
+      var extraMemory = { squadId: squadId, role: plan.role, targetRoom: targetRoom };
+      var ok = Spawn_Worker_Bee(spawn, plan.role, avail, extraMemory);
       if (ok) {
         S.lastSpawnAt = Game.time;
         S.lastSpawnRole = plan.role;
@@ -841,31 +1043,31 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
 // ---------- Exports ----------
 module.exports = {
   // utilities
-  Generate_Creep_Name,
-  Calculate_Spawn_Resource,
-  configurations: Object.entries(CONFIGS).map(([task, body]) => ({ task, body })), // preserve your original shape
-  Generate_Body_From_Config,
-  Spawn_Creep_Role,
-    // + new helper
-  Spawn_Squad,
+  Generate_Creep_Name: Generate_Creep_Name,
+  Calculate_Spawn_Resource: Calculate_Spawn_Resource,
+  configurations: CONFIGURATION_LIST,
+  Generate_Body_From_Config: Generate_Body_From_Config,
+  Spawn_Creep_Role: Spawn_Creep_Role,
+  // + new helper
+  Spawn_Squad: Spawn_Squad,
   // role generators (compat)
-  Generate_Courier_Body,
-  Generate_BaseHarvest_Body,
-  Generate_Upgrader_Body,
-  Generate_Builder_Body,
-  Generate_Repair_Body,
-  Generate_Queen_Body,
-  Generate_Luna_Body,
-  Generate_Scout_Body,
-  Generate_CombatMelee_Body,
-  Generate_CombatArcher_Body,
-  Generate_CombatMedic_Body,
-  Generate_Dismantler_Config_Body,
-  Generate_Claimer_Body,
+  Generate_Courier_Body: Generate_Courier_Body,
+  Generate_BaseHarvest_Body: Generate_BaseHarvest_Body,
+  Generate_Upgrader_Body: Generate_Upgrader_Body,
+  Generate_Builder_Body: Generate_Builder_Body,
+  Generate_Repair_Body: Generate_Repair_Body,
+  Generate_Queen_Body: Generate_Queen_Body,
+  Generate_Luna_Body: Generate_Luna_Body,
+  Generate_Scout_Body: Generate_Scout_Body,
+  Generate_CombatMelee_Body: Generate_CombatMelee_Body,
+  Generate_CombatArcher_Body: Generate_CombatArcher_Body,
+  Generate_CombatMedic_Body: Generate_CombatMedic_Body,
+  Generate_Dismantler_Config_Body: Generate_Dismantler_Config_Body,
+  Generate_Claimer_Body: Generate_Claimer_Body,
 
   // existing helpers
-  getBodyForTask,
-  Spawn_Worker_Bee,
-  Spawn_From_Intent,
-  Consume_Spawn_Intents,
+  getBodyForTask: getBodyForTask,
+  Spawn_Worker_Bee: Spawn_Worker_Bee,
+  Spawn_From_Intent: Spawn_From_Intent,
+  Consume_Spawn_Intents: Consume_Spawn_Intents,
 };
