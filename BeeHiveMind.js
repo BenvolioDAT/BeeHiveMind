@@ -626,14 +626,13 @@ function dequeueAndSpawn(spawner, context) {
   if (!spawner || spawner.spawning) return false;
   var handled = spawnFromPrimaryQueue(spawner);
   if (handled) return true;
-  var localQueue = ensureRoomQueue(spawner.room.name);
-  if (localQueue && localQueue.length) {
-    return false;
-  }
   if (attemptBootstrapSpawn(spawner, context)) return true;
   if (spawnLogic && typeof spawnLogic.Consume_Spawn_Intents === 'function') {
-    return spawnLogic.Consume_Spawn_Intents(spawner);
+    var consumed = spawnLogic.Consume_Spawn_Intents(spawner);
+    if (consumed) return true;
   }
+  var localQueue = ensureRoomQueue(spawner.room.name);
+  if (localQueue && localQueue.length) return false;
   return false;
 }
 
