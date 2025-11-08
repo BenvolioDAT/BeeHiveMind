@@ -59,7 +59,12 @@ function getMemoryRoot() {
     if (!state.lastBuilderRequest) state.lastBuilderRequest = 0;
     if (!state.lastHaulerRequest) state.lastHaulerRequest = 0;
     if (!state.status) state.status = '';
-    if (!state.inProgress) state.inProgress = {};
+    if (!state.inProgress) {
+        // Tracks active expansion targets so we can enforce
+        // MAX_PARALLEL_EXPANSIONS without conflating it with total room
+        // ownership (which is still governed by the player's GCL).
+        state.inProgress = {};
+    }
     return state;
 }
 
