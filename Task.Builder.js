@@ -204,7 +204,7 @@ function handleExpansionBuilder(creep) {
 }
 
 var CFG = Object.freeze({
-  DEBUG_SAY: false,
+  DEBUG_SAY: true,
   DEBUG_DRAW: true,
   DRAW: {
     GATHER: '#6ec1ff',
