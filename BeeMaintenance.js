@@ -306,12 +306,13 @@ var BeeMaintenance = (function () {
     var nextScan = m.nextRepairScanTick | 0;
 
     // If not time to rescan, return cached (and drop fully repaired)
-    if (T < nextScan && m.cachedRepairTargets && m.cachedRepairTargets.length) {
+    var cachedList = m.cachedRepairTargets;
+    if (T < nextScan && Array.isArray(cachedList)) {
       var kept = [];
       var maxR = CFG.REPAIR_MAX_RAMPART;
       var maxW = CFG.REPAIR_MAX_WALL;
-      for (var i0 = 0; i0 < m.cachedRepairTargets.length; i0++) {
-        var t = m.cachedRepairTargets[i0];
+      for (var i0 = 0; i0 < cachedList.length; i0++) {
+        var t = cachedList[i0];
         var obj = Game.getObjectById(t.id);
         if (!obj) continue;
         if (obj.structureType === STRUCTURE_RAMPART) {
@@ -323,6 +324,8 @@ var BeeMaintenance = (function () {
         }
       }
       m.cachedRepairTargets = kept;
+      // Always return the filtered cache, even when empty, so repeated
+      // calls during the throttle window stay cheap and deterministic.
       return kept;
     }
 
