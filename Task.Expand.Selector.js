@@ -172,7 +172,16 @@ function selectExpansionTarget() {
         }
         if (hops === Infinity || hops > maxDistance) continue;
 
-        var sourceCount = (intel.sources && intel.sources.length) ? intel.sources.length : 0;
+        var sources = intel.sources;
+        // Normalize intel.sources into a consistent numeric count.
+        var sourceCount = 0;
+        if (Array.isArray(sources)) {
+            sourceCount = sources.length;
+        } else if (typeof sources === 'number') {
+            sourceCount = sources;
+        } else if (sources && typeof sources === 'object') {
+            sourceCount = Object.keys(sources).length;
+        }
         var twoSource = sourceCount >= 2 ? 1 : 0;
         var freshness = intel.ts || 0;
 
