@@ -315,6 +315,8 @@ function needNewTask(creep, task) {
       }
       break;
   }
+  // Do NOT treat stationary work as "stuck"
+  if (task.type === 'harvest' || task.type === 'build' || task.type === 'repair') return false;
   if (updateStuckTracker(task, creep)) return true;
   return false;
 }
