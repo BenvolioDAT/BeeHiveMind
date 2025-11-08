@@ -7,19 +7,19 @@ var TaskBuilder = require('./Task.Builder');
 var TaskRepair = require('./Task.Repair');
 var TaskUpgrader = require('./Task.Upgrader');
 
-const DEFAULT_NEEDS = Object.freeze({
+var DEFAULT_NEEDS = Object.freeze({
   builder: 1,
   repair: 1,
   upgrader: 1,
 });
 
-const DEFAULT_PRIORITY = Object.freeze([
+var DEFAULT_PRIORITY = Object.freeze([
   'repair',
   'builder',
   'upgrader',
 ]);
 
-const TASK_REGISTRY = Object.create(null);
+var TASK_REGISTRY = Object.create(null);
 
 function registerTask(name, module) {
   if (!name || !module || typeof module.run !== 'function') {
@@ -35,7 +35,7 @@ registerTask('repair', TaskRepair);
 registerTask('upgrader', TaskUpgrader);
 registerTask('idle', TaskIdle);
 
-const cache = (global.__taskManagerCache = global.__taskManagerCache || {
+var cache = (global.__taskManagerCache = global.__taskManagerCache || {
   tick: -1,
   counts: null,
   needs: null,
@@ -107,7 +107,8 @@ function getPriorityList() {
 }
 
 module.exports = {
-  run(creep) {
+  // Execute the assigned task for the provided creep.
+  run: function (creep) {
     if (!creep) return;
     var taskName = creep.memory && creep.memory.task;
     var taskModule = getTaskModule(taskName);
@@ -122,12 +123,14 @@ module.exports = {
     }
   },
 
-  isTaskNeeded(taskName) {
+  // Check if the colony currently needs more creeps for a given task.
+  isTaskNeeded: function (taskName) {
     var needs = colonyNeeds();
     return (needs[taskName] || 0) > 0;
   },
 
-  getHighestPriorityTask(creep) {
+  // Get the highest priority task that still has unmet demand.
+  getHighestPriorityTask: function (creep) {
     var needs = colonyNeeds();
     var priorityList = getPriorityList();
     for (var i = 0; i < priorityList.length; i++) {
@@ -137,7 +140,8 @@ module.exports = {
     return 'idle';
   },
 
-  clearTaskMemory(creep) {
+  // Remove task-related fields from the creep's memory.
+  clearTaskMemory: function (creep) {
     if (!creep || !creep.memory) return;
     delete creep.memory.assignedSource;
     delete creep.memory.targetRoom;
