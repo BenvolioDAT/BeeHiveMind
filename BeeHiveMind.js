@@ -405,8 +405,8 @@ function computeRoomQuotas(C, room) {
     Claimer:      0,
     ExpandClaimer: 0
   };
-  var lunaQuota = determineLunaQuota(C, room);
-  if (lunaQuota > 0) quotas.luna = lunaQuota;
+  //var lunaQuota = determineLunaQuota(C, room);
+  //if (lunaQuota > 0) quotas.luna = lunaQuota;
   // Expansion manager publishes spawn intents with canonical role names; bump
   // quotas here so queue pruning keeps those items alive until spawns fire.
   var expansionBoost = getExpansionQuotaBoost(room);
