@@ -1,3 +1,18 @@
+// -----------------------------------------------------------------------------
+// BeeHiveMind.js – global orchestrator for each Screeps tick
+// Responsibilities:
+// * Prepares per-tick caches (rooms, creeps, selectors) and exposes them to
+//   task/role modules.
+// * Manages per-room spawn queues, enforcing quotas and energy gates.
+// * Dispatches creep roles (including Task.Queen via role assignments) after
+//   initialising movement and visuals.
+// * Triggers auxiliary systems (Trade.Energy, planners) at deterministic points.
+// Data touched:
+// * global.__BHM.* (tick caches shared with BeeSelectors, Task modules).
+// * Memory.rooms[roomName].spawnQueue (array of spawn jobs).
+// * creep.memory.task/role for implicit task assignment.
+// Entry point: main.js requires BeeHiveMind and calls run() once per tick.
+// -----------------------------------------------------------------------------
 'use strict';
 
 /**
@@ -6,15 +21,15 @@
  */
 
 // ----------------------------- Dependencies -----------------------------
-const CoreLogger     = require('core.logger');
+const CoreLogger     = require('core.logger'); // Logging utility (core.logger.js)
 const { LOG_LEVEL }  = CoreLogger;
 const hiveLog        = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
-const BeeVisualsSpawnPanel = require('BeeVisuals.SpawnPanel');
+const BeeVisualsSpawnPanel = require('BeeVisuals.SpawnPanel'); // UI overlay for spawn queues
 const BeeSelectors   = require('BeeSelectors');
 const BeeActions     = require('BeeActions');
 const MovementManager= require('Movement.Manager');
-const spawnLogic     = require('spawn.logic');
+const spawnLogic     = require('spawn.logic'); // Contains body plans and spawn helpers
 const roleWorker_Bee = require('role.Worker_Bee');
 const TaskBuilder    = require('Task.Builder');       // kept for your ecosystem
 const RoomPlanner    = require('Planner.Room');
@@ -23,6 +38,8 @@ const TradeEnergy    = require('Trade.Energy');
 const TaskLuna       = require('Task.Luna');
 
 // Map role -> run fn (extend as you add roles)
+// Default role map; specific roles (queen, courier etc.) may be registered
+// elsewhere by mutating this object.
 const creepRoles = { Worker_Bee: roleWorker_Bee.run };
 
 // --------------------------- Tunables & Constants ------------------------
@@ -76,6 +93,10 @@ const ROLE_MIN_ENERGY = {
   CombatMelee: 200,
   CombatMedic: 200
 };
+// Function header: minEnergyFor(role)
+// Inputs: role string
+// Output: minimum energy threshold before spawning role (spawnLogic override or fallback table).
+// Side-effects: none.
 function minEnergyFor(role) {
   if (spawnLogic && typeof spawnLogic.minEnergyFor === 'function') {
     const v = spawnLogic.minEnergyFor(role);
@@ -87,7 +108,10 @@ function minEnergyFor(role) {
 // --------------------------- Global Tick Cache ---------------------------
 if (!global.__BHM) global.__BHM = {};
 
-/** Prepare and return the per-tick cache (idempotent). */
+// Function header: prepareTickCaches()
+// Inputs: none
+// Output: populated global.__BHM cache for this tick (rooms, spawns, counts, selectors).
+// Side-effects: mutates global.__BHM; calls BeeSelectors.prepareRoomSnapshot for each owned room.
 function prepareTickCaches() {
   const C = global.__BHM;
   const now = Game.time;
@@ -123,7 +147,9 @@ function prepareTickCaches() {
   return C;
 }
 
-/** Return all owned rooms (controller.my). */
+// Function header: getOwnedRooms()
+// Inputs: none
+// Output: array of rooms where controller.my === true (visibility dependent).
 function getOwnedRooms() {
   const result = [];
   for (const room of Object.values(Game.rooms)) {
@@ -132,17 +158,24 @@ function getOwnedRooms() {
   return result;
 }
 
-/** Return an object map: name -> room */
+// Function header: indexByName(rooms)
+// Inputs: array of Room objects
+// Output: object mapping room.name to Room instance.
 function indexByName(rooms) {
   const map = {};
   for (const r of rooms) map[r.name] = r;
   return map;
 }
 
-/** Return all spawns as an array. */
+// Function header: getAllSpawns()
+// Inputs: none
+// Output: array of owned StructureSpawn instances (from Game.spawns values).
 function getAllSpawns() { return Object.values(Game.spawns); }
 
-/** Scan creeps once for counts (task-based) and per-home Luna counts. */
+// Function header: buildCreepAndRoleCounts()
+// Inputs: none
+// Output: {creeps, roleCounts, lunaCountsByHome}; excludes soon-to-expire creeps.
+// Side-effects: rewrites creep.memory.task 'remoteharvest' -> 'luna' for consistency.
 function buildCreepAndRoleCounts() {
   const creeps           = [];
   const roleCounts       = Object.create(null);
@@ -176,7 +209,9 @@ function buildCreepAndRoleCounts() {
   return { creeps, roleCounts, lunaCountsByHome };
 }
 
-/** Count my construction sites overall and by room. */
+// Function header: computeConstructionSiteCounts()
+// Inputs: none
+// Output: {byRoom, total} for owned construction sites (Game.constructionSites snapshot).
 function computeConstructionSiteCounts() {
   const byRoom = Object.create(null);
   let total = 0;
@@ -189,7 +224,9 @@ function computeConstructionSiteCounts() {
   return { byRoom, total };
 }
 
-/** For each owned room, fetch its active remotes via RoadPlanner (once per tick). */
+// Function header: computeRemotesByHome(ownedRooms)
+// Inputs: array of owned rooms
+// Output: map of home room name -> active remote room list (from RoadPlanner).
 function computeRemotesByHome(ownedRooms) {
   const out = Object.create(null);
   const hasHelper = RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function';
@@ -199,12 +236,24 @@ function computeRemotesByHome(ownedRooms) {
 }
 
 // ------------------------------ Debug utils ------------------------------
+// Function header: tickEvery(n)
+// Inputs: integer interval n
+// Output: boolean true when Game.time modulo n equals zero (used to rate-limit logs).
 function tickEvery(n) { return Game.time % n === 0; }
+// Function header: dlog(...args)
+// Inputs: arbitrary debug payload
+// Output: none; routes to hiveLog when DEBUG_SPAWN_QUEUE enabled.
 function dlog() {
   if (!DEBUG_SPAWN_QUEUE) return;
   try { hiveLog.debug.apply(hiveLog, arguments); } catch (e) { /* noop */ }
 }
+// Function header: fmt(room)
+// Inputs: Room instance or name
+// Output: string representation for logs.
 function fmt(room) { return room && room.name ? room.name : String(room); }
+// Function header: energyStatus(room)
+// Inputs: Room object
+// Output: "available/capacity" string snapshot of energy.
 function energyStatus(room) {
   const a = room.energyAvailable | 0;
   const c = room.energyCapacityAvailable | 0;
@@ -213,17 +262,28 @@ function energyStatus(room) {
 
 // ------------------------------ Spawn Queue ------------------------------
 // Memory helpers
+// Function header: ensureRoomQueue(roomName)
+// Inputs: owned room name
+// Output: spawn queue array from Memory.rooms[roomName].spawnQueue (initialised if missing).
+// Side-effects: creates Memory.rooms and queue array when absent.
 function ensureRoomQueue(roomName) {
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
   if (!Array.isArray(Memory.rooms[roomName].spawnQueue)) Memory.rooms[roomName].spawnQueue = [];
   return Memory.rooms[roomName].spawnQueue;
 }
+// Function header: queuedCount(roomName, role)
+// Inputs: roomName string, role string
+// Output: number of queue entries with matching role.
 function queuedCount(roomName, role) {
   const q = ensureRoomQueue(roomName);
   let n = 0; for (let i = 0; i < q.length; i++) if (q[i] && q[i].role === role) n++;
   return n;
 }
+// Function header: enqueue(roomName, role, opts)
+// Inputs: room name, role key, optional metadata (body, flags)
+// Output: true when enqueued, false when queue already at QUEUE_HARD_LIMIT.
+// Side-effects: pushes to Memory queue and logs.
 function enqueue(roomName, role, opts) {
   const q = ensureRoomQueue(roomName);
   if (q.length >= QUEUE_HARD_LIMIT) {
@@ -242,6 +302,10 @@ function enqueue(roomName, role, opts) {
   dlog('➕ [Queue]', roomName, 'enqueued', role, '(prio', item.priority + ')');
   return true;
 }
+// Function header: pruneOverfilledQueue(roomName, quotas, C)
+// Inputs: roomName string, quotas map, tick cache C
+// Output: none; compacts queue to respect remaining quota space.
+// Side-effects: replaces Memory queue with kept entries; logs summary.
 function pruneOverfilledQueue(roomName, quotas, C) {
   const q = ensureRoomQueue(roomName);
   const before = q.length;
@@ -266,7 +330,7 @@ function pruneOverfilledQueue(roomName, quotas, C) {
     const usedSoFar = used[it.role] | 0;
     if (usedSoFar < left) { kept.push(it); used[it.role] = usedSoFar + 1; }
   }
-  Memory.rooms[roomName].spawnQueue = kept;
+  Memory.rooms[roomName].spawnQueue = kept; // Persist trimmed queue back to Memory.rooms[roomName].spawnQueue.
 
   const dropped = before - kept.length;
   if (dropped > 0 || tickEvery(DBG_EVERY)) {
@@ -277,6 +341,10 @@ function pruneOverfilledQueue(roomName, quotas, C) {
 }
 
 // Signals
+// Function header: getBuilderNeed(C, room)
+// Inputs: tick cache C, owned room
+// Output: 1 when there are construction sites locally or in attached remotes; 0 otherwise.
+// Side-effects: emits debug log every DBG_EVERY ticks.
 function getBuilderNeed(C, room) {
   if (!room) return 0;
   const local = C.roomSiteCounts[room.name] || 0;
@@ -287,6 +355,10 @@ function getBuilderNeed(C, room) {
   if (tickEvery(DBG_EVERY)) dlog('🧱 [Signal] builderNeed', fmt(room), 'local=', local, 'remote=', remote, '->', need);
   return need;
 }
+// Function header: determineLunaQuota(C, room)
+// Inputs: tick cache C, owned room
+// Output: desired remote miner count based on remote intel and active assignments.
+// Side-effects: reads Memory.remoteAssignments, Memory.rooms.* locks.
 function determineLunaQuota(C, room) {
   if (!room) return 0;
   const remotes = C.remotesByHome[room.name] || [];
@@ -341,6 +413,10 @@ function determineLunaQuota(C, room) {
 }
 
 // Per-room quota policy (tweak here to change strategy)
+// Function header: computeRoomQuotas(C, room)
+// Inputs: tick cache C, owned room
+// Output: quotas object for spawn queue planning.
+// Side-effects: debug logging every DBG_EVERY ticks.
 function computeRoomQuotas(C, room) {
   const quotas = {
     baseharvest:  2,
@@ -364,6 +440,9 @@ function computeRoomQuotas(C, room) {
 }
 
 // Fill queue with deficits (active + queued < quota)
+// Function header: fillQueueForRoom(C, room)
+// Inputs: tick cache C, owned room
+// Output: none; reconciles queue with quotas and enqueues deficits.
 function fillQueueForRoom(C, room) {
   const quotas   = computeRoomQuotas(C, room);
   const roomName = room.name;
@@ -397,6 +476,10 @@ function fillQueueForRoom(C, room) {
  *    look at lower priorities)
  *  - Otherwise spawn the oldest eligible item at that priority
  *  --------------------------------------------------------------------- */
+// Function header: dequeueAndSpawn(spawner)
+// Inputs: StructureSpawn spawner
+// Output: true when spawn succeeds, false otherwise (including energy holds and cooldown waits).
+// Side-effects: sorts and mutates Memory spawn queue, calls spawnLogic.Spawn_Worker_Bee, sets retryAt.
 function dequeueAndSpawn(spawner) {
   if (!spawner || spawner.spawning) return false;
   const room = spawner.room;
@@ -466,13 +549,20 @@ function dequeueAndSpawn(spawner) {
 // ------------------------------ Main Module ------------------------------
 const BeeHiveMind = {
   /** Top-level tick entrypoint. */
+  // Function header: run()
+  // Inputs: none
+  // Output: none; orchestrates tick: memory init → visuals → caches → rooms → creeps → movement → spawns → trade.
+  // Side-effects: updates global.__BHM, Memory rooms, MovementManager state.
   run() {
     BeeHiveMind.initializeMemory();
 
+    // Expose action/selectors globally for console debugging and legacy modules
+    // expecting global symbols.
     if (BeeActions) global.BeeActions = BeeActions;
     if (BeeSelectors) global.BeeSelectors = BeeSelectors;
 
     if (MovementManager && typeof MovementManager.startTick === 'function') {
+      // Reset movement queue before any role enqueues requests.
       MovementManager.startTick();
     }
 
@@ -490,6 +580,7 @@ const BeeHiveMind = {
     BeeHiveMind.runCreeps(C);
 
     if (MovementManager && typeof MovementManager.resolveAndMove === 'function') {
+      // Execute queued movement intents after all roles finish issuing actions.
       MovementManager.resolveAndMove();
     }
 
@@ -504,6 +595,9 @@ const BeeHiveMind = {
   },
 
   /** Room loop – keep lean. */
+  // Function header: manageRoom(room, C)
+  // Inputs: owned room, tick cache C
+  // Output: none; triggers planner helpers for construction/roads.
   manageRoom(room, C) {
     if (!room) return;
 
@@ -513,6 +607,9 @@ const BeeHiveMind = {
   },
 
   /** Creep loop – dispatch by role with safe fallback. */
+  // Function header: runCreeps(C)
+  // Inputs: tick cache C containing creeps array
+  // Output: none; hands off each creep to its role.run and handles errors.
   runCreeps(C) {
     for (const creep of C.creeps) {
       BeeHiveMind.assignTask(creep);
@@ -525,6 +622,9 @@ const BeeHiveMind = {
   },
 
   /** Assign default task from role if missing. */
+  // Function header: assignTask(creep)
+  // Inputs: creep object
+  // Output: none; sets creep.memory.task for queen/scout/repair roles when absent.
   assignTask(creep) {
     if (!creep || (creep.memory && creep.memory.task)) return;
     const role = creep.memory && creep.memory.role;
@@ -539,6 +639,9 @@ const BeeHiveMind = {
    * - First available spawn handles squads once per tick.
    * - Each spawn dequeues at most one item and attempts to spawn it.
    */
+  // Function header: manageSpawns(C)
+  // Inputs: tick cache C (roomsOwned, spawns arrays, role counts)
+  // Output: none; keeps per-room spawn queues and triggers spawnLogic.
   manageSpawns(C) {
     if (!C || !Array.isArray(C.spawns) || !Array.isArray(C.roomsOwned)) return;
 
@@ -574,9 +677,14 @@ const BeeHiveMind = {
   },
 
   /** Stub hook for future remote ops. */
+  // Function header: manageRemoteOps()
+  // Inputs/Outputs: none; placeholder for remote automation pipeline.
   manageRemoteOps() {},
 
   /** Normalize Memory.rooms to objects. */
+  // Function header: initializeMemory()
+  // Inputs: none
+  // Output: none; ensures Memory.rooms entries are non-null objects (prevents later property access errors).
   initializeMemory() {
     if (!Memory.rooms) Memory.rooms = {};
     for (const roomName of Object.keys(Memory.rooms)) {
