@@ -413,7 +413,9 @@ function dequeueAndSpawn(spawner) {
   }
 
   var ok = false;
-  if (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function') {
+  if (spawnLogic && typeof spawnLogic.spawnRole === 'function') {
+    ok = spawnLogic.spawnRole(spawner, item.role, spawnResource, item);
+  } else if (spawnLogic && typeof spawnLogic.Spawn_Worker_Bee === 'function') {
     ok = spawnLogic.Spawn_Worker_Bee(spawner, item.role, spawnResource, item);
   }
 
