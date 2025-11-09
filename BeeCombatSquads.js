@@ -1,4 +1,5 @@
 
+// PvE-only combat: squads fight Invader threats even in my reserved rooms while avoiding PvP.
 var BeeToolbox; try { BeeToolbox = require('BeeToolbox'); } catch (e) { BeeToolbox = null; }
 try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
 
@@ -42,12 +43,46 @@ var TaskSquad = (function () {
 
   function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
   function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
-  function _isPlayerControlledRoom(room) {
+
+  var _cachedMyNameTick = -1;
+  var _cachedMyName = null;
+  function _firstSpawn() {
+    if (!Game || !Game.spawns) return null;
+    for (var sn in Game.spawns) {
+      if (Game.spawns.hasOwnProperty(sn)) {
+        return Game.spawns[sn];
+      }
+    }
+    return null;
+  }
+  function _getMyName(roomName) {
+    if (_cachedMyNameTick !== Game.time || (!_cachedMyName && roomName)) {
+      var spawn = _firstSpawn();
+      var viaSpawn = null;
+      if (spawn && spawn.owner && spawn.owner.username) viaSpawn = spawn.owner.username;
+
+      var viaRoom = null;
+      if (!viaSpawn && roomName && Game.rooms[roomName] && Game.rooms[roomName].controller &&
+          Game.rooms[roomName].controller.owner && Game.rooms[roomName].controller.owner.username) {
+        viaRoom = Game.rooms[roomName].controller.owner.username;
+      }
+
+      _cachedMyName = viaSpawn || viaRoom || null;
+      _cachedMyNameTick = Game.time;
+    }
+    return _cachedMyName;
+  }
+
+  function _isPlayerControlledRoom(room, me) {
     if (!room || !room.controller) return false;
     var ctrl = room.controller;
+    var myName = _getMyName(me && me.pos && me.pos.roomName);
     if (ctrl.my) return false;
     if (ctrl.owner && ctrl.owner.username !== 'Invader') return true;
-    if (ctrl.reservation && ctrl.reservation.username && ctrl.reservation.username !== 'Invader') return true;
+    if (ctrl.reservation && ctrl.reservation.username && ctrl.reservation.username !== 'Invader') {
+      if (myName && ctrl.reservation.username === myName) return false;
+      return true;
+    }
     return false;
   }
 
@@ -189,7 +224,7 @@ var TaskSquad = (function () {
   function _chooseRoomTarget(me) {
     var room = me.room; if (!room) return null;
 
-    if (_isPlayerControlledRoom(room)) {
+    if (_isPlayerControlledRoom(room, me)) {
       return null; // PvE acceptance: sharedTarget returns null in player rooms
     }
 
@@ -235,6 +270,13 @@ var TaskSquad = (function () {
     var nxt = _chooseRoomTarget(creep);
     if (nxt) { S.targetId = nxt.id; S.targetAt = Game.time; return nxt; }
     S.targetId = null; S.targetAt = Game.time;
+    var room = creep.room;
+    if (room) {
+      var invaders = room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+      if (invaders && invaders.length && Game.time % 10 === 0) {
+        console.log('[TaskSquad] null target in', creep.pos.roomName, 'but Invaders present; check player-room filter');
+      }
+    }
     return null;
   }
 
