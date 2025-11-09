@@ -60,7 +60,6 @@ var ROLE_MIN_ENERGY = {
 var ROLE_ALIAS_MAP = (function () {
   var map = Object.create(null);
   var canon = [
-    'Idle',
     'BaseHarvest',
     'Builder',
     'Courier',
@@ -81,8 +80,6 @@ var ROLE_ALIAS_MAP = (function () {
     map[name] = name;
     map[name.toLowerCase()] = name;
   }
-  map.worker_bee = 'Idle';
-  map['Worker_Bee'] = 'Idle';
   map.remoteharvest = 'Luna';
   return map;
 })();
