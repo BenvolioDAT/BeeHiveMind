@@ -105,7 +105,7 @@ var TaskSquad = (function () {
     if (!creep || !creep.memory) return '';
     var role = creep.memory.role;
     if (role && role.length) return role;
-    return creep.memory.task || '';
+    return creep.memory.role || '';
   }
   function _isCombat(creep) { return !!COMBAT_ROLES[_roleOf(creep)]; }
   function _isCivilian(creep) { return !_isCombat(creep); }
