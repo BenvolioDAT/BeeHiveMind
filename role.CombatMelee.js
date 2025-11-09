@@ -9,7 +9,7 @@
 // PvE-only acceptance: targets *Invader* creeps/structures (never player assets)
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('Task.Squad');
+var TaskSquad  = require('BeeCombatSquads');
 
 function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
 function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }

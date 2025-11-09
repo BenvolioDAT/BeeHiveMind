@@ -2,7 +2,7 @@
 // ES5-safe (no const/let/arrows). Uses TaskSquad pathing helpers when available.
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('Task.Squad');
+var TaskSquad  = require('BeeCombatSquads');
 
 // ---- PvE-only acceptance: react ONLY to Invader creeps/structures ----
 function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
