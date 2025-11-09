@@ -5,15 +5,15 @@
  *
  * Draws:
  *  - Debug creep list (left column)
- *  - Optional structure placement markers (Task.Builder.structurePlacements)
+ *  - Optional structure placement markers (role.Builder.structurePlacements)
  *  - CPU & bucket stats
  *  - In-room planned roads (debug)
  *  - World/overview overlays (flags + planned road dots)
- *  - Energy bar + Worker_Bee task table (bottom-right, stacked upward)
+ *  - Energy bar + worker role table (bottom-right, stacked upward)
  */
 
 // ----------------------------- Dependencies ------------------------------
-var TaskBuilder = require('Task.Builder'); // optional: structurePlacements
+var roleBuilder = require('role.Builder'); // optional: structurePlacements
 var Logger      = require('core.logger');
 var LOG_LEVEL   = Logger.LOG_LEVEL;
 
@@ -150,7 +150,7 @@ function _reserveBottomRight(roomName, panelWidth, panelHeight) {
  *  - In-room planned roads (debug)
  *  - World overlays (if enabled)
  *  - Repair counter
- *  - Energy bar (bottom-right) + Worker_Bee table stacked above it
+ *  - Energy bar (bottom-right) + worker table stacked above it
  */
 BeeVisuals.drawVisuals = function () {
   var room = getMainRoom();
@@ -221,7 +221,7 @@ BeeVisuals.drawEnergyBar = function () {
 };
 
 /**
- * Worker_Bee task table (bottom-right). Stacks above energy bar.
+ * Worker role table (bottom-right). Stacks above energy bar.
  * Uses a fixed target map for quick at-a-glance guidance.
  */
 BeeVisuals.drawWorkerBeeTaskTable = function () {
@@ -231,30 +231,60 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
 
   var v = new RoomVisual(room.name);
 
-  // Collect Worker_Bee creeps
-  var workerBees = [];
-  for (var name in Game.creeps) {
-    if (!Game.creeps.hasOwnProperty(name)) continue;
-    var c = Game.creeps[name];
-    if (c && c.memory && c.memory.role === 'Worker_Bee') workerBees.push(c);
-  }
-  var totalCount = workerBees.length | 0;
-
-  // Tweak to match your spawn quotas
+  // Tweak to match your spawn quotas (canonical role names)
   var maxTasks = {
-    baseharvest: 2, builder: 1, upgrader: 1, repair: 0,
-    courier: 1, luna: 8, scout: 1, queen: 2,
+    BaseHarvest: 2, Builder: 1, Upgrader: 1, Repair: 0,
+    Courier: 1, Luna: 8, Scout: 1, Queen: 2,
     CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
     Dismantler: 0, Claimer: 2
   };
+
+  var ROLE_ALIAS = {
+    baseharvest: 'BaseHarvest',
+    builder: 'Builder',
+    upgrader: 'Upgrader',
+    repair: 'Repair',
+    courier: 'Courier',
+    luna: 'Luna',
+    remoteharvest: 'Luna',
+    scout: 'Scout',
+    queen: 'Queen',
+    combatarcher: 'CombatArcher',
+    combatmelee: 'CombatMelee',
+    combatmedic: 'CombatMedic',
+    dismantler: 'Dismantler',
+    claimer: 'Claimer'
+  };
+
+  function canonicalRole(tag) {
+    if (!tag) return null;
+    if (Object.prototype.hasOwnProperty.call(maxTasks, tag)) return tag;
+    var lower = tag.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(ROLE_ALIAS, lower)) return ROLE_ALIAS[lower];
+    return null;
+  }
+
+  // Collect worker-role creeps
+  var workers = [];
+  for (var name in Game.creeps) {
+    if (!Game.creeps.hasOwnProperty(name)) continue;
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    var roleTag = c.memory.role || c.memory.task;
+    var canonical = canonicalRole(roleTag ? roleTag.toString() : '');
+    if (canonical && maxTasks.hasOwnProperty(canonical)) {
+      workers.push(canonical);
+    }
+  }
+  var totalCount = workers.length | 0;
 
   // Current counts by task
   var tasks = {};
   var k;
   for (k in maxTasks) if (maxTasks.hasOwnProperty(k)) tasks[k] = 0;
-  for (var i = 0; i < workerBees.length; i++) {
-    var t = (workerBees[i].memory && workerBees[i].memory.task) ? workerBees[i].memory.task : 'idle';
-    if (tasks.hasOwnProperty(t)) tasks[t] = (tasks[t] | 0) + 1;
+  for (var i = 0; i < workers.length; i++) {
+    var canonical = workers[i];
+    if (tasks.hasOwnProperty(canonical)) tasks[canonical] = (tasks[canonical] | 0) + 1;
   }
 
   // Sum of maxes for header total
@@ -283,7 +313,7 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
   // header row
   v.rect(xLeft, yTop, nameW, cellH, { fill: CFG.colors.panelFill, stroke: CFG.colors.panelStroke, opacity: CFG.alpha.panel, radius: 0.05 });
   v.rect(xLeft + nameW, yTop, valueW, cellH, { fill: CFG.colors.panelFill, stroke: CFG.colors.panelStroke, opacity: CFG.alpha.panel, radius: 0.05 });
-  text(v, 'Worker_Bee', xLeft + 0.3, yTop + cellH / 2 + 0.15, 0.5, 'left', 1);
+  text(v, 'Workers', xLeft + 0.3, yTop + cellH / 2 + 0.15, 0.5, 'left', 1);
   text(v, totalCount + '/' + maxTotal, xLeft + nameW + valueW - 0.3, yTop + cellH / 2 + 0.15, 0.5, 'right', 1);
 
   // body rows
@@ -473,7 +503,7 @@ function drawCreepDebugList(visual, room) {
   }
 }
 
-/** Cyan dots near the first spawn showing TaskBuilder.structurePlacements, if present. */
+/** Cyan dots near the first spawn showing roleBuilder.structurePlacements, if present. */
 function drawStructurePlacementDots(visual, room) {
   var firstSpawn = null;
   for (var sn in Game.spawns) {
@@ -483,10 +513,10 @@ function drawStructurePlacementDots(visual, room) {
   }
   if (!firstSpawn) return;
 
-  if (TaskBuilder && TaskBuilder.structurePlacements) {
+  if (roleBuilder && roleBuilder.structurePlacements) {
     var baseX = firstSpawn.pos.x;
     var baseY = firstSpawn.pos.y;
-    var placements = TaskBuilder.structurePlacements;
+    var placements = roleBuilder.structurePlacements;
 
     for (var p = 0; p < placements.length; p++) {
       var pl = placements[p];

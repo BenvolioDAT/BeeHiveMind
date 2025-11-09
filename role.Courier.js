@@ -1,4 +1,4 @@
-// Task.Courier – Energy hauler (ES5-safe) with SAY + DRAW breadcrumbs
+// role.Courier – Energy hauler (ES5-safe) with SAY + DRAW breadcrumbs
 // Collect priority: Source CONTAINER -> big DROPS (en route) -> drops NEAR container -> GRAVES/RUINS -> misc DROPS -> STORAGE/TERMINAL
 // Deliver priority: SPAWNS/EXTENSIONS -> TOWERS (<= pct) -> STORAGE
 //
@@ -348,7 +348,8 @@ function _pickStorage(creep) {
 // ============================
 // Main role
 // ============================
-var TaskCourier = {
+var roleCourier = {
+  role: 'Courier',
   run: function (creep) {
     // State bootstrap
     if (creep.memory.transferring && creep.store[RESOURCE_ENERGY] === 0) { creep.memory.transferring = false; }
@@ -360,9 +361,9 @@ var TaskCourier = {
     if (creep.memory.dropoffId === undefined) creep.memory.dropoffId = null;
 
     if (creep.memory.transferring) {
-      TaskCourier.deliverEnergy(creep);
+      roleCourier.deliverEnergy(creep);
     } else {
-      TaskCourier.collectEnergy(creep);
+      roleCourier.collectEnergy(creep);
     }
   },
 
@@ -538,4 +539,4 @@ var TaskCourier = {
   }
 };
 
-module.exports = TaskCourier;
+module.exports = roleCourier;

@@ -1,4 +1,4 @@
-// Task.Scout.js — ring-based exploration with Debug_say & Debug_draw
+// role.Scout – ring-based exploration with Debug_say & Debug_draw
 var BeeToolbox = require('BeeToolbox');
 try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
 
@@ -599,7 +599,8 @@ function computeNextHop(fromRoom, toRoom) {
 }
 
 // ---------- API ----------
-var TaskScout = {
+var roleScout = {
+  role: 'Scout',
   isExitBlocked: function (creep, exitDir) { return isExitBlockedCached(creep.room, exitDir); },
 
   run: function (creep) {
@@ -667,7 +668,7 @@ var TaskScout = {
         creep.memory.nextHop = null;
         return;
       }
-      if (TaskScout.isExitBlocked(creep, dir)) {
+      if (isExitBlockedCached(creep.room, dir)) {
         markBlocked(hop);
         drawExitMarker(creep.room, dir, "X", CFG.DRAW.EXIT_BAD);
         creep.memory.nextHop = null;
@@ -730,7 +731,7 @@ var TaskScout = {
       creep.memory.nextHop = nh;
 
       var dir2 = creep.room.findExitTo(nh);
-      if (dir2 < 0 || TaskScout.isExitBlocked(creep, dir2)) {
+      if (dir2 < 0 || isExitBlockedCached(creep.room, dir2)) {
         markBlocked(nh);
         drawExitMarker(creep.room, dir2, "X", CFG.DRAW.EXIT_BAD);
         creep.memory.nextHop = null;
@@ -746,4 +747,4 @@ var TaskScout = {
   }
 };
 
-module.exports = TaskScout;
+module.exports = roleScout;

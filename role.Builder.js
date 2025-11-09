@@ -1,4 +1,4 @@
-// Task.Builder.mini.js — with Debug_say & Debug_draw (ES5-safe, Screeps-friendly)
+// role.Builder.js — migrated from Task.Builder (with Debug_say & Debug_draw, ES5-safe)
 var BeeToolbox = require('BeeToolbox');
 try { require('Traveler'); } catch (e) {} // use if available
 
@@ -253,7 +253,8 @@ function doBuild(creep, site) {
 // ==============================
 // Public API
 // ==============================
-var TaskBuilder = {
+var roleBuilder = {
+  role: 'Builder',
   run: function (creep) {
     // state flip
     if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
@@ -312,4 +313,4 @@ var TaskBuilder = {
   }
 };
 
-module.exports = TaskBuilder;
+module.exports = roleBuilder;

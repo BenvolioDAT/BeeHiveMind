@@ -2,15 +2,15 @@
 // BeeHiveMind.js – global orchestrator for each Screeps tick
 // Responsibilities:
 // * Prepares per-tick caches (rooms, creeps, selectors) and exposes them to
-//   task/role modules.
+//   role modules.
 // * Manages per-room spawn queues, enforcing quotas and energy gates.
-// * Dispatches creep roles (including Task.Queen via role assignments) after
+// * Dispatches creep roles (including role.Queen via role assignments) after
 //   initialising movement and visuals.
 // * Triggers auxiliary systems (Trade.Energy, planners) at deterministic points.
 // Data touched:
-// * global.__BHM.* (tick caches shared with BeeSelectors, Task modules).
+// * global.__BHM.* (tick caches shared with BeeSelectors, role modules).
 // * Memory.rooms[roomName].spawnQueue (array of spawn jobs).
-// * creep.memory.task/role for implicit task assignment.
+// * creep.memory.role for implicit role assignment.
 // Entry point: main.js requires BeeHiveMind and calls run() once per tick.
 // -----------------------------------------------------------------------------
 'use strict';
@@ -30,8 +30,21 @@ var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
-var roleWorker_Bee       = require('role.Worker_Bee');
-var TaskBuilder          = require('Task.Builder');         // kept for your ecosystem
+var roleIdle             = require('role.Idle');
+var roleBaseHarvest      = require('role.BaseHarvest');
+var roleBuilder          = require('role.Builder');
+var roleCourier          = require('role.Courier');
+var roleRepair           = require('role.Repair');
+var roleUpgrader         = require('role.Upgrader');
+var roleDismantler       = require('role.Dismantler');
+var roleLuna             = require('role.Luna');
+var roleScout            = require('role.Scout');
+var roleQueen            = require('role.Queen');
+var roleTrucker          = require('role.Trucker');
+var roleClaimer          = require('role.Claimer');
+var roleCombatArcher     = require('role.CombatArcher');
+var roleCombatMedic      = require('role.CombatMedic');
+var roleCombatMelee      = require('role.CombatMelee');
 var RoomPlanner          = require('Planner.Room');
 var RoadPlanner          = require('Planner.Road');
 var TradeEnergy          = require('Trade.Energy');
@@ -39,7 +52,78 @@ var TradeEnergy          = require('Trade.Energy');
 // Map role -> run fn (extend as you add roles)
 // Default role map; specific roles (queen, courier etc.) may be registered
 // elsewhere by mutating this object.
-var creepRoles = { Worker_Bee: roleWorker_Bee.run };
+var creepRoles = {
+  Idle: roleIdle.run,
+  BaseHarvest: roleBaseHarvest.run,
+  Builder: roleBuilder.run,
+  Courier: roleCourier.run,
+  Repair: roleRepair.run,
+  Upgrader: roleUpgrader.run,
+  Dismantler: roleDismantler.run,
+  Luna: roleLuna.run,
+  Scout: roleScout.run,
+  Queen: roleQueen.run,
+  Trucker: roleTrucker.run,
+  Claimer: roleClaimer.run,
+  CombatArcher: roleCombatArcher.run,
+  CombatMedic: roleCombatMedic.run,
+  CombatMelee: roleCombatMelee.run
+};
+
+var ROLE_ALIAS_MAP = (function () {
+  var map = Object.create(null);
+  var canon = [
+    'Idle',
+    'BaseHarvest',
+    'Builder',
+    'Courier',
+    'Repair',
+    'Upgrader',
+    'Dismantler',
+    'Luna',
+    'Scout',
+    'Queen',
+    'Trucker',
+    'Claimer',
+    'CombatArcher',
+    'CombatMedic',
+    'CombatMelee'
+  ];
+  for (var i = 0; i < canon.length; i++) {
+    var name = canon[i];
+    map[name] = name;
+    map[name.toLowerCase()] = name;
+  }
+  map.worker_bee = 'Idle';
+  map['Worker_Bee'] = 'Idle';
+  map.remoteharvest = 'Luna';
+  return map;
+})();
+
+function canonicalRoleName(name) {
+  if (!name) return null;
+  if (creepRoles[name]) return name;
+  var key = String(name);
+  if (ROLE_ALIAS_MAP[key]) return ROLE_ALIAS_MAP[key];
+  var lower = key.toLowerCase();
+  if (ROLE_ALIAS_MAP[lower]) return ROLE_ALIAS_MAP[lower];
+  return null;
+}
+
+function ensureCreepRole(creep) {
+  if (!creep) return 'Idle';
+  var mem = creep.memory || (creep.memory = {});
+
+  var canonical = canonicalRoleName(mem.role) || canonicalRoleName(mem.task);
+  if (!canonical) canonical = 'Idle';
+
+  if (canonical === 'Luna' && mem && mem.task === 'remoteharvest') {
+    mem.task = 'luna';
+  }
+
+  mem.role = canonical;
+  return canonical;
+}
 
 // --------------------------- Tunables & Constants ------------------------
 // Grouped knobs to make strategy tweaks easy to find.
@@ -165,19 +249,10 @@ function buildCreepAndRoleCounts() {
       continue;
     }
 
-    // Normalize task
-    var task = creep.memory && creep.memory.task;
-    if (task === 'remoteharvest' && creep.memory) {
-      task = 'luna';
-      creep.memory.task = 'luna';
-    }
-    if (!task) {
-      continue;
-    }
+    var roleName = ensureCreepRole(creep);
+    roleCounts[roleName] = (roleCounts[roleName] || 0) + 1;
 
-    roleCounts[task] = (roleCounts[task] || 0) + 1;
-
-    if (task === 'luna') {
+    if (roleName === 'Luna') {
       var home = (creep.memory && creep.memory.home) || null;
       if (!home && creep.memory && creep.memory._home) home = creep.memory._home;
       if (!home && creep.room) home = creep.room.name;
@@ -305,11 +380,10 @@ var BeeHiveMind = {
     var creeps = C.creeps;
     for (var i = 0; i < creeps.length; i++) {
       var creep = creeps[i];
-      BeeHiveMind.assignTask(creep);
-      var roleName = (creep.memory && creep.memory.role) || 'Worker_Bee';
+      var roleName = ensureCreepRole(creep);
       var roleFn = creepRoles[roleName];
       if (typeof roleFn !== 'function') {
-        roleFn = roleWorker_Bee.run;
+        roleFn = roleIdle.run;
       }
       try {
         roleFn(creep);
@@ -319,21 +393,7 @@ var BeeHiveMind = {
     }
   },
 
-  /** Assign default task from role if missing. */
-  // Function header: assignTask(creep)
-  // Inputs: creep object
-  // Output: none; sets creep.memory.task for queen/scout/repair roles when absent.
-  assignTask: function assignTask(creep) {
-    if (!creep || (creep.memory && creep.memory.task)) return;
-    var role = creep.memory && creep.memory.role;
-    if (role === 'Queen') {
-      creep.memory.task = 'queen';
-    } else if (role === 'Scout') {
-      creep.memory.task = 'scout';
-    } else if (role === 'repair') {
-      creep.memory.task = 'repair';
-    }
-  },
+  ensureRole: ensureCreepRole,
 
   /**
    * Queue-based spawn manager.

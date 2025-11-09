@@ -1,4 +1,4 @@
-// Task.Luna – Remote harvester with SAY + DRAW breadcrumbs (ES5-safe)
+// role.Luna – Remote harvester with SAY + DRAW breadcrumbs (ES5-safe)
 // Visual intent lines help you see: travel, pick, harvest, return, and fallbacks.
 
 var BeeToolbox = require('BeeToolbox');
@@ -758,7 +758,8 @@ function tryBuildOrUpgrade(creep) {
 // ============================
 // Main role
 // ============================
-var TaskLuna = {
+var roleLuna = {
+  role: 'Luna',
   run: function(creep){
     if (creep && creep.memory && creep.memory.task === 'remoteharvest') {
       creep.memory.task = 'luna';
@@ -773,8 +774,8 @@ var TaskLuna = {
     creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
 
     // Carry state
-    this.updateReturnState(creep);
-    if (creep.memory.returning){ this.returnToStorage(creep); return; }
+    roleLuna.updateReturnState(creep);
+    if (creep.memory.returning){ roleLuna.returnToStorage(creep); return; }
 
     // Gentle EOL slot free
     if (creep.ticksToLive!==undefined && creep.ticksToLive<5 && creep.memory.assigned){ releaseAssignment(creep); }
@@ -803,7 +804,7 @@ var TaskLuna = {
         creep.memory.assigned   = true;
         creep.memory._assignTick = Game.time;
       }else{
-        this.initializeAndAssign(creep);
+        roleLuna.initializeAndAssign(creep);
         if (!creep.memory.sourceId){
           var anchor=getAnchorPos(getHomeName(creep));
           debugSay(creep, 'IDLE');
@@ -840,7 +841,7 @@ var TaskLuna = {
 
     // Defensive: memory wipe mid-run
     if (!creep.memory.targetRoom || !creep.memory.sourceId){
-      this.initializeAndAssign(creep);
+      roleLuna.initializeAndAssign(creep);
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
         if (Game.time % 25 === 0) console.log('🚫 Forager '+creep.name+' could not be assigned a room/source.');
         return;
@@ -863,7 +864,7 @@ var TaskLuna = {
     if (ctl) { ensureControllerFlag(ctl); debugRing(targetRoomObj, ctl.pos, CFG.DRAW.TRAVEL_COLOR, "CTRL"); }
 
     // Work the source
-    this.harvestSource(creep);
+    roleLuna.harvestSource(creep);
   },
 
   // ---- Legacy fallback (no vision) — now radius-bounded ----
@@ -916,14 +917,14 @@ var TaskLuna = {
   },
 
   initializeAndAssign: function(creep){
-    var targetRooms = this.getNearbyRoomsWithSources(creep);
+    var targetRooms = roleLuna.getNearbyRoomsWithSources(creep);
     if (!creep.memory.targetRoom || !creep.memory.sourceId){
-      var least = this.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
+      var least = roleLuna.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
       if (!least){ if (Game.time%25===0) console.log('🚫 Forager '+creep.name+' found no suitable room with unclaimed sources.'); return; }
       creep.memory.targetRoom = least;
 
       var roomMemory = _roomMem(creep.memory.targetRoom);
-      var sid = this.assignSource(creep, roomMemory);
+      var sid = roleLuna.assignSource(creep, roomMemory);
       if (sid){
         creep.memory.sourceId = sid;
         creep.memory.assigned = true;
@@ -1097,6 +1098,6 @@ var TaskLuna = {
   }
 };
 
-TaskLuna.MAX_LUNA_PER_SOURCE = MAX_LUNA_PER_SOURCE;
+roleLuna.MAX_LUNA_PER_SOURCE = MAX_LUNA_PER_SOURCE;
 
-module.exports = TaskLuna;
+module.exports = roleLuna;

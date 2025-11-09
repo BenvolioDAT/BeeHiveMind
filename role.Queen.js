@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------------
-// Task.Queen.js – economy hauler role
+// role.Queen.js – economy hauler role
 // Responsibilities:
 // * Keeps a single "Queen" creep ferrying energy between sources (drops, links,
 //   tombstones, storage) and sinks (spawns/extensions/towers/storage terminals).
@@ -11,7 +11,7 @@
 //   or run out of capacity.
 // * Uses global.__BHM.queenReservations to avoid multiple Queens double-booking
 //   the same sink in the same tick.
-// Called from: TaskManager -> role dispatch -> BeeHiveMind.runCreeps -> TaskQueen.run.
+// Called from: BeeHiveMind.runCreeps dispatcher -> roleQueen.run.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -19,7 +19,7 @@
 var BeeSelectors = require('BeeSelectors');
 // Shared action wrappers with movement intents.
 var BeeActions = require('BeeActions');
-// Central movement queue; TaskQueen enqueues idles here.
+// Central movement queue; roleQueen enqueues idles here.
 var MovementManager = require('Movement.Manager');
 
 // Static configuration covering debug outputs, stuck detection, and movement
@@ -472,7 +472,8 @@ function executeTask(creep, task) {
   }
 }
 
-var TaskQueen = {
+var roleQueen = {
+  role: 'Queen',
   // Function header: run(creep)
   // Inputs: Queen creep dispatched from BeeHiveMind role loop.
   // Output: none; drives task selection/execution and updates memory.
@@ -503,4 +504,4 @@ var TaskQueen = {
   }
 };
 
-module.exports = TaskQueen;
+module.exports = roleQueen;

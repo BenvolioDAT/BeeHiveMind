@@ -7,7 +7,7 @@
 //   so calling tasks can respond immediately without extra checks.
 // * Centralise priorities via Movement.Manager.PRIORITIES to keep action →
 //   movement mapping declarative.
-// Consumers: Task.Queen, Task.Builder, combat tasks, BeeHiveMind role loops.
+// Consumers: role.Queen, role.Builder, combat tasks, BeeHiveMind role loops.
 // -----------------------------------------------------------------------------
 'use strict';
 

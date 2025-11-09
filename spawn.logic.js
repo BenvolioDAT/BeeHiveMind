@@ -183,6 +183,49 @@ const CONFIGS = {
   ],
 };
 
+const DIRECT_ROLE_MAP = Object.freeze({
+  Idle: 'Idle',
+  idle: 'Idle',
+  BaseHarvest: 'BaseHarvest',
+  baseharvest: 'BaseHarvest',
+  Builder: 'Builder',
+  builder: 'Builder',
+  Courier: 'Courier',
+  courier: 'Courier',
+  Repair: 'Repair',
+  repair: 'Repair',
+  Upgrader: 'Upgrader',
+  upgrader: 'Upgrader',
+  Dismantler: 'Dismantler',
+  dismantler: 'Dismantler',
+  CombatArcher: 'CombatArcher',
+  combatarcher: 'CombatArcher',
+  Luna: 'Luna',
+  luna: 'Luna',
+  remoteharvest: 'Luna',
+  Scout: 'Scout',
+  scout: 'Scout',
+  Queen: 'Queen',
+  queen: 'Queen',
+  Trucker: 'Trucker',
+  trucker: 'Trucker',
+  Claimer: 'Claimer',
+  claimer: 'Claimer',
+  CombatMedic: 'CombatMedic',
+  combatmedic: 'CombatMedic',
+  CombatMelee: 'CombatMelee',
+  combatmelee: 'CombatMelee',
+});
+
+function directRoleForTask(task) {
+  if (!task) return null;
+  const key = String(task);
+  if (DIRECT_ROLE_MAP[key]) return DIRECT_ROLE_MAP[key];
+  const lower = key.toLowerCase();
+  if (DIRECT_ROLE_MAP[lower]) return DIRECT_ROLE_MAP[lower];
+  return null;
+}
+
 // ---------- Task Aliases (normalize user-facing names) ----------
 // This lets getBodyForTask('Trucker') resolve to courier configs, etc.
 const TASK_ALIAS = {
@@ -355,17 +398,20 @@ function Spawn_Creep_Role(spawn, roleName, generateBodyFn, availableEnergy, memo
   return false;
 }
 
-// Spawns a generic "Worker_Bee" with a task (kept for your existing callsites).
+// Spawns a generic worker with a task (kept for existing callsites).
 function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   const body = getBodyForTask(neededTask, availableEnergy);
   const name = Generate_Creep_Name(neededTask || 'Worker');
+  const directRole = directRoleForTask(neededTask);
   const memory = {
-    role: 'Worker_Bee',
     task: neededTask,
     bornTask: neededTask,
     birthBody: body.slice(),
   };
+  var canonicalRole = directRole || 'Idle';
+  memory.bornRole = directRole || canonicalRole;
   if (extraMemory) Object.assign(memory, extraMemory);
+  memory.role = canonicalRole;
   const res = spawn.spawnCreep(body, name, { memory });
   if (res === OK) {
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {

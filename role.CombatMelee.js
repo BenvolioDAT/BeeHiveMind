@@ -1,4 +1,4 @@
-// Combat.Melee.js — PvE melee with Debug_say & Debug_draw instrumentation (ES5-safe)
+// role.CombatMelee.js — PvE melee with Debug_say & Debug_draw instrumentation (ES5-safe)
 //
 // Additions:
 //  - DEBUG_SAY & DEBUG_DRAW toggles with lightweight HUD
@@ -97,7 +97,9 @@ function moveSmart(creep, dest, range){
 // ==========================
 // Core
 // ==========================
-var CombatMelee = {
+var roleCombatMelee = {
+  role: 'CombatMelee',
+
   run: function (creep) {
     if (creep.spawning) return;
 
@@ -395,4 +397,4 @@ var CombatMelee = {
   }
 };
 
-module.exports = CombatMelee;
+module.exports = roleCombatMelee;
