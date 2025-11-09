@@ -30,7 +30,6 @@ var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
-var roleIdle             = require('role.Idle');
 var roleBaseHarvest      = require('role.BaseHarvest');
 var roleBuilder          = require('role.Builder');
 var roleCourier          = require('role.Courier');
@@ -53,7 +52,6 @@ var TradeEnergy          = require('Trade.Energy');
 // Default role map; specific roles (queen, courier etc.) may be registered
 // elsewhere by mutating this object.
 var creepRoles = {
-  Idle: roleIdle.run,
   BaseHarvest: roleBaseHarvest.run,
   Builder: roleBuilder.run,
   Courier: roleCourier.run,
