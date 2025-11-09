@@ -403,14 +403,25 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   const body = getBodyForTask(neededTask, availableEnergy);
   const name = Generate_Creep_Name(neededTask || 'Worker');
   const directRole = directRoleForTask(neededTask);
+  const canonicalRole = directRole || (neededTask || 'Idle');
   const memory = {
-    task: neededTask,
     bornTask: neededTask,
     birthBody: body.slice(),
+    bornRole: directRole || canonicalRole,
   };
-  var canonicalRole = directRole || 'Idle';
-  memory.bornRole = directRole || canonicalRole;
-  if (extraMemory) Object.assign(memory, extraMemory);
+
+  const suppressTask = !!(extraMemory && extraMemory.skipTaskMemory);
+  if (!suppressTask && neededTask != null) {
+    memory.task = neededTask;
+  }
+
+  let extras = null;
+  if (extraMemory) {
+    extras = Object.assign({}, extraMemory);
+    if (extras.skipTaskMemory) delete extras.skipTaskMemory;
+    Object.assign(memory, extras);
+  }
+
   memory.role = canonicalRole;
   const res = spawn.spawnCreep(body, name, { memory });
   if (res === OK) {
@@ -482,16 +493,32 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
   S.lastEvaluated = Game.time;
 
   // Count squad members by role (includes spawning eggs)
+  function matchesSquadRole(mem, taskName) {
+    if (!mem || !taskName) return false;
+    const target = String(taskName).toLowerCase();
+    const role = mem.role && String(mem.role).toLowerCase();
+    if (role === target) return true;
+    const bornRole = mem.bornRole && String(mem.bornRole).toLowerCase();
+    if (bornRole === target) return true;
+    const task = mem.task && String(mem.task).toLowerCase();
+    if (task === target) return true;
+    const bornTask = mem.bornTask && String(mem.bornTask).toLowerCase();
+    if (bornTask === target) return true;
+    return false;
+  }
+
   function haveCount(taskName) {
     // count live creeps
     var live = _.sum(Game.creeps, function(c){
-      return c.my && c.memory && c.memory.squadId === squadId && c.memory.task === taskName ? 1 : 0;
+      if (!c || !c.my || !c.memory) return 0;
+      if (c.memory.squadId !== squadId) return 0;
+      return matchesSquadRole(c.memory, taskName) ? 1 : 0;
     });
     // count "eggs" currently spawning (Memory is set immediately when you spawn)
     var hatching = _.sum(Memory.creeps, function(mem, name){
       if (!mem) return 0;
       if (mem.squadId !== squadId) return 0;
-      if (mem.task !== taskName) return 0;
+      if (!matchesSquadRole(mem, taskName)) return 0;
       // Only count if not yet in Game.creeps (i.e., still spawning)
       return Game.creeps[name] ? 0 : 1;
     });
@@ -512,7 +539,7 @@ function Spawn_Squad(spawn, squadId = 'Alpha') {
     const have = haveCount(plan.role);
 
     if (have < plan.need) {
-      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: targetRoom };
+      const extraMemory = { squadId: squadId, role: plan.role, targetRoom: targetRoom, skipTaskMemory: true };
       const ok = Spawn_Worker_Bee(spawn, plan.role, avail, extraMemory);
       if (ok) {
         S.lastSpawnAt = Game.time;

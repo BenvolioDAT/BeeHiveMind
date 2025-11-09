@@ -63,7 +63,8 @@ var SquadFlagManager = (function () {
     for (var cname in Game.creeps) {
       var c = Game.creeps[cname];
       if (!c || !c.my || !c.memory) continue;
-      var tag = (c.memory.task || c.memory.role || '').toString().toLowerCase();
+      var tagSource = (c.memory.role != null) ? c.memory.role : c.memory.task;
+      var tag = (tagSource || '').toString().toLowerCase();
       if (tag === 'scout' || tag.indexOf('scout') === 0) continue;
       set[c.pos.roomName] = true;
     }
