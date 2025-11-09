@@ -55,6 +55,38 @@ var SquadFlagManager = (function () {
     return Memory.squadFlags;
   }
 
+  function _ensureSquadMem(id) {
+    if (!id) return null;
+    if (!Memory.squads) Memory.squads = {};
+    if (!Memory.squads[id]) Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
+    return Memory.squads[id];
+  }
+
+  function _squadIdFromFlagName(name) {
+    if (!name) return null;
+    if (name.indexOf('Squad_') === 0) return name.substring(6);
+    if (name.indexOf('Squad') === 0) return name.substring(5);
+    return null;
+  }
+
+  function _rememberAnchor(flagName, pos) {
+    if (!pos) return;
+    var squadId = _squadIdFromFlagName(flagName);
+    if (!squadId) return;
+    var bucket = _ensureSquadMem(squadId);
+    if (!bucket) return;
+    bucket.anchor = { x: pos.x, y: pos.y, roomName: pos.roomName };
+    bucket.anchor.room = pos.roomName;
+    bucket.anchorAt = Game.time;
+  }
+
+  function _clearAnchor(flagName) {
+    var squadId = _squadIdFromFlagName(flagName);
+    if (!squadId || !Memory.squads || !Memory.squads[squadId]) return;
+    Memory.squads[squadId].anchor = null;
+    Memory.squads[squadId].anchorAt = Game.time;
+  }
+
   // ------------- Helpers -------------
 
   // Rooms that currently have at least one of YOUR non-scout creeps
@@ -155,7 +187,10 @@ var SquadFlagManager = (function () {
   function _ensureFlagAt(name, pos) {
     var f = Game.flags[name];
     if (f) {
-      if (f.pos.roomName === pos.roomName && f.pos.x === pos.x && f.pos.y === pos.y) return;
+      if (f.pos.roomName === pos.roomName && f.pos.x === pos.x && f.pos.y === pos.y) {
+        _rememberAnchor(name, f.pos);
+        return;
+      }
       try { f.remove(); } catch (e) {}
     }
     var rc = pos.roomName && Game.rooms[pos.roomName]
@@ -170,16 +205,23 @@ var SquadFlagManager = (function () {
             if (Math.abs(dx) !== i && Math.abs(dy) !== i) continue;
             x = pos.x + dx; y = pos.y + dy;
             if (x < 1 || x > 48 || y < 1 || y > 48) continue;
-            if (Game.rooms[pos.roomName].createFlag(x, y, name) === OK) return;
+            if (Game.rooms[pos.roomName].createFlag(x, y, name) === OK) {
+              _rememberAnchor(name, new RoomPosition(x, y, pos.roomName));
+              return;
+            }
           }
         }
       }
+    }
+    if (rc === OK) {
+      _rememberAnchor(name, pos);
     }
   }
 
   function _removeFlag(name) {
     var f = Game.flags[name];
     if (f) { try { f.remove(); } catch (e) {} }
+    _clearAnchor(name);
   }
 
   // ------------- Core logic -------------
@@ -243,6 +285,7 @@ var SquadFlagManager = (function () {
           ? new RoomPosition(rrec.lastPos.x, rrec.lastPos.y, rrec.lastPos.roomName)
           : new RoomPosition(25, 25, boundRoom);
         _ensureFlagAt(fname, pos);
+        _rememberAnchor(fname, pos);
       }
     }
 
@@ -292,6 +335,7 @@ var SquadFlagManager = (function () {
         ? new RoomPosition(rec3.lastPos.x, rec3.lastPos.y, rec3.lastPos.roomName)
         : new RoomPosition(25,25,pick.rn);
       _ensureFlagAt(fname, placePos);
+      _rememberAnchor(fname, placePos);
     }
 
     // 4) Cleanup: remove flags beyond managed list or unconfigured names
