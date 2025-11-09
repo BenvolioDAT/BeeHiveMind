@@ -184,8 +184,6 @@ const CONFIGS = {
 };
 
 const DIRECT_ROLE_MAP = Object.freeze({
-  Idle: 'Idle',
-  idle: 'Idle',
   BaseHarvest: 'BaseHarvest',
   baseharvest: 'BaseHarvest',
   Builder: 'Builder',
@@ -403,17 +401,8 @@ function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
   const body = getBodyForTask(neededTask, availableEnergy);
   const name = Generate_Creep_Name(neededTask || 'Worker');
   const directRole = directRoleForTask(neededTask);
-  const canonicalRole = directRole || (neededTask || 'Idle');
-  const memory = {
-    bornTask: neededTask,
-    birthBody: body.slice(),
-    bornRole: directRole || canonicalRole,
-  };
-
-  const suppressTask = !!(extraMemory && extraMemory.skipTaskMemory);
-  if (!suppressTask && neededTask != null) {
-    memory.task = neededTask;
-  }
+  const canonicalRole = directRole || (neededTask);
+  const memory = {  };
 
   let extras = null;
   if (extraMemory) {
