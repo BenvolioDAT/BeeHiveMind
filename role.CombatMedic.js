@@ -1,7 +1,7 @@
 // role.CombatMedic.js — PvE Medic with Debug_say & Debug_draw instrumentation (ES5-safe)
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('Task.Squad');
+var TaskSquad  = require('BeeCombatSquads');
 
 // PvE-only acceptance: react ONLY to Invader creeps/structures
 function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
