@@ -40,24 +40,12 @@ function debugSay(creep, msg) {
 function _posOf(t) { return t && t.pos ? t.pos : t; }
 function _roomOf(pos) { return pos && Game.rooms[pos.roomName]; }
 
-function debugLine(from, to, color, label) {
+function debugLine(from, to, color) {
   if (!CFG.DEBUG_DRAW || !from || !to) return;
   var f = _posOf(from), t = _posOf(to);
   if (!f || !t || f.roomName !== t.roomName) return;
   var R = _roomOf(f); if (!R || !R.visual) return;
   R.visual.line(f, t, { color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPAC });
-  if (label) {
-    var mx = (f.x + t.x) / 2;
-    var my = (f.y + t.y) / 2;
-    R.visual.text(label, mx, my - 0.25, {
-      color: color,
-      opacity: 0.95,
-      font: CFG.DRAW.FONT,
-      align: "center",
-      backgroundColor: "#000",
-      backgroundOpacity: 0.25
-    });
-  }
 }
 function debugRing(target, color, text) {
   if (!CFG.DEBUG_DRAW || !target) return;
@@ -74,7 +62,7 @@ function go(creep, dest, range) {
   var R = (range != null) ? range : 1;
   var dpos = _posOf(dest) || dest;
   if (creep.pos.roomName === dpos.roomName && creep.pos.getRangeTo(dpos) > R) {
-    debugLine(creep.pos, dpos, CFG.DRAW.PATH, '→');
+    debugLine(creep.pos, dpos, CFG.DRAW.PATH);
   }
   if (creep.pos.getRangeTo(dpos) <= R) return OK;
 
@@ -110,7 +98,7 @@ function checkAndUpdateControllerSign(creep, controller) {
     }
   } else {
     debugSay(creep, "📝");
-    debugLine(creep, controller, CFG.DRAW.CTRL, "sign");
+    debugLine(creep, controller, CFG.DRAW.CTRL);
     go(creep, controller, 1);
   }
 }
@@ -130,7 +118,7 @@ function pickDroppedEnergy(creep) {
   }
   if (droppedResource) {
     debugRing(droppedResource, CFG.DRAW.DROP, 'drop');
-    debugLine(creep, droppedResource, CFG.DRAW.DROP, 'pickup');
+    debugLine(creep, droppedResource, CFG.DRAW.DROP);
     var pr = creep.pickup(droppedResource);
     if (pr === ERR_NOT_IN_RANGE) {
       go(creep, droppedResource, 1);
@@ -180,7 +168,7 @@ module.exports = {
 
         var ur = creep.upgradeController(controller);
         if (ur === ERR_NOT_IN_RANGE) {
-          debugLine(creep, controller, CFG.DRAW.CTRL, "ctrl");
+          debugLine(creep, controller, CFG.DRAW.CTRL);
           go(creep, controller, 3);
         } else if (ur === OK) {
           debugRing(controller, CFG.DRAW.CTRL, "UP");
@@ -207,7 +195,7 @@ module.exports = {
     if (linkNearController) {
       var lr = creep.withdraw(linkNearController, RESOURCE_ENERGY);
       debugRing(linkNearController, CFG.DRAW.LINK, "LINK");
-      debugLine(creep, linkNearController, CFG.DRAW.LINK, "withdraw");
+      debugLine(creep, linkNearController, CFG.DRAW.LINK);
       if (lr === ERR_NOT_IN_RANGE) go(creep, linkNearController, 1);
       return; // early exit if valid link path found
     }
@@ -219,7 +207,7 @@ module.exports = {
     var stor = creep.room.storage;
     if (stor && stor.store && (stor.store[RESOURCE_ENERGY] | 0) > 0) {
       debugRing(stor, CFG.DRAW.STORE, "STO");
-      debugLine(creep, stor, CFG.DRAW.STORE, "withdraw");
+      debugLine(creep, stor, CFG.DRAW.STORE);
       var sr = creep.withdraw(stor, RESOURCE_ENERGY);
       if (sr === ERR_NOT_IN_RANGE) go(creep, stor, 1);
       return;
@@ -234,7 +222,7 @@ module.exports = {
     });
     if (containerWithEnergy) {
       debugRing(containerWithEnergy, CFG.DRAW.CONT, "CONT");
-      debugLine(creep, containerWithEnergy, CFG.DRAW.CONT, "withdraw");
+      debugLine(creep, containerWithEnergy, CFG.DRAW.CONT);
       var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY);
       if (cr === ERR_NOT_IN_RANGE) go(creep, containerWithEnergy, 1);
       return;
