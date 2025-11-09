@@ -11,6 +11,7 @@ var TaskSquad = (function () {
   var TARGET_STICKY_TICKS = 12; // how long to keep a chosen target before re-eval
   var RALLY_FLAG_PREFIX   = 'Squad'; // e.g. "SquadAlpha", "Squad_Beta"
   var MAX_TARGET_RANGE    = 30;
+  var ANCHOR_STICKY_TICKS = 75;  // remember last anchor for a little while (cross-room pathing)
 
   // Target scoring
   var HEALER_WEIGHT = -500, RANGED_WEIGHT = -260, MELEE_WEIGHT = -140, HURT_WEIGHT = -160, TOUGH_PENALTY = +25;
@@ -125,10 +126,52 @@ var TaskSquad = (function () {
     return Memory.squads[id];
   }
 
+  function _flagNamesFor(id) {
+    return [
+      RALLY_FLAG_PREFIX + id,
+      RALLY_FLAG_PREFIX + '_' + id,
+      id
+    ];
+  }
+
+  function _storeAnchor(S, pos) {
+    if (!S || !pos) return;
+    S.anchor = { x: pos.x, y: pos.y, roomName: pos.roomName };
+    // Preserve legacy "room" property for any older consumers
+    S.anchor.room = pos.roomName;
+    S.anchorAt = Game.time;
+  }
+
+  function _anchorFromData(data) {
+    if (!data || typeof data.x !== 'number' || typeof data.y !== 'number') return null;
+    var roomName = data.roomName || data.room;
+    if (!roomName) return null;
+    return new RoomPosition(data.x, data.y, roomName);
+  }
+
+  function _bindingAnchorFor(id) {
+    if (!Memory.squadFlags || !Memory.squadFlags.bindings) return null;
+    var names = _flagNamesFor(id);
+    var bindings = Memory.squadFlags.bindings;
+    for (var i = 0; i < names.length; i++) {
+      var roomName = bindings[names[i]];
+      if (!roomName) continue;
+      var info = (Memory.squadFlags.rooms && Memory.squadFlags.rooms[roomName]) || null;
+      if (info && info.lastPos && typeof info.lastPos.x === 'number' && typeof info.lastPos.y === 'number') {
+        return new RoomPosition(info.lastPos.x, info.lastPos.y, info.lastPos.roomName || roomName);
+      }
+      // Fall back to center of bound room if we do not have a lastPos recorded yet
+      if (roomName) return new RoomPosition(25, 25, roomName);
+    }
+    return null;
+  }
+
   function _rallyFlagFor(id) {
-    return Game.flags[RALLY_FLAG_PREFIX + id] ||
-           Game.flags[RALLY_FLAG_PREFIX + '_' + id] ||
-           Game.flags[id] || null;
+    var names = _flagNamesFor(id);
+    for (var i = 0; i < names.length; i++) {
+      if (Game.flags[names[i]]) return Game.flags[names[i]];
+    }
+    return null;
   }
 
   function _isGood(obj) { return obj && obj.hits != null && obj.hits > 0 && obj.pos && obj.pos.roomName; }
@@ -196,24 +239,47 @@ var TaskSquad = (function () {
   }
 
   function getAnchor(creep) {
-    var id = getSquadId(creep), S = _ensureSquadBucket(id), f = _rallyFlagFor(id);
-    if (f) { S.anchor = { x: f.pos.x, y: f.pos.y, room: f.pos.roomName }; S.anchorAt = Game.time; return f.pos; }
+    var id = getSquadId(creep);
+    var S = _ensureSquadBucket(id);
+    var flag = _rallyFlagFor(id);
 
-    // Fallback: the first melee in squad, else any member
-    var names = Object.keys(Game.creeps).sort(), leader = null, i, c;
-    for (i = 0; i < names.length; i++) {
-      c = Game.creeps[names[i]];
+    if (flag) {
+      _storeAnchor(S, flag.pos);
+      return flag.pos;
+    }
+
+    // Check for recently stored anchor information
+    var stored = _anchorFromData(S.anchor);
+    if (stored) {
+      if ((Game.time - (S.anchorAt || 0)) <= ANCHOR_STICKY_TICKS) {
+        return stored;
+      }
+      stored = null;
+    }
+
+    // Fall back to SquadFlagManager bindings if a flag temporarily vanished
+    var memAnchor = _bindingAnchorFor(id);
+    if (memAnchor) {
+      _storeAnchor(S, memAnchor);
+      return memAnchor;
+    }
+
+    // Final fallback: use the first melee in squad, else any squad member
+    var names = Object.keys(Game.creeps).sort();
+    var leader = null;
+    for (var i = 0; i < names.length; i++) {
+      var c = Game.creeps[names[i]];
       if (c && c.memory && c.memory.squadId === id && (_roleOf(c) === 'CombatMelee')) { leader = c; break; }
     }
     if (!leader) {
-      for (i = 0; i < names.length; i++) {
-        c = Game.creeps[names[i]];
-        if (c && c.memory && c.memory.squadId === id) { leader = c; break; }
+      for (var j = 0; j < names.length; j++) {
+        var c2 = Game.creeps[names[j]];
+        if (c2 && c2.memory && c2.memory.squadId === id) { leader = c2; break; }
       }
     }
     if (leader && leader.pos) {
-      S.anchor = { x: leader.pos.x, y: leader.pos.y, room: leader.pos.roomName };
-      S.anchorAt = Game.time; return leader.pos;
+      _storeAnchor(S, leader.pos);
+      return leader.pos;
     }
     return null;
   }
