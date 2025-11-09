@@ -1,4 +1,4 @@
-// Task.Repair.js — with Debug_say & Debug_draw
+// role.Repair.js — with Debug_say & Debug_draw
 var BeeToolbox = require('BeeToolbox');
 
 // =============== Config ===============
@@ -113,8 +113,16 @@ function findWithdrawSource(creep){
 }
 
 // =============== Main Role ===============
-var TaskRepair = {
+module.exports = {
+  role: 'Repair',
+
   run: function(creep){
+    if (!creep) return;
+
+    if (creep.memory && !creep.memory.role) {
+      creep.memory.role = 'Repair';
+    }
+
     // Status HUD
     var e = creep.store[RESOURCE_ENERGY] | 0;
     hud(creep, "🔧 " + e + "/" + creep.store.getCapacity(RESOURCE_ENERGY));
@@ -123,9 +131,8 @@ var TaskRepair = {
       // — Have energy: repair flow —
       var target = popInvalidHead(creep.room);
       if (!target){
-        // queue empty or invalid → clear task (caller can reassign)
-        if (currentLogLevel >= LOG_LEVEL.BASIC) {}
-        creep.memory.task = undefined;
+        // queue empty or invalid → clear legacy task (caller can reassign)
+        if (creep.memory) creep.memory.task = undefined;
         debugSay(creep, "✅ done");
         return;
       }
@@ -190,8 +197,6 @@ var TaskRepair = {
     if (currentLogLevel >= LOG_LEVEL.DEBUG){
       console.log("No available energy source for "+creep.name);
     }
-    debugSay(creep, "😮‍💨");
+    debugSay(creep, "‍💨");
   }
 };
-
-module.exports = TaskRepair;

@@ -1,4 +1,4 @@
-// Task.Upgrader.js — adds Debug_say & Debug_draw visibility
+// role.Upgrader.js — adds Debug_say & Debug_draw visibility
 var BeeToolbox = require('BeeToolbox');
 try { require('Traveler'); } catch (e) {} // optional
 
@@ -46,6 +46,18 @@ function debugLine(from, to, color, label) {
   if (!f || !t || f.roomName !== t.roomName) return;
   var R = _roomOf(f); if (!R || !R.visual) return;
   R.visual.line(f, t, { color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPAC });
+  if (label) {
+    var mx = (f.x + t.x) / 2;
+    var my = (f.y + t.y) / 2;
+    R.visual.text(label, mx, my - 0.25, {
+      color: color,
+      opacity: 0.95,
+      font: CFG.DRAW.FONT,
+      align: "center",
+      backgroundColor: "#000",
+      backgroundOpacity: 0.25
+    });
+  }
 }
 function debugRing(target, color, text) {
   if (!CFG.DEBUG_DRAW || !target) return;
@@ -62,7 +74,7 @@ function go(creep, dest, range) {
   var R = (range != null) ? range : 1;
   var dpos = _posOf(dest) || dest;
   if (creep.pos.roomName === dpos.roomName && creep.pos.getRangeTo(dpos) > R) {
-    debugLine(creep.pos, dpos, CFG.DRAW.PATH);
+    debugLine(creep.pos, dpos, CFG.DRAW.PATH, '→');
   }
   if (creep.pos.getRangeTo(dpos) <= R) return OK;
 
@@ -103,11 +115,45 @@ function checkAndUpdateControllerSign(creep, controller) {
   }
 }
 
-/** =========================
- *  Main role
- *  ========================= */
-var TaskUpgrader = {
+function pickDroppedEnergy(creep) {
+  var targetDroppedEnergyId = creep.memory.targetDroppedEnergyId;
+  var droppedResource = targetDroppedEnergyId ? Game.getObjectById(targetDroppedEnergyId) : null;
+  if (!droppedResource) {
+    droppedResource = creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
+      filter: function (r) {
+        return r.resourceType === RESOURCE_ENERGY && r.amount > 0;
+      }
+    });
+    if (droppedResource) {
+      creep.memory.targetDroppedEnergyId = droppedResource.id;
+    }
+  }
+  if (droppedResource) {
+    debugRing(droppedResource, CFG.DRAW.DROP, 'drop');
+    debugLine(creep, droppedResource, CFG.DRAW.DROP, 'pickup');
+    var pr = creep.pickup(droppedResource);
+    if (pr === ERR_NOT_IN_RANGE) {
+      go(creep, droppedResource, 1);
+    } else if (pr === OK) {
+      debugSay(creep, "📦");
+      creep.memory.targetDroppedEnergyId = null;
+    }
+    return true;
+  }
+  creep.memory.targetDroppedEnergyId = null;
+  return false;
+}
+
+// =========================
+// Main role
+// =========================
+module.exports = {
+  role: 'Upgrader',
+
   run: function (creep) {
+    if (!creep) return;
+    if (creep.memory && !creep.memory.role) creep.memory.role = 'Upgrader';
+
     // State flip
     if (creep.memory.upgrading && creep.store[RESOURCE_ENERGY] === 0) {
       creep.memory.upgrading = false;
@@ -195,31 +241,10 @@ var TaskUpgrader = {
     }
 
     // 5) Dropped energy (sticky by memory)
-    var targetDroppedEnergyId = creep.memory.targetDroppedEnergyId;
-    var droppedResource = targetDroppedEnergyId ? Game.getObjectById(targetDroppedEnergyId) : null;
+    if (pickDroppedEnergy(creep)) return;
 
-    if (!droppedResource || (droppedResource.amount | 0) === 0) {
-      var dropped = creep.room.find(FIND_DROPPED_RESOURCES, {
-        filter: function (r) { return r.resourceType === RESOURCE_ENERGY; }
-      }) || [];
-      if (dropped.length) {
-        dropped.sort(function (a, b) { return (b.amount|0) - (a.amount|0); });
-        droppedResource = dropped[0];
-        creep.memory.targetDroppedEnergyId = droppedResource.id;
-      }
+    if (CFG.DEBUG_DRAW) {
+      debugSay(creep, "❓");
     }
-
-    if (droppedResource) {
-      debugRing(droppedResource, CFG.DRAW.DROP, "💧" + (droppedResource.amount|0));
-      debugLine(creep, droppedResource, CFG.DRAW.DROP, "pickup");
-      var pr = creep.pickup(droppedResource);
-      if (pr === ERR_NOT_IN_RANGE) go(creep, droppedResource, 1);
-      return;
-    }
-
-    // Idle: drift toward controller so next upgrade is quick
-    if (ctrl) go(creep, ctrl, 3);
   }
 };
-
-module.exports = TaskUpgrader;

@@ -1,4 +1,4 @@
-// Task.CombatMedic.js — PvE Medic with Debug_say & Debug_draw instrumentation (ES5-safe)
+// role.CombatMedic.js — PvE Medic with Debug_say & Debug_draw instrumentation (ES5-safe)
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('Task.Squad');
@@ -169,7 +169,9 @@ function inTowerDanger(pos){
 // ==========================
 var CombatRoles = { CombatMelee:1, CombatArcher:1, Dismantler:1 };
 
-var TaskCombatMedic = {
+var roleCombatMedic = {
+  role: 'CombatMedic',
+
   run: function (creep) {
     if (creep.spawning) return;
 
@@ -350,4 +352,4 @@ var TaskCombatMedic = {
   }
 };
 
-module.exports = TaskCombatMedic;
+module.exports = roleCombatMedic;

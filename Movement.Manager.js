@@ -2,7 +2,7 @@
 // Movement.Manager.js – centralised movement intent queue for creeps
 // Responsibilities:
 // * Collects per-tick move requests from tasks/actions (BeeActions.safe*,
-//   Task.Queen idle, combat scripts) and resolves them in deterministic order.
+//   role.Queen idle, combat scripts) and resolves them in deterministic order.
 // * Delegates actual pathfinding to Traveler (creep.travelTo) when available,
 //   falling back to Screeps moveTo with same options if Traveler absent.
 // * Detects stale intents (creep moved rooms, target invalid, wrong shard) and

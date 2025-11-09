@@ -1,4 +1,4 @@
-// Task.Dismantler.js — PvE dismantler with Debug_say & Debug_draw instrumentation (ES5-safe)
+// role.Dismantler.js — PvE dismantler with Debug_say & Debug_draw instrumentation (ES5-safe)
 //
 // What’s new:
 //  - DEBUG_SAY and DEBUG_DRAW toggles
@@ -89,10 +89,9 @@ function moveSmart(creep, dest, range){
   return creep.moveTo(d, { reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
 }
 
-// ---------------------
-// Main role
-// ---------------------
-var TaskDismantler = {
+var roleDismantler = {
+  role: 'Dismantler',
+
   run: function (creep) {
     if (creep.spawning) return;
 
@@ -113,8 +112,8 @@ var TaskDismantler = {
       debugRing(target, CONFIG.COLORS.TARGET, "target", 0.8);
     }
 
-    if (!this._isValidTarget(target)) {
-      target = this._pickNewTarget(creep);
+    if (!roleDismantler._isValidTarget(target)) {
+      target = roleDismantler._pickNewTarget(creep);
       if (target) {
         creep.memory.tid = target.id;
         debugRing(target, CONFIG.COLORS.TARGET, "lock", 0.8);
@@ -128,7 +127,7 @@ var TaskDismantler = {
     }
 
     // -------- B) If path is blocked, pick first “door” on route --------
-    var door = this._firstBlockingDoorOnPath(creep, target);
+    var door = roleDismantler._firstBlockingDoorOnPath(creep, target);
     if (door) {
       debugRing(door, CONFIG.COLORS.DOOR, "door", 0.6);
       // Prefer door as current target until cleared
@@ -246,4 +245,4 @@ var TaskDismantler = {
   }
 };
 
-module.exports = TaskDismantler;
+module.exports = roleDismantler;

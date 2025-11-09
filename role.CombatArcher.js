@@ -1,4 +1,4 @@
-// Task.CombatArcher.js — PvE archer with Debug_say & Debug_draw sprinkles
+// role.CombatArcher.js — PvE archer with Debug_say & Debug_draw sprinkles
 // ES5-safe (no const/let/arrows). Uses TaskSquad pathing helpers when available.
 
 var BeeToolbox = require('BeeToolbox');
@@ -186,7 +186,9 @@ function shootOpportunistic(creep){
 // ==========================
 // Main role
 // ==========================
-var TaskCombatArcher = {
+var roleCombatArcher = {
+  role: 'CombatArcher',
+
   run: function(creep){
     if (creep.spawning) return;
 
@@ -281,4 +283,4 @@ var TaskCombatArcher = {
   }
 };
 
-module.exports = TaskCombatArcher;
+module.exports = roleCombatArcher;

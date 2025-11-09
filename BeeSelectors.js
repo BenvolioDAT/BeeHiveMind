@@ -2,15 +2,15 @@
 // BeeSelectors.js – shared room/remote scanning helpers
 // Responsibilities:
 // * Builds cached per-room snapshots (structures, drops, repair targets) so
-//   task modules (Task.Queen, Task.Builder, Task.Repair, etc.) query once/tick.
+//   role modules (role.Queen, role.Builder, role.Repair, etc.) query once/tick.
 // * Manages repair target reservations via global.__BHM to prevent double work
 //   between creeps and towers.
 // * Exposes selectors for remote mining (seat positions, container state) used
-//   by Task.Luna and couriers.
+//   by role.Luna and couriers.
 // Data touched:
 // * global.__BHM.caches – per-key TTL caches (reset at shard reset).
 // * Memory.__BHM.* – remote room metadata (remotesByHome, reservations).
-// Callers: Task.* modules, BeeHiveMind.prepareTickCaches, Movement planners.
+// Callers: role.* modules, BeeHiveMind.prepareTickCaches, Movement planners.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -159,7 +159,7 @@ function buildSnapshot(room) {
         snapshot.repairs.push({ target: s, goalHits: goal });
       }
     }
-    // Dropped energy piles (Task.Queen/Task.Courier read this list).
+    // Dropped energy piles (role.Queen/role.Courier read this list).
     var drops = room.find(FIND_DROPPED_RESOURCES, {
       filter: function (r) { return r.resourceType === RESOURCE_ENERGY && r.amount > 0; }
     });
@@ -279,7 +279,7 @@ function chooseBestSeatForSource(pos) {
 // Inputs: Source object
 // Output: {container, site, seatPos, containerEnergy, source}
 // Side-effects: checks immediate surroundings for containers/sites; used by
-//               Task.BaseHarvest/Task.Luna and BeeSelectors API wrappers.
+//               role.BaseHarvest/role.Luna and BeeSelectors API wrappers.
 function getSourceContainerOrSiteImpl(source) {
   if (!source || !source.pos) return { container: null, site: null, seatPos: null, containerEnergy: 0, source: source };
   var pos = source.pos;
@@ -333,7 +333,7 @@ function collectSourceFlags() {
 // Output: array of remote source entries {sourceId, roomName, container, ...}
 // Side-effects: reads Memory.__BHM.remotesByHome[home], scans visible remote
 //               rooms, merges intel from Memory.rooms when fogged.
-// Consumers: Task.Luna (remote miners), Task.Courier/Trucker.
+// Consumers: role.Luna (remote miners), role.Courier/Trucker.
 function buildRemoteSourcesSnapshot(homeRoomName) {
   ensureRemoteMemory();
   var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
@@ -469,7 +469,7 @@ var BeeSelectors = {
   },
 
   findBestEnergyDrop: function (room) {
-    // Returns biggest dropped energy pile; used by Task.Queen pickup path.
+    // Returns biggest dropped energy pile; used by role.Queen pickup path.
     var snap = buildSnapshot(room);
     if (!snap || !snap.dropped.length) return null;
     return snap.dropped[0];
@@ -481,7 +481,7 @@ var BeeSelectors = {
   },
 
   getRemoteSourcesSnapshot: function (homeRoomName) {
-    // Remote mining summary for BeeHiveMind & Task.Luna planning.
+    // Remote mining summary for BeeHiveMind & role.Luna planning.
     return buildRemoteSourcesSnapshot(homeRoomName);
   },
 
@@ -505,7 +505,7 @@ var BeeSelectors = {
 
   pickBestHaulTarget: function (containers, homeRoomName) {
     // Choose container entry by energy minus distance penalty (linear distance).
-    // Used by Task.Courier/Task.Trucker to pick next haul job.
+    // Used by role.Courier/role.Trucker to pick next haul job.
     if (!containers || !containers.length) return null;
     var best = null;
     var bestScore = -999999;
@@ -552,14 +552,14 @@ var BeeSelectors = {
   },
 
   findSpawnLikeNeedingEnergy: function (room) {
-    // Returns array of spawns/extensions needing energy; Task.Queen selects
+    // Returns array of spawns/extensions needing energy; role.Queen selects
     // nearest using selectClosestByRange.
     var snap = buildSnapshot(room);
     return snap ? snap.spawnLikeNeedy.slice() : [];
   },
 
   findStorageNeedingEnergy: function (room) {
-    // Single storage with free capacity; Task.Queen fallback.
+    // Single storage with free capacity; role.Queen fallback.
     var snap = buildSnapshot(room);
     if (!snap || !snap.storage) return null;
     if (snap.storage.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) return null;
@@ -603,14 +603,14 @@ var BeeSelectors = {
   },
 
   findBestConstructionSite: function (room) {
-    // Returns highest priority construction site; used by Task.Builder.
+    // Returns highest priority construction site; used by role.Builder.
     var snap = buildSnapshot(room);
     if (!snap || !snap.sites.length) return null;
     return snap.sites[0];
   },
 
   findBestRepairTarget: function (room) {
-    // Returns most urgent repair entry ({target, goalHits}) for Task.Repair.
+    // Returns most urgent repair entry ({target, goalHits}) for role.Repair.
     var snap = buildSnapshot(room);
     if (!snap || !snap.repairs.length) return null;
     return snap.repairs[0];

@@ -1,25 +1,27 @@
+'use strict';
+
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var taskLog = Logger.createLogger('TaskManager', LOG_LEVEL.BASIC);
 
-var TaskIdle = require('./Task.Idle');
-var TaskBuilder = require('./Task.Builder');
-var TaskRepair = require('./Task.Repair');
-var TaskUpgrader = require('./Task.Upgrader');
+var RoleIdle = require('role.Idle');
+var RoleBuilder = require('role.Builder');
+var RoleRepair = require('role.Repair');
+var RoleUpgrader = require('role.Upgrader');
 
-const DEFAULT_NEEDS = Object.freeze({
-  builder: 1,
-  repair: 1,
-  upgrader: 1,
+var DEFAULT_NEEDS = Object.freeze({
+  Builder: 1,
+  Repair: 1,
+  Upgrader: 1
 });
 
-const DEFAULT_PRIORITY = Object.freeze([
-  'repair',
-  'builder',
-  'upgrader',
+var DEFAULT_PRIORITY = Object.freeze([
+  'Repair',
+  'Builder',
+  'Upgrader'
 ]);
 
-const TASK_REGISTRY = Object.create(null);
+var TASK_REGISTRY = Object.create(null);
 
 function registerTask(name, module) {
   if (!name || !module || typeof module.run !== 'function') {
@@ -29,26 +31,51 @@ function registerTask(name, module) {
     return;
   }
   TASK_REGISTRY[name] = module;
+  TASK_REGISTRY[String(name).toLowerCase()] = module;
 }
-registerTask('builder', TaskBuilder);
-registerTask('repair', TaskRepair);
-registerTask('upgrader', TaskUpgrader);
-registerTask('idle', TaskIdle);
+registerTask('Builder', RoleBuilder);
+registerTask('Repair', RoleRepair);
+registerTask('Upgrader', RoleUpgrader);
+registerTask('Idle', RoleIdle);
 
-const cache = (global.__taskManagerCache = global.__taskManagerCache || {
+var cache = (global.__taskManagerCache = global.__taskManagerCache || {
   tick: -1,
   counts: null,
   needs: null,
-  needsTick: -1,
+  needsTick: -1
 });
+
+function getTaskModule(taskName) {
+  if (!taskName) return TASK_REGISTRY.Idle || TASK_REGISTRY.idle;
+  if (TASK_REGISTRY[taskName]) return TASK_REGISTRY[taskName];
+  var lower = String(taskName).toLowerCase();
+  if (TASK_REGISTRY[lower]) return TASK_REGISTRY[lower];
+  var capitalized = lower.charAt(0).toUpperCase() + lower.slice(1);
+  if (TASK_REGISTRY[capitalized]) return TASK_REGISTRY[capitalized];
+  return TASK_REGISTRY.Idle || TASK_REGISTRY.idle;
+}
 
 function getTaskCounts() {
   if (cache.tick === Game.time && cache.counts) return cache.counts;
   cache.tick = Game.time;
-  cache.counts = _.countBy(Game.creeps, function (c) {
-    return c && c.memory ? c.memory.task || 'idle' : 'idle';
-  });
-  return cache.counts;
+  var counts = Object.create(null);
+  var names = Object.keys(Game.creeps);
+  for (var i = 0; i < names.length; i++) {
+    var creep = Game.creeps[names[i]];
+    if (!creep) continue;
+    var mem = creep.memory || {};
+    var module = getTaskModule(mem.role || mem.task);
+    var key = (module && module.role) ? module.role : 'Idle';
+    counts[key] = (counts[key] | 0) + 1;
+  }
+  cache.counts = counts;
+  return counts;
+}
+
+function canonicalKey(name) {
+  var module = getTaskModule(name);
+  if (module && module.role) return module.role;
+  return name;
 }
 
 function mergeNeeds(defaults, overrides) {
@@ -56,12 +83,14 @@ function mergeNeeds(defaults, overrides) {
   var key;
   for (key in defaults) {
     if (Object.prototype.hasOwnProperty.call(defaults, key)) {
-      result[key] = defaults[key];
+      var canonical = canonicalKey(key);
+      result[canonical] = defaults[key];
     }
   }
   for (key in overrides) {
     if (Object.prototype.hasOwnProperty.call(overrides, key)) {
-      result[key] = overrides[key];
+      var canonicalOverride = canonicalKey(key);
+      result[canonicalOverride] = overrides[key];
     }
   }
   return result;
@@ -89,16 +118,6 @@ function colonyNeeds() {
   return shortage;
 }
 
-function getTaskModule(taskName) {
-  if (!taskName) return null;
-  if (TASK_REGISTRY[taskName]) return TASK_REGISTRY[taskName];
-  var lowered = String(taskName).toLowerCase();
-  if (TASK_REGISTRY[lowered]) return TASK_REGISTRY[lowered];
-  var capitalized = taskName.charAt(0).toUpperCase() + taskName.slice(1);
-  if (TASK_REGISTRY[capitalized]) return TASK_REGISTRY[capitalized];
-  return null;
-}
-
 function getPriorityList() {
   if (Memory.colonyNeeds && Memory.colonyNeeds.priorityOrder && Memory.colonyNeeds.priorityOrder.length) {
     return Memory.colonyNeeds.priorityOrder;
@@ -107,41 +126,45 @@ function getPriorityList() {
 }
 
 module.exports = {
-  run(creep) {
+  run: function (creep) {
     if (!creep) return;
-    var taskName = creep.memory && creep.memory.task;
-    var taskModule = getTaskModule(taskName);
+    var mem = creep.memory || {};
+    var module = getTaskModule(mem.role || mem.task);
 
-    if (taskModule) {
-      taskModule.run(creep);
+    if (module && typeof module.run === 'function') {
+      module.run(creep);
     } else {
       if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-        taskLog.debug('No task module registered for', taskName, 'requested by', creep.name);
+        taskLog.debug('No task module registered for', mem && (mem.role || mem.task), 'requested by', creep.name);
       }
       creep.say('No task!');
     }
   },
 
-  isTaskNeeded(taskName) {
+  isTaskNeeded: function (taskName) {
     var needs = colonyNeeds();
-    return (needs[taskName] || 0) > 0;
+    var module = getTaskModule(taskName);
+    var key = (module && module.role) ? module.role : taskName;
+    return (needs[key] || 0) > 0;
   },
 
-  getHighestPriorityTask(creep) {
+  getHighestPriorityTask: function () {
     var needs = colonyNeeds();
     var priorityList = getPriorityList();
     for (var i = 0; i < priorityList.length; i++) {
       var task = priorityList[i];
-      if ((needs[task] | 0) > 0) return task;
+      var module = getTaskModule(task);
+      var key = (module && module.role) ? module.role : task;
+      if ((needs[key] | 0) > 0) return key;
     }
-    return 'idle';
+    return 'Idle';
   },
 
-  clearTaskMemory(creep) {
+  clearTaskMemory: function (creep) {
     if (!creep || !creep.memory) return;
     delete creep.memory.assignedSource;
     delete creep.memory.targetRoom;
     delete creep.memory.assignedContainer;
     delete creep.memory.sourceId;
-  },
+  }
 };

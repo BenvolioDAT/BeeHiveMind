@@ -1,4 +1,4 @@
-// TaskBaseHarvest.js — queued handoff + conflict-safe miner (with Debug_say & Debug_draw)
+// role.BaseHarvest.js — queued handoff + conflict-safe miner (with Debug_say & Debug_draw)
 var BeeToolbox = require('BeeToolbox');
 
 /** =========================
@@ -165,6 +165,19 @@ function getPreferredSeatPos(source) {
   return candidates[0];
 }
 
+function matchesRole(creep, roleName, legacyTask) {
+  if (!creep || !creep.memory) return false;
+  var role = creep.memory.role;
+  if (role && roleName && String(role).toLowerCase() === String(roleName).toLowerCase()) return true;
+  var bornRole = creep.memory.bornRole;
+  if (bornRole && roleName && String(bornRole).toLowerCase() === String(roleName).toLowerCase()) return true;
+  var task = creep.memory.task;
+  var legacy = legacyTask || roleName;
+  if (task && legacy && String(task).toLowerCase() === String(legacy).toLowerCase()) return true;
+  if (task && roleName && String(task).toLowerCase() === String(roleName).toLowerCase()) return true;
+  return false;
+}
+
 // Any friendly harvesters currently assigned to this source (live only)
 function getIncumbents(roomName, sourceId, excludeName) {
   var out = [];
@@ -172,7 +185,7 @@ function getIncumbents(roomName, sourceId, excludeName) {
     var c = Game.creeps[name];
     if (!c || !c.my) continue;
     if (excludeName && name === excludeName) continue;
-    if (c.memory && c.memory.task === 'baseharvest' &&
+    if (c.memory && matchesRole(c, 'BaseHarvest', 'baseharvest') &&
         c.memory.assignedSource === sourceId &&
         c.room && c.room.name === roomName) {
       out.push(c);
@@ -195,7 +208,7 @@ function resolveSourceConflict(creep, source) {
   var neighbors = source.pos.findInRange(FIND_MY_CREEPS, 1, {
     filter: function(c) {
       return c.name !== creep.name &&
-             c.memory.task === 'baseharvest' &&
+             matchesRole(c, 'BaseHarvest', 'baseharvest') &&
              c.memory.assignedSource === source.id;
     }
   });
@@ -343,11 +356,11 @@ function getContainerAtOrAdjacent(pos) {
   return (around && around.length) ? around[0] : null;
 }
 
-function countCreepsWithTask(taskName) {
+function countCreepsWithRole(roleName, legacyTask) {
   var n = 0;
   for (var name in Game.creeps) {
     var c = Game.creeps[name];
-    if (c && c.memory && c.memory.task === taskName) n++;
+    if (c && matchesRole(c, roleName, legacyTask)) n++;
   }
   return n;
 }
@@ -390,8 +403,16 @@ function findEmergencyEnergySink(creep) {
  *  Main role
  *  ========================= */
 
-var TaskBaseHarvest = {
+var roleBaseHarvest = {
+  role: 'BaseHarvest',
   run: function(creep) {
+    if (creep && creep.memory) {
+      if (!creep.memory.role || String(creep.memory.role).toLowerCase() === 'baseharvest') {
+        creep.memory.role = 'BaseHarvest';
+      }
+      if (!creep.memory.task) creep.memory.task = 'baseharvest';
+    }
+
     // (0) Simple state flip based on store
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
       if (!creep.memory.harvesting) { creep.memory.harvesting = true; debugSay(creep, '⤵️MINE'); }
@@ -467,8 +488,8 @@ var TaskBaseHarvest = {
       creep.memory.waitingForSeat = false;
 
       // --- Same-tick dump+harvest ONLY if collectors exist ---
-      var courierCount = countCreepsWithTask('courier');
-      var queenCount   = countCreepsWithTask('queen');
+      var courierCount = countCreepsWithRole('Courier', 'courier');
+      var queenCount   = countCreepsWithRole('Queen', 'queen');
       var haveCollectors = (courierCount > 0 || queenCount > 0);
 
       var contHere = getContainerAtOrAdjacent(creep.pos);
@@ -489,8 +510,8 @@ var TaskBaseHarvest = {
 
     // (2) Offload phase: keep going until empty
     if (!creep.memory.harvesting && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
-      var courierCount2 = countCreepsWithTask('courier');
-      var queenCount2   = countCreepsWithTask('queen');
+      var courierCount2 = countCreepsWithRole('Courier', 'courier');
+      var queenCount2   = countCreepsWithRole('Queen', 'queen');
       var haveCollectors2 = (courierCount2 > 0 || queenCount2 > 0);
 
       // If we DON'T have collectors, prioritize hauling to spawn/ext/storage.
@@ -544,4 +565,4 @@ var TaskBaseHarvest = {
   }
 };
 
-module.exports = TaskBaseHarvest;
+module.exports = roleBaseHarvest;

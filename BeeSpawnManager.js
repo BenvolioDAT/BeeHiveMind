@@ -14,7 +14,7 @@ var LOG_LEVEL   = CoreLogger.LOG_LEVEL;
 var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
 var spawnLogic  = require('spawn.logic');
-var TaskLuna    = require('Task.Luna');
+var roleLuna    = require('role.Luna');
 
 // --------------------------- Tunables & Constants ------------------------
 var QUEUE_RETRY_COOLDOWN  = 5;
@@ -56,6 +56,47 @@ var ROLE_MIN_ENERGY = {
   CombatMelee: 200,
   CombatMedic: 200
 };
+
+var ROLE_ALIAS_MAP = (function () {
+  var map = Object.create(null);
+  var canon = [
+    'Idle',
+    'BaseHarvest',
+    'Builder',
+    'Courier',
+    'Repair',
+    'Upgrader',
+    'Dismantler',
+    'Luna',
+    'Scout',
+    'Queen',
+    'Trucker',
+    'Claimer',
+    'CombatArcher',
+    'CombatMedic',
+    'CombatMelee'
+  ];
+  for (var i = 0; i < canon.length; i++) {
+    var name = canon[i];
+    map[name] = name;
+    map[name.toLowerCase()] = name;
+  }
+  map.worker_bee = 'Idle';
+  map['Worker_Bee'] = 'Idle';
+  map.remoteharvest = 'Luna';
+  return map;
+})();
+
+function canonicalRole(role) {
+  if (!role) return null;
+  var key = String(role);
+  if (ROLE_ALIAS_MAP[key]) return ROLE_ALIAS_MAP[key];
+  var lower = key.toLowerCase();
+  if (ROLE_ALIAS_MAP[lower]) return ROLE_ALIAS_MAP[lower];
+  var fallback = key.charAt(0).toUpperCase() + key.slice(1);
+  if (ROLE_ALIAS_MAP[fallback]) return ROLE_ALIAS_MAP[fallback];
+  return key;
+}
 
 // ------------------------------ Debug utils ------------------------------
 function tickEvery(n) {
@@ -155,9 +196,10 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   var quotaRoles = Object.keys(quotas);
   for (var i = 0; i < quotaRoles.length; i++) {
     var role = quotaRoles[i];
-    var active = (role === 'luna')
+    var canonical = canonicalRole(role);
+    var active = (canonical === 'Luna')
       ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) | 0)
-      : (C.roleCounts[role] | 0);
+      : (C.roleCounts[canonical] | 0);
     remaining[role] = Math.max(0, (quotas[role] | 0) - active);
   }
 
@@ -211,7 +253,7 @@ function determineLunaQuota(C, room) {
   }
 
   var roomsMem = Memory.rooms || {};
-  var perSource = (TaskLuna && TaskLuna.MAX_LUNA_PER_SOURCE) || 1;
+  var perSource = (roleLuna && roleLuna.MAX_LUNA_PER_SOURCE) || 1;
 
   var totalSources = 0;
   for (var j = 0; j < remotes.length; j++) {
@@ -301,9 +343,10 @@ function fillQueueForRoom(C, room) {
   for (var i = 0; i < roles.length; i++) {
     var role = roles[i];
     var limit = quotas[role] | 0;
-    var active = (role === 'luna')
+    var canonical = canonicalRole(role);
+    var active = (canonical === 'Luna')
       ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) | 0)
-      : (C.roleCounts[role] | 0);
+      : (C.roleCounts[canonical] | 0);
     var queued = queuedCount(roomName, role);
     var deficit = Math.max(0, limit - active - queued);
 

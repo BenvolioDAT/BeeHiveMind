@@ -1,4 +1,4 @@
-// Task.Claimer.js — Reserve/Claim/Attack with Debug_say & Debug_draw
+// role.Claimer — Reserve/Claim/Attack with Debug_say & Debug_draw
 var BeeToolbox = require('BeeToolbox');
 
 /** =========================
@@ -437,7 +437,8 @@ function doAttack(creep, controller) {
 /** =========================
  *  Public API
  *  ========================= */
-var TaskClaimer = {
+var roleClaimer = {
+  role: 'Claimer',
   run: function(creep) {
     // Update intel for any room we’re in
     rememberReservationIntel(creep.room);
@@ -521,4 +522,4 @@ var TaskClaimer = {
   }
 };
 
-module.exports = TaskClaimer;
+module.exports = roleClaimer;
