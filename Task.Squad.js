@@ -289,6 +289,58 @@ var TaskSquad = (function () {
     }
   }
 
+  function tryFriendlySwap(creep, dest) {
+    if (!creep || !dest) return false;
+
+    var rawPos = dest.pos || dest;
+    if (!rawPos || typeof rawPos.x !== 'number' || typeof rawPos.y !== 'number' || !rawPos.roomName) return false;
+    var pos = (rawPos instanceof RoomPosition) ? rawPos : new RoomPosition(rawPos.x, rawPos.y, rawPos.roomName);
+
+    if (!creep.pos.isNearTo(pos)) return false;
+    if (creep.fatigue > 0) return false;
+    if (creep.getActiveBodyparts(MOVE) <= 0) return false;
+
+    var room = Game.rooms[pos.roomName];
+    if (!room) return false;
+
+    var look = room.lookForAt(LOOK_CREEPS, pos.x, pos.y);
+    if (!look || !look.length) return false;
+
+    var ally = look[0];
+    if (!ally || !ally.my || ally.id === creep.id) return false;
+    if (_movedThisTick(ally)) return false;
+    if (ally.fatigue > 0) return false;
+
+    var mySquad = (creep.memory && creep.memory.squadId) || 'Alpha';
+    var allySquad = (ally.memory && ally.memory.squadId) || 'Alpha';
+    if (mySquad !== allySquad) return false;
+
+    if (ally.getActiveBodyparts(MOVE) <= 0) return false;
+
+    var dirToTarget = creep.pos.getDirectionTo(pos);
+    var dirToMe = ally.pos.getDirectionTo(creep.pos);
+
+    var creepMove = creep.move(dirToTarget);
+    if (creepMove !== OK) return false;
+
+    var allyMove = ally.move(dirToMe);
+    if (allyMove !== OK) {
+      if (typeof creep.cancelOrder === 'function') creep.cancelOrder('move');
+      return false;
+    }
+
+    var creepMem = creep.memory = creep.memory || {};
+    creepMem._movedAt = Game.time;
+
+    ally.memory = ally.memory || {};
+    ally.memory._movedAt = Game.time;
+
+    _reserveTile(creep, pos, _rolePri(creep));
+    _reserveTile(ally, creep.pos, _rolePri(ally));
+
+    return true;
+  }
+
   // -----------------------------
   // Traveler-backed stepToward with reservations
   // -----------------------------
@@ -424,6 +476,7 @@ var TaskSquad = (function () {
   API.sharedTarget = sharedTarget;
   API.getAnchor    = getAnchor;
   API.stepToward   = stepToward;
+  API.tryFriendlySwap = tryFriendlySwap;
 
   return API;
 })();
