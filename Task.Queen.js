@@ -281,19 +281,59 @@ function needsNewTask(creep, task) {
 function pickWithdrawTask(creep) {
   var room = creep.room;
   if (!room) return null;
+  // -----------------------------
+  // Queen-only preference order
+  // Edit this array to change what Queens try first.
+  // (If you set creep.memory.energyPref, that will override this list for THAT Queen only.)
+  // Common sensible Queen order: battlefield cleanup first, then structured stores.
+  var pref = (creep.memory && creep.memory.energyPref && creep.memory.energyPref.length)
+  ? creep.memory.energyPref
+  :['tomb','ruin','storage','drop','container','terminal','link'];
+  // Build a room snapshot once
   var list = BeeSelectors.getEnergySourcePriority(room);
+  if (!list || !list.length) return null;
+
+  // Bucket snapshot entries by kind for quick access: { kind -> [targets] }
+  var buckets = {};
   for (var i = 0; i < list.length; i++) {
-    var entry = list[i];
-    if (!entry || !entry.target) continue;
-    if (entry.kind === 'source') continue; // Queens haul; harvesting wastes work body slots reserved for carry.
-    if (entry.kind === 'drop') return createTask('pickup', entry.target.id, { source: 'drop' });
-    if (entry.kind === 'tomb') return createTask('withdraw', entry.target.id, { source: 'tomb' });
-    if (entry.kind === 'ruin') return createTask('withdraw', entry.target.id, { source: 'ruin' });
-    return createTask('withdraw', entry.target.id, { source: entry.kind || 'energy' });
+    var e = list[i];
+    if (!e || !e.target) continue;
+    var k = e.kind || 'unknown';
+    if (!buckets[k]) buckets[k] = [];
+    buckets[k].push(e.target);
+  }
+  //walk the Queen's preference order; pick the closest target in the first non-empty bucket
+  for (var p = 0; p < pref.length; p++) {
+    var kind = pref[p];
+    if (kind === 'source') continue; // Queens don't harvest
+    var arr = buckets[kind];
+    if (!arr || !arr.length) continue;
+    // Prefer closest-by-range to reduce walking
+    var best = BeeSelectors.selectClosestByRange
+    ? BeeSelectors.selectClosestByRange(creep.pos, arr)
+    : (function (){
+        var win = null, bestD = 9999;
+        for (var j = 0; j < arr.length; j++) {
+          var t = arr[j];
+          var d = creep.pos.getRangeTo(t);
+          if (d < bestD) { bestD = d; win = t; }
+        }
+        return win;
+      })();    
+    if (!best) continue;
+    // Map kind -> task
+    if (kind === 'drop')      return createTask('pickup',   best.id, { source: 'drop' });
+    if (kind === 'tomb')      return createTask('withdraw', best.id, { source: 'tomb' });
+    if (kind === 'ruin')      return createTask('withdraw', best.id, { source: 'ruin' });
+    if (kind === 'storage')   return createTask('withdraw', best.id, { source: 'storage' });
+    if (kind === 'terminal')  return createTask('withdraw', best.id, { source: 'terminal' });
+    if (kind === 'container') return createTask('withdraw', best.id, { source: 'container' });
+    if (kind === 'link')      return createTask('withdraw', best.id, { source: 'link' });
+    // Unknown kind: safe fallback
+    return createTask('withdraw', best.id, { source: kind || 'energy' });
   }
   return null;
 }
-
 // Function header: pickDeliverTask(creep)
 // Inputs: creep with energy cargo
 // Output: task envelope targeting highest priority sink (spawn/extension,

@@ -351,7 +351,7 @@ function getBuilderNeed(C, room) {
   let remote = 0;
   const remotes = C.remotesByHome[room.name] || [];
   for (const rn of remotes) remote += (C.roomSiteCounts[rn] || 0);
-  const need = (local + remote) > 0 ? 1 : 0;
+  const need = (local + remote) > 0 ? 2 : 0;
   if (tickEvery(DBG_EVERY)) dlog('🧱 [Signal] builderNeed', fmt(room), 'local=', local, 'remote=', remote, '->', need);
   return need;
 }
@@ -422,7 +422,7 @@ function computeRoomQuotas(C, room) {
     baseharvest:  2,
     courier:      1,
     queen:        1,
-    upgrader:     5,
+    upgrader:     2,
     builder:      getBuilderNeed(C, room),
     scout:        1,
     // Switch to determineLunaQuota(C, room) when you're ready:
