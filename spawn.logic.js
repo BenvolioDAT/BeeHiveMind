@@ -3,10 +3,7 @@
 // CHANGELOG:
 // - Removed CONFIGS; use ROLE_CONFIGS for canonical role definitions.
 // - Removed directRoleForTask/TASK_ALIAS helpers; use normalizeRole() instead.
-// - Replaced Generate_Body_From_Config/getBodyForTask/Spawn_Worker_Bee internals with spawnRole() and getBodyForRole().
-// Toggle to true in a follow-up commit to strip compatibility shims and logging noise.
-var REMOVE_COMPAT_SHIMS = false;
-var DEPRECATE_TICK_MODULO = 25;
+// - Removed deprecated Generate_* and Spawn_Worker_Bee shims; call spawnRole()/getBodyForRole().
 
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
@@ -261,20 +258,6 @@ function cloneBody(body) {
   return copy;
 }
 
-function warnOnce(key, message) {
-  if (REMOVE_COMPAT_SHIMS) return;
-  if (!Logger.shouldLog(LOG_LEVEL.WARN)) return;
-  if (!Memory._spawnLogicDeprecations) {
-    Memory._spawnLogicDeprecations = {};
-  }
-  var store = Memory._spawnLogicDeprecations;
-  var nextAllowed = store[key] || 0;
-  if (Game.time >= nextAllowed) {
-    store[key] = Game.time + DEPRECATE_TICK_MODULO;
-    spawnLog.warn('[DEPRECATED]', message);
-  }
-}
-
 function getBodyForRole(roleName, energyAvailable) {
   var energy = energyAvailable | 0;
   if (!roleName) return [];
@@ -343,6 +326,9 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   var mem = copyMemory(memory);
   if (!mem.role) mem.role = canonicalRole;
   if (!mem.bornRole) mem.bornRole = canonicalRole;
+  if (mem.skipTaskMemory) {
+    delete mem.skipTaskMemory;
+  }
   var result = spawn.spawnCreep(body, creepName, { memory: mem });
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('spawnRole', canonicalRole, 'body [' + body + ']', 'cost', calculateBodyCost(body), 'avail', energy, 'result', result);
@@ -532,106 +518,6 @@ function minEnergyFor(roleName) {
   return finalCost;
 }
 
-// -----------------------------------------------------------------------------
-// Compatibility shims
-// -----------------------------------------------------------------------------
-function Generate_Body_From_Config(taskKey, energyAvailable) {
-  warnOnce('Generate_Body_From_Config', 'Generate_Body_From_Config() is deprecated; use getBodyForRole().');
-  var role = normalizeRole(taskKey);
-  if (!role) return [];
-  return getBodyForRole(role, energyAvailable);
-}
-
-function getBodyForTask(task, energyAvailable) {
-  warnOnce('getBodyForTask', 'getBodyForTask() is deprecated; use getBodyForRole().');
-  var role = normalizeRole(task);
-  if (!role) return [];
-  return getBodyForRole(role, energyAvailable);
-}
-
-function Spawn_Worker_Bee(spawn, neededTask, availableEnergy, extraMemory) {
-  warnOnce('Spawn_Worker_Bee', 'Spawn_Worker_Bee() is deprecated; use spawnRole().');
-  var memory = copyMemory(extraMemory);
-  if (memory.skipTaskMemory) {
-    delete memory.skipTaskMemory;
-  }
-  return spawnRole(spawn, neededTask, availableEnergy, memory);
-}
-
-function Generate_Courier_Body(e) {
-  warnOnce('Generate_Courier_Body', 'Generate_Courier_Body() is deprecated; use getBodyForRole("Courier").');
-  return getBodyForRole('Courier', e);
-}
-
-function Generate_BaseHarvest_Body(e) {
-  warnOnce('Generate_BaseHarvest_Body', 'Generate_BaseHarvest_Body() is deprecated; use getBodyForRole("BaseHarvest").');
-  return getBodyForRole('BaseHarvest', e);
-}
-
-function Generate_Builder_Body(e) {
-  warnOnce('Generate_Builder_Body', 'Generate_Builder_Body() is deprecated; use getBodyForRole("Builder").');
-  return getBodyForRole('Builder', e);
-}
-
-function Generate_Repair_Body(e) {
-  warnOnce('Generate_Repair_Body', 'Generate_Repair_Body() is deprecated; use getBodyForRole("Repair").');
-  return getBodyForRole('Repair', e);
-}
-
-function Generate_Queen_Body(e) {
-  warnOnce('Generate_Queen_Body', 'Generate_Queen_Body() is deprecated; use getBodyForRole("Queen").');
-  return getBodyForRole('Queen', e);
-}
-
-function Generate_Luna_Body(e) {
-  warnOnce('Generate_Luna_Body', 'Generate_Luna_Body() is deprecated; use getBodyForRole("Luna").');
-  return getBodyForRole('Luna', e);
-}
-
-function Generate_Upgrader_Body(e) {
-  warnOnce('Generate_Upgrader_Body', 'Generate_Upgrader_Body() is deprecated; use getBodyForRole("Upgrader").');
-  return getBodyForRole('Upgrader', e);
-}
-
-function Generate_Scout_Body(e) {
-  warnOnce('Generate_Scout_Body', 'Generate_Scout_Body() is deprecated; use getBodyForRole("Scout").');
-  return getBodyForRole('Scout', e);
-}
-
-function Generate_CombatMelee_Body(e) {
-  warnOnce('Generate_CombatMelee_Body', 'Generate_CombatMelee_Body() is deprecated; use getBodyForRole("CombatMelee").');
-  return getBodyForRole('CombatMelee', e);
-}
-
-function Generate_CombatArcher_Body(e) {
-  warnOnce('Generate_CombatArcher_Body', 'Generate_CombatArcher_Body() is deprecated; use getBodyForRole("CombatArcher").');
-  return getBodyForRole('CombatArcher', e);
-}
-
-function Generate_CombatMedic_Body(e) {
-  warnOnce('Generate_CombatMedic_Body', 'Generate_CombatMedic_Body() is deprecated; use getBodyForRole("CombatMedic").');
-  return getBodyForRole('CombatMedic', e);
-}
-
-function Generate_Dismantler_Config_Body(e) {
-  warnOnce('Generate_Dismantler_Config_Body', 'Generate_Dismantler_Config_Body() is deprecated; use getBodyForRole("Dismantler").');
-  return getBodyForRole('Dismantler', e);
-}
-
-function Generate_Claimer_Body(e) {
-  warnOnce('Generate_Claimer_Body', 'Generate_Claimer_Body() is deprecated; use getBodyForRole("Claimer").');
-  return getBodyForRole('Claimer', e);
-}
-
-var LEGACY_CONFIG_LIST = (function () {
-  var list = [];
-  for (var role in ROLE_CONFIGS) {
-    if (!Object.prototype.hasOwnProperty.call(ROLE_CONFIGS, role)) continue;
-    list.push({ role: role, task: role, body: ROLE_CONFIGS[role] });
-  }
-  return list;
-})();
-
 module.exports = {
   ROLE_CONFIGS: ROLE_CONFIGS,
   normalizeRole: normalizeRole,
@@ -640,23 +526,5 @@ module.exports = {
   minEnergyFor: minEnergyFor,
   Calculate_Spawn_Resource: Calculate_Spawn_Resource,
   Generate_Creep_Name: Generate_Creep_Name,
-  Spawn_Squad: Spawn_Squad,
-  // compatibility exports
-  Generate_Body_From_Config: Generate_Body_From_Config,
-  getBodyForTask: getBodyForTask,
-  Spawn_Worker_Bee: Spawn_Worker_Bee,
-  Generate_Courier_Body: Generate_Courier_Body,
-  Generate_BaseHarvest_Body: Generate_BaseHarvest_Body,
-  Generate_Builder_Body: Generate_Builder_Body,
-  Generate_Repair_Body: Generate_Repair_Body,
-  Generate_Queen_Body: Generate_Queen_Body,
-  Generate_Luna_Body: Generate_Luna_Body,
-  Generate_Upgrader_Body: Generate_Upgrader_Body,
-  Generate_Scout_Body: Generate_Scout_Body,
-  Generate_CombatMelee_Body: Generate_CombatMelee_Body,
-  Generate_CombatArcher_Body: Generate_CombatArcher_Body,
-  Generate_CombatMedic_Body: Generate_CombatMedic_Body,
-  Generate_Dismantler_Config_Body: Generate_Dismantler_Config_Body,
-  Generate_Claimer_Body: Generate_Claimer_Body,
-  configurations: LEGACY_CONFIG_LIST
+  Spawn_Squad: Spawn_Squad
 };
