@@ -21,6 +21,7 @@ var CONFIG = {
   // Motion hygiene
   shuffleCooldown: 2,       // ticks to rest after moving (anti-jitter)
   waitForMedic: true,       // delay engagement until medic nearby (if BeeToolbox.shouldWaitForMedic)
+  waitTimeout: 25,
 
   // Safety
   fleeHpPct: 0.40,          // flee when HP below this fraction
@@ -32,6 +33,7 @@ var CONFIG = {
   // Debug
   DEBUG_SAY: true,
   DEBUG_DRAW: true,
+  DEBUG_LOG: false,
 
   COLORS: {
     PATH:   "#7ac7ff",
@@ -192,14 +194,31 @@ var roleCombatArcher = {
   run: function(creep){
     if (creep.spawning) return;
 
+    var assignedAt = creep.memory.assignedAt;
+    if (assignedAt == null) {
+      creep.memory.assignedAt = Game.time;
+      assignedAt = Game.time;
+    }
+    var waited = Game.time - assignedAt;
+    var waitTimeout = CONFIG.waitTimeout || 25;
+
     // Optional rally until medic present
-    if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)){
+    var shouldWait = CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic &&
+      BeeToolbox.shouldWaitForMedic(creep);
+    if (shouldWait && waited < waitTimeout){
       var rf = Game.flags.Rally || Game.flags.MedicRally || (TaskSquad && TaskSquad.getAnchor && TaskSquad.getAnchor(creep));
       if (rf){
         debugSay(creep, "⛺ wait");
         moveSmart(creep, (rf.pos || rf), 0);
       }
+      if (CONFIG.DEBUG_LOG && Game.time % 5 === 0){
+        console.log('[CombatArcher] waiting for medic', creep.name, 'in', creep.pos.roomName, 'waited', waited, 'ticks');
+      }
       return;
+    }
+    if (!shouldWait){
+      creep.memory.assignedAt = Game.time;
+      assignedAt = Game.time;
     }
 
     // Acquire shared target, else rally & opportunistic fire

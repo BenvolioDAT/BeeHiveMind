@@ -31,12 +31,14 @@ var CONFIG = {
   reusePath: 10,
   maxOps: 2000,
   waitForMedic: true,
+  waitTimeout: 25,
   doorBash: true,
   edgePenalty: 8,
 
   // Debug
   DEBUG_SAY: true,
   DEBUG_DRAW: true,
+  DEBUG_LOG: false,
 
   COLORS: {
     PATH:   "#7ac7ff",
@@ -103,12 +105,29 @@ var roleCombatMelee = {
   run: function (creep) {
     if (creep.spawning) return;
 
+    var assignedAt = creep.memory.assignedAt;
+    if (assignedAt == null) {
+      creep.memory.assignedAt = Game.time;
+      assignedAt = Game.time;
+    }
+    var waited = Game.time - assignedAt;
+    var waitTimeout = CONFIG.waitTimeout || 25;
+
     // (0) optional: wait for medic if you want tighter stack
-    if (CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic && BeeToolbox.shouldWaitForMedic(creep)) {
+    var shouldWait = CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic &&
+      BeeToolbox.shouldWaitForMedic(creep);
+    if (shouldWait && waited < waitTimeout) {
       var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
       if (rf) moveSmart(creep, rf.pos || rf, 0);
       debugSay(creep, "⏳");
+      if (CONFIG.DEBUG_LOG && Game.time % 5 === 0) {
+        console.log('[CombatMelee] waiting for medic', creep.name, 'in', creep.pos.roomName, 'waited', waited, 'ticks');
+      }
       return;
+    }
+    if (!shouldWait) {
+      creep.memory.assignedAt = Game.time;
+      assignedAt = Game.time;
     }
 
     // quick self/buddy healing if we have HEAL
@@ -142,6 +161,18 @@ var roleCombatMelee = {
     if (target && !_isInvaderTarget(target)) target = null;
 
     if (!target) {
+      var hostiles = creep.room ? creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep }) : null;
+      if (hostiles && hostiles.length) {
+        var nearest = creep.pos.findClosestByPath(hostiles) || creep.pos.findClosestByRange(hostiles);
+        if (nearest) {
+          moveSmart(creep, nearest.pos, 1);
+          if (creep.pos.isNearTo(nearest) && creep.getActiveBodyparts(ATTACK) > 0) {
+            debugLine(creep.pos, nearest.pos, CONFIG.COLORS.ATTACK, "⚔");
+            creep.attack(nearest);
+          }
+          return;
+        }
+      }
       var anc = TaskSquad.getAnchor(creep);
       if (anc) {
         debugRing(anc, CONFIG.COLORS.BUDDY, "anchor", 0.8);
