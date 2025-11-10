@@ -72,6 +72,121 @@ function debugRing(target, color, text, radius){
   if (text) R.visual.text(text, p.x, p.y-0.8, { color: color, font: CONFIG.FONT, opacity: 0.95, align:"center" });
 }
 
+function _maybeSay(creep, key, msg){
+  if (!creep || !creep.say || !creep.memory) return;
+  var field = key ? ('_medSay_' + key) : '_medSay';
+  var last = creep.memory[field] || 0;
+  if ((Game.time - last) >= 8){
+    creep.say(msg, true);
+    creep.memory[field] = Game.time;
+  }
+}
+
+function _logSquadSample(creep, squadId, target, anchor, keySuffix){
+  if (!Memory || !Memory.squads) return;
+  var S = Memory.squads[squadId];
+  if (!S) return;
+  var field = keySuffix ? ('logger_' + keySuffix) : 'logger';
+  if (!S[field] || !Game.creeps[S[field]]) S[field] = creep.name;
+  if (S[field] !== creep.name) return;
+  if (Game.time % 25 !== 0) return;
+  var anchorStr = 'none';
+  if (anchor && anchor.x != null && anchor.y != null && anchor.roomName){
+    anchorStr = anchor.x + ',' + anchor.y + '/' + anchor.roomName;
+  }
+  var targetId = (target && target.id) ? target.id : 'none';
+  console.log('[SquadLog]', squadId, creep.name, (keySuffix || 'medic'), 'target', targetId, 'anchor', anchorStr);
+}
+
+function _chooseBuddyFromPool(creep, pool, respectCap){
+  if (!creep || !pool || !pool.length) return null;
+  var best = null;
+  var bestScore = null;
+  var enforce = respectCap ? (CONFIG.maxMedicsPerTarget | 0) : 0;
+  var i;
+  for (i = 0; i < pool.length; i++){
+    var cand = pool[i];
+    if (!cand || !cand.pos) continue;
+    if (enforce > 0){
+      var load = countMedicsFollowing(creep, cand.id);
+      if (load >= enforce) continue;
+    }
+    var ratio = cand.hits / Math.max(1, cand.hitsMax);
+    var score = (ratio * 100) + creep.pos.getRangeTo(cand);
+    if (best === null || score < bestScore){
+      best = cand;
+      bestScore = score;
+    }
+  }
+  if (!best && enforce > 0){
+    var fallback = null;
+    var bestLoad = null;
+    for (i = 0; i < pool.length; i++){
+      var cand2 = pool[i];
+      if (!cand2) continue;
+      var load2 = countMedicsFollowing(creep, cand2.id);
+      if (bestLoad === null || load2 < bestLoad){
+        bestLoad = load2;
+        fallback = cand2;
+      }
+    }
+    if (fallback) best = fallback;
+  }
+  if (!best && pool.length){
+    best = creep.pos.findClosestByRange(pool) || pool[0];
+  }
+  return best;
+}
+
+function _selectBuddy(creep, squadId){
+  var room = creep.room;
+  if (!room) return null;
+  var sameSquad = room.find(FIND_MY_CREEPS, { filter: function (a){
+    if (!a || !a.memory || a.id === creep.id) return false;
+    var role = a.memory.role || a.memory.task || '';
+    if (!CombatRoles[role]) return false;
+    if (squadId && a.memory.squadId && a.memory.squadId !== squadId) return false;
+    return true;
+  }});
+  var priorities = ['CombatMelee', 'CombatArcher', 'Dismantler'];
+  var idx;
+  for (idx = 0; idx < priorities.length; idx++){
+    var roleName = priorities[idx];
+    var pool = [];
+    var i;
+    for (i = 0; i < sameSquad.length; i++){
+      var cand = sameSquad[i];
+      var r = cand.memory.role || cand.memory.task || '';
+      if (r === roleName) pool.push(cand);
+    }
+    if (!pool.length) continue;
+    var injured = [];
+    for (i = 0; i < pool.length; i++){
+      if (pool[i].hits < pool[i].hitsMax) injured.push(pool[i]);
+    }
+    var pick = _chooseBuddyFromPool(creep, injured.length ? injured : pool, true);
+    if (pick) return pick;
+  }
+  var damaged = room.find(FIND_MY_CREEPS, { filter: function (a){
+    return a && a.id !== creep.id && a.hits < a.hitsMax;
+  }});
+  if (damaged && damaged.length){
+    var any = _chooseBuddyFromPool(creep, damaged, false);
+    if (any) return any;
+  }
+  var meleePool = [];
+  var j;
+  for (j = 0; j < sameSquad.length; j++){
+    var cand2 = sameSquad[j];
+    var role2 = cand2.memory.role || cand2.memory.task || '';
+    if (role2 === 'CombatMelee') meleePool.push(cand2);
+  }
+  if (meleePool.length){
+    return _chooseBuddyFromPool(creep, meleePool, true);
+  }
+  return null;
+}
+
 // Movement wrapper (TaskSquad.stepToward > BeeTravel > moveTo) with line preview
 function moveSmart(creep, dest, range){
   var d = _posOf(dest) || dest;
@@ -81,11 +196,6 @@ function moveSmart(creep, dest, range){
   if (TaskSquad && typeof TaskSquad.stepToward === 'function'){
     return TaskSquad.stepToward(creep, d, range);
   }
-  try {
-    if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function'){
-      return BeeToolbox.BeeTravel(creep, d, { range: (range!=null?range:1), reusePath: CONFIG.reusePath });
-    }
-  } catch(e){}
   return creep.moveTo(d, { reusePath: CONFIG.reusePath, maxOps: 2000 });
 }
 
@@ -108,6 +218,7 @@ function tryHeal(creep, target, healedFlag){
     if (ok === OK){
       debugSay(creep, "❤️");
       debugLine(creep.pos, target.pos, CONFIG.COLORS.HEAL, "heal");
+      _maybeSay(creep, 'heal', 'MED:heal');
       healedFlag.v = true;
     }
   } else if (creep.pos.inRangeTo(target, 3)){
@@ -115,6 +226,7 @@ function tryHeal(creep, target, healedFlag){
     if (ok2 === OK){
       debugSay(creep, "💚");
       debugLine(creep.pos, target.pos, CONFIG.COLORS.RHEAL, "rheal");
+      _maybeSay(creep, 'heal', 'MED:heal');
       healedFlag.v = true;
     }
   }
@@ -180,6 +292,15 @@ var roleCombatMedic = {
     var bodyHeal = creep.getActiveBodyparts(HEAL);
     var canHeal = bodyHeal > 0;
     var healedThisTick = { v: false }; // one heal cast per tick (heal OR rangedHeal)
+    var anchor = (TaskSquad && TaskSquad.getAnchor) ? TaskSquad.getAnchor(creep) : null;
+    var squadId = (TaskSquad && TaskSquad.getSquadId) ? TaskSquad.getSquadId(creep) : ((creep.memory && creep.memory.squadId) || 'Alpha');
+
+    if (canHeal && !healedThisTick.v) {
+      var selfRatio = creep.hits / Math.max(1, creep.hitsMax);
+      if (selfRatio < 0.7) {
+        tryHeal(creep, creep, healedThisTick);
+      }
+    }
 
     // ---------- 1) choose / refresh buddy ----------
     var buddy = Game.getObjectById(creep.memory.followTarget);
@@ -191,76 +312,17 @@ var roleCombatMedic = {
     if (needNewBuddy) {
       delete creep.memory.followTarget;
       delete creep.memory.assignedAt;
-
-      var squadId = creep.memory.squadId || null;
-      var room = creep.room;
-      var sameSquad = [];
-      var fallbacks = [];
-      if (room) {
-        sameSquad = room.find(FIND_MY_CREEPS, { filter: function (a) {
-          if (!a || !a.memory || a.id === creep.id) return false;
-          var role = a.memory.role || a.memory.task || '';
-          if (!CombatRoles[role]) return false;
-          if (squadId && a.memory.squadId && a.memory.squadId !== squadId) return false;
-          return true;
-        }});
-        if (!sameSquad.length) {
-          fallbacks = room.find(FIND_MY_CREEPS, { filter: function (a) {
-            if (!a || !a.memory || a.id === creep.id) return false;
-            var role = a.memory.role || a.memory.task || '';
-            return !!CombatRoles[role];
-          }});
-        }
+      var picked = _selectBuddy(creep, squadId);
+      if (picked) {
+        buddy = picked;
+        creep.memory.followTarget = buddy.id;
+        creep.memory.assignedAt = now;
+        if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "buddy", 0.7);
+        debugSay(creep, "👣");
+        _maybeSay(creep, 'stick', 'MED:stick');
       }
-
-      var candidates = sameSquad.length ? sameSquad : fallbacks;
-
-      if (candidates && candidates.length) {
-        if (sameSquad.length) {
-          var anyInjured = _.some(candidates, function(a){ return a.hits < a.hitsMax; });
-          if (anyInjured) {
-            var best = null, bestScore = 9999;
-            for (var i=0;i<candidates.length;i++){
-              var a = candidates[i];
-              var score = (a.hits - estimateTowerDamage(a.room, a.pos)) / Math.max(1, a.hitsMax);
-              if (score < bestScore) { bestScore = score; best = a; }
-            }
-            buddy = best;
-          } else {
-            var i2; buddy = null;
-            for (i2=0;i2<candidates.length;i2++){
-              var t2 = candidates[i2].memory.task || candidates[i2].memory.role || '';
-              if (t2 === 'CombatMelee'){ buddy = candidates[i2]; break; }
-            }
-            if (!buddy) buddy = candidates[0];
-          }
-        } else {
-          buddy = creep.pos.findClosestByRange(candidates) || candidates[0];
-        }
-
-        // Per-target medic cap
-        if (buddy && CONFIG.maxMedicsPerTarget > 0) {
-          var load = countMedicsFollowing(creep, buddy.id);
-          if (load >= CONFIG.maxMedicsPerTarget) {
-            var alt = null, bestLoad = 999, j;
-            for (j=0;j<candidates.length;j++){
-              var cand = candidates[j];
-              var l = countMedicsFollowing(creep, cand.id);
-              if (l < bestLoad) { bestLoad = l; alt = cand; }
-            }
-            if (alt) buddy = alt;
-          }
-        }
-
-        if (buddy) {
-          creep.memory.followTarget = buddy.id;
-          creep.memory.assignedAt = now;
-          if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "buddy", 0.7);
-          debugSay(creep, "👣");
-        }
-      }
-    } else {
-      if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "buddy", 0.7);
+    } else if (buddy && CONFIG.DEBUG_DRAW) {
+      debugRing(buddy, CONFIG.COLORS.BUDDY, "buddy", 0.7);
     }
 
     if (buddy) {
@@ -273,10 +335,16 @@ var roleCombatMedic = {
       }
     }
 
+    if (!anchor && TaskSquad && TaskSquad.getAnchor) anchor = TaskSquad.getAnchor(creep);
+    _logSquadSample(creep, squadId, buddy, anchor, 'medic');
+
     // ---------- 2) no buddy? hover at anchor/rally and still heal ----------
     if (!buddy) {
-      var anc = (TaskSquad && TaskSquad.getAnchor && TaskSquad.getAnchor(creep)) || Game.flags.MedicRally || Game.flags.Rally;
-      if (anc) moveSmart(creep, (anc.pos || anc), 1);
+      var anc = anchor || Game.flags.MedicRally || Game.flags.Rally;
+      if (anc) {
+        _maybeSay(creep, 'seek', 'MED:seek');
+        moveSmart(creep, (anc.pos || anc), 1);
+      }
       var invaders = creep.room ? creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep }) : null;
       if (invaders && invaders.length) {
         var injured = lowestInRange(creep.pos, CONFIG.triageRange);
