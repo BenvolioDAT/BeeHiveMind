@@ -301,14 +301,46 @@ var TaskSquad = (function () {
   function sharedTarget(creep) {
     var id = getSquadId(creep);
     var S  = _ensureSquadBucket(id);
+    var mem = creep && creep.memory ? creep.memory : null;
+
+    if (mem && mem.stickTargetId) {
+      var memTarget = Game.getObjectById(mem.stickTargetId);
+      if (memTarget && _isGood(memTarget)) {
+        var stickAt = mem.stickTargetAt || 0;
+        if ((Game.time - stickAt) <= TARGET_STICKY_TICKS) {
+          mem.stickTargetAt = Game.time;
+          return memTarget;
+        }
+      } else {
+        delete mem.stickTargetId;
+        delete mem.stickTargetAt;
+      }
+    }
 
     if (S.targetId && Game.time - (S.targetAt || 0) <= TARGET_STICKY_TICKS) {
       var keep = Game.getObjectById(S.targetId);
-      if (_isGood(keep) && creep.pos.getRangeTo(keep) <= MAX_TARGET_RANGE) return keep;
+      if (_isGood(keep) && creep.pos.getRangeTo(keep) <= MAX_TARGET_RANGE) {
+        if (mem) {
+          mem.stickTargetId = keep.id;
+          mem.stickTargetAt = Game.time;
+        }
+        return keep;
+      }
     }
     var nxt = _chooseRoomTarget(creep, S);
-    if (nxt) { S.targetId = nxt.id; S.targetAt = Game.time; return nxt; }
+    if (nxt) {
+      S.targetId = nxt.id; S.targetAt = Game.time;
+      if (mem) {
+        mem.stickTargetId = nxt.id;
+        mem.stickTargetAt = Game.time;
+      }
+      return nxt;
+    }
     S.targetId = null; S.targetAt = Game.time;
+    if (mem) {
+      delete mem.stickTargetId;
+      delete mem.stickTargetAt;
+    }
     var room = creep.room;
     if (room) {
       var anyHostiles = room.find(FIND_HOSTILE_CREEPS);
@@ -322,6 +354,14 @@ var TaskSquad = (function () {
   function getAnchor(creep) {
     var id = getSquadId(creep);
     var S = _ensureSquadBucket(id);
+    var mem = creep && creep.memory ? creep.memory : null;
+    if (mem && mem.squadFlag) {
+      var memFlag = Game.flags[mem.squadFlag];
+      if (memFlag && memFlag.pos) {
+        _storeAnchor(S, memFlag.pos);
+        return memFlag.pos;
+      }
+    }
     var flag = _rallyFlagFor(id);
 
     if (flag) {

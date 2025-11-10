@@ -189,20 +189,26 @@ var roleCombatMelee = {
   run: function (creep) {
     if (creep.spawning) return;
 
-    var assignedAt = creep.memory.assignedAt;
+    var mem = creep.memory || {};
+    if (!mem.state) mem.state = 'rally';
+    if (!mem.waitUntil) mem.waitUntil = Game.time + (CONFIG.waitTimeout || 25);
+
+    var assignedAt = mem.assignedAt;
     if (assignedAt == null) {
-      creep.memory.assignedAt = Game.time;
+      mem.assignedAt = Game.time;
       assignedAt = Game.time;
     }
+    var waitUntil = mem.waitUntil || 0;
     var waited = Game.time - assignedAt;
     var waitTimeout = CONFIG.waitTimeout || 25;
     var anchor = (TaskSquad && TaskSquad.getAnchor) ? TaskSquad.getAnchor(creep) : null;
-    var squadId = (TaskSquad && TaskSquad.getSquadId) ? TaskSquad.getSquadId(creep) : ((creep.memory && creep.memory.squadId) || 'Alpha');
+    var squadId = (TaskSquad && TaskSquad.getSquadId) ? TaskSquad.getSquadId(creep) : ((mem.squadId) || 'Alpha');
 
     // (0) optional: wait for medic if you want tighter stack
     var shouldWait = CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic &&
       BeeToolbox.shouldWaitForMedic(creep);
-    if (shouldWait && waited < waitTimeout) {
+    var waiting = false;
+    if (shouldWait && Game.time <= waitUntil && waited < waitTimeout) {
       var rf = Game.flags.Rally || Game.flags.MedicRally || null;
       if (!rf && anchor) rf = anchor;
       if (rf) moveSmart(creep, rf.pos || rf, 0);
@@ -211,11 +217,16 @@ var roleCombatMelee = {
       if (CONFIG.DEBUG_LOG && Game.time % 5 === 0) {
         console.log('[CombatMelee] waiting for medic', creep.name, 'in', creep.pos.roomName, 'waited', waited, 'ticks');
       }
-      return;
+      waiting = true;
     }
-    if (!shouldWait) {
-      creep.memory.assignedAt = Game.time;
-      assignedAt = Game.time;
+    if (waiting) return;
+
+    if (!shouldWait || Game.time > waitUntil || waited >= waitTimeout) {
+      mem.assignedAt = Game.time;
+    }
+
+    if (Game.time >= waitUntil && mem.state === 'rally') {
+      mem.state = 'advance';
     }
 
     // quick self/buddy healing if we have HEAL
@@ -226,6 +237,7 @@ var roleCombatMelee = {
     if (lowHp || this._inTowerDanger(creep.pos)) {
       debugRing(creep.pos, CONFIG.COLORS.DANGER, "flee", 1.0);
       _logSquadSample(creep, squadId, null, anchor, 'melee');
+      if (mem.state !== 'retreat') mem.state = 'retreat';
       this._flee(creep);
       var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
       if (adjBad && creep.getActiveBodyparts(ATTACK) > 0) {
@@ -247,13 +259,39 @@ var roleCombatMelee = {
     }
 
     // (3) squad shared target with fallbacks for visible threats
-    var target = TaskSquad.sharedTarget(creep);
-    var myName = _myUsername();
-    if (!target && creep.room && !_roomIsForeign(creep.room)) {
-      var hostiles = creep.room.find(FIND_HOSTILE_CREEPS);
-      if (hostiles && hostiles.length) {
-        target = creep.pos.findClosestByRange(hostiles);
+    var stored = null;
+    if (mem.stickTargetId) {
+      var cache = Game.getObjectById(mem.stickTargetId);
+      if (cache && cache.pos && cache.pos.roomName) {
+        var lastStick = mem.stickTargetAt || 0;
+        if ((Game.time - lastStick) <= 5) {
+          stored = cache;
+        }
       }
+      if (!stored) {
+        delete mem.stickTargetId;
+        delete mem.stickTargetAt;
+      }
+    }
+
+    var target = stored;
+    var myName = _myUsername();
+    if (!target && TaskSquad && TaskSquad.sharedTarget) {
+      target = TaskSquad.sharedTarget(creep);
+    }
+
+    var invaders = null;
+    if (!target && creep.room) {
+      invaders = creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+      if (invaders && invaders.length) {
+        target = creep.pos.findClosestByRange(invaders);
+        if (target) {
+          mem.stickTargetId = target.id;
+          mem.stickTargetAt = Game.time;
+        }
+      }
+    }
+    if (!target && creep.room && !_roomIsForeign(creep.room)) {
       if (!target) {
         target = _fallbackStructureTarget(creep, myName);
       }
@@ -263,12 +301,24 @@ var roleCombatMelee = {
     _logSquadSample(creep, squadId, target, anchor, 'melee');
 
     if (!target) {
+      var waitExpired = Game.time > waitUntil;
       if (anchor) {
         debugRing(anchor, CONFIG.COLORS.BUDDY, "anchor", 0.8);
-        _maybeSay(creep, 'MM:seek');
+        _maybeSay(creep, waitExpired ? 'MM:adv' : 'MM:seek');
         moveSmart(creep, anchor, 1);
+      } else if (mem.targetRoom) {
+        var drift = new RoomPosition(25, 25, mem.targetRoom);
+        _maybeSay(creep, waitExpired ? 'MM:adv' : 'MM:seek');
+        moveSmart(creep, drift, 1);
+      }
+      if (waitExpired && mem.state !== 'advance') {
+        mem.state = 'advance';
       }
       return;
+    }
+
+    if (mem.state === 'rally' && (Game.time >= waitUntil || !shouldWait)) {
+      mem.state = 'advance';
     }
 
     _maybeSay(creep, 'MM:atk');
@@ -286,6 +336,7 @@ var roleCombatMelee = {
 
     // (4) approach & strike
     if (creep.pos.isNearTo(target)) {
+      if (mem.state !== 'engage') mem.state = 'engage';
       // If target tile is protected by an Invader rampart, hit the cover first (PvE-only)
       var coverList = target.pos.lookFor(LOOK_STRUCTURES);
       var cover = null;
@@ -339,6 +390,7 @@ var roleCombatMelee = {
     }
 
     // (6) close in via TaskSquad pathing (polite traffic + swaps)
+    if (mem.state !== 'engage') mem.state = 'advance';
     moveSmart(creep, target.pos, 1);
 
     // Opportunistic hit if we brushed into melee with a creep
