@@ -44,45 +44,51 @@ var TaskSquad = (function () {
   function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
   function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
 
-  var _cachedMyNameTick = -1;
-  var _cachedMyName = null;
-  function _firstSpawn() {
-    if (!Game || !Game.spawns) return null;
-    for (var sn in Game.spawns) {
-      if (Game.spawns.hasOwnProperty(sn)) {
-        return Game.spawns[sn];
+  var _myNameCacheTick = -1;
+  var _myNameCache = null;
+  function _myUsername() {
+    if (!Game) return null;
+    if (_myNameCacheTick === Game.time && _myNameCache !== undefined) return _myNameCache;
+    _myNameCacheTick = Game.time;
+    _myNameCache = null;
+
+    var s, k;
+    for (k in Game.spawns) {
+      if (!Game.spawns.hasOwnProperty(k)) continue;
+      s = Game.spawns[k];
+      if (s && s.owner && s.owner.username) {
+        _myNameCache = s.owner.username;
+        return _myNameCache;
       }
     }
-    return null;
-  }
-  function _getMyName(roomName) {
-    if (_cachedMyNameTick !== Game.time || (!_cachedMyName && roomName)) {
-      var spawn = _firstSpawn();
-      var viaSpawn = null;
-      if (spawn && spawn.owner && spawn.owner.username) viaSpawn = spawn.owner.username;
 
-      var viaRoom = null;
-      if (!viaSpawn && roomName && Game.rooms[roomName] && Game.rooms[roomName].controller &&
-          Game.rooms[roomName].controller.owner && Game.rooms[roomName].controller.owner.username) {
-        viaRoom = Game.rooms[roomName].controller.owner.username;
+    for (k in Game.rooms) {
+      var r = Game.rooms[k];
+      if (!r || !r.controller) continue;
+      if (r.controller.my && r.controller.owner && r.controller.owner.username) {
+        _myNameCache = r.controller.owner.username;
+        return _myNameCache;
       }
-
-      _cachedMyName = viaSpawn || viaRoom || null;
-      _cachedMyNameTick = Game.time;
     }
-    return _cachedMyName;
+
+    return _myNameCache;
   }
 
-  function _isPlayerControlledRoom(room, me) {
+  function _isPlayerControlledRoom(room) {
     if (!room || !room.controller) return false;
     var ctrl = room.controller;
-    var myName = _getMyName(me && me.pos && me.pos.roomName);
+    var me = _myUsername();
+
     if (ctrl.my) return false;
-    if (ctrl.owner && ctrl.owner.username !== 'Invader') return true;
-    if (ctrl.reservation && ctrl.reservation.username && ctrl.reservation.username !== 'Invader') {
-      if (myName && ctrl.reservation.username === myName) return false;
+
+    if (ctrl.owner && ctrl.owner.username && ctrl.owner.username !== 'Invader') return true;
+
+    if (ctrl.reservation && ctrl.reservation.username &&
+        ctrl.reservation.username !== 'Invader' &&
+        ctrl.reservation.username !== me) {
       return true;
     }
+
     return false;
   }
 
@@ -224,7 +230,7 @@ var TaskSquad = (function () {
   function _chooseRoomTarget(me) {
     var room = me.room; if (!room) return null;
 
-    if (_isPlayerControlledRoom(room, me)) {
+    if (_isPlayerControlledRoom(room)) {
       return null; // PvE acceptance: sharedTarget returns null in player rooms
     }
 
@@ -274,7 +280,7 @@ var TaskSquad = (function () {
     if (room) {
       var invaders = room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
       if (invaders && invaders.length && Game.time % 10 === 0) {
-        console.log('[TaskSquad] null target in', creep.pos.roomName, 'but Invaders present; check player-room filter');
+        console.log('[Squad] null target in', room.name, 'with Invaders present (check filters)');
       }
     }
     return null;

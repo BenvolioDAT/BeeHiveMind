@@ -32,6 +32,7 @@ var CONFIG = {
   // Debug
   DEBUG_SAY: true,
   DEBUG_DRAW: true,
+  DEBUG_LOG: false,
 
   COLORS: {
     PATH:   "#7ac7ff",
@@ -191,32 +192,50 @@ var roleCombatMedic = {
       delete creep.memory.followTarget;
       delete creep.memory.assignedAt;
 
-      var squadId = creep.memory.squadId || 'Alpha';
-      var candidates = _.filter(Game.creeps, function (a){
-        if (!a || !a.my || !a.memory) return false;
-        if ((a.memory.squadId || 'Alpha') !== squadId) return false;
-        var t = a.memory.task || a.memory.role || '';
-        return !!CombatRoles[t];
-      });
+      var squadId = creep.memory.squadId || null;
+      var room = creep.room;
+      var sameSquad = [];
+      var fallbacks = [];
+      if (room) {
+        sameSquad = room.find(FIND_MY_CREEPS, { filter: function (a) {
+          if (!a || !a.memory || a.id === creep.id) return false;
+          var role = a.memory.role || a.memory.task || '';
+          if (!CombatRoles[role]) return false;
+          if (squadId && a.memory.squadId && a.memory.squadId !== squadId) return false;
+          return true;
+        }});
+        if (!sameSquad.length) {
+          fallbacks = room.find(FIND_MY_CREEPS, { filter: function (a) {
+            if (!a || !a.memory || a.id === creep.id) return false;
+            var role = a.memory.role || a.memory.task || '';
+            return !!CombatRoles[role];
+          }});
+        }
+      }
 
-      if (candidates.length) {
-        var anyInjured = _.some(candidates, function(a){ return a.hits < a.hitsMax; });
-        if (anyInjured) {
-          var best = null, bestScore = 9999;
-          for (var i=0;i<candidates.length;i++){
-            var a = candidates[i];
-            var score = (a.hits - estimateTowerDamage(a.room, a.pos)) / Math.max(1, a.hitsMax);
-            if (score < bestScore) { bestScore = score; best = a; }
+      var candidates = sameSquad.length ? sameSquad : fallbacks;
+
+      if (candidates && candidates.length) {
+        if (sameSquad.length) {
+          var anyInjured = _.some(candidates, function(a){ return a.hits < a.hitsMax; });
+          if (anyInjured) {
+            var best = null, bestScore = 9999;
+            for (var i=0;i<candidates.length;i++){
+              var a = candidates[i];
+              var score = (a.hits - estimateTowerDamage(a.room, a.pos)) / Math.max(1, a.hitsMax);
+              if (score < bestScore) { bestScore = score; best = a; }
+            }
+            buddy = best;
+          } else {
+            var i2; buddy = null;
+            for (i2=0;i2<candidates.length;i2++){
+              var t2 = candidates[i2].memory.task || candidates[i2].memory.role || '';
+              if (t2 === 'CombatMelee'){ buddy = candidates[i2]; break; }
+            }
+            if (!buddy) buddy = candidates[0];
           }
-          buddy = best;
         } else {
-          // Prefer melee anchor if nobody hurt
-          var i2; buddy = null;
-          for (i2=0;i2<candidates.length;i2++){
-            var t2 = candidates[i2].memory.task || candidates[i2].memory.role || '';
-            if (t2 === 'CombatMelee'){ buddy = candidates[i2]; break; }
-          }
-          if (!buddy) buddy = candidates[0];
+          buddy = creep.pos.findClosestByRange(candidates) || candidates[0];
         }
 
         // Per-target medic cap
@@ -244,11 +263,31 @@ var roleCombatMedic = {
       if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "buddy", 0.7);
     }
 
+    if (buddy) {
+      creep.memory.noBuddyTicks = 0;
+    } else {
+      var nb = (creep.memory.noBuddyTicks || 0) + 1;
+      creep.memory.noBuddyTicks = nb;
+      if (CONFIG.DEBUG_LOG && nb % 20 === 0) {
+        console.log('[CombatMedic] no buddy for', nb, 'ticks in', creep.pos.roomName, '(', creep.name, ')');
+      }
+    }
+
     // ---------- 2) no buddy? hover at anchor/rally and still heal ----------
     if (!buddy) {
       var anc = (TaskSquad && TaskSquad.getAnchor && TaskSquad.getAnchor(creep)) || Game.flags.MedicRally || Game.flags.Rally;
       if (anc) moveSmart(creep, (anc.pos || anc), 1);
-      // opportunistic heal around rally point
+      var invaders = creep.room ? creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep }) : null;
+      if (invaders && invaders.length) {
+        var injured = lowestInRange(creep.pos, CONFIG.triageRange);
+        if (!injured && anc) {
+          injured = lowestInRange((anc.pos || anc), CONFIG.triageRange);
+        }
+        if (injured) {
+          moveSmart(creep, injured.pos, CONFIG.followRange || 1);
+          if (canHeal && !healedThisTick.v) tryHeal(creep, injured, healedThisTick);
+        }
+      }
       if (canHeal && !healedThisTick.v) tryHeal(creep, lowestInRange(creep.pos, CONFIG.triageRange), healedThisTick);
       return;
     }
