@@ -241,7 +241,8 @@ function countMedicsFollowing(creep, targetId) {
     if ((c.memory.squadId || 'Alpha') !== sid) continue;
     var tag = (c.memory.task || c.memory.role);
     if (tag !== 'CombatMedic') continue;
-    if (c.memory.followTarget === targetId) n++;
+    var buddyId = c.memory.buddyId || c.memory.followTarget;
+    if (buddyId === targetId) n++;
   }
   return n;
 }
@@ -288,12 +289,19 @@ var roleCombatMedic = {
   run: function (creep) {
     if (creep.spawning) return;
 
+    var mem = creep.memory || {};
+    if (mem.followTarget && !mem.buddyId) {
+      mem.buddyId = mem.followTarget;
+    }
+
     var now = Game.time;
     var bodyHeal = creep.getActiveBodyparts(HEAL);
     var canHeal = bodyHeal > 0;
     var healedThisTick = { v: false }; // one heal cast per tick (heal OR rangedHeal)
     var anchor = (TaskSquad && TaskSquad.getAnchor) ? TaskSquad.getAnchor(creep) : null;
-    var squadId = (TaskSquad && TaskSquad.getSquadId) ? TaskSquad.getSquadId(creep) : ((creep.memory && creep.memory.squadId) || 'Alpha');
+    var squadId = (TaskSquad && TaskSquad.getSquadId) ? TaskSquad.getSquadId(creep) : ((mem && mem.squadId) || 'Alpha');
+    var followMin = Math.max(1, CONFIG.followRange || 1);
+    var followMax = Math.max(followMin, 2);
 
     if (canHeal && !healedThisTick.v) {
       var selfRatio = creep.hits / Math.max(1, creep.hitsMax);
@@ -303,33 +311,40 @@ var roleCombatMedic = {
     }
 
     // ---------- 1) choose / refresh buddy ----------
-    var buddy = Game.getObjectById(creep.memory.followTarget);
+    var buddyId = mem.buddyId || mem.followTarget;
+    var buddy = buddyId ? Game.getObjectById(buddyId) : null;
+    var buddyAt = mem.buddyAt || 0;
     var needNewBuddy = (!buddy || !buddy.my || buddy.hits <= 0);
-    if (!needNewBuddy && creep.memory.assignedAt && (now - creep.memory.assignedAt) > CONFIG.stickiness) {
+    if (!needNewBuddy && buddyAt && (now - buddyAt) > CONFIG.stickiness) {
       needNewBuddy = true;
     }
 
     if (needNewBuddy) {
-      delete creep.memory.followTarget;
-      delete creep.memory.assignedAt;
+      delete mem.buddyId;
+      delete mem.buddyAt;
+      delete mem.followTarget;
+      delete mem.assignedAt;
       var picked = _selectBuddy(creep, squadId);
       if (picked) {
         buddy = picked;
-        creep.memory.followTarget = buddy.id;
-        creep.memory.assignedAt = now;
+        mem.buddyId = buddy.id;
+        mem.buddyAt = now;
+        mem.followTarget = buddy.id;
+        delete mem.assignedAt;
         if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "buddy", 0.7);
         debugSay(creep, "👣");
         _maybeSay(creep, 'stick', 'MED:stick');
       }
-    } else if (buddy && CONFIG.DEBUG_DRAW) {
-      debugRing(buddy, CONFIG.COLORS.BUDDY, "buddy", 0.7);
+    } else if (buddy) {
+      mem.buddyId = buddy.id;
+      if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "buddy", 0.7);
     }
 
     if (buddy) {
-      creep.memory.noBuddyTicks = 0;
+      mem.noBuddyTicks = 0;
     } else {
-      var nb = (creep.memory.noBuddyTicks || 0) + 1;
-      creep.memory.noBuddyTicks = nb;
+      var nb = (mem.noBuddyTicks || 0) + 1;
+      mem.noBuddyTicks = nb;
       if (CONFIG.DEBUG_LOG && nb % 20 === 0) {
         console.log('[CombatMedic] no buddy for', nb, 'ticks in', creep.pos.roomName, '(', creep.name, ')');
       }
@@ -338,12 +353,16 @@ var roleCombatMedic = {
     if (!anchor && TaskSquad && TaskSquad.getAnchor) anchor = TaskSquad.getAnchor(creep);
     _logSquadSample(creep, squadId, buddy, anchor, 'medic');
 
+    if (canHeal && buddy && !healedThisTick.v && buddy.hits < buddy.hitsMax) {
+      tryHeal(creep, buddy, healedThisTick);
+    }
+
     // ---------- 2) no buddy? hover at anchor/rally and still heal ----------
     if (!buddy) {
       var anc = anchor || Game.flags.MedicRally || Game.flags.Rally;
       if (anc) {
         _maybeSay(creep, 'seek', 'MED:seek');
-        moveSmart(creep, (anc.pos || anc), 1);
+        moveSmart(creep, (anc.pos || anc), followMin);
       }
       var invaders = creep.room ? creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep }) : null;
       if (invaders && invaders.length) {
@@ -352,7 +371,7 @@ var roleCombatMedic = {
           injured = lowestInRange((anc.pos || anc), CONFIG.triageRange);
         }
         if (injured) {
-          moveSmart(creep, injured.pos, CONFIG.followRange || 1);
+          moveSmart(creep, injured.pos, followMin);
           if (canHeal && !healedThisTick.v) tryHeal(creep, injured, healedThisTick);
         }
       }
@@ -393,8 +412,8 @@ var roleCombatMedic = {
     }
 
     // ---------- 4) follow buddy with safe spacing ----------
-    var wantRange = CONFIG.followRange;
-    if (!creep.pos.inRangeTo(buddy, wantRange)) {
+    var wantRange = followMin;
+    if (!creep.pos.inRangeTo(buddy, followMax)) {
       moveSmart(creep, buddy.pos, wantRange);
       // heal while approaching
       if (canHeal && !healedThisTick.v) {
@@ -440,7 +459,7 @@ var roleCombatMedic = {
       }
     } else {
       // ---------- 6) fallback: stick to buddy, heal buddy/nearby ----------
-      if (!creep.pos.inRangeTo(buddy, wantRange)) moveSmart(creep, buddy.pos, wantRange);
+      if (!creep.pos.inRangeTo(buddy, followMax)) moveSmart(creep, buddy.pos, wantRange);
       if (canHeal && !healedThisTick.v) {
         if (buddy.hits < buddy.hitsMax) tryHeal(creep, buddy, healedThisTick);
         if (!healedThisTick.v) tryHeal(creep, lowestInRange(creep.pos, 3), healedThisTick);

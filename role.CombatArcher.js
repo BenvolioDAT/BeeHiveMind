@@ -194,19 +194,25 @@ var roleCombatArcher = {
   run: function(creep){
     if (creep.spawning) return;
 
-    var assignedAt = creep.memory.assignedAt;
+    var mem = creep.memory || {};
+    if (!mem.state) mem.state = 'rally';
+    if (!mem.waitUntil) mem.waitUntil = Game.time + (CONFIG.waitTimeout || 25);
+
+    var assignedAt = mem.assignedAt;
     if (assignedAt == null) {
-      creep.memory.assignedAt = Game.time;
+      mem.assignedAt = Game.time;
       assignedAt = Game.time;
     }
     var waited = Game.time - assignedAt;
     var waitTimeout = CONFIG.waitTimeout || 25;
+    var waitUntil = mem.waitUntil || 0;
+    var anchor = (TaskSquad && TaskSquad.getAnchor) ? TaskSquad.getAnchor(creep) : null;
 
     // Optional rally until medic present
     var shouldWait = CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic &&
       BeeToolbox.shouldWaitForMedic(creep);
-    if (shouldWait && waited < waitTimeout){
-      var rf = Game.flags.Rally || Game.flags.MedicRally || (TaskSquad && TaskSquad.getAnchor && TaskSquad.getAnchor(creep));
+    if (shouldWait && Game.time <= waitUntil && waited < waitTimeout){
+      var rf = Game.flags.Rally || Game.flags.MedicRally || anchor;
       if (rf){
         debugSay(creep, "⛺ wait");
         moveSmart(creep, (rf.pos || rf), 0);
@@ -216,18 +222,40 @@ var roleCombatArcher = {
       }
       return;
     }
-    if (!shouldWait){
-      creep.memory.assignedAt = Game.time;
+    if (!shouldWait || Game.time > waitUntil || waited >= waitTimeout){
+      mem.assignedAt = Game.time;
       assignedAt = Game.time;
+    }
+
+    if (Game.time >= waitUntil && mem.state === 'rally') {
+      mem.state = 'advance';
     }
 
     // Acquire shared target, else rally & opportunistic fire
     var target = TaskSquad && TaskSquad.sharedTarget ? TaskSquad.sharedTarget(creep) : null;
+    var waitExpired = Game.time > waitUntil;
+    var rallyPos = anchor || (Game.flags.Rally && Game.flags.Rally.pos) || null;
     if (!target){
-      // Fallback: regroup at anchor and keep pressure with opportunistic shots when no shared target.
-      var anc = (TaskSquad && TaskSquad.getAnchor && TaskSquad.getAnchor(creep)) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
-      if (anc) moveSmart(creep, anc, 0);
+      var visibleHostiles = creep.room ? creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep }) : [];
       shootOpportunistic(creep);
+      if (visibleHostiles && visibleHostiles.length) {
+        if (waitExpired) {
+          if (mem.state !== 'advance') mem.state = 'advance';
+          var chase = creep.pos.findClosestByRange(visibleHostiles);
+          if (chase) moveSmart(creep, chase.pos, CONFIG.desiredRange);
+        }
+      } else {
+        if (waitExpired) {
+          if (mem.state !== 'advance') mem.state = 'advance';
+          var drift = rallyPos;
+          if (!drift && mem.targetRoom) {
+            drift = new RoomPosition(25, 25, mem.targetRoom);
+          }
+          if (drift) moveSmart(creep, drift, 1);
+        } else if (rallyPos) {
+          moveSmart(creep, rallyPos, 0);
+        }
+      }
       return;
     }
 
@@ -264,6 +292,14 @@ var roleCombatArcher = {
     shootPrimary(creep, target);
 
     var range = creep.pos.getRangeTo(target);
+
+    if (range <= 3) {
+      if (mem.state !== 'engage') mem.state = 'engage';
+    } else if (mem.state === 'engage') {
+      mem.state = 'advance';
+    } else if (mem.state === 'rally' && waitExpired) {
+      mem.state = 'advance';
+    }
 
     // Rest a beat after movement to avoid jitter
     if (typeof A.movedAt === 'number' && (Game.time - A.movedAt) < CONFIG.shuffleCooldown){

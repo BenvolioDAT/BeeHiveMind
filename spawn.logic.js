@@ -305,6 +305,19 @@ function copyMemory(source) {
   return target;
 }
 
+// ES5-safe combat squad memory initializer
+function _initSquadMemory(mem, squadId, targetRoom, squadFlag) {
+  if (!mem) mem = {};
+  if (squadId && !mem.squadId) mem.squadId = squadId;
+  if (targetRoom && !mem.targetRoom) mem.targetRoom = targetRoom;
+  if (squadFlag && !mem.squadFlag) mem.squadFlag = squadFlag;
+  if (!mem.assignedAt) mem.assignedAt = Game.time;
+  if (!mem.state) mem.state = 'rally';
+  if (!mem.waitUntil) mem.waitUntil = Game.time + 25;
+  // buddyId / stickTargetId handled by roles post-spawn
+  return mem;
+}
+
 function spawnRole(spawn, roleName, availableEnergy, memory) {
   if (!spawn) return false;
   var canonicalRole = normalizeRole(roleName);
@@ -328,6 +341,14 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   if (!mem.bornRole) mem.bornRole = canonicalRole;
   if (mem.skipTaskMemory) {
     delete mem.skipTaskMemory;
+  }
+  if (canonicalRole === 'CombatMelee' ||
+      canonicalRole === 'CombatMedic' ||
+      canonicalRole === 'CombatArcher') {
+    var sid = mem.squadId || (memory && memory.squadId);
+    var targetRoom = mem.targetRoom || (memory && memory.targetRoom);
+    var squadFlag = mem.squadFlag || (memory && memory.squadFlag);
+    mem = _initSquadMemory(mem, sid, targetRoom, squadFlag);
   }
   var result = spawn.spawnCreep(body, creepName, { memory: mem });
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
