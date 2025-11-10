@@ -79,6 +79,95 @@ function debugRing(target, color, text, radius){
   if (text) R.visual.text(text, p.x, p.y-0.8, { color: color, font: CONFIG.FONT, opacity: 0.95, align:"center" });
 }
 
+var _myNameTick = -1;
+var _myNameCache = null;
+function _myUsername(){
+  if (Game.time === _myNameTick && _myNameCache !== null) return _myNameCache;
+  _myNameTick = Game.time;
+  _myNameCache = null;
+  var k;
+  for (k in Game.spawns){
+    if (!Game.spawns.hasOwnProperty(k)) continue;
+    var s = Game.spawns[k];
+    if (s && s.owner && s.owner.username){
+      _myNameCache = s.owner.username;
+      return _myNameCache;
+    }
+  }
+  for (k in Game.rooms){
+    if (!Game.rooms.hasOwnProperty(k)) continue;
+    var r = Game.rooms[k];
+    if (r && r.controller && r.controller.my && r.controller.owner && r.controller.owner.username){
+      _myNameCache = r.controller.owner.username;
+      return _myNameCache;
+    }
+  }
+  return _myNameCache;
+}
+
+function _roomIsForeign(room){
+  if (!room || !room.controller) return false;
+  var ctrl = room.controller;
+  if (ctrl.my) return false;
+  if (ctrl.owner && ctrl.owner.username && ctrl.owner.username !== 'Invader') return true;
+  if (ctrl.reservation && ctrl.reservation.username){
+    var me = _myUsername();
+    if (ctrl.reservation.username !== 'Invader' && (!me || ctrl.reservation.username !== me)) return true;
+  }
+  return false;
+}
+
+function _maybeSay(creep, msg){
+  if (!creep || !creep.say || !creep.memory) return;
+  var last = creep.memory._mmSayAt || 0;
+  if ((Game.time - last) >= 8){
+    creep.say(msg, true);
+    creep.memory._mmSayAt = Game.time;
+  }
+}
+
+function _logSquadSample(creep, squadId, target, anchor, keySuffix){
+  if (!Memory || !Memory.squads) return;
+  var S = Memory.squads[squadId];
+  if (!S) return;
+  var field = keySuffix ? ('logger_' + keySuffix) : 'logger';
+  if (!S[field] || !Game.creeps[S[field]]) S[field] = creep.name;
+  if (S[field] !== creep.name) return;
+  if (Game.time % 25 !== 0) return;
+  var anchorStr = 'none';
+  if (anchor && anchor.x != null && anchor.y != null && anchor.roomName){
+    anchorStr = anchor.x + ',' + anchor.y + '/' + anchor.roomName;
+  }
+  var targetId = (target && target.id) ? target.id : 'none';
+  console.log('[SquadLog]', squadId, creep.name, (keySuffix || 'melee'), 'target', targetId, 'anchor', anchorStr);
+}
+
+function _fallbackStructureTarget(creep, myName){
+  if (!creep || !creep.room) return null;
+  var room = creep.room;
+  var types = [STRUCTURE_INVADER_CORE, STRUCTURE_TOWER, STRUCTURE_SPAWN];
+  var structures = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){
+    var j;
+    if (!s || !s.hits || s.hits <= 0) return false;
+    if (s.structureType === STRUCTURE_CONTROLLER) return false;
+    if (s.owner && s.owner.username && myName && s.owner.username === myName) return false;
+    for (j = 0; j < types.length; j++){
+      if (s.structureType === types[j]) return true;
+    }
+    return _isInvaderStruct(s);
+  }});
+  if (structures && structures.length) {
+    return creep.pos.findClosestByRange(structures) || structures[0];
+  }
+  var cores = room.find(FIND_STRUCTURES, { filter: function (s){
+    return s && s.structureType === STRUCTURE_INVADER_CORE && s.hits > 0;
+  }});
+  if (cores && cores.length){
+    return creep.pos.findClosestByRange(cores) || cores[0];
+  }
+  return null;
+}
+
 // Movement wrapper (TaskSquad.stepToward > BeeTravel > moveTo) with path preview
 function moveSmart(creep, dest, range){
   var d = _posOf(dest) || dest;
@@ -88,11 +177,6 @@ function moveSmart(creep, dest, range){
   if (TaskSquad && typeof TaskSquad.stepToward === 'function'){
     return TaskSquad.stepToward(creep, d, range);
   }
-  try {
-    if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function'){
-      return BeeToolbox.BeeTravel(creep, d, { range: (range!=null?range:1), reusePath: CONFIG.reusePath });
-    }
-  } catch(e){}
   return creep.moveTo(d, { reusePath: CONFIG.reusePath, maxOps: CONFIG.maxOps });
 }
 
@@ -112,14 +196,18 @@ var roleCombatMelee = {
     }
     var waited = Game.time - assignedAt;
     var waitTimeout = CONFIG.waitTimeout || 25;
+    var anchor = (TaskSquad && TaskSquad.getAnchor) ? TaskSquad.getAnchor(creep) : null;
+    var squadId = (TaskSquad && TaskSquad.getSquadId) ? TaskSquad.getSquadId(creep) : ((creep.memory && creep.memory.squadId) || 'Alpha');
 
     // (0) optional: wait for medic if you want tighter stack
     var shouldWait = CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic &&
       BeeToolbox.shouldWaitForMedic(creep);
     if (shouldWait && waited < waitTimeout) {
-      var rf = Game.flags.Rally || Game.flags.MedicRally || TaskSquad.getAnchor(creep);
+      var rf = Game.flags.Rally || Game.flags.MedicRally || null;
+      if (!rf && anchor) rf = anchor;
       if (rf) moveSmart(creep, rf.pos || rf, 0);
       debugSay(creep, "⏳");
+      _logSquadSample(creep, squadId, null, anchor, 'melee');
       if (CONFIG.DEBUG_LOG && Game.time % 5 === 0) {
         console.log('[CombatMelee] waiting for medic', creep.name, 'in', creep.pos.roomName, 'waited', waited, 'ticks');
       }
@@ -137,6 +225,7 @@ var roleCombatMelee = {
     var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
     if (lowHp || this._inTowerDanger(creep.pos)) {
       debugRing(creep.pos, CONFIG.COLORS.DANGER, "flee", 1.0);
+      _logSquadSample(creep, squadId, null, anchor, 'melee');
       this._flee(creep);
       var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
       if (adjBad && creep.getActiveBodyparts(ATTACK) > 0) {
@@ -153,33 +242,36 @@ var roleCombatMelee = {
         debugLine(creep.pos, hugger.pos, CONFIG.COLORS.ATTACK, "⚔");
         creep.attack(hugger);
       }
+      _logSquadSample(creep, squadId, hugger, anchor, 'melee');
       return;
     }
 
-    // (3) squad shared target (enforce PvE: skip if not Invader-owned/core)
+    // (3) squad shared target with fallbacks for visible threats
     var target = TaskSquad.sharedTarget(creep);
-    if (target && !_isInvaderTarget(target)) target = null;
+    var myName = _myUsername();
+    if (!target && creep.room && !_roomIsForeign(creep.room)) {
+      var hostiles = creep.room.find(FIND_HOSTILE_CREEPS);
+      if (hostiles && hostiles.length) {
+        target = creep.pos.findClosestByRange(hostiles);
+      }
+      if (!target) {
+        target = _fallbackStructureTarget(creep, myName);
+      }
+    }
+
+    if (!anchor && TaskSquad && TaskSquad.getAnchor) anchor = TaskSquad.getAnchor(creep);
+    _logSquadSample(creep, squadId, target, anchor, 'melee');
 
     if (!target) {
-      var hostiles = creep.room ? creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep }) : null;
-      if (hostiles && hostiles.length) {
-        var nearest = creep.pos.findClosestByPath(hostiles) || creep.pos.findClosestByRange(hostiles);
-        if (nearest) {
-          moveSmart(creep, nearest.pos, 1);
-          if (creep.pos.isNearTo(nearest) && creep.getActiveBodyparts(ATTACK) > 0) {
-            debugLine(creep.pos, nearest.pos, CONFIG.COLORS.ATTACK, "⚔");
-            creep.attack(nearest);
-          }
-          return;
-        }
-      }
-      var anc = TaskSquad.getAnchor(creep);
-      if (anc) {
-        debugRing(anc, CONFIG.COLORS.BUDDY, "anchor", 0.8);
-        moveSmart(creep, anc, 1);
+      if (anchor) {
+        debugRing(anchor, CONFIG.COLORS.BUDDY, "anchor", 0.8);
+        _maybeSay(creep, 'MM:seek');
+        moveSmart(creep, anchor, 1);
       }
       return;
     }
+
+    _maybeSay(creep, 'MM:atk');
 
     if (CONFIG.DEBUG_DRAW) debugRing(target, CONFIG.COLORS.TARGET, "target", 0.7);
 

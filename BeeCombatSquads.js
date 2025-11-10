@@ -9,7 +9,7 @@ var TaskSquad = (function () {
   // -----------------------------
   // Tunables
   // -----------------------------
-  var TARGET_STICKY_TICKS = 12; // how long to keep a chosen target before re-eval
+  var TARGET_STICKY_TICKS = 5; // how long to keep a chosen target before re-eval
   var RALLY_FLAG_PREFIX   = 'Squad'; // e.g. "SquadAlpha", "Squad_Beta"
   var MAX_TARGET_RANGE    = 30;
   var ANCHOR_STICKY_TICKS = 75;  // remember last anchor for a little while (cross-room pathing)
@@ -90,6 +90,22 @@ var TaskSquad = (function () {
     }
 
     return false;
+  }
+
+  function _roomIsMineOrReserved(room) {
+    if (!room || !room.controller) return false;
+    var ctrl = room.controller;
+    if (ctrl.my) return true;
+    if (!ctrl.reservation || !ctrl.reservation.username) return false;
+    var me = _myUsername();
+    return !!(me && ctrl.reservation.username === me);
+  }
+
+  function _targetRoomForSquad(id, S) {
+    if (S && S.targetRoom) return S.targetRoom;
+    var anchor = _bindingAnchorFor(id);
+    if (anchor && anchor.roomName) return anchor.roomName;
+    return null;
   }
 
   // -----------------------------
@@ -227,15 +243,26 @@ var TaskSquad = (function () {
     return healer + ranged + melee + tough + hurt + dist;
   }
 
-  function _chooseRoomTarget(me) {
+  function _chooseRoomTarget(me, S) {
     var room = me.room; if (!room) return null;
+    var id = getSquadId(me);
+    var roomName = room.name;
+    var myRoom = _roomIsMineOrReserved(room);
+    var boundRoom = _targetRoomForSquad(id, S);
+    var inBoundRoom = !!(boundRoom && boundRoom === roomName);
 
-    if (_isPlayerControlledRoom(room)) {
+    if (_isPlayerControlledRoom(room) && !myRoom) {
       return null; // PvE acceptance: sharedTarget returns null in player rooms
     }
 
-    // Acceptance: sharedTarget only returns Invader creeps/towers/spawns/cores/structures
-    var hostiles = room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+    var allowAnyHostile = myRoom || inBoundRoom;
+    var myName = _myUsername();
+    var hostiles = room.find(FIND_HOSTILE_CREEPS, { filter: function (h) {
+      if (!h || !h.hits || h.hits <= 0) return false;
+      if (h.owner && h.owner.username && myName && h.owner.username === myName) return false;
+      if (!allowAnyHostile) return _isInvaderCreep(h);
+      return true;
+    }});
     if (hostiles && hostiles.length) {
       var scored = _.map(hostiles, function (h) { return { h: h, s: _scoreHostile(me, h) }; });
       var best = _.min(scored, 's');
@@ -258,6 +285,12 @@ var TaskSquad = (function () {
     if (cores.length) return me.pos.findClosestByRange(cores);
 
     var others = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
+      if (!s || !s.hits || s.hits <= 0) return false;
+      if (s.structureType === STRUCTURE_CONTROLLER) return false;
+      if (allowAnyHostile) {
+        if (s.owner && s.owner.username && myName && s.owner.username === myName) return false;
+        return true;
+      }
       return _isInvaderStruct(s) && s.structureType !== STRUCTURE_TOWER && s.structureType !== STRUCTURE_SPAWN;
     }});
     if (others.length) return me.pos.findClosestByRange(others);
@@ -273,14 +306,14 @@ var TaskSquad = (function () {
       var keep = Game.getObjectById(S.targetId);
       if (_isGood(keep) && creep.pos.getRangeTo(keep) <= MAX_TARGET_RANGE) return keep;
     }
-    var nxt = _chooseRoomTarget(creep);
+    var nxt = _chooseRoomTarget(creep, S);
     if (nxt) { S.targetId = nxt.id; S.targetAt = Game.time; return nxt; }
     S.targetId = null; S.targetAt = Game.time;
     var room = creep.room;
     if (room) {
-      var invaders = room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
-      if (invaders && invaders.length && Game.time % 10 === 0) {
-        console.log('[Squad] null target in', room.name, 'with Invaders present (check filters)');
+      var anyHostiles = room.find(FIND_HOSTILE_CREEPS);
+      if (anyHostiles && anyHostiles.length && Game.time % 5 === 0) {
+        console.log('[Squad]', creep.name, 'null target despite hostiles in', room.name);
       }
     }
     return null;

@@ -224,6 +224,7 @@ var roleCombatArcher = {
     // Acquire shared target, else rally & opportunistic fire
     var target = TaskSquad && TaskSquad.sharedTarget ? TaskSquad.sharedTarget(creep) : null;
     if (!target){
+      // Fallback: regroup at anchor and keep pressure with opportunistic shots when no shared target.
       var anc = (TaskSquad && TaskSquad.getAnchor && TaskSquad.getAnchor(creep)) || (Game.flags.Rally && Game.flags.Rally.pos) || null;
       if (anc) moveSmart(creep, anc, 0);
       shootOpportunistic(creep);
