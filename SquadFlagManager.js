@@ -1,3 +1,19 @@
+/**
+ * SquadFlagManager.js — maintains rally/target flags that drive BeeCombatSquads.
+ *
+ * Combat pipeline placement: Sense → Decide. This module senses threats via room scans
+ * and decides which rooms deserve squad attention by binding Squad* flags accordingly.
+ *
+ * Inputs: live Game.flags, Game.rooms, Game.creeps, configuration constants below, and
+ * Memory.squadFlags/Memory.squads. Outputs: created/removed flags, Memory.squadFlags
+ * updates (rooms + bindings), and anchor breadcrumbs written into Memory.squads for
+ * consumption by BeeCombatSquads and combat roles.
+ *
+ * Collaborations: BeeCombatSquads.js reads Memory.squadFlags.bindings/rooms to compute
+ * anchors; role.CombatArcher.js, role.CombatMelee.js, and role.CombatMedic.js follow
+ * those anchors through BeeCombatSquads.getAnchor(). BeeCombatSquads shared targeting
+ * assumes flags remain stable across ticks.
+ */
 
 var SquadFlagManager = (function () {
 
@@ -37,60 +53,134 @@ var SquadFlagManager = (function () {
     maxFlags: 4
   };
 
+  /**
+   * Memory schema reference:
+   *
+   * Memory.squadFlags = {
+   *   rooms: {
+   *     [roomName]: {
+   *       lastSeen: number,                 // last Game.time tick we had vision
+   *       lastThreatAt: number,             // last tick we detected a threat
+   *       lastPos: { x:number, y:number, roomName:string }|null,
+   *       lastScore: number                 // cached threat score at last scan
+   *     }
+   *   },
+   *   bindings: { [flagName:string]: roomName:string }
+   * }
+   *
+   * Memory.squads[squadId] (populated here when anchors are remembered) mirrors the
+   * structure documented in BeeCombatSquads.js.
+   */
+
   // ------------- Memory bucket -------------
-  // Memory.squadFlags = {
-  //   rooms: {
-  //     [roomName]: {
-  //       lastSeen: <tick we had vision>,
-  //       lastThreatAt: <tick we saw threat>,
-  //       lastPos: {x,y,roomName} // last known threat anchor
-  //     }
-  //   },
-  //   bindings: { 'SquadAlpha': 'W1N1', 'SquadBravo': 'W2N3', ... }
-  // }
+  /**
+   * _mem
+   *
+   * @return {Object} Root Memory.squadFlags object with rooms/bindings maps.
+   * Preconditions: Memory global is available.
+   * Postconditions: Memory.squadFlags.rooms/bindings exist.
+   * Side-effects: Initializes persistent Memory keys when missing.
+   */
   function _mem() {
+    // [1] Ensure root container exists so callers can rely on object structure.
     if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
     if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
     if (!Memory.squadFlags.bindings) Memory.squadFlags.bindings = {};
     return Memory.squadFlags;
   }
 
+  /**
+   * _ensureSquadMem
+   *
+   * @param {string} id Squad identifier derived from flag name.
+   * @return {Object|null} Memory bucket for given squad or null when id invalid.
+   * Preconditions: Memory global available.
+   * Postconditions: Memory.squads[id] initialized with anchor metadata.
+   * Side-effects: Mutates persistent Memory.squads.
+   */
   function _ensureSquadMem(id) {
+    // [1] Validate identifier to avoid polluting Memory with null keys.
     if (!id) return null;
     if (!Memory.squads) Memory.squads = {};
+
+    // [2] Lazily create squad bucket if absent (mirrors BeeCombatSquads defaults).
     if (!Memory.squads[id]) Memory.squads[id] = { targetId: null, targetAt: 0, anchor: null, anchorAt: 0 };
     return Memory.squads[id];
   }
 
+  /**
+   * _squadIdFromFlagName
+   *
+   * @param {string} name Flag name (e.g., "SquadAlpha" or "Squad_Beta").
+   * @return {string|null} Squad identifier extracted from flag naming convention.
+   * Preconditions: name follows Squad* pattern.
+   * Postconditions: none.
+   */
   function _squadIdFromFlagName(name) {
+    // [1] Support both legacy "Squad" and "Squad_" prefixes.
     if (!name) return null;
     if (name.indexOf('Squad_') === 0) return name.substring(6);
     if (name.indexOf('Squad') === 0) return name.substring(5);
     return null;
   }
 
+  /**
+   * _rememberAnchor
+   *
+   * @param {string} flagName Managed flag name.
+   * @param {RoomPosition} pos Position where flag currently resides or is placed.
+   * @return {void}
+   * Preconditions: Valid flagName resolves to a squadId.
+   * Postconditions: Memory.squads[squadId].anchor updated with position + timestamp.
+   * Side-effects: Persists anchor coordinates for BeeCombatSquads.getAnchor().
+   */
   function _rememberAnchor(flagName, pos) {
+    // [1] No position available means we keep previous anchor.
     if (!pos) return;
     var squadId = _squadIdFromFlagName(flagName);
     if (!squadId) return;
+
+    // [2] Acquire squad Memory bucket; bail if initialization failed.
     var bucket = _ensureSquadMem(squadId);
     if (!bucket) return;
+
+    // [3] Serialize RoomPosition for Memory storage and stamp timestamp for freshness.
     bucket.anchor = { x: pos.x, y: pos.y, roomName: pos.roomName };
     bucket.anchor.room = pos.roomName;
     bucket.anchorAt = Game.time;
   }
 
+  /**
+   * _clearAnchor
+   *
+   * @param {string} flagName Managed flag name being removed.
+   * @return {void}
+   * Preconditions: Corresponding squad Memory bucket exists.
+   * Postconditions: anchor cleared so BeeCombatSquads falls back to alternate sources.
+   */
   function _clearAnchor(flagName) {
+    // [1] Translate flagName to squadId and guard against missing Memory bucket.
     var squadId = _squadIdFromFlagName(flagName);
     if (!squadId || !Memory.squads || !Memory.squads[squadId]) return;
+
+    // [2] Clear anchor data and mark timestamp for stale detection.
     Memory.squads[squadId].anchor = null;
     Memory.squads[squadId].anchorAt = Game.time;
   }
 
   // ------------- Helpers -------------
 
-  // Rooms that currently have at least one of YOUR non-scout creeps
+  /**
+   * _roomsWithNonScoutCreeps
+   *
+   * @return {Array<string>} Room names currently containing our non-scout creeps.
+   * Preconditions: Game.creeps populated.
+   * Postconditions: none.
+   * Side-effects: none.
+   * Edge cases: ignores creeps lacking memory or classification.
+   */
   function _roomsWithNonScoutCreeps() {
+    // [1] Build temporary set of room names where allied combat/logistics creeps exist.
     var set = {};
     for (var cname in Game.creeps) {
       var c = Game.creeps[cname];
@@ -100,32 +190,51 @@ var SquadFlagManager = (function () {
       if (tag === 'scout' || tag.indexOf('scout') === 0) continue;
       set[c.pos.roomName] = true;
     }
+
+    // [2] Convert set to array for deterministic downstream iteration.
     var out = [];
     for (var rn in set) out.push(rn);
     return out;
   }
 
-  // Hash mod to spread scans
+  /**
+   * _roomHashMod
+   *
+   * @param {string} roomName Room identifier to hash.
+   * @param {number} mod Modulo base controlling scan staggering.
+   * @return {number} Deterministic hash bucket (0..mod-1).
+   * Preconditions: mod >= 1.
+   */
   function _roomHashMod(roomName, mod) {
+    // [1] A modulo of 1 disables staggering.
     if (mod <= 1) return 0;
+
+    // [2] Simple polynomial hash to distribute rooms evenly across ticks.
     var h = 0, i;
     for (i = 0; i < roomName.length; i++) h = ((h * 31) + roomName.charCodeAt(i)) | 0;
     return Math.abs(h) % mod;
   }
 
-  // PvE-only scoring: never score player structures; only Invader threats.
+  /**
+   * _scoreRoom
+   *
+   * @param {Room} room Visible room to evaluate for Invader threats.
+   * @return {{score:number,pos:RoomPosition|null}} Threat score and representative position.
+   * Preconditions: Caller has vision (room exists in Game.rooms).
+   * Postconditions: none.
+   * Edge cases: gracefully ignores PvP rooms by returning zero score.
+   */
   function _scoreRoom(room) {
+    // [1] Initialize accumulators used to choose anchor location.
     var s = 0;
     var pos = null;
 
-    // --- Hard bail: if this is a player room, do NOT score it (no PvP) ---
+    // [2] Hard bail on PvP rooms: skip rooms owned or reserved by non-Invader players.
     var ctrl = room.controller;
     if (ctrl) {
-      // Owned by someone else (not you), and not the NPC 'Invader' => bail
       if (ctrl.owner && !ctrl.my && ctrl.owner.username !== 'Invader') {
         return { score: 0, pos: null };
       }
-      // Reserved by a player (not Invader) => bail
       if (ctrl.reservation &&
           ctrl.reservation.username &&
           ctrl.reservation.username !== 'Invader') {
@@ -133,7 +242,7 @@ var SquadFlagManager = (function () {
       }
     }
 
-    // --- Score Invader Core (PvE objective) ---
+    // [3] Score Invader cores first; they anchor the threat location.
     var cores = room.find(FIND_STRUCTURES, {
       filter: function (st) {
         return st.structureType === STRUCTURE_INVADER_CORE;
@@ -144,18 +253,18 @@ var SquadFlagManager = (function () {
       if (!pos) pos = cores[0].pos;
     }
 
-    // --- Score only INVADER hostile creeps (avoid PvP creeps) ---
+    // [4] Count Invader creeps only; PvE charter avoids retaliating against players.
     var invaderCreeps = room.find(FIND_HOSTILE_CREEPS, {
       filter: function (c) {
         return c.owner && c.owner.username === 'Invader';
       }
     });
     if (invaderCreeps.length > 0) {
-      s += invaderCreeps.length * CFG.score.invaderCreep; // e.g., +5 each
+      s += invaderCreeps.length * CFG.score.invaderCreep;
       if (!pos) pos = invaderCreeps[0].pos;
     }
 
-    // --- Score only INVADER towers (skip player towers entirely) ---
+    // [5] Score Invader towers to prioritize heavy defenses.
     var invaderTowers = room.find(FIND_HOSTILE_STRUCTURES, {
       filter: function (st) {
         return st.structureType === STRUCTURE_TOWER &&
@@ -163,11 +272,11 @@ var SquadFlagManager = (function () {
       }
     });
     if (invaderTowers.length > 0) {
-      s += invaderTowers.length * CFG.score.hostileTower; // e.g., +10 each
+      s += invaderTowers.length * CFG.score.hostileTower;
       if (!pos) pos = invaderTowers[0].pos;
     }
 
-    // --- Score only INVADER spawns (skip player spawns entirely) ---
+    // [6] Score Invader spawns as secondary objectives.
     var invaderSpawns = room.find(FIND_HOSTILE_STRUCTURES, {
       filter: function (st) {
         return st.structureType === STRUCTURE_SPAWN &&
@@ -175,16 +284,27 @@ var SquadFlagManager = (function () {
       }
     });
     if (invaderSpawns.length > 0) {
-      s += invaderSpawns.length * CFG.score.hostileSpawn; // e.g., +6 each
+      s += invaderSpawns.length * CFG.score.hostileSpawn;
       if (!pos) pos = invaderSpawns[0].pos;
     }
 
-    // Return total threat score and a representative position to drop a Squad* flag near
+    // [7] Return aggregated threat score and fallback position (null when no threats).
     return { score: s, pos: pos };
   }
 
-  // Ensure a flag is at a position (idempotent, slight nudge if tile blocked)
+  /**
+   * _ensureFlagAt
+   *
+   * @param {string} name Flag name to create or reposition.
+   * @param {RoomPosition} pos Desired target position.
+   * @return {void}
+   * Preconditions: pos is within visible room for final placement.
+   * Postconditions: Flag at or near position; Memory anchors updated via _rememberAnchor.
+   * Side-effects: May create/remove flags and mutate Memory.squads anchor data.
+   * Edge cases: Nudges flag around blocked tiles via concentric search.
+   */
   function _ensureFlagAt(name, pos) {
+    // [1] If flag already at correct tile, simply refresh anchor timestamp.
     var f = Game.flags[name];
     if (f) {
       if (f.pos.roomName === pos.roomName && f.pos.x === pos.x && f.pos.y === pos.y) {
@@ -193,10 +313,13 @@ var SquadFlagManager = (function () {
       }
       try { f.remove(); } catch (e) {}
     }
+
+    // [2] Attempt to create flag exactly at requested coordinates (requires vision).
     var rc = pos.roomName && Game.rooms[pos.roomName]
       ? Game.rooms[pos.roomName].createFlag(pos, name)
       : ERR_INVALID_TARGET;
 
+    // [3] When placement fails (tile blocked), spiral outward up to distance 2 looking for free tile.
     if (rc !== OK && Game.rooms[pos.roomName]) {
       var i, dx, dy, x, y;
       for (i = 1; i <= 2; i++) {
@@ -213,23 +336,49 @@ var SquadFlagManager = (function () {
         }
       }
     }
+
+    // [4] Successful placement at original tile updates anchor immediately.
     if (rc === OK) {
       _rememberAnchor(name, pos);
     }
   }
 
+  /**
+   * _removeFlag
+   *
+   * @param {string} name Flag to delete.
+   * @return {void}
+   * Preconditions: none (handles missing flag gracefully).
+   * Postconditions: Flag removed and Memory anchor cleared.
+   * Side-effects: Mutates Game.flags and Memory.squads anchors.
+   */
   function _removeFlag(name) {
+    // [1] Remove live flag when it exists; ignore errors to remain resilient.
     var f = Game.flags[name];
     if (f) { try { f.remove(); } catch (e) {} }
+
+    // [2] Clear anchor so squads fall back to other cues until new flag assigned.
     _clearAnchor(name);
   }
 
   // ------------- Core logic -------------
+
+  /**
+   * ensureSquadFlags — exported function.
+   *
+   * @return {void}
+   * Preconditions: Called every tick (or regularly) after creep/flag updates.
+   * Postconditions: Maintains Memory.squadFlags, binds Squad* flags to active threats,
+   *   updates Memory.squads anchors, and removes stale flags.
+   * Side-effects: Creates/removes flags, writes to Memory.squadFlags and Memory.squads.
+   * Edge cases: Handles vision loss by delaying drops until room observed again.
+   */
   function ensureSquadFlags() {
+    // [1] Acquire Memory bucket and current tick once to share across steps.
     var mem = _mem();
     var tick = Game.time | 0;
 
-    // 1) Scan rooms where we have non-scout creeps (staggered)
+    // [2] Scan rooms where we maintain presence (non-scout creeps) using hash staggering.
     var rooms = _roomsWithNonScoutCreeps();
     for (var r = 0; r < rooms.length; r++) {
       var rn = rooms[r];
@@ -243,18 +392,17 @@ var SquadFlagManager = (function () {
 
       rec.lastSeen = tick;
       rec.lastScore = info.score | 0;
-      if (info.score >= CFG.minThreatScore) {
+      if (info.score >= CFG.minThreatScore && info.pos) {
         rec.lastThreatAt = tick;
         rec.lastPos = { x: info.pos.x, y: info.pos.y, roomName: info.pos.roomName };
       } else {
-        // still keep lastThreatAt; we only drop after dropGrace with vision (handled below)
-        // update lastPos to center if we have nothing better
+        // [2.1] Keep lastThreatAt to allow grace-period retention; seed position with room center when missing.
         if (!rec.lastPos) rec.lastPos = { x: 25, y: 25, roomName: rn };
       }
       mem.rooms[rn] = rec;
     }
 
-    // 2) Maintain existing bindings (flags already assigned to rooms)
+    // [3] Maintain existing bindings to avoid flag flicker.
     var boundNames = {};
     var nameIdx, fname, boundRoom;
 
@@ -270,17 +418,16 @@ var SquadFlagManager = (function () {
       var keep = true;
 
       if (Game.rooms[boundRoom]) {
-        // We have vision: drop only if threat has NOT been seen for > dropGrace
+        // [3.1] With vision, release binding when threat absent beyond dropGrace ticks.
         var lastAt = rrec && rrec.lastThreatAt || 0;
         if ((tick - lastAt) > CFG.dropGrace) {
-          // Confirmed clear long enough -> remove binding + flag
           _removeFlag(fname);
           delete mem.bindings[fname];
           keep = false;
         }
       }
       if (keep) {
-        // Ensure the flag exists and is near the last known threat position (if we have it)
+        // [3.2] Re-plant flag near last known threat position (default to room center).
         var pos = (rrec && rrec.lastPos)
           ? new RoomPosition(rrec.lastPos.x, rrec.lastPos.y, rrec.lastPos.roomName)
           : new RoomPosition(25, 25, boundRoom);
@@ -289,8 +436,7 @@ var SquadFlagManager = (function () {
       }
     }
 
-    // 3) Assign unbound flags to the strongest unbound recent threats
-    // Gather candidate rooms: seen a threat recently (within assignRecentWindow) and not already bound
+    // [4] Assign unbound flags to the strongest recent threats.
     var candidates = [];
     var now = tick;
     for (var rn in mem.rooms) {
@@ -298,25 +444,23 @@ var SquadFlagManager = (function () {
       var rec2 = mem.rooms[rn];
       if (!rec2 || typeof rec2.lastThreatAt !== 'number') continue;
       if ((now - rec2.lastThreatAt) <= CFG.assignRecentWindow) {
-        // Avoid double-binding: if already bound by any flag, skip
         var already = false;
         for (var n2 in mem.bindings) {
           if (mem.bindings[n2] === rn) { already = true; break; }
         }
         if (!already) {
-          // Prefer rooms that were seen more recently; tie-break by lastThreatAt
           candidates.push({ rn: rn, lastSeen: rec2.lastSeen | 0, lastThreatAt: rec2.lastThreatAt | 0 });
         }
       }
     }
 
-    // Sort: newest threat first, then newest vision
+    // [4.1] Prefer the freshest threats; tie-break by most recent vision.
     candidates.sort(function(a,b){
       if (b.lastThreatAt !== a.lastThreatAt) return b.lastThreatAt - a.lastThreatAt;
       return b.lastSeen - a.lastSeen;
     });
 
-    // Assign each unbound flag up to maxFlags
+    // [4.2] Bind available flags in configured order until we run out of threats or names.
     var maxN = Math.min(CFG.maxFlags, CFG.names.length);
     var usedCount = 0;
     for (nameIdx = 0; nameIdx < maxN; nameIdx++) {
@@ -329,7 +473,6 @@ var SquadFlagManager = (function () {
       mem.bindings[fname] = pick.rn;
       usedCount++;
 
-      // Drop it at last known position (or center as fallback)
       var rec3 = mem.rooms[pick.rn];
       var placePos = (rec3 && rec3.lastPos)
         ? new RoomPosition(rec3.lastPos.x, rec3.lastPos.y, rec3.lastPos.roomName)
@@ -338,19 +481,16 @@ var SquadFlagManager = (function () {
       _rememberAnchor(fname, placePos);
     }
 
-    // 4) Cleanup: remove flags beyond managed list or unconfigured names
-    // (Not strictly required if you only use these names.)
+    // [5] Cleanup stray flags that lost bindings or exceed our managed list.
     for (var fName in Game.flags) {
       if (!Game.flags.hasOwnProperty(fName)) continue;
       if (CFG.names.indexOf(fName) === -1) continue; // not ours
-      // If we somehow ended with a flag present without a binding, keep it only if we rebind it now.
       if (!mem.bindings[fName]) {
-        // Unbound and not assigned -> remove to avoid drift
         _removeFlag(fName);
       }
     }
 
-    // Optional: prune ancient room records (keeps Memory tidy)
+    // [6] Prune ancient room records to keep Memory lean.
     for (var k in mem.rooms) {
       if (!mem.rooms.hasOwnProperty(k)) continue;
       if ((tick - (mem.rooms[k].lastSeen | 0)) > 20000) delete mem.rooms[k];
@@ -363,3 +503,18 @@ var SquadFlagManager = (function () {
 })();
 
 module.exports = SquadFlagManager;
+
+/**
+ * Collaboration Map:
+ * - Runs before BeeCombatSquads.getAnchor(), ensuring Memory.squadFlags.bindings points
+ *   to rooms containing active threats and that anchors reflect flag positions.
+ * - Supplies rally data for role.CombatArcher.js, role.CombatMelee.js, and
+ *   role.CombatMedic.js indirectly through BeeCombatSquads shared anchor logic.
+ * - Expects BeeCombatSquads to respect Memory.squadFlags updates and to fall back to
+ *   stored anchors when flags are temporarily missing.
+ * Edge cases noted:
+ * - No vision in target room: bindings preserved until dropGrace expires after regained vision.
+ * - Enemy disappears mid-tick: lastThreatAt retains recent timestamp to avoid premature drop.
+ * - Flag moved manually: ensureSquadFlags re-anchors Memory based on actual flag position.
+ * - Flag deleted externally: _rememberAnchor/_clearAnchor reset Memory and next scan reassigns.
+ */
