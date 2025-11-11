@@ -370,6 +370,56 @@ function pickDeliverTask(creep) {
       return createTask('deliver', bestTower.id, { sink: 'tower' });
     }
   }
+  
+  if (room.storage) {
+    // [1] Gather candidate links near storage (radius 2 is typical; bump to 3 if your layout is spaced)
+    var storagePos = room.storage.pos;
+    var nearbyLinks = storagePos.findInRange(FIND_MY_STRUCTURES, 2, {
+      filter: function (s) {
+        return s.structureType === STRUCTURE_LINK;
+      }
+    });
+
+    // If none are literally adjacent, fall back to "closest link in room" to be safe.
+    if (!nearbyLinks || nearbyLinks.length === 0) {
+      var allLinks = room.find(FIND_MY_STRUCTURES, {
+        filter: function (s) {
+          return s.structureType === STRUCTURE_LINK;
+        }
+      });
+      // Choose the link closest to storage as our hub candidate
+      if (allLinks && allLinks.length) {
+        // If you have BeeSelectors, reuse its range helper for consistency
+        // Otherwise, you could do storagePos.findClosestByRange(allLinks)
+        nearbyLinks = [BeeSelectors.selectClosestByRange(storagePos, allLinks)];
+      }
+    }
+
+    // [2] From the candidates, pick the one closest to the Queen (shortest run)
+    var hubLink = BeeSelectors.selectClosestByRange(creep.pos, nearbyLinks);
+
+    if (hubLink && hubLink.store) {
+      // [3] Compute fill percentage and free space
+      var cap  = hubLink.store.getCapacity(RESOURCE_ENERGY) || 0;
+      var used = hubLink.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
+      var fillPct = cap > 0 ? (used / cap) : 1; // if weird zero-cap, treat as "full" to skip
+      var free = cap - used;
+
+      // [4] Only top-off if below 80% and there is real free capacity beyond any existing reservations
+      if (cap > 0 && fillPct < 0.80 && free > 0) {
+        // Respect your reservation system so multiple Queens don't overfill
+        var reserved = getReserved(hubLink.id) || 0;
+        var availForPlan = free - reserved;
+
+        if (availForPlan > 0) {
+          var planAmount = Math.min(amount, availForPlan);
+          reserveFill(hubLink.id, planAmount);
+          return createTask('deliver', hubLink.id, { sink: 'link_storage' });
+        }
+      }
+    }
+  }
+
 
   if (room.storage) {
     var storeFree = room.storage.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
