@@ -1,4 +1,19 @@
-// role.CombatMedic.js — PvE Medic with Debug_say & Debug_draw instrumentation (ES5-safe)
+/**
+ * role.CombatMedic.js — PvE healer supporting Bee combat squads with triage and kiting.
+ *
+ * Pipeline position: Decide → Act → Move. Medic decides which ally to heal, executes
+ * heal/rangedHeal actions, then repositions relative to its buddy while respecting
+ * threat envelopes.
+ *
+ * Inputs: creep.memory (buddyId, followTarget, stickiness timers), TaskSquad anchors,
+ * BeeToolbox medic wait heuristics, Game flags, hostiles in room. Outputs: heal intents,
+ * follow movement orders, and Memory breadcrumbs (e.g., _medSay_* throttles).
+ *
+ * Collaborations: BeeCombatSquads.js provides anchors and shared target focus; melee and
+ * archers rely on the medic to maintain follow distance, while the medic expects melee to
+ * interpose (see role.CombatMelee.js). SquadFlagManager.js ensures anchors exist when no
+ * buddy is found so medics can rally safely.
+ */
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('BeeCombatSquads');
@@ -98,6 +113,9 @@ function _logSquadSample(creep, squadId, target, anchor, keySuffix){
   console.log('[SquadLog]', squadId, creep.name, (keySuffix || 'medic'), 'target', targetId, 'anchor', anchorStr);
 }
 
+/**
+ * _chooseBuddyFromPool — prioritize buddies based on health ratio and distance.
+ */
 function _chooseBuddyFromPool(creep, pool, respectCap){
   if (!creep || !pool || !pool.length) return null;
   var best = null;
@@ -138,6 +156,9 @@ function _chooseBuddyFromPool(creep, pool, respectCap){
   return best;
 }
 
+/**
+ * _selectBuddy — choose best ally to follow within squad.
+ */
 function _selectBuddy(creep, squadId){
   var room = creep.room;
   if (!room) return null;
@@ -286,6 +307,17 @@ var CombatRoles = { CombatMelee:1, CombatArcher:1, Dismantler:1 };
 var roleCombatMedic = {
   role: 'CombatMedic',
 
+  /**
+   * run — per-tick logic for medics.
+   *
+   * @param {Creep} creep Medic creep.
+   * @return {void}
+   * Preconditions: creep has HEAL parts for meaningful work (gracefully handles zero).
+   * Postconditions: creep.memory.buddyId updated, follow distance maintained, heals cast
+   *   on highest-priority targets, and flee behavior triggered when threatened.
+   * Side-effects: Moves via TaskSquad, calls PathFinder search for flee, updates Memory
+   *   fields (buddyId, buddyAt, followTarget, noBuddyTicks, _medSay_*).
+   */
   run: function (creep) {
     if (creep.spawning) return;
 
@@ -402,7 +434,6 @@ var roleCombatMedic = {
         moveSmart(creep, buddy.pos, 3);
       }
 
-      // heal while fleeing: buddy > anyone in 3 > self
       if (canHeal && !healedThisTick.v) {
         if (buddy.hits < buddy.hitsMax && creep.pos.inRangeTo(buddy, 3)) tryHeal(creep, buddy, healedThisTick);
         if (!healedThisTick.v) tryHeal(creep, lowestInRange(creep.pos, 3), healedThisTick);
@@ -415,18 +446,16 @@ var roleCombatMedic = {
     var wantRange = followMin;
     if (!creep.pos.inRangeTo(buddy, followMax)) {
       moveSmart(creep, buddy.pos, wantRange);
-      // heal while approaching
       if (canHeal && !healedThisTick.v) {
         if (buddy.hits < buddy.hitsMax) tryHeal(creep, buddy, healedThisTick);
         if (!healedThisTick.v) tryHeal(creep, lowestInRange(creep.pos, 3), healedThisTick);
       }
     } else {
-      // avoid standing too close to enemy melee if possible
       var hm = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, {
         filter: function (h){ return _isInvaderCreep(h) && h.getActiveBodyparts(ATTACK)>0 && h.hits>0; }
       });
       if (hm && creep.pos.getRangeTo(hm) < CONFIG.avoidMeleeRange) {
-        var dir = hm.pos.getDirectionTo(creep.pos); // step away
+        var dir = hm.pos.getDirectionTo(creep.pos);
         debugSay(creep, "↩");
         creep.move(dir);
       }
@@ -455,10 +484,9 @@ var roleCombatMedic = {
         }
         var desiredRange = creep.pos.inRangeTo(patient, 1) ? 1 : (creep.pos.inRangeTo(patient, 3) ? 3 : 1);
         moveSmart(creep, patient.pos, desiredRange === 1 ? 1 : 2);
-        tryHeal(creep, patient, healedThisTick); // rangedHeal during approach, heal if adjacent
+        tryHeal(creep, patient, healedThisTick);
       }
     } else {
-      // ---------- 6) fallback: stick to buddy, heal buddy/nearby ----------
       if (!creep.pos.inRangeTo(buddy, followMax)) moveSmart(creep, buddy.pos, wantRange);
       if (canHeal && !healedThisTick.v) {
         if (buddy.hits < buddy.hitsMax) tryHeal(creep, buddy, healedThisTick);
@@ -471,7 +499,6 @@ var roleCombatMedic = {
       tryHeal(creep, creep, healedThisTick);
     }
 
-    // Decor: draw danger aura if near tower zone
     if (CONFIG.DEBUG_DRAW && inTowerDanger(creep.pos)){
       debugRing(creep.pos, CONFIG.COLORS.DANGER, "tower zone", 1.1);
     }
@@ -479,3 +506,19 @@ var roleCombatMedic = {
 };
 
 module.exports = roleCombatMedic;
+
+/**
+ * Collaboration Map:
+ * - BeeCombatSquads.getAnchor() (fed by SquadFlagManager) supplies rally points when medics
+ *   are between buddies, preventing aimless wandering.
+ * - Relies on role.CombatMelee.js to hold formation so medics can maintain followRange;
+ *   medics reciprocate by prioritizing melee/archers based on CombatRoles.
+ * - Expects BeeCombatSquads.sharedTarget() to keep front line predictable, enabling medics
+ *   to pre-position via follow distance.
+ * Edge cases noted:
+ * - No buddy available: medic circles anchor and heals any nearby ally.
+ * - Enemy dies mid-tick: buddy refresh logic selects new target once stickiness expires.
+ * - Wounds healed before action: tryHeal exits early if patient already full.
+ * - Path blocked by towers/ramparts: moveSmart leverages TaskSquad reservations.
+ * - Flag moved while traveling: anchor refresh each tick prevents desync.
+ */

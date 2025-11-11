@@ -1,18 +1,50 @@
-// role.CombatMelee.js — PvE melee with Debug_say & Debug_draw instrumentation (ES5-safe)
-//
-// Additions:
-//  - DEBUG_SAY & DEBUG_DRAW toggles with lightweight HUD
-//  - Path/attack/flee visuals (lines, rings, labels)
-//  - Buddy/anchor annotations while guarding or rallying
-//  - Tower danger rings for fast visual debugging
-//
-// PvE-only acceptance: targets *Invader* creeps/structures (never player assets)
+/**
+ * role.CombatMelee.js — PvE melee vanguard with defensive/escort behaviors for Bee squads.
+ *
+ * Pipeline position: Decide → Act → Move. Melee listens to BeeCombatSquads decisions
+ * (shared targets, anchors), executes close-combat actions, and moves via squad-aware
+ * pathing helpers.
+ *
+ * Inputs: creep.memory (state, wait timers, squadId, stickTargetId, etc.), TaskSquad
+ * sharedTarget/getAnchor, BeeToolbox medic waiting heuristic, Game flags. Outputs:
+ * melee attacks, structure demolition, escort positioning, and healing actions (when
+ * body includes HEAL) along with Memory updates for squad logging.
+ *
+ * Collaborations: BeeCombatSquads.js coordinates movement/targets; SquadFlagManager.js
+ * supplies anchors; role.CombatArcher.js and role.CombatMedic.js depend on melee to hold
+ * front lines, soak damage, and open paths (door bash). This role ensures medics have
+ * cover by interposing and kiting threats away.
+ */
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('BeeCombatSquads');
 
-function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
-function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
+/**
+ * _isInvaderCreep
+ *
+ * @param {Creep} c Candidate hostile.
+ * @return {boolean} True when owned by Invader NPC.
+ */
+function _isInvaderCreep(c) {
+  return !!(c && c.owner && c.owner.username === 'Invader');
+}
+
+/**
+ * _isInvaderStruct
+ *
+ * @param {Structure} s Candidate structure.
+ * @return {boolean} True when owned by Invader NPC.
+ */
+function _isInvaderStruct(s) {
+  return !!(s && s.owner && s.owner.username === 'Invader');
+}
+
+/**
+ * _isInvaderTarget
+ *
+ * @param {RoomObject} t Potential attack target.
+ * @return {boolean} True when target is Invader creep/structure or core.
+ */
 function _isInvaderTarget(t){
   if (!t) return false;
   if (t.owner && t.owner.username) return t.owner.username === 'Invader';
@@ -81,6 +113,11 @@ function debugRing(target, color, text, radius){
 
 var _myNameTick = -1;
 var _myNameCache = null;
+/**
+ * _myUsername — cached lookup of player username.
+ *
+ * @return {string|null} Username of the controlling player.
+ */
 function _myUsername(){
   if (Game.time === _myNameTick && _myNameCache !== null) return _myNameCache;
   _myNameTick = Game.time;
@@ -105,6 +142,12 @@ function _myUsername(){
   return _myNameCache;
 }
 
+/**
+ * _roomIsForeign
+ *
+ * @param {Room} room Room to inspect.
+ * @return {boolean} True when owned/reserved by non-Invader players (PvP zone).
+ */
 function _roomIsForeign(room){
   if (!room || !room.controller) return false;
   var ctrl = room.controller;
@@ -117,6 +160,12 @@ function _roomIsForeign(room){
   return false;
 }
 
+/**
+ * _maybeSay — throttled say helper to avoid spamming HUD bubbles.
+ *
+ * @param {Creep} creep Actor creep.
+ * @param {string} msg Message to display.
+ */
 function _maybeSay(creep, msg){
   if (!creep || !creep.say || !creep.memory) return;
   var last = creep.memory._mmSayAt || 0;
@@ -126,6 +175,15 @@ function _maybeSay(creep, msg){
   }
 }
 
+/**
+ * _logSquadSample — writes periodic logs for debugging squad behavior.
+ *
+ * @param {Creep} creep Actor creep.
+ * @param {string} squadId Squad identifier.
+ * @param {RoomObject|null} target Current target.
+ * @param {RoomPosition|null} anchor Current rally anchor.
+ * @param {string} keySuffix Optional suffix to differentiate roles.
+ */
 function _logSquadSample(creep, squadId, target, anchor, keySuffix){
   if (!Memory || !Memory.squads) return;
   var S = Memory.squads[squadId];
@@ -142,6 +200,13 @@ function _logSquadSample(creep, squadId, target, anchor, keySuffix){
   console.log('[SquadLog]', squadId, creep.name, (keySuffix || 'melee'), 'target', targetId, 'anchor', anchorStr);
 }
 
+/**
+ * _fallbackStructureTarget — choose structures when no invader creeps remain.
+ *
+ * @param {Creep} creep Melee creep.
+ * @param {string} myName Player username to avoid friendly fire.
+ * @return {Structure|null} Invader structure to attack.
+ */
 function _fallbackStructureTarget(creep, myName){
   if (!creep || !creep.room) return null;
   var room = creep.room;
@@ -168,7 +233,14 @@ function _fallbackStructureTarget(creep, myName){
   return null;
 }
 
-// Movement wrapper (TaskSquad.stepToward > BeeTravel > moveTo) with path preview
+/**
+ * moveSmart — wrapper around TaskSquad pathing for consistent squad motion.
+ *
+ * @param {Creep} creep Moving melee creep.
+ * @param {RoomObject|RoomPosition} dest Destination.
+ * @param {number} range Desired stopping range.
+ * @return {number} Movement result code.
+ */
 function moveSmart(creep, dest, range){
   var d = _posOf(dest) || dest;
   if (creep.pos.roomName === d.roomName && creep.pos.getRangeTo(d) > (range||1)){
@@ -186,12 +258,33 @@ function moveSmart(creep, dest, range){
 var roleCombatMelee = {
   role: 'CombatMelee',
 
+  /**
+   * run — main loop for melee combatants.
+   *
+   * @param {Creep} creep Melee creep.
+   * @return {void}
+   * Preconditions: creep assigned to a squad (creep.memory.squadId).
+   * Postconditions: creep.memory.state transitions between rally/advance/engage/retreat,
+   *   stickTargetId maintained for short-lived focus fire, and healing performed when possible.
+   * Side-effects: Moves creep, attacks targets/structures, may heal allies, logs squad data.
+   */
   run: function (creep) {
     if (creep.spawning) return;
 
     var mem = creep.memory || {};
     if (!mem.state) mem.state = 'rally';
     if (!mem.waitUntil) mem.waitUntil = Game.time + (CONFIG.waitTimeout || 25);
+
+    // Memory schema (comment only):
+    // creep.memory = {
+    //   state: 'rally'|'advance'|'engage'|'retreat',
+    //   waitUntil: number,
+    //   assignedAt: number,
+    //   stickTargetId: string|undefined,
+    //   stickTargetAt: number|undefined,
+    //   targetRoom: string|undefined,
+    //   _mmSayAt: number|undefined
+    // }
 
     var assignedAt = mem.assignedAt;
     if (assignedAt == null) {
@@ -204,7 +297,7 @@ var roleCombatMelee = {
     var anchor = (TaskSquad && TaskSquad.getAnchor) ? TaskSquad.getAnchor(creep) : null;
     var squadId = (TaskSquad && TaskSquad.getSquadId) ? TaskSquad.getSquadId(creep) : ((mem.squadId) || 'Alpha');
 
-    // (0) optional: wait for medic if you want tighter stack
+    // [1] Optionally wait for medic support before advancing.
     var shouldWait = CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic &&
       BeeToolbox.shouldWaitForMedic(creep);
     var waiting = false;
@@ -229,10 +322,10 @@ var roleCombatMelee = {
       mem.state = 'advance';
     }
 
-    // quick self/buddy healing if we have HEAL
+    // [2] Self-heal or patch allies when HEAL parts available.
     this._auxHeal(creep);
 
-    // (1) emergency bail if low HP or in tower ring
+    // [3] Emergency retreat when low HP or inside invader tower radius.
     var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
     if (lowHp || this._inTowerDanger(creep.pos)) {
       debugRing(creep.pos, CONFIG.COLORS.DANGER, "flee", 1.0);
@@ -247,7 +340,7 @@ var roleCombatMelee = {
       return;
     }
 
-    // (2) bodyguard: interpose for squishy squadmates
+    // [4] Interpose for vulnerable squadmates (archers, medics, dismantlers).
     if (this._guardSquadmate(creep)) {
       var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
       if (hugger && creep.getActiveBodyparts(ATTACK) > 0) {
@@ -258,7 +351,7 @@ var roleCombatMelee = {
       return;
     }
 
-    // (3) squad shared target with fallbacks for visible threats
+    // [5] Shared target acquisition with sticky focus fallback.
     var stored = null;
     if (mem.stickTargetId) {
       var cache = Game.getObjectById(mem.stickTargetId);
@@ -300,6 +393,7 @@ var roleCombatMelee = {
     if (!anchor && TaskSquad && TaskSquad.getAnchor) anchor = TaskSquad.getAnchor(creep);
     _logSquadSample(creep, squadId, target, anchor, 'melee');
 
+    // [6] No target: regroup at anchor or drift target room.
     if (!target) {
       var waitExpired = Game.time > waitUntil;
       if (anchor) {
@@ -325,7 +419,7 @@ var roleCombatMelee = {
 
     if (CONFIG.DEBUG_DRAW) debugRing(target, CONFIG.COLORS.TARGET, "target", 0.7);
 
-    // Opportunistic pre-retarget to weaklings in 1..2 (actually used now)
+    // [7] Opportunistically retarget weak enemies within 1..2 range to finish them.
     if (Game.time % 3 === 0) {
       var weak = this._weakestIn1to2(creep);
       if (weak && (weak.hits / Math.max(1, weak.hitsMax)) < 0.5) {
@@ -334,10 +428,9 @@ var roleCombatMelee = {
       }
     }
 
-    // (4) approach & strike
+    // [8] Engage target when adjacent; handle rampart cover and micro repositioning.
     if (creep.pos.isNearTo(target)) {
       if (mem.state !== 'engage') mem.state = 'engage';
-      // If target tile is protected by an Invader rampart, hit the cover first (PvE-only)
       var coverList = target.pos.lookFor(LOOK_STRUCTURES);
       var cover = null;
       for (var ci = 0; ci < coverList.length; ci++) {
@@ -353,7 +446,6 @@ var roleCombatMelee = {
         return;
       }
 
-      // Explicit Invader Core handling: stand and swing
       if (target.structureType && target.structureType === STRUCTURE_INVADER_CORE) {
         debugSay(creep, "⚔ core!");
         debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "⚔");
@@ -361,13 +453,11 @@ var roleCombatMelee = {
         return;
       }
 
-      // Normal melee attack (unshielded)
       if (creep.getActiveBodyparts(ATTACK) > 0) {
         debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "⚔");
         creep.attack(target);
       }
 
-      // Micro-step to a safer/better adjacent tile (avoid tower/edges/melee stacks)
       var better = this._bestAdjacentTile(creep, target);
       if (better && (better.x !== creep.pos.x || better.y !== creep.pos.y)) {
         var dir = creep.pos.getDirectionTo(better);
@@ -376,7 +466,7 @@ var roleCombatMelee = {
       return;
     }
 
-    // (5) door bash if a blocking wall/rampart is the nearer path at range 1 (Invader ramparts only)
+    // [9] Door-bash Invader ramparts/walls blocking path.
     if (CONFIG.doorBash) {
       var blocker = this._blockingDoor(creep, target);
       if (blocker && creep.pos.isNearTo(blocker)) {
@@ -389,11 +479,10 @@ var roleCombatMelee = {
       }
     }
 
-    // (6) close in via TaskSquad pathing (polite traffic + swaps)
+    // [10] Close distance politely using TaskSquad movement.
     if (mem.state !== 'engage') mem.state = 'advance';
     moveSmart(creep, target.pos, 1);
 
-    // Opportunistic hit if we brushed into melee with a creep
     var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
     if (adj && creep.getActiveBodyparts(ATTACK) > 0) {
       debugLine(creep.pos, adj.pos, CONFIG.COLORS.ATTACK, "⚔");
@@ -401,7 +490,9 @@ var roleCombatMelee = {
     }
   },
 
-  // --- heal self/squad if possible (no double actions)
+  /**
+   * _auxHeal — heals self or wounded squadmate when HEAL parts available.
+   */
   _auxHeal: function (creep) {
     var healParts = creep.getActiveBodyparts(HEAL);
     if (!healParts) return;
@@ -428,7 +519,9 @@ var roleCombatMelee = {
     }
   },
 
-  // --- interpose for allies (uses TaskSquad.swap + stepToward)
+  /**
+   * _guardSquadmate — move to shield vulnerable allies from melee threats.
+   */
   _guardSquadmate: function (creep) {
     var sid = (creep.memory && creep.memory.squadId) || 'Alpha';
     var threatened = _.filter(Game.creeps, function (ally) {
@@ -447,7 +540,6 @@ var roleCombatMelee = {
     if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "guard", 0.8);
 
     if (creep.pos.isNearTo(buddy)) {
-      // Try a same-squad friendly swap to put melee between buddy and threat
       if (TaskSquad.tryFriendlySwap && TaskSquad.tryFriendlySwap(creep, buddy.pos)) {
         debugSay(creep, "↔");
         return true;
@@ -470,6 +562,9 @@ var roleCombatMelee = {
     return false;
   },
 
+  /**
+   * _inTowerDanger — detect invader tower coverage at a position.
+   */
   _inTowerDanger: function (pos) {
     var room = Game.rooms[pos.roomName]; if (!room) return false;
     var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){
@@ -483,6 +578,9 @@ var roleCombatMelee = {
     return danger;
   },
 
+  /**
+   * _bestAdjacentTile — pick safest adjacent tile while sticking to target.
+   */
   _bestAdjacentTile: function (creep, target) {
     var best = creep.pos, bestScore = 1e9, room = creep.room;
     var threats = room ? room.find(FIND_HOSTILE_CREEPS, {
@@ -498,13 +596,12 @@ var roleCombatMelee = {
       var pos = new RoomPosition(x,y, creep.room.name);
       if (!pos.isNearTo(target)) continue;
 
-      // passability & bonuses
       var look = pos.look();
       var impass=false, onRoad=false, i;
       for (i=0;i<look.length;i++){
         var o=look[i];
         if (o.type===LOOK_TERRAIN && o.terrain==='wall') { impass=true; break; }
-        if (o.type===LOOK_CREEPS) { impass=true; break; } // don't choose an occupied tile
+        if (o.type===LOOK_CREEPS) { impass=true; break; }
         if (o.type===LOOK_STRUCTURES) {
           var st=o.structure.structureType;
           if (st===STRUCTURE_ROAD) onRoad=true;
@@ -514,13 +611,9 @@ var roleCombatMelee = {
       if (impass) continue;
 
       var score=0;
-      // adjacent to melee or ranged threats
       for (i=0;i<threats.length;i++) if (threats[i].pos.getRangeTo(pos)<=1) score+=20;
-      // tower danger ring
       if (this._inTowerDanger(pos)) score+=50;
-      // near-edge penalty (1 and 48 rows/cols)
       if (x<=1 || x>=48 || y<=1 || y>=48) score += CONFIG.edgePenalty;
-      // roads are slightly preferred
       if (onRoad) score-=1;
 
       if (score<bestScore) { bestScore=score; best=pos; }
@@ -532,8 +625,10 @@ var roleCombatMelee = {
     return best;
   },
 
+  /**
+   * _blockingDoor — identify Invader ramparts/walls obstructing target.
+   */
   _blockingDoor: function (creep, target) {
-    // Only walls and INVADER ramparts count as bashable (PvE-only)
     var closeStructs = creep.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) {
       if (s.structureType === STRUCTURE_WALL) return true;
       if (s.structureType === STRUCTURE_RAMPART && _isInvaderStruct(s)) return true;
@@ -548,14 +643,20 @@ var roleCombatMelee = {
     return distThru < distNow ? best : null;
   },
 
+  /**
+   * _weakestIn1to2 — choose lowest effective HP invader within range 2.
+   */
   _weakestIn1to2: function (creep) {
     var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 2, { filter: _isInvaderCreep });
     if (!xs.length) return null;
     return _.min(xs, function (c){ return c.hits / Math.max(1, c.hitsMax); });
   },
 
+  /**
+   * _flee — retreat toward rally or away from closest hostile.
+   */
   _flee: function (creep) {
-    var rally = Game.flags.MedicRally || Game.flags.Rally || TaskSquad.getAnchor(creep);
+    var rally = Game.flags.MedicRally || Game.flags.Rally || (TaskSquad && TaskSquad.getAnchor && TaskSquad.getAnchor(creep));
     if (rally) {
       debugLine(creep.pos, rally.pos || rally, CONFIG.COLORS.FLEE, "flee");
       moveSmart(creep, rally.pos || rally, 1);
@@ -573,3 +674,19 @@ var roleCombatMelee = {
 };
 
 module.exports = roleCombatMelee;
+
+/**
+ * Collaboration Map:
+ * - BeeCombatSquads.sharedTarget() feeds melee focus fire; archers/medics rely on melee to
+ *   lock that target in place using stickTargetId.
+ * - BeeCombatSquads.getAnchor() (backed by SquadFlagManager) provides rally points when
+ *   no threats exist, allowing squads to regroup without drifting.
+ * - role.CombatMedic.js expects melee to signal state transitions (state + _logSquadSample)
+ *   to plan heals; melee simultaneously clears cover so archers maintain line-of-sight.
+ * Edge cases noted:
+ * - No vision in target room: fallbackStructureTarget and anchor drift keep melee busy.
+ * - Enemy dies mid-tick: stickTarget cleared and new target selected next tick.
+ * - Wounds healed before retreat: low HP check re-evaluates each tick.
+ * - Path blocked by ramparts: _blockingDoor and moveSmart coordinate door bashing.
+ * - Squad member death/desync: _guardSquadmate adapts to remaining allies; anchor fallback ensures regroup.
+ */

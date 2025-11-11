@@ -1,12 +1,44 @@
-// role.CombatArcher.js — PvE archer with Debug_say & Debug_draw sprinkles
-// ES5-safe (no const/let/arrows). Uses TaskSquad pathing helpers when available.
+/**
+ * role.CombatArcher.js — PvE ranged damage dealer coordinating inside Bee combat squads.
+ *
+ * Pipeline position: Decide → Act → Move. The archer reads squad intent/anchors from
+ * BeeCombatSquads (Decide), chooses firing tactics (Act), then repositions via
+ * TaskSquad.stepToward or BeeToolbox movement (Move).
+ *
+ * Inputs: creep memory (squadId, state, waitUntil, archer subobject), TaskSquad shared
+ * targets/anchors, BeeToolbox medic wait heuristics, Game flags. Outputs: ranged attack
+ * actions, movement intents, and diagnostic breadcrumbs in creep.memory.archer.
+ *
+ * Collaborations: BeeCombatSquads.js supplies sharedTarget(), stepToward(), and anchors;
+ * SquadFlagManager.js ensures those anchors point to relevant threats; role.CombatMelee.js
+ * and role.CombatMedic.js rely on archers maintaining spacing so medics can heal safely.
+ */
 
 var BeeToolbox = require('BeeToolbox');
 var TaskSquad  = require('BeeCombatSquads');
 
 // ---- PvE-only acceptance: react ONLY to Invader creeps/structures ----
-function _isInvaderCreep(c) { return !!(c && c.owner && c.owner.username === 'Invader'); }
-function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
+/**
+ * _isInvaderCreep
+ *
+ * @param {Creep} c Candidate hostile creep.
+ * @return {boolean} True when owned by Invader NPC.
+ */
+function _isInvaderCreep(c) {
+  // [1] Enforce PvE charter by checking owner username.
+  return !!(c && c.owner && c.owner.username === 'Invader');
+}
+
+/**
+ * _isInvaderStruct
+ *
+ * @param {Structure} s Candidate hostile structure.
+ * @return {boolean} True when owned by Invader NPC.
+ */
+function _isInvaderStruct(s) {
+  // [1] Mirror PvE check for structures.
+  return !!(s && s.owner && s.owner.username === 'Invader');
+}
 
 // ==========================
 // Config
@@ -52,19 +84,67 @@ var CONFIG = {
 // ==========================
 // Mini debug helpers
 // ==========================
-function _posOf(t){ return t && t.pos ? t.pos : t; }
-function _roomOf(p){ return p && Game.rooms[p.roomName]; }
+/**
+ * _posOf
+ *
+ * @param {*} t RoomObject or RoomPosition-like.
+ * @return {RoomPosition|null} Normalized position.
+ */
+function _posOf(t){
+  // [1] Accept both RoomObjects and raw positions.
+  return t && t.pos ? t.pos : t;
+}
 
+/**
+ * _roomOf
+ *
+ * @param {RoomPosition} p Position with roomName.
+ * @return {Room|null} Room object if visible.
+ */
+function _roomOf(p){
+  // [1] Guard against missing vision (returns undefined to caller).
+  return p && Game.rooms[p.roomName];
+}
+
+/**
+ * debugSay
+ *
+ * @param {Creep} creep Actor creep.
+ * @param {string} msg Speech bubble text.
+ * @return {void}
+ */
 function debugSay(creep, msg){
+  // [1] Emit say bubble when debugging enabled to visualize decisions.
   if (CONFIG.DEBUG_SAY && creep && creep.say) creep.say(msg, true);
 }
+
+/**
+ * debugLine
+ *
+ * @param {RoomPosition|RoomObject} from Start point.
+ * @param {RoomPosition|RoomObject} to End point.
+ * @param {string} color Hex color string.
+ * @return {void}
+ */
 function debugLine(from, to, color){
+  // [1] Only draw when debug enabled and both points share a visible room.
   if (!CONFIG.DEBUG_DRAW || !from || !to) return;
   var f=_posOf(from), t=_posOf(to); if(!f||!t||f.roomName!==t.roomName) return;
   var R=_roomOf(f); if(!R||!R.visual) return;
   R.visual.line(f, t, { color: color, width: CONFIG.WIDTH, opacity: CONFIG.OPAC });
 }
+
+/**
+ * debugRing
+ *
+ * @param {RoomObject|RoomPosition} target Center of ring.
+ * @param {string} color Stroke color.
+ * @param {string|null} text Optional label.
+ * @param {number} radius Circle radius.
+ * @return {void}
+ */
 function debugRing(target, color, text, radius){
+  // [1] Render rings only when visuals enabled and room visible.
   if (!CONFIG.DEBUG_DRAW || !target) return;
   var p=_posOf(target); if(!p) return;
   var R=_roomOf(p); if(!R||!R.visual) return;
@@ -72,43 +152,88 @@ function debugRing(target, color, text, radius){
   if (text) R.visual.text(text, p.x, p.y-0.8, { color: color, font: CONFIG.FONT, opacity: 0.95, align:"center" });
 }
 
-// Wrap TaskSquad.stepToward / BeeTravel / moveTo and draw a line
+/**
+ * moveSmart
+ *
+ * @param {Creep} creep Moving creep.
+ * @param {RoomObject|RoomPosition} dest Destination.
+ * @param {number} range Desired stopping distance.
+ * @return {number} Screeps OK/ERR_* code from movement helper.
+ * Preconditions: TaskSquad stepToward or BeeToolbox.BeeTravel may be available.
+ * Postconditions: Movement intent issued; debug path drawn when relevant.
+ */
 function moveSmart(creep, dest, range){
+  // [1] Draw guidance line when moving within visible room.
   var d = _posOf(dest) || dest;
   if (creep.pos.roomName === d.roomName && creep.pos.getRangeTo(d) > (range||1)){
     debugLine(creep.pos, d, CONFIG.COLORS.PATH);
   }
+
+  // [2] Prefer TaskSquad stepToward for reservation-aware movement.
   if (TaskSquad && typeof TaskSquad.stepToward === 'function'){
     return TaskSquad.stepToward(creep, d, range);
   }
+
+  // [3] Fall back to BeeToolbox.BeeTravel (Traveler wrapper) if present.
   try {
     if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function'){
       return BeeToolbox.BeeTravel(creep, d, { range: (range!=null?range:1), reusePath: CONFIG.reusePath });
     }
   } catch(e){}
+
+  // [4] Last resort: native moveTo with configured reuse.
   return creep.moveTo(d, { reusePath: CONFIG.reusePath, maxOps: 2000 });
 }
 
 // ==========================
 // Core helpers
 // ==========================
+/**
+ * inHoldBand
+ *
+ * @param {number} range Current distance to target.
+ * @return {boolean} True when within acceptable standoff band.
+ */
 function inHoldBand(range){
+  // [1] Accept only ranges between desiredRange and desiredRange+holdBand.
   if (range < CONFIG.desiredRange) return false;
   if (range > (CONFIG.desiredRange + CONFIG.holdBand)) return false;
   return true;
 }
+
+/**
+ * threatsInRoom
+ *
+ * @param {Room} room Room to scan.
+ * @return {Array<RoomObject>} Array of invader creeps and towers.
+ */
 function threatsInRoom(room){
+  // [1] Without vision there are no actionable threats.
   if (!room) return [];
+
+  // [2] Collect combat-capable invader creeps.
   var creeps = room.find(FIND_HOSTILE_CREEPS, { filter: function (h){
     return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
   }});
+
+  // [3] Add invader towers which project area denial.
   var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){
     return _isInvaderStruct(s) && s.structureType===STRUCTURE_TOWER;
   }});
   return creeps.concat(towers);
 }
+
+/**
+ * inTowerDanger
+ *
+ * @param {RoomPosition} pos Position to evaluate.
+ * @return {boolean} True when within CONFIG.towerAvoidRadius of invader tower.
+ */
 function inTowerDanger(pos){
+  // [1] Without room vision cannot evaluate danger; assume safe.
   var room = Game.rooms[pos.roomName]; if (!room) return false;
+
+  // [2] Look for invader towers and highlight the danger radius when debugging.
   var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s){ return _isInvaderStruct(s) && s.structureType===STRUCTURE_TOWER; } });
   for (var i=0;i<towers.length;i++){
     if (towers[i].pos.getRangeTo(pos) <= CONFIG.towerAvoidRadius){
@@ -119,9 +244,22 @@ function inTowerDanger(pos){
   return false;
 }
 
-// Flee (PathFinder.flee) with gentle friendly-swap
+/**
+ * fleeFrom
+ *
+ * @param {Creep} creep Archer executing emergency retreat.
+ * @param {Array<RoomObject>} fromThings Threats to flee from.
+ * @param {number} safeRange Range to maintain.
+ * @return {void}
+ * Preconditions: PathFinder available.
+ * Postconditions: Issues move/friendly swap to escape; may attempt reverse fallback.
+ * Side-effects: Uses TaskSquad.tryFriendlySwap if available to avoid blocking allies.
+ */
 function fleeFrom(creep, fromThings, safeRange){
+  // [1] Translate threats into PathFinder goals describing avoidance radius.
   var goals = (fromThings || []).map(function (t){ return { pos: t.pos, range: safeRange }; });
+
+  // [2] Compute flee path using roomCallback to respect terrain and friendly ramparts.
   var res = PathFinder.search(creep.pos, goals, {
     flee: true,
     maxOps: CONFIG.maxOps,
@@ -137,6 +275,7 @@ function fleeFrom(creep, fromThings, safeRange){
     }
   });
 
+  // [3] Follow the first step of the flee path, optionally swapping with allies for smooth retreat.
   if (res && res.path && res.path.length){
     var step = res.path[0];
     if (step){
@@ -149,7 +288,7 @@ function fleeFrom(creep, fromThings, safeRange){
     }
   }
 
-  // emergency reverse if no path returned
+  // [4] Emergency backup plan when PathFinder fails: step directly opposite closest invader.
   var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
   if (bad){
     var dir = creep.pos.getDirectionTo(bad);
@@ -162,22 +301,45 @@ function fleeFrom(creep, fromThings, safeRange){
 // ==========================
 // Shooter policies
 // ==========================
+/**
+ * shootPrimary
+ *
+ * @param {Creep} creep Archer performing attack.
+ * @param {Creep|Structure} target Shared squad target.
+ * @return {void}
+ * Preconditions: target exists and is within vision.
+ * Postconditions: Performs rangedMassAttack when surrounded or rangedAttack otherwise.
+ * Side-effects: Writes debug visuals.
+ */
 function shootPrimary(creep, target){
+  // [1] Evaluate cluster density to decide between mass attack and single target shot.
   var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: _isInvaderCreep });
   if (in3.length >= 3){
     debugSay(creep, "💥 mass");
     creep.rangedMassAttack();
     return;
   }
+
+  // [2] Prefer direct rangedAttack when target within standard range.
   var range = creep.pos.getRangeTo(target);
   if (range <= 3){
     debugLine(creep.pos, target.pos, CONFIG.COLORS.SHOOT, "ranged");
     creep.rangedAttack(target);
     return;
   }
+
+  // [3] Otherwise opportunistically snap-shot closer hostiles.
   shootOpportunistic(creep);
 }
+
+/**
+ * shootOpportunistic
+ *
+ * @param {Creep} creep Archer performing quick shot.
+ * @return {void}
+ */
 function shootOpportunistic(creep){
+  // [1] Acquire closest invader within 3 tiles and fire if available.
   var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
   if (closer && creep.pos.inRangeTo(closer, 3)){
     debugLine(creep.pos, closer.pos, CONFIG.COLORS.SHOOT, "snap");
@@ -191,12 +353,39 @@ function shootOpportunistic(creep){
 var roleCombatArcher = {
   role: 'CombatArcher',
 
+  /**
+   * run — main per-tick behavior for combat archers.
+   *
+   * @param {Creep} creep Archer creep assigned to a squad.
+   * @return {void}
+   * Preconditions:
+   *  - creep.memory.squadId is set (BeeCombatSquads membership).
+   *  - TaskSquad.sharedTarget/getAnchor available (fails gracefully otherwise).
+   * Postconditions:
+   *  - creep.memory.state transitions among 'rally'|'advance'|'engage'.
+   *  - creep.memory.archer stores target tracking data (tX/tY/tR/lastSeen/movedAt).
+   * Side-effects:
+   *  - Issues rangedAttack/rangedMassAttack commands.
+   *  - Moves via TaskSquad or BeeToolbox helpers and may call PathFinder.flee.
+   * Edge cases handled: lack of anchor/target, medic delays, tower danger, low HP retreats.
+   */
   run: function(creep){
+    // [1] Ignore spawn-incomplete creeps; nothing to do yet.
     if (creep.spawning) return;
 
+    // [2] Initialize key memory fields once for deterministic behavior.
     var mem = creep.memory || {};
     if (!mem.state) mem.state = 'rally';
     if (!mem.waitUntil) mem.waitUntil = Game.time + (CONFIG.waitTimeout || 25);
+
+    // Memory schema (comment only):
+    // creep.memory = {
+    //   state: 'rally'|'advance'|'engage',
+    //   waitUntil: number,           // tick until which medic wait applies
+    //   assignedAt: number,          // timestamp of latest wait cycle start
+    //   targetRoom: string|undefined // optional cross-room drift target
+    //   archer: { tX,tY,tR,lastSeen,movedAt } // target tracking breadcrumbs
+    // }
 
     var assignedAt = mem.assignedAt;
     if (assignedAt == null) {
@@ -208,7 +397,7 @@ var roleCombatArcher = {
     var waitUntil = mem.waitUntil || 0;
     var anchor = (TaskSquad && TaskSquad.getAnchor) ? TaskSquad.getAnchor(creep) : null;
 
-    // Optional rally until medic present
+    // [3] Optionally hold position until medic support arrives (BeeToolbox heuristic).
     var shouldWait = CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic &&
       BeeToolbox.shouldWaitForMedic(creep);
     if (shouldWait && Game.time <= waitUntil && waited < waitTimeout){
@@ -227,11 +416,12 @@ var roleCombatArcher = {
       assignedAt = Game.time;
     }
 
+    // [4] After wait window expires, transition from rally to advance.
     if (Game.time >= waitUntil && mem.state === 'rally') {
       mem.state = 'advance';
     }
 
-    // Acquire shared target, else rally & opportunistic fire
+    // [5] Acquire shared squad target; fallback to opportunistic harassment when none.
     var target = TaskSquad && TaskSquad.sharedTarget ? TaskSquad.sharedTarget(creep) : null;
     var waitExpired = Game.time > waitUntil;
     var rallyPos = anchor || (Game.flags.Rally && Game.flags.Rally.pos) || null;
@@ -259,21 +449,21 @@ var roleCombatArcher = {
       return;
     }
 
-    // Draw target ring + desired band
+    // [6] Visualize engagement envelope for debugging.
     if (CONFIG.DEBUG_DRAW){
       debugRing(target, CONFIG.COLORS.TARGET, "target", 0.7);
       debugRing(target, CONFIG.COLORS.HOLD, null, CONFIG.desiredRange);
       debugRing(target, CONFIG.COLORS.HOLD, null, CONFIG.desiredRange + CONFIG.holdBand);
     }
 
-    // Track target motion (anti-dance)
-    var mem = creep.memory; if (!mem.archer) mem.archer = {};
-    var A = mem.archer;
+    // [7] Track target motion to avoid unnecessary repositioning when enemy stationary.
+    var archerMem = creep.memory; if (!archerMem.archer) archerMem.archer = {};
+    var A = archerMem.archer;
     var tpos = target.pos;
     var tMoved = !(A.tX === tpos.x && A.tY === tpos.y && A.tR === tpos.roomName);
     A.tX = tpos.x; A.tY = tpos.y; A.tR = tpos.roomName; A.lastSeen = Game.time;
 
-    // Safety gates
+    // [8] Safety gates: retreat when low HP, melee adjacent, or inside tower kill zone.
     var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
     var dangerAdj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h){
       return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
@@ -288,11 +478,12 @@ var roleCombatArcher = {
       return;
     }
 
-    // Combat before feet
+    // [9] Act before moving to avoid wasting attack windows.
     shootPrimary(creep, target);
 
     var range = creep.pos.getRangeTo(target);
 
+    // [10] Update high-level state machine for visibility in Memory (helps medic syncing).
     if (range <= 3) {
       if (mem.state !== 'engage') mem.state = 'engage';
     } else if (mem.state === 'engage') {
@@ -301,26 +492,25 @@ var roleCombatArcher = {
       mem.state = 'advance';
     }
 
-    // Rest a beat after movement to avoid jitter
+    // [11] Respect shuffle cooldown to avoid oscillation when kiting.
     if (typeof A.movedAt === 'number' && (Game.time - A.movedAt) < CONFIG.shuffleCooldown){
       debugSay(creep, "⏸");
       return;
     }
 
-    // Hold if target steady and we are in comfy band
+    // [12] Maintain standoff band: hold when stable, otherwise adjust distance.
     if (!tMoved && inHoldBand(range)){
       debugSay(creep, "🪨 hold");
       return;
     }
 
-    // If we already have good threats in 3 and are in band, hold too
     var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: _isInvaderCreep });
     if (hostilesIn3 && hostilesIn3.length && inHoldBand(range)){
       debugSay(creep, "🎯 hold");
       return;
     }
 
-    // Hysteresis movement: kite if too close, approach if too far, otherwise hold
+    // [13] Execute hysteresis movement for smooth kiting.
     var moved = false;
     if (range <= CONFIG.kiteIfAtOrBelow){
       debugSay(creep, "↩ kite");
@@ -331,7 +521,7 @@ var roleCombatArcher = {
       moveSmart(creep, target.pos, CONFIG.desiredRange);
       moved = true;
     } else {
-      // in-band and target moved: deliberately do nothing (no orbiting)
+      // [13.1] Intentionally pause to prevent orbiting when within band.
       debugSay(creep, "🤫 stay");
     }
 
@@ -340,3 +530,19 @@ var roleCombatArcher = {
 };
 
 module.exports = roleCombatArcher;
+
+/**
+ * Collaboration Map:
+ * - Relies on BeeCombatSquads.sharedTarget() being evaluated before movement so archers
+ *   and melees focus fire the same enemy.
+ * - Uses BeeCombatSquads.getAnchor() seeded by SquadFlagManager to determine rally points
+ *   when no target is available, ensuring synchronized regroup.
+ * - Assumes role.CombatMedic.js monitors creep.memory.state and archerMem.archer.lastSeen
+ *   to prioritize heals; archer reciprocally kites to keep medic safe.
+ * Edge cases noted:
+ * - No vision in target room: sharedTarget returns null, causing rally drift instead of blind push.
+ * - Enemy dies mid-tick: mem.archer target tracking updates next tick and movement holds.
+ * - Wounds healed before action: state machine still recalibrates via waitExpired logic.
+ * - Path blocked by ally: TaskSquad stepToward/tryFriendlySwap handles swaps, else BeeTravel fallback.
+ * - Flag moved mid-travel: anchor recomputed each tick from BeeCombatSquads.
+ */
