@@ -1,6 +1,7 @@
 'use strict';
 
-var CombatAPI = require('Combat.API');
+var BeeCombatSquads = require('BeeCombatSquads');
+var CombatAPI = BeeCombatSquads.CombatAPI;
 
 var SquadFlagManager = (function () {
   function _isSquadFlag(name) {

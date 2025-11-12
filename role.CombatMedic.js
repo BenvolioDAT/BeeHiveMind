@@ -1,7 +1,8 @@
 'use strict';
 
 var Traveler = require('Traveler');
-var CombatAPI = require('Combat.API');
+var BeeCombatSquads = require('BeeCombatSquads');
+var CombatAPI = BeeCombatSquads.CombatAPI;
 var BeeSelectors = require('BeeSelectors');
 
 function _resolveFlagName(creep) {

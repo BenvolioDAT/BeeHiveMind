@@ -657,7 +657,7 @@ var BeeSelectors = {
     return snap ? snap.controllerLink : null;
   },
 
-  // Generic combat helpers shared by roles/Combat.API (ES5-friendly).
+  // Generic combat helpers shared by roles/BeeCombatSquads CombatAPI (ES5-friendly).
   findClosestByRange: function (origin, objects) {
     if (!origin || !objects || !objects.length) return null;
     var pos = origin.pos ? origin.pos : origin;
