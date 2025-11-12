@@ -52,7 +52,7 @@ try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
  *   _lx/_ly: previous position for stuck detection
  */
 
-var TaskSquad = (function () {
+var BeeCombatSquads = (function () {
   var API = {};
   var _nullTargetLog = {};
 
@@ -1227,7 +1227,7 @@ var TaskSquad = (function () {
   return API;
 })();
 
-module.exports = TaskSquad;
+module.exports = BeeCombatSquads;
 
 /**
  * Collaboration Map:
