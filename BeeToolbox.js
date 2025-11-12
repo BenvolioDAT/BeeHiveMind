@@ -1,17 +1,36 @@
 
 var Traveler = require('Traveler');
 var Logger = require('core.logger');
-var Config = require('core.config');
+var CoreConfig = require('core.config');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+function _norm(name) {
+  if (!name) return '';
+  return String(name).toLowerCase();
+}
+
 var _ALLY_MAP = {};
-var _allyList = Config.ALLY_USERNAMES || [];
+var _allyList = CoreConfig.ALLY_USERNAMES || [];
 for (var _ai = 0; _ai < _allyList.length; _ai++) {
   var _allyName = _allyList[_ai];
   if (typeof _allyName === 'string' && _allyName.length > 0) {
-    _ALLY_MAP[_allyName] = true;
+    _ALLY_MAP[_norm(_allyName)] = true;
   }
+}
+
+function isAlly(username) {
+  var key = _norm(username);
+  if (!key) return false;
+  return _ALLY_MAP[key] === true;
+}
+
+function isNpcHostileOwner(ownerName) {
+  var key = _norm(ownerName);
+  if (!key) return false;
+  if (key === 'invader') return true;
+  if (CoreConfig.TREAT_SOURCE_KEEPERS_AS_PVE && key === 'source keeper') return true;
+  return false;
 }
 
 var _myNameTick = -1;
@@ -47,22 +66,19 @@ function _myUsername() {
 }
 
 function _isAllyUsername(name) {
-  if (!name) return false;
-  if (_ALLY_MAP[name]) return true;
-  return false;
+  return isAlly(name);
 }
 
 function _isFriendlyUsername(name) {
   if (!name) return false;
-  if (_isAllyUsername(name)) return true;
+  if (isAlly(name)) return true;
   var me = _myUsername();
   return !!(me && name === me);
 }
 
 function _isNpcOwner(name) {
   if (!name) return false;
-  if (name === 'Invader') return true;
-  if (Config.TREAT_SOURCE_KEEPERS_AS_PVE && name === 'Source Keeper') return true;
+  if (isNpcHostileOwner(name)) return true;
   return false;
 }
 
@@ -134,20 +150,20 @@ function _canEngageTarget(attacker, target) {
   var npc = _isNpcTarget(target);
   if (npc) {
     if (_isForeignPlayerRoom(room)) {
-      return Config.ALLOW_INVADERS_IN_FOREIGN_ROOMS !== false;
+      return CoreConfig.ALLOW_INVADERS_IN_FOREIGN_ROOMS !== false;
     }
     return true;
   }
 
   var ownerName = target.owner && target.owner.username;
   if (ownerName && !_isFriendlyUsername(ownerName)) {
-    if (Config.ALLOW_PVP === false && !_isMyRoom(room)) {
+    if (CoreConfig.ALLOW_PVP === false && !_isMyRoom(room)) {
       return false;
     }
   }
 
   if (_isForeignPlayerRoom(room)) {
-    return Config.ALLOW_PVP !== false;
+    return CoreConfig.ALLOW_PVP !== false;
   }
 
   return true;
@@ -160,11 +176,14 @@ var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
 
 var BeeToolbox = {
 
+  isAlly: function (name) { return isAlly(name); },
+  
   isAllyUsername: function (name) { return _isAllyUsername(name); },
   isFriendlyUsername: function (name) { return _isFriendlyUsername(name); },
   isAllyObject: function (obj) { return _isAllyObject(obj); },
   isFriendlyObject: function (obj) { return _isFriendlyObject(obj); },
   isNpcOwner: function (name) { return _isNpcOwner(name); },
+  isNpcHostileOwner: function (name) { return isNpcHostileOwner(name); },
   isNpcTarget: function (obj) { return _isNpcTarget(obj); },
   isNpcHostileCreep: function (obj) { return _isNpcCreep(obj); },
   isNpcHostileStruct: function (obj) { return _isNpcStruct(obj); },
@@ -688,68 +707,40 @@ var BeeToolbox = {
 
   // Should an attacker pause to let its medic catch up?
   shouldWaitForMedic: function (attacker) {
-    if (!attacker) return false;
+    if (!attacker || !attacker.memory) return false;
 
-    if (!attacker.memory) attacker.memory = {};
-    var mem = attacker.memory;
-    if (mem.waitTicks === undefined) mem.waitTicks = 0;
-
-    var waitState = mem._waitForMedic;
-    if (!waitState) {
-      waitState = { since: 0, lastCheck: 0 };
-      mem._waitForMedic = waitState;
+    var state = attacker.memory._medicWait;
+    if (!state) {
+      state = { t: 0 };
+      attacker.memory._medicWait = state;
     }
 
-    // find linked medic by role + followTarget
-    var medic = _.find(Game.creeps, function (c) {
-      return c.memory && c.memory.role === 'CombatMedic' && c.memory.followTarget === attacker.id;
-    });
-    if (!medic) {
-      mem.waitTicks = 0;
-      waitState.since = 0;
-      waitState.lastCheck = Game.time;
-      return false;
-    }
-    if (mem.noWaitForMedic) {
-      mem.waitTicks = 0;
-      waitState.since = 0;
-      waitState.lastCheck = Game.time;
-      return false;
-    }
-
-    var nearExit = (attacker.pos.x <= 3 || attacker.pos.x >= 46 || attacker.pos.y <= 3 || attacker.pos.y >= 46);
-    var inRange = attacker.pos.inRangeTo(medic, 2);
-
-    if (!mem.advanceDone && !inRange) {
-      if (!waitState.since || Game.time < waitState.since) {
-        waitState.since = Game.time;
+    var nearExit = (attacker.pos && (attacker.pos.x <= 3 || attacker.pos.y <= 3 ||
+      attacker.pos.x >= 46 || attacker.pos.y >= 46));
+    if (nearExit && attacker.room) {
+      if ((Game.time % 3) === 0) {
+        attacker.moveTo(25, 25, { reusePath: 3 });
       }
-      waitState.lastCheck = Game.time;
-      mem.waitTicks = 2;
+    }
 
-      var elapsed = Game.time - waitState.since;
-      var cap = 12;
-      if (elapsed > cap) {
-        return false;
-      }
+    var hasFollowObj = false;
+    if (attacker.memory.followTarget && typeof Game !== 'undefined' && Game.getObjectById) {
+      hasFollowObj = !!Game.getObjectById(attacker.memory.followTarget);
+    }
 
-      if (nearExit) {
-        var center = new RoomPosition(25, 25, attacker.room.name);
-        var dir = attacker.pos.getDirectionTo(center);
-        attacker.move(dir);
-        attacker.say('🚶 Clear exit');
+    var hasMedicLinked = attacker.memory.followedByMedic === true ||
+      attacker.memory.medicLinked === true ||
+      hasFollowObj;
+
+    if (hasMedicLinked) {
+      state.t = (state.t || 0) + 1;
+      if (state.t <= 12) {
         return true;
       }
-      return true;
     }
 
-    waitState.since = 0;
-    waitState.lastCheck = Game.time;
-
-    if (mem.waitTicks > 0) {
-      mem.waitTicks--;
-      return true;
-    }
+    state.t = 0;
+    attacker.memory._medicWait = state;
     return false;
   },
 

@@ -5,20 +5,29 @@ var LOG_LEVEL = Object.freeze({
   DEBUG: 2,
 });
 
-var ALLY_USERNAMES = Object.freeze([]);
+var CoreConfig = {
+  LOG_LEVEL: LOG_LEVEL,
+  ALLY_USERNAMES: [
+    // 'FriendOne',
+    // 'BuddyTwo'
+  ],
+  ALLOW_PVP: true,
+  ALLOW_INVADERS_IN_FOREIGN_ROOMS: true,
+  TREAT_SOURCE_KEEPERS_AS_PVE: true,
+};
 
-var settings = Object.freeze({
+CoreConfig.settings = Object.freeze({
   logging: Object.freeze({
     /** Default log level applied on boot. */
     defaultLevel: LOG_LEVEL.BASIC,
   }),
   combat: Object.freeze({
     /** Allow combat creeps to engage non-ally players. */
-    ALLOW_PVP: false,
+    ALLOW_PVP: CoreConfig.ALLOW_PVP,
     /** Engage Invader NPCs even inside foreign player rooms. */
-    ALLOW_INVADERS_IN_FOREIGN_ROOMS: true,
+    ALLOW_INVADERS_IN_FOREIGN_ROOMS: CoreConfig.ALLOW_INVADERS_IN_FOREIGN_ROOMS,
     /** Treat Source Keeper NPCs as PvE targets. */
-    TREAT_SOURCE_KEEPERS_AS_PVE: true,
+    TREAT_SOURCE_KEEPERS_AS_PVE: CoreConfig.TREAT_SOURCE_KEEPERS_AS_PVE,
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */
@@ -36,11 +45,4 @@ var settings = Object.freeze({
   }),
 });
 
-module.exports = {
-  LOG_LEVEL: LOG_LEVEL,
-  settings: settings,
-  ALLY_USERNAMES: ALLY_USERNAMES,
-  ALLOW_PVP: settings.combat.ALLOW_PVP,
-  ALLOW_INVADERS_IN_FOREIGN_ROOMS: settings.combat.ALLOW_INVADERS_IN_FOREIGN_ROOMS,
-  TREAT_SOURCE_KEEPERS_AS_PVE: settings.combat.TREAT_SOURCE_KEEPERS_AS_PVE,
-};
+module.exports = CoreConfig;
