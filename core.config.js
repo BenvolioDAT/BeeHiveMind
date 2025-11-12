@@ -8,8 +8,14 @@ var LOG_LEVEL = Object.freeze({
 var CoreConfig = {
   LOG_LEVEL: LOG_LEVEL,
   ALLY_USERNAMES: [
-    // 'FriendOne',
-    // 'BuddyTwo'
+    'walter_bell',
+    'sleek',
+    'haha233jpg',
+    'Court_of_Silver',
+    'chris1',
+    'MoonArtyre',
+    'HerrKai',
+    
   ],
   ALLOW_PVP: true,
   ALLOW_INVADERS_IN_FOREIGN_ROOMS: true,
