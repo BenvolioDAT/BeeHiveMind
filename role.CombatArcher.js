@@ -64,6 +64,9 @@ function _canShootTarget(creep, target){
 
 function _safeRangedAttack(creep, target){
   if (!creep || !target) return ERR_INVALID_TARGET;
+  if (target.owner && target.owner.username && BeeToolbox && BeeToolbox.isAlly && BeeToolbox.isAlly(target.owner.username)) {
+    return ERR_INVALID_TARGET;
+  }
   if (!_canShootTarget(creep, target)) return ERR_INVALID_TARGET;
   return creep.rangedAttack(target);
 }

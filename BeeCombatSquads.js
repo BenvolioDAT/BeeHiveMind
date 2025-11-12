@@ -19,7 +19,7 @@
 
 // PvE-only combat: squads fight Invader threats even in my reserved rooms while avoiding PvP.
 var BeeToolbox; try { BeeToolbox = require('BeeToolbox'); } catch (e) { BeeToolbox = null; }
-var Config; try { Config = require('core.config'); } catch (e3) { Config = { ALLOW_PVP: true, ALLOW_INVADERS_IN_FOREIGN_ROOMS: true }; }
+var CoreConfig; try { CoreConfig = require('core.config'); } catch (e3) { CoreConfig = { ALLOW_PVP: true, ALLOW_INVADERS_IN_FOREIGN_ROOMS: true, TREAT_SOURCE_KEEPERS_AS_PVE: true, ALLY_USERNAMES: [] }; }
 try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
 
 /**
@@ -602,6 +602,72 @@ var BeeCombatSquads = (function () {
     return healer + ranged + melee + tough + hurt + dist;
   }
 
+  function _isValidHostileTarget(obj) {
+    if (!obj || !obj.hits || obj.hits <= 0) return false;
+    var ownerName = obj.owner && obj.owner.username ? obj.owner.username : '';
+
+    if (BeeToolbox && BeeToolbox.isNpcHostileOwner && BeeToolbox.isNpcHostileOwner(ownerName)) {
+      return true;
+    }
+
+    if (BeeToolbox && BeeToolbox.isAlly && BeeToolbox.isAlly(ownerName)) {
+      return false;
+    }
+
+    var myName = _myUsername();
+    if (myName && ownerName && ownerName === myName) {
+      return false;
+    }
+
+    if (!ownerName) {
+      return true;
+    }
+
+    if (BeeToolbox && BeeToolbox.isFriendlyObject && BeeToolbox.isFriendlyObject(obj)) {
+      return false;
+    }
+
+    if (CoreConfig && CoreConfig.ALLOW_PVP === false) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function _foreignRoomGuard(room) {
+    if (!room || !room.controller) return false;
+
+    var ownerName = null;
+    if (room.controller.owner && room.controller.owner.username) {
+      ownerName = room.controller.owner.username;
+    } else if (room.controller.reservation && room.controller.reservation.username) {
+      ownerName = room.controller.reservation.username;
+    }
+
+    if (!ownerName) {
+      return false;
+    }
+
+    if (BeeToolbox && BeeToolbox.isNpcHostileOwner && BeeToolbox.isNpcHostileOwner(ownerName)) {
+      return false;
+    }
+
+    if (BeeToolbox && BeeToolbox.isAlly && BeeToolbox.isAlly(ownerName)) {
+      return 'ally-room';
+    }
+
+    var myName = _myUsername();
+    if (myName && ownerName === myName) {
+      return false;
+    }
+
+    if (CoreConfig && CoreConfig.ALLOW_PVP === false) {
+      return 'pvp-disabled';
+    }
+
+    return false;
+  }
+
   /**
    * _chooseRoomTarget
    *
@@ -625,81 +691,82 @@ var BeeCombatSquads = (function () {
     var inBoundRoom = !!(boundRoom && boundRoom === roomName);
 
     var reason = null;
+    var allowStructTargets = myRoom || inBoundRoom;
 
-    var useToolbox = !!(BeeToolbox && BeeToolbox.canEngageTarget);
-    if (useToolbox && BeeToolbox.isAllyRoom && BeeToolbox.isAllyRoom(room)) {
+    var rawHostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+    var anyHostiles = rawHostiles.length > 0;
+    var validHostiles = [];
+    var skippedFriendly = false;
+    var skippedPvp = false;
+    var npcVisible = false;
+
+    for (var hi = 0; hi < rawHostiles.length; hi++) {
+      var h = rawHostiles[hi];
+      if (!h || !h.hits || h.hits <= 0) continue;
+      var ownerName = h.owner && h.owner.username ? h.owner.username : '';
+      if (BeeToolbox && BeeToolbox.isNpcHostileOwner && BeeToolbox.isNpcHostileOwner(ownerName)) {
+        npcVisible = true;
+      }
+      if (_isValidHostileTarget(h)) {
+        validHostiles.push(h);
+      } else if (BeeToolbox && BeeToolbox.isAlly && BeeToolbox.isAlly(ownerName)) {
+        skippedFriendly = true;
+      } else if (ownerName) {
+        skippedPvp = true;
+      }
+    }
+
+    if (!npcVisible) {
+      var invaderStructs = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
+        return _isInvaderStruct(s);
+      }});
+      if (invaderStructs && invaderStructs.length) {
+        npcVisible = true;
+      } else {
+        var invaderCores = room.find(FIND_STRUCTURES, { filter: function (s) {
+          return s && s.structureType === STRUCTURE_INVADER_CORE && s.hits > 0;
+        }});
+        if (invaderCores && invaderCores.length) {
+          npcVisible = true;
+        }
+      }
+    }
+
+    var guardReason = _foreignRoomGuard(room);
+    if (guardReason === 'pvp-disabled' && npcVisible && CoreConfig && CoreConfig.ALLOW_INVADERS_IN_FOREIGN_ROOMS !== false) {
+      guardReason = false;
+    }
+    if (guardReason) {
       if (outReason) {
-        var seen = room.find(FIND_HOSTILE_CREEPS);
-        outReason.reason = 'ally-room';
-        outReason.anyHostiles = !!(seen && seen.length);
+        outReason.reason = guardReason;
+        outReason.anyHostiles = anyHostiles;
       }
       return null;
     }
 
-    // [3] Determine whether we can engage any hostile or only Invader NPCs.
-    var allowAnyHostile = myRoom || inBoundRoom;
-    var myName = _myUsername();
-
-    var hostiles = room.find(FIND_HOSTILE_CREEPS);
-    var anyHostiles = hostiles && hostiles.length;
-    var validHostiles = [];
-    var skippedFriendly = false;
-    var skippedNpc = false;
-    var skippedPvp = false;
-
-    if (hostiles && hostiles.length) {
-      for (var hi = 0; hi < hostiles.length; hi++) {
-        var h = hostiles[hi];
-        if (!h || !h.hits || h.hits <= 0) continue;
-        if (h.owner && h.owner.username && myName && h.owner.username === myName) {
-          skippedFriendly = true; continue;
-        }
-        if (useToolbox) {
-          if (BeeToolbox.isFriendlyObject && BeeToolbox.isFriendlyObject(h)) {
-            skippedFriendly = true; continue;
-          }
-          if (!BeeToolbox.canEngageTarget(me, h)) {
-            if (BeeToolbox.isNpcHostileCreep && BeeToolbox.isNpcHostileCreep(h)) {
-              skippedNpc = true;
-            } else {
-              skippedPvp = true;
-            }
-            continue;
-          }
-        } else {
-          if (!allowAnyHostile && !_isInvaderCreep(h)) {
-            skippedPvp = true;
-            continue;
-          }
-        }
-        validHostiles.push(h);
-      }
-    }
-
-    // [5] Score and pick best hostile creep when available.
     if (validHostiles.length) {
       var scored = _.map(validHostiles, function (h) { return { h: h, s: _scoreHostile(me, h) }; });
       var best = _.min(scored, 's');
       if (best && best.h) return best.h;
     }
 
-    if (!validHostiles.length) {
-      if (!reason) {
-        if (skippedFriendly) reason = 'friendly-target';
-        else if (skippedNpc) reason = 'npc-blocked';
-        else if (skippedPvp) reason = 'pvp-disabled';
-      }
+    if (!validHostiles.length && anyHostiles) {
+      reason = reason || (skippedFriendly ? 'ally-filtered' : (skippedPvp ? 'pvp-filtered' : 'no-valid-hostiles'));
     }
 
     // [6] Prioritize Invader towers next because they threaten the entire squad.
     var towers = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
-      return _isInvaderStruct(s) && s.structureType === STRUCTURE_TOWER;
+      if (!_isValidHostileTarget(s)) return false;
+      if (!allowStructTargets && !_isInvaderStruct(s)) return false;
+      return s.structureType === STRUCTURE_TOWER;
     }});
     if (towers.length) return me.pos.findClosestByRange(towers);
 
-    // [7] Target Invader spawns when towers are absent to shut down reinforcements.
+    // [7] Target spawns when towers are absent to shut down reinforcements.
     var spawns = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
-      return _isInvaderStruct(s) && s.structureType === STRUCTURE_SPAWN;
+      if (!_isValidHostileTarget(s)) return false;
+      if (!allowStructTargets && !_isInvaderStruct(s)) return false;
+      return s.structureType === STRUCTURE_SPAWN;
     }});
     if (spawns.length) return me.pos.findClosestByRange(spawns);
 
@@ -711,14 +778,13 @@ var BeeCombatSquads = (function () {
 
     // [9] Finally attack other structures when allowed (e.g., in our rooms or bound rooms).
     var others = room.find(FIND_HOSTILE_STRUCTURES, { filter: function (s) {
-      if (!s || !s.hits || s.hits <= 0) return false;
+      if (!_isValidHostileTarget(s)) return false;
       if (s.structureType === STRUCTURE_CONTROLLER) return false;
-      if (allowAnyHostile) {
-        if (s.owner && s.owner.username && myName && s.owner.username === myName) return false;
-        if (BeeToolbox && BeeToolbox.isFriendlyObject && BeeToolbox.isFriendlyObject(s)) return false;
-        return true;
+      if (s.structureType === STRUCTURE_TOWER || s.structureType === STRUCTURE_SPAWN) return false;
+      if (!allowStructTargets) {
+        return _isInvaderStruct(s);
       }
-      return _isInvaderStruct(s) && s.structureType !== STRUCTURE_TOWER && s.structureType !== STRUCTURE_SPAWN;
+      return true;
     }});
     if (others.length) return me.pos.findClosestByRange(others);
 
@@ -803,8 +869,9 @@ var BeeCombatSquads = (function () {
         var msg;
         if (tag === 'ally-room') msg = 'holding fire in ally room';
         else if (tag === 'pvp-disabled') msg = 'PvP disabled for room';
-        else if (tag === 'npc-blocked') msg = 'NPC blocked by room policy';
-        else if (tag === 'friendly-target') msg = 'filtered friendly units';
+        else if (tag === 'ally-filtered') msg = 'filtered allied units';
+        else if (tag === 'pvp-filtered') msg = 'hostiles blocked by PvP policy';
+        else if (tag === 'no-valid-hostiles') msg = 'no valid hostile targets';
         else msg = 'no valid targets';
         console.log('[Squad]', id, 'skipping hostiles in', roomName, '-', msg);
         _nullTargetLog[key] = Game.time;

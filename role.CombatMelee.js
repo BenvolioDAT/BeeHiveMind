@@ -18,6 +18,7 @@
 
 var BeeToolbox = require('BeeToolbox');
 var BeeCombatSquads  = require('BeeCombatSquads');
+var CoreConfig = require('core.config');
 
 /**
  * _isInvaderCreep
@@ -53,6 +54,38 @@ function _isInvaderTarget(t){
   if (t.owner && t.owner.username) return t.owner.username === 'Invader';
   if (t.structureType === STRUCTURE_INVADER_CORE) return true;
   return false;
+}
+
+function _isValidHostileTarget(obj) {
+  if (!obj || !obj.hits || obj.hits <= 0) return false;
+  var ownerName = obj.owner && obj.owner.username ? obj.owner.username : '';
+
+  if (BeeToolbox && BeeToolbox.isNpcHostileOwner && BeeToolbox.isNpcHostileOwner(ownerName)) {
+    return true;
+  }
+
+  if (BeeToolbox && BeeToolbox.isAlly && BeeToolbox.isAlly(ownerName)) {
+    return false;
+  }
+
+  var me = _myUsername();
+  if (me && ownerName && ownerName === me) {
+    return false;
+  }
+
+  if (!ownerName) {
+    return true;
+  }
+
+  if (BeeToolbox && BeeToolbox.isFriendlyObject && BeeToolbox.isFriendlyObject(obj)) {
+    return false;
+  }
+
+  if (CoreConfig && CoreConfig.ALLOW_PVP === false) {
+    return false;
+  }
+
+  return true;
 }
 
 function _isAllyTarget(t){
@@ -402,17 +435,23 @@ var roleCombatMelee = {
       target = BeeCombatSquads.sharedTarget(creep);
     }
 
-    var invaders = null;
     if (!target && creep.room) {
-      invaders = creep.room.find(FIND_HOSTILE_CREEPS, { filter: function (h) {
-        return _canMeleeEngage(creep, h);
-      }});
-      if (invaders && invaders.length) {
-        target = creep.pos.findClosestByRange(invaders);
-        if (target) {
-          mem.stickTargetId = target.id;
-          mem.stickTargetAt = Game.time;
+      var seen = creep.room.find(FIND_HOSTILE_CREEPS);
+      var best = null;
+      var bestRange = 999;
+      for (var si = 0; si < seen.length; si++) {
+        var hostile = seen[si];
+        if (!_isValidHostileTarget(hostile)) continue;
+        var range = creep.pos.getRangeTo(hostile);
+        if (range < bestRange) {
+          bestRange = range;
+          best = hostile;
         }
+      }
+      if (best) {
+        target = best;
+        mem.stickTargetId = best.id;
+        mem.stickTargetAt = Game.time;
       }
     }
     if (!target && creep.room && !_roomIsForeign(creep.room)) {
@@ -422,6 +461,13 @@ var roleCombatMelee = {
     }
 
     if (!anchor && BeeCombatSquads && BeeCombatSquads.getAnchor) anchor = BeeCombatSquads.getAnchor(creep);
+    if (target && target.owner && BeeToolbox && BeeToolbox.isAlly && BeeToolbox.isAlly(target.owner.username)) {
+      target = null;
+      if (mem) {
+        delete mem.stickTargetId;
+        delete mem.stickTargetAt;
+      }
+    }
     _logSquadSample(creep, squadId, target, anchor, 'melee');
 
     // [6] No target: regroup at anchor or drift target room.
