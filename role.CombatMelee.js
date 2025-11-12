@@ -5,7 +5,7 @@
  * (shared targets, anchors), executes close-combat actions, and moves via squad-aware
  * pathing helpers.
  *
- * Inputs: creep.memory (state, wait timers, squadId, stickTargetId, etc.), TaskSquad
+ * Inputs: creep.memory (state, wait timers, squadId, stickTargetId, etc.), BeeCombatSquads
  * sharedTarget/getAnchor, BeeToolbox medic waiting heuristic, Game flags. Outputs:
  * melee attacks, structure demolition, escort positioning, and healing actions (when
  * body includes HEAL) along with Memory updates for squad logging.
@@ -17,7 +17,7 @@
  */
 
 var BeeToolbox = require('BeeToolbox');
-var TaskSquad  = require('BeeCombatSquads');
+var BeeCombatSquads  = require('BeeCombatSquads');
 
 /**
  * _isInvaderCreep
@@ -263,7 +263,7 @@ function _fallbackStructureTarget(creep, myName){
 }
 
 /**
- * moveSmart — wrapper around TaskSquad pathing for consistent squad motion.
+ * moveSmart — wrapper around BeeCombatSquads pathing for consistent squad motion.
  *
  * @param {Creep} creep Moving melee creep.
  * @param {RoomObject|RoomPosition} dest Destination.
@@ -275,8 +275,8 @@ function moveSmart(creep, dest, range){
   if (creep.pos.roomName === d.roomName && creep.pos.getRangeTo(d) > (range||1)){
     debugLine(creep.pos, d, CONFIG.COLORS.PATH);
   }
-  if (TaskSquad && typeof TaskSquad.stepToward === 'function'){
-    return TaskSquad.stepToward(creep, d, range);
+  if (BeeCombatSquads && typeof BeeCombatSquads.stepToward === 'function'){
+    return BeeCombatSquads.stepToward(creep, d, range);
   }
   return creep.moveTo(d, { reusePath: CONFIG.reusePath, maxOps: CONFIG.maxOps });
 }
@@ -323,8 +323,8 @@ var roleCombatMelee = {
     var waitUntil = mem.waitUntil || 0;
     var waited = Game.time - assignedAt;
     var waitTimeout = CONFIG.waitTimeout || 25;
-    var anchor = (TaskSquad && TaskSquad.getAnchor) ? TaskSquad.getAnchor(creep) : null;
-    var squadId = (TaskSquad && TaskSquad.getSquadId) ? TaskSquad.getSquadId(creep) : ((mem.squadId) || 'Alpha');
+    var anchor = (BeeCombatSquads && BeeCombatSquads.getAnchor) ? BeeCombatSquads.getAnchor(creep) : null;
+    var squadId = (BeeCombatSquads && BeeCombatSquads.getSquadId) ? BeeCombatSquads.getSquadId(creep) : ((mem.squadId) || 'Alpha');
 
     // [1] Optionally wait for medic support before advancing.
     var shouldWait = CONFIG.waitForMedic && BeeToolbox && BeeToolbox.shouldWaitForMedic &&
@@ -398,8 +398,8 @@ var roleCombatMelee = {
 
     var target = stored;
     var myName = _myUsername();
-    if (!target && TaskSquad && TaskSquad.sharedTarget) {
-      target = TaskSquad.sharedTarget(creep);
+    if (!target && BeeCombatSquads && BeeCombatSquads.sharedTarget) {
+      target = BeeCombatSquads.sharedTarget(creep);
     }
 
     var invaders = null;
@@ -421,7 +421,7 @@ var roleCombatMelee = {
       }
     }
 
-    if (!anchor && TaskSquad && TaskSquad.getAnchor) anchor = TaskSquad.getAnchor(creep);
+    if (!anchor && BeeCombatSquads && BeeCombatSquads.getAnchor) anchor = BeeCombatSquads.getAnchor(creep);
     _logSquadSample(creep, squadId, target, anchor, 'melee');
 
     // [6] No target: regroup at anchor or drift target room.
@@ -510,7 +510,7 @@ var roleCombatMelee = {
       }
     }
 
-    // [10] Close distance politely using TaskSquad movement.
+    // [10] Close distance politely using BeeCombatSquads movement.
     if (mem.state !== 'engage') mem.state = 'advance';
     moveSmart(creep, target.pos, 1);
 
@@ -571,7 +571,7 @@ var roleCombatMelee = {
     if (CONFIG.DEBUG_DRAW) debugRing(buddy, CONFIG.COLORS.BUDDY, "guard", 0.8);
 
     if (creep.pos.isNearTo(buddy)) {
-      if (TaskSquad.tryFriendlySwap && TaskSquad.tryFriendlySwap(creep, buddy.pos)) {
+      if (BeeCombatSquads.tryFriendlySwap && BeeCombatSquads.tryFriendlySwap(creep, buddy.pos)) {
         debugSay(creep, "↔");
         return true;
       }
@@ -687,7 +687,7 @@ var roleCombatMelee = {
    * _flee — retreat toward rally or away from closest hostile.
    */
   _flee: function (creep) {
-    var rally = Game.flags.MedicRally || Game.flags.Rally || (TaskSquad && TaskSquad.getAnchor && TaskSquad.getAnchor(creep));
+    var rally = Game.flags.MedicRally || Game.flags.Rally || (BeeCombatSquads && BeeCombatSquads.getAnchor && BeeCombatSquads.getAnchor(creep));
     if (rally) {
       debugLine(creep.pos, rally.pos || rally, CONFIG.COLORS.FLEE, "flee");
       moveSmart(creep, rally.pos || rally, 1);
