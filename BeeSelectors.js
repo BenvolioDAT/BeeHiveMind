@@ -655,6 +655,45 @@ var BeeSelectors = {
     // Returns link within 3 tiles of controller (for link manager role).
     var snap = buildSnapshot(room);
     return snap ? snap.controllerLink : null;
+  },
+
+  // Generic combat helpers shared by roles/Combat.API (ES5-friendly).
+  findClosestByRange: function (origin, objects) {
+    if (!origin || !objects || !objects.length) return null;
+    var pos = origin.pos ? origin.pos : origin;
+    if (!pos || pos.x == null) return null;
+    var closest = null;
+    var best = 9999;
+    for (var i = 0; i < objects.length; i++) {
+      var obj = objects[i];
+      if (!obj) continue;
+      var targetPos = obj.pos ? obj.pos : obj;
+      if (!targetPos || targetPos.x == null) continue;
+      var range = pos.getRangeTo(targetPos);
+      if (range < best) {
+        best = range;
+        closest = obj;
+      }
+    }
+    return closest;
+  },
+
+  findWithinRange: function (origin, objects, maxRange) {
+    if (!origin || !objects || !objects.length) return [];
+    var pos = origin.pos ? origin.pos : origin;
+    if (!pos || pos.x == null) return [];
+    var range = (typeof maxRange === 'number') ? maxRange : 1;
+    var matches = [];
+    for (var i = 0; i < objects.length; i++) {
+      var obj = objects[i];
+      if (!obj) continue;
+      var targetPos = obj.pos ? obj.pos : obj;
+      if (!targetPos || targetPos.x == null) continue;
+      if (pos.getRangeTo(targetPos) <= range) {
+        matches.push(obj);
+      }
+    }
+    return matches;
   }
 };
 
