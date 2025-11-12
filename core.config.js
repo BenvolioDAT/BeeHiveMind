@@ -14,7 +14,7 @@ var settings = Object.freeze({
   }),
   combat: Object.freeze({
     /** Allow combat creeps to engage non-ally players. */
-    ALLOW_PVP: true,
+    ALLOW_PVP: false,
     /** Engage Invader NPCs even inside foreign player rooms. */
     ALLOW_INVADERS_IN_FOREIGN_ROOMS: true,
     /** Treat Source Keeper NPCs as PvE targets. */
