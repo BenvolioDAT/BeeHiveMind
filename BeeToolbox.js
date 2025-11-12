@@ -705,44 +705,7 @@ var BeeToolbox = {
     return null;
   },
 
-  // Should an attacker pause to let its medic catch up?
-  shouldWaitForMedic: function (attacker) {
-    if (!attacker || !attacker.memory) return false;
-
-    var state = attacker.memory._medicWait;
-    if (!state) {
-      state = { t: 0 };
-      attacker.memory._medicWait = state;
-    }
-
-    var nearExit = (attacker.pos && (attacker.pos.x <= 3 || attacker.pos.y <= 3 ||
-      attacker.pos.x >= 46 || attacker.pos.y >= 46));
-    if (nearExit && attacker.room) {
-      if ((Game.time % 3) === 0) {
-        attacker.moveTo(25, 25, { reusePath: 3 });
-      }
-    }
-
-    var hasFollowObj = false;
-    if (attacker.memory.followTarget && typeof Game !== 'undefined' && Game.getObjectById) {
-      hasFollowObj = !!Game.getObjectById(attacker.memory.followTarget);
-    }
-
-    var hasMedicLinked = attacker.memory.followedByMedic === true ||
-      attacker.memory.medicLinked === true ||
-      hasFollowObj;
-
-    if (hasMedicLinked) {
-      state.t = (state.t || 0) + 1;
-      if (state.t <= 12) {
-        return true;
-      }
-    }
-
-    state.t = 0;
-    attacker.memory._medicWait = state;
-    return false;
-  },
+  // Combat medic pacing helpers moved into Combat.API/role logic (2024 refactor).
 
   // ---------------------------------------------------------------------------
   // 🚚 MOVEMENT: Traveler wrapper
