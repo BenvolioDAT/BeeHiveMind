@@ -1,11 +1,157 @@
 
 var Traveler = require('Traveler');
 var Logger = require('core.logger');
+var Config = require('core.config');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
-function _isInvaderCreep(obj) { return !!(obj && obj.owner && obj.owner.username === 'Invader'); }
-function _isInvaderStruct(obj) { return !!(obj && obj.owner && obj.owner.username === 'Invader'); }
+var _ALLY_MAP = {};
+var _allyList = Config.ALLY_USERNAMES || [];
+for (var _ai = 0; _ai < _allyList.length; _ai++) {
+  var _allyName = _allyList[_ai];
+  if (typeof _allyName === 'string' && _allyName.length > 0) {
+    _ALLY_MAP[_allyName] = true;
+  }
+}
+
+var _myNameTick = -1;
+var _myNameCache = null;
+
+function _myUsername() {
+  if (!Game) return null;
+  if (_myNameTick === Game.time) return _myNameCache;
+  _myNameTick = Game.time;
+  _myNameCache = null;
+
+  var k;
+  for (k in Game.spawns) {
+    if (!Game.spawns.hasOwnProperty(k)) continue;
+    var s = Game.spawns[k];
+    if (s && s.owner && s.owner.username) {
+      _myNameCache = s.owner.username;
+      return _myNameCache;
+    }
+  }
+
+  for (k in Game.rooms) {
+    if (!Game.rooms.hasOwnProperty(k)) continue;
+    var r = Game.rooms[k];
+    if (!r || !r.controller) continue;
+    if (r.controller.my && r.controller.owner && r.controller.owner.username) {
+      _myNameCache = r.controller.owner.username;
+      return _myNameCache;
+    }
+  }
+
+  return _myNameCache;
+}
+
+function _isAllyUsername(name) {
+  if (!name) return false;
+  if (_ALLY_MAP[name]) return true;
+  return false;
+}
+
+function _isFriendlyUsername(name) {
+  if (!name) return false;
+  if (_isAllyUsername(name)) return true;
+  var me = _myUsername();
+  return !!(me && name === me);
+}
+
+function _isNpcOwner(name) {
+  if (!name) return false;
+  if (name === 'Invader') return true;
+  if (Config.TREAT_SOURCE_KEEPERS_AS_PVE && name === 'Source Keeper') return true;
+  return false;
+}
+
+function _isNpcTarget(obj) {
+  if (!obj) return false;
+  if (obj.owner && obj.owner.username && _isNpcOwner(obj.owner.username)) return true;
+  if (obj.structureType === STRUCTURE_INVADER_CORE) return true;
+  return false;
+}
+
+function _isNpcCreep(obj) { return _isNpcTarget(obj); }
+function _isNpcStruct(obj) { return _isNpcTarget(obj); }
+
+function _isAllyObject(obj) {
+  if (!obj || !obj.owner) return false;
+  return _isAllyUsername(obj.owner.username);
+}
+
+function _isFriendlyObject(obj) {
+  if (!obj || !obj.owner) return false;
+  return _isFriendlyUsername(obj.owner.username);
+}
+
+function _isMyRoom(room) {
+  if (!room || !room.controller) return false;
+  if (room.controller.my) return true;
+  if (!room.controller.reservation || !room.controller.reservation.username) return false;
+  var me = _myUsername();
+  return !!(me && room.controller.reservation.username === me);
+}
+
+function _isAllyRoom(room) {
+  if (!room || !room.controller) return false;
+  if (room.controller.owner && _isAllyUsername(room.controller.owner.username)) return true;
+  if (room.controller.reservation && _isAllyUsername(room.controller.reservation.username)) return true;
+  return false;
+}
+
+function _isForeignPlayerRoom(room) {
+  if (!room || !room.controller) return false;
+  if (room.controller.my) return false;
+  var me = _myUsername();
+  if (room.controller.owner && room.controller.owner.username) {
+    var ownerName = room.controller.owner.username;
+    if (_isNpcOwner(ownerName)) return false;
+    if (me && ownerName === me) return false;
+    return true;
+  }
+  if (room.controller.reservation && room.controller.reservation.username) {
+    var resName = room.controller.reservation.username;
+    if (_isNpcOwner(resName)) return false;
+    if (me && resName === me) return false;
+    return true;
+  }
+  return false;
+}
+
+function _canEngageTarget(attacker, target) {
+  if (!attacker || !target) return false;
+  if (_isFriendlyObject(target)) return false;
+
+  var room = attacker.room;
+  if (!room && target.pos && target.pos.roomName) {
+    room = Game.rooms[target.pos.roomName];
+  }
+  if (!room) return false;
+  if (_isAllyRoom(room)) return false;
+
+  var npc = _isNpcTarget(target);
+  if (npc) {
+    if (_isForeignPlayerRoom(room)) {
+      return Config.ALLOW_INVADERS_IN_FOREIGN_ROOMS !== false;
+    }
+    return true;
+  }
+
+  var ownerName = target.owner && target.owner.username;
+  if (ownerName && !_isFriendlyUsername(ownerName)) {
+    if (Config.ALLOW_PVP === false && !_isMyRoom(room)) {
+      return false;
+    }
+  }
+
+  if (_isForeignPlayerRoom(room)) {
+    return Config.ALLOW_PVP !== false;
+  }
+
+  return true;
+}
 
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
@@ -13,6 +159,20 @@ function _isInvaderStruct(obj) { return !!(obj && obj.owner && obj.owner.usernam
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
 
 var BeeToolbox = {
+
+  isAllyUsername: function (name) { return _isAllyUsername(name); },
+  isFriendlyUsername: function (name) { return _isFriendlyUsername(name); },
+  isAllyObject: function (obj) { return _isAllyObject(obj); },
+  isFriendlyObject: function (obj) { return _isFriendlyObject(obj); },
+  isNpcOwner: function (name) { return _isNpcOwner(name); },
+  isNpcTarget: function (obj) { return _isNpcTarget(obj); },
+  isNpcHostileCreep: function (obj) { return _isNpcCreep(obj); },
+  isNpcHostileStruct: function (obj) { return _isNpcStruct(obj); },
+  isMyRoom: function (room) { return _isMyRoom(room); },
+  isAllyRoom: function (room) { return _isAllyRoom(room); },
+  isForeignPlayerRoom: function (room) { return _isForeignPlayerRoom(room); },
+  canEngageTarget: function (attacker, target) { return _canEngageTarget(attacker, target); },
+  myUsername: function () { return _myUsername(); },
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL
@@ -464,7 +624,7 @@ var BeeToolbox = {
     if (!creep) return null;
 
     // 1) hostile creeps
-    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+    var hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS, { filter: _isNpcCreep });
     if (hostile) return hostile;
 
     // 2) invader core
@@ -483,7 +643,7 @@ var BeeToolbox = {
         for (var j = 0; j < structs.length; j++) {
           var s = structs[j];
           if (s.structureType === STRUCTURE_WALL) return s;
-          if (s.structureType === STRUCTURE_RAMPART && _isInvaderStruct(s)) return s;
+          if (s.structureType === STRUCTURE_RAMPART && _isNpcStruct(s)) return s;
         }
       }
       return null;
@@ -502,7 +662,7 @@ var BeeToolbox = {
     prioTypes[STRUCTURE_EXTENSION] = true;
 
     var prio = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
-      filter: function (s) { return _isInvaderStruct(s) && prioTypes[s.structureType] === true; }
+      filter: function (s) { return _isNpcStruct(s) && prioTypes[s.structureType] === true; }
     });
     if (prio) {
       return firstBarrierOnPath(creep, prio) || prio;
@@ -511,10 +671,10 @@ var BeeToolbox = {
     // 4) any other hostile structure (not controller/walls/closed ramparts)
     var other = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
       filter: function (s) {
-        if (!_isInvaderStruct(s)) return false;
+        if (!_isNpcStruct(s)) return false;
         if (s.structureType === STRUCTURE_CONTROLLER) return false;
         if (s.structureType === STRUCTURE_WALL) return false;
-        if (s.structureType === STRUCTURE_RAMPART && _isInvaderStruct(s)) return false;
+        if (s.structureType === STRUCTURE_RAMPART && _isNpcStruct(s)) return false;
         return true;
       }
     });
@@ -530,19 +690,49 @@ var BeeToolbox = {
   shouldWaitForMedic: function (attacker) {
     if (!attacker) return false;
 
+    if (!attacker.memory) attacker.memory = {};
+    var mem = attacker.memory;
+    if (mem.waitTicks === undefined) mem.waitTicks = 0;
+
+    var waitState = mem._waitForMedic;
+    if (!waitState) {
+      waitState = { since: 0, lastCheck: 0 };
+      mem._waitForMedic = waitState;
+    }
+
     // find linked medic by role + followTarget
     var medic = _.find(Game.creeps, function (c) {
       return c.memory && c.memory.role === 'CombatMedic' && c.memory.followTarget === attacker.id;
     });
-    if (!medic) return false;
-    if (attacker.memory && attacker.memory.noWaitForMedic) return false;
-
-    if (attacker.memory.waitTicks === undefined) attacker.memory.waitTicks = 0;
+    if (!medic) {
+      mem.waitTicks = 0;
+      waitState.since = 0;
+      waitState.lastCheck = Game.time;
+      return false;
+    }
+    if (mem.noWaitForMedic) {
+      mem.waitTicks = 0;
+      waitState.since = 0;
+      waitState.lastCheck = Game.time;
+      return false;
+    }
 
     var nearExit = (attacker.pos.x <= 3 || attacker.pos.x >= 46 || attacker.pos.y <= 3 || attacker.pos.y >= 46);
+    var inRange = attacker.pos.inRangeTo(medic, 2);
 
-    if (!attacker.memory.advanceDone && !attacker.pos.inRangeTo(medic, 2)) {
-      attacker.memory.waitTicks = 2;
+    if (!mem.advanceDone && !inRange) {
+      if (!waitState.since || Game.time < waitState.since) {
+        waitState.since = Game.time;
+      }
+      waitState.lastCheck = Game.time;
+      mem.waitTicks = 2;
+
+      var elapsed = Game.time - waitState.since;
+      var cap = 12;
+      if (elapsed > cap) {
+        return false;
+      }
+
       if (nearExit) {
         var center = new RoomPosition(25, 25, attacker.room.name);
         var dir = attacker.pos.getDirectionTo(center);
@@ -552,8 +742,12 @@ var BeeToolbox = {
       }
       return true;
     }
-    if (attacker.memory.waitTicks > 0) {
-      attacker.memory.waitTicks--;
+
+    waitState.since = 0;
+    waitState.lastCheck = Game.time;
+
+    if (mem.waitTicks > 0) {
+      mem.waitTicks--;
       return true;
     }
     return false;
