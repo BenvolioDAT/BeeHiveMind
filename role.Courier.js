@@ -504,7 +504,7 @@ var roleCourier = {
       // Priority 2: towers (below threshold)
       if (!target) target = _pickTower(creep);
       // Priority 3: storage (last choice)
-      //if (!target) target = _pickStorage(creep);
+      if (!target) target = _pickStorage(creep);
 
       if (!target) {
         var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
