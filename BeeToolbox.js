@@ -707,40 +707,83 @@ var BeeToolbox = {
 
   // Should an attacker pause to let its medic catch up?
   shouldWaitForMedic: function (attacker) {
-    if (!attacker || !attacker.memory) return false;
+    if (!attacker) return false;
 
-    var state = attacker.memory._medicWait;
-    if (!state) {
-      state = { t: 0 };
-      attacker.memory._medicWait = state;
+    if (!attacker.memory) attacker.memory = {};
+    var mem = attacker.memory;
+    if (mem.waitTicks === undefined) mem.waitTicks = 0;
+
+    var waitState = mem._medicWait;
+    if (!waitState || typeof waitState !== 'object') {
+      waitState = { since: 0, lastCheck: 0 };
+      mem._medicWait = waitState;
     }
 
-    var nearExit = (attacker.pos && (attacker.pos.x <= 3 || attacker.pos.y <= 3 ||
-      attacker.pos.x >= 46 || attacker.pos.y >= 46));
-    if (nearExit && attacker.room) {
-      if ((Game.time % 3) === 0) {
-        attacker.moveTo(25, 25, { reusePath: 3 });
+    // locate a linked medic by role + buddy/followTarget assignment
+    var medic = null;
+    if (typeof Game !== 'undefined' && Game.creeps) {
+      var squadId = mem.squadId || 'Alpha';
+      for (var name in Game.creeps) {
+        var c = Game.creeps[name];
+        if (!c || !c.my || !c.memory) continue;
+        var tag = c.memory.role || c.memory.task;
+        if (tag !== 'CombatMedic') continue;
+        if ((c.memory.squadId || 'Alpha') !== squadId) continue;
+        var buddyId = c.memory.buddyId || c.memory.followTarget;
+        if (buddyId !== attacker.id) continue;
+        medic = c;
+        break;
       }
     }
 
-    var hasFollowObj = false;
-    if (attacker.memory.followTarget && typeof Game !== 'undefined' && Game.getObjectById) {
-      hasFollowObj = !!Game.getObjectById(attacker.memory.followTarget);
+    if (!medic) {
+      mem.waitTicks = 0;
+      waitState.since = 0;
+      waitState.lastCheck = Game.time;
+      return false;
     }
 
-    var hasMedicLinked = attacker.memory.followedByMedic === true ||
-      attacker.memory.medicLinked === true ||
-      hasFollowObj;
+    if (mem.noWaitForMedic) {
+      mem.waitTicks = 0;
+      waitState.since = 0;
+      waitState.lastCheck = Game.time;
+      return false;
+    }
 
-    if (hasMedicLinked) {
-      state.t = (state.t || 0) + 1;
-      if (state.t <= 12) {
+    var attackerPos = attacker.pos;
+    var medicPos = medic.pos;
+    var nearExit = attackerPos && (attackerPos.x <= 3 || attackerPos.x >= 46 || attackerPos.y <= 3 || attackerPos.y >= 46);
+    var inRange = attackerPos && medicPos && attackerPos.inRangeTo(medicPos, 2);
+
+    if (!mem.advanceDone && !inRange) {
+      if (!waitState.since || Game.time < waitState.since) {
+        waitState.since = Game.time;
+      }
+      waitState.lastCheck = Game.time;
+      mem.waitTicks = 2;
+
+      var elapsed = Game.time - waitState.since;
+      var cap = 12;
+      if (elapsed > cap) {
+        return false;
+      }
+
+      if (nearExit && attacker.room) {
+        if ((Game.time % 3) === 0) {
+          attacker.moveTo(25, 25, { reusePath: 3 });
+        }
         return true;
       }
+      return true;
     }
 
-    state.t = 0;
-    attacker.memory._medicWait = state;
+    waitState.since = 0;
+    waitState.lastCheck = Game.time;
+
+    if (mem.waitTicks > 0) {
+      mem.waitTicks--;
+      return true;
+    }
     return false;
   },
 
