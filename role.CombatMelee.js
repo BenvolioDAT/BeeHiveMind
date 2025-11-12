@@ -26,6 +26,7 @@ var TaskSquad  = require('BeeCombatSquads');
  * @return {boolean} True when owned by Invader NPC.
  */
 function _isInvaderCreep(c) {
+  if (BeeToolbox && BeeToolbox.isNpcHostileCreep) return BeeToolbox.isNpcHostileCreep(c);
   return !!(c && c.owner && c.owner.username === 'Invader');
 }
 
@@ -36,6 +37,7 @@ function _isInvaderCreep(c) {
  * @return {boolean} True when owned by Invader NPC.
  */
 function _isInvaderStruct(s) {
+  if (BeeToolbox && BeeToolbox.isNpcHostileStruct) return BeeToolbox.isNpcHostileStruct(s);
   return !!(s && s.owner && s.owner.username === 'Invader');
 }
 
@@ -47,9 +49,34 @@ function _isInvaderStruct(s) {
  */
 function _isInvaderTarget(t){
   if (!t) return false;
+  if (BeeToolbox && BeeToolbox.isNpcTarget) return BeeToolbox.isNpcTarget(t);
   if (t.owner && t.owner.username) return t.owner.username === 'Invader';
   if (t.structureType === STRUCTURE_INVADER_CORE) return true;
   return false;
+}
+
+function _isAllyTarget(t){
+  if (!t || !t.owner || !t.owner.username) return false;
+  if (BeeToolbox && BeeToolbox.isFriendlyObject) return BeeToolbox.isFriendlyObject(t);
+  if (BeeToolbox && BeeToolbox.isFriendlyUsername) return BeeToolbox.isFriendlyUsername(t.owner.username);
+  return t.owner.username === _myUsername();
+}
+
+function _canMeleeEngage(creep, target){
+  if (!creep || !target) return false;
+  if (_isAllyTarget(target)) return false;
+  if (BeeToolbox && BeeToolbox.canEngageTarget) return BeeToolbox.canEngageTarget(creep, target);
+  if (_isInvaderTarget(target)) return true;
+  if (target.owner && target.owner.username) {
+    return target.owner.username !== _myUsername();
+  }
+  return true;
+}
+
+function _safeAttack(creep, target){
+  if (!creep || !target) return ERR_INVALID_TARGET;
+  if (!_canMeleeEngage(creep, target)) return ERR_INVALID_TARGET;
+  return creep.attack(target);
 }
 
 // ==========================
@@ -216,6 +243,8 @@ function _fallbackStructureTarget(creep, myName){
     if (!s || !s.hits || s.hits <= 0) return false;
     if (s.structureType === STRUCTURE_CONTROLLER) return false;
     if (s.owner && s.owner.username && myName && s.owner.username === myName) return false;
+    if (BeeToolbox && BeeToolbox.isFriendlyObject && BeeToolbox.isFriendlyObject(s)) return false;
+    if (!_canMeleeEngage(creep, s)) return false;
     for (j = 0; j < types.length; j++){
       if (s.structureType === types[j]) return true;
     }
@@ -332,20 +361,20 @@ var roleCombatMelee = {
       _logSquadSample(creep, squadId, null, anchor, 'melee');
       if (mem.state !== 'retreat') mem.state = 'retreat';
       this._flee(creep);
-      var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
+      var adjBad = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h) { return _canMeleeEngage(creep, h); } })[0];
       if (adjBad && creep.getActiveBodyparts(ATTACK) > 0) {
         debugLine(creep.pos, adjBad.pos, CONFIG.COLORS.ATTACK, "⚔");
-        creep.attack(adjBad);
+        _safeAttack(creep, adjBad);
       }
       return;
     }
 
     // [4] Interpose for vulnerable squadmates (archers, medics, dismantlers).
     if (this._guardSquadmate(creep)) {
-      var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
+      var hugger = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h) { return _canMeleeEngage(creep, h); } })[0];
       if (hugger && creep.getActiveBodyparts(ATTACK) > 0) {
         debugLine(creep.pos, hugger.pos, CONFIG.COLORS.ATTACK, "⚔");
-        creep.attack(hugger);
+        _safeAttack(creep, hugger);
       }
       _logSquadSample(creep, squadId, hugger, anchor, 'melee');
       return;
@@ -375,7 +404,9 @@ var roleCombatMelee = {
 
     var invaders = null;
     if (!target && creep.room) {
-      invaders = creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+      invaders = creep.room.find(FIND_HOSTILE_CREEPS, { filter: function (h) {
+        return _canMeleeEngage(creep, h);
+      }});
       if (invaders && invaders.length) {
         target = creep.pos.findClosestByRange(invaders);
         if (target) {
@@ -442,20 +473,20 @@ var roleCombatMelee = {
       if (cover && creep.getActiveBodyparts(ATTACK) > 0) {
         debugLine(creep.pos, cover.pos, CONFIG.COLORS.COVER, "🛡");
         debugSay(creep, "🔨");
-        creep.attack(cover);
+        _safeAttack(creep, cover);
         return;
       }
 
       if (target.structureType && target.structureType === STRUCTURE_INVADER_CORE) {
         debugSay(creep, "⚔ core!");
         debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "⚔");
-        if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
+        if (creep.getActiveBodyparts(ATTACK) > 0) _safeAttack(creep, target);
         return;
       }
 
       if (creep.getActiveBodyparts(ATTACK) > 0) {
         debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "⚔");
-        creep.attack(target);
+        _safeAttack(creep, target);
       }
 
       var better = this._bestAdjacentTile(creep, target);
@@ -473,7 +504,7 @@ var roleCombatMelee = {
         if (creep.getActiveBodyparts(ATTACK) > 0) {
           debugSay(creep, "🧱");
           debugLine(creep.pos, blocker.pos, CONFIG.COLORS.COVER, "bash");
-          creep.attack(blocker);
+          _safeAttack(creep, blocker);
         }
         return;
       }
@@ -483,10 +514,10 @@ var roleCombatMelee = {
     if (mem.state !== 'engage') mem.state = 'advance';
     moveSmart(creep, target.pos, 1);
 
-    var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: _isInvaderCreep })[0];
+    var adj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h) { return _canMeleeEngage(creep, h); } })[0];
     if (adj && creep.getActiveBodyparts(ATTACK) > 0) {
       debugLine(creep.pos, adj.pos, CONFIG.COLORS.ATTACK, "⚔");
-      creep.attack(adj);
+      _safeAttack(creep, adj);
     }
   },
 
@@ -529,7 +560,7 @@ var roleCombatMelee = {
       var role = ally.memory.task || ally.memory.role || '';
       if (role !== 'CombatArcher' && role !== 'CombatMedic' && role !== 'Dismantler') return false;
       return ally.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {
-        filter: function (h){ return _isInvaderCreep(h) && h.getActiveBodyparts(ATTACK) > 0; }
+        filter: function (h){ return _canMeleeEngage(creep, h) && h.getActiveBodyparts(ATTACK) > 0; }
       }).length > 0;
     });
 
@@ -545,7 +576,7 @@ var roleCombatMelee = {
         return true;
       }
 
-      var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {filter: function (h){return _isInvaderCreep(h) && h.getActiveBodyparts(ATTACK)>0;}})[0];
+      var bad = buddy.pos.findInRange(FIND_HOSTILE_CREEPS, 1, {filter: function (h){return _canMeleeEngage(creep, h) && h.getActiveBodyparts(ATTACK)>0;}})[0];
       if (bad) {
         var best = this._bestAdjacentTile(creep, bad);
         if (best && creep.pos.getRangeTo(best) === 1) {
@@ -585,7 +616,7 @@ var roleCombatMelee = {
     var best = creep.pos, bestScore = 1e9, room = creep.room;
     var threats = room ? room.find(FIND_HOSTILE_CREEPS, {
       filter: function (h){
-        return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0) && h.hits>0;
+        return _canMeleeEngage(creep, h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0) && h.hits>0;
       }
     }) : [];
 
@@ -647,7 +678,7 @@ var roleCombatMelee = {
    * _weakestIn1to2 — choose lowest effective HP invader within range 2.
    */
   _weakestIn1to2: function (creep) {
-    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 2, { filter: _isInvaderCreep });
+    var xs = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 2, { filter: function (h) { return _canMeleeEngage(creep, h); } });
     if (!xs.length) return null;
     return _.min(xs, function (c){ return c.hits / Math.max(1, c.hitsMax); });
   },
@@ -661,7 +692,7 @@ var roleCombatMelee = {
       debugLine(creep.pos, rally.pos || rally, CONFIG.COLORS.FLEE, "flee");
       moveSmart(creep, rally.pos || rally, 1);
     } else {
-      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+      var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: function (h) { return _canMeleeEngage(creep, h); } });
       if (bad) {
         var dir = creep.pos.getDirectionTo(bad);
         var zero = (dir - 1 + 8) % 8;

@@ -26,6 +26,7 @@ var TaskSquad  = require('BeeCombatSquads');
  */
 function _isInvaderCreep(c) {
   // [1] Enforce PvE charter by checking owner username.
+  if (BeeToolbox && BeeToolbox.isNpcHostileCreep) return BeeToolbox.isNpcHostileCreep(c);
   return !!(c && c.owner && c.owner.username === 'Invader');
 }
 
@@ -37,7 +38,34 @@ function _isInvaderCreep(c) {
  */
 function _isInvaderStruct(s) {
   // [1] Mirror PvE check for structures.
+  if (BeeToolbox && BeeToolbox.isNpcHostileStruct) return BeeToolbox.isNpcHostileStruct(s);
   return !!(s && s.owner && s.owner.username === 'Invader');
+}
+
+function _isFriendlyTarget(t){
+  if (!t || !t.owner || !t.owner.username) return false;
+  if (BeeToolbox && BeeToolbox.isFriendlyObject) return BeeToolbox.isFriendlyObject(t);
+  if (BeeToolbox && BeeToolbox.isFriendlyUsername) return BeeToolbox.isFriendlyUsername(t.owner.username);
+  return false;
+}
+
+function _canShootTarget(creep, target){
+  if (!creep || !target) return false;
+  if (_isFriendlyTarget(target)) return false;
+  if (BeeToolbox && BeeToolbox.canEngageTarget) return BeeToolbox.canEngageTarget(creep, target);
+  if (_isInvaderCreep(target) || _isInvaderStruct(target)) return true;
+  if (target.owner && target.owner.username) {
+    if (BeeToolbox && BeeToolbox.isFriendlyUsername) {
+      return !BeeToolbox.isFriendlyUsername(target.owner.username);
+    }
+  }
+  return true;
+}
+
+function _safeRangedAttack(creep, target){
+  if (!creep || !target) return ERR_INVALID_TARGET;
+  if (!_canShootTarget(creep, target)) return ERR_INVALID_TARGET;
+  return creep.rangedAttack(target);
 }
 
 // ==========================
@@ -213,7 +241,7 @@ function threatsInRoom(room){
 
   // [2] Collect combat-capable invader creeps.
   var creeps = room.find(FIND_HOSTILE_CREEPS, { filter: function (h){
-    return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
+    return _canShootTarget({ room: room }, h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
   }});
 
   // [3] Add invader towers which project area denial.
@@ -289,7 +317,7 @@ function fleeFrom(creep, fromThings, safeRange){
   }
 
   // [4] Emergency backup plan when PathFinder fails: step directly opposite closest invader.
-  var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+  var bad = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: function (h) { return _canShootTarget(creep, h); } });
   if (bad){
     var dir = creep.pos.getDirectionTo(bad);
     var zero = (dir - 1 + 8) % 8;
@@ -313,7 +341,7 @@ function fleeFrom(creep, fromThings, safeRange){
  */
 function shootPrimary(creep, target){
   // [1] Evaluate cluster density to decide between mass attack and single target shot.
-  var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: _isInvaderCreep });
+  var in3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: function (h) { return _canShootTarget(creep, h); } });
   if (in3.length >= 3){
     debugSay(creep, "💥 mass");
     creep.rangedMassAttack();
@@ -323,8 +351,9 @@ function shootPrimary(creep, target){
   // [2] Prefer direct rangedAttack when target within standard range.
   var range = creep.pos.getRangeTo(target);
   if (range <= 3){
+    if (!_canShootTarget(creep, target)) return;
     debugLine(creep.pos, target.pos, CONFIG.COLORS.SHOOT, "ranged");
-    creep.rangedAttack(target);
+    _safeRangedAttack(creep, target);
     return;
   }
 
@@ -340,10 +369,11 @@ function shootPrimary(creep, target){
  */
 function shootOpportunistic(creep){
   // [1] Acquire closest invader within 3 tiles and fire if available.
-  var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep });
+  var closer = creep.pos.findClosestByRange(FIND_HOSTILE_CREEPS, { filter: function (h) { return _canShootTarget(creep, h); } });
   if (closer && creep.pos.inRangeTo(closer, 3)){
+    if (!_canShootTarget(creep, closer)) return;
     debugLine(creep.pos, closer.pos, CONFIG.COLORS.SHOOT, "snap");
-    creep.rangedAttack(closer);
+    _safeRangedAttack(creep, closer);
   }
 }
 
@@ -423,10 +453,13 @@ var roleCombatArcher = {
 
     // [5] Acquire shared squad target; fallback to opportunistic harassment when none.
     var target = TaskSquad && TaskSquad.sharedTarget ? TaskSquad.sharedTarget(creep) : null;
+    if (target && !_canShootTarget(creep, target)) {
+      target = null;
+    }
     var waitExpired = Game.time > waitUntil;
     var rallyPos = anchor || (Game.flags.Rally && Game.flags.Rally.pos) || null;
     if (!target){
-      var visibleHostiles = creep.room ? creep.room.find(FIND_HOSTILE_CREEPS, { filter: _isInvaderCreep }) : [];
+      var visibleHostiles = creep.room ? creep.room.find(FIND_HOSTILE_CREEPS, { filter: function (h) { return _canShootTarget(creep, h); } }) : [];
       shootOpportunistic(creep);
       if (visibleHostiles && visibleHostiles.length) {
         if (waitExpired) {
@@ -466,7 +499,7 @@ var roleCombatArcher = {
     // [8] Safety gates: retreat when low HP, melee adjacent, or inside tower kill zone.
     var lowHp = (creep.hits / Math.max(1, creep.hitsMax)) < CONFIG.fleeHpPct;
     var dangerAdj = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 1, { filter: function (h){
-      return _isInvaderCreep(h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
+      return _canShootTarget(creep, h) && (h.getActiveBodyparts(ATTACK)>0 || h.getActiveBodyparts(RANGED_ATTACK)>0);
     }}).length > 0;
     var towerBad = inTowerDanger(creep.pos);
 
@@ -504,7 +537,7 @@ var roleCombatArcher = {
       return;
     }
 
-    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: _isInvaderCreep });
+    var hostilesIn3 = creep.pos.findInRange(FIND_HOSTILE_CREEPS, 3, { filter: function (h) { return _canShootTarget(creep, h); } });
     if (hostilesIn3 && hostilesIn3.length && inHoldBand(range)){
       debugSay(creep, "🎯 hold");
       return;

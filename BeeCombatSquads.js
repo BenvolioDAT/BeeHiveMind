@@ -19,6 +19,7 @@
 
 // PvE-only combat: squads fight Invader threats even in my reserved rooms while avoiding PvP.
 var BeeToolbox; try { BeeToolbox = require('BeeToolbox'); } catch (e) { BeeToolbox = null; }
+var Config; try { Config = require('core.config'); } catch (e3) { Config = { ALLOW_PVP: true, ALLOW_INVADERS_IN_FOREIGN_ROOMS: true }; }
 try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
 
 /**
@@ -53,6 +54,7 @@ try { require('Traveler'); } catch (e2) { /* ensure Traveler is loaded once */ }
 
 var TaskSquad = (function () {
   var API = {};
+  var _nullTargetLog = {};
 
   // -----------------------------
   // Tunables
@@ -113,6 +115,7 @@ var TaskSquad = (function () {
    * Handles missing/invalid creeps by returning false.
    */
   function _isInvaderCreep(c) {
+    if (BeeToolbox && BeeToolbox.isNpcHostileCreep) return BeeToolbox.isNpcHostileCreep(c);
     // [1] Treat only Invader-owned creeps as PvE threats we may automatically attack.
     return !!(c && c.owner && c.owner.username === 'Invader');
   }
@@ -127,6 +130,7 @@ var TaskSquad = (function () {
    * Side-effects: none.
    */
   function _isInvaderStruct(s) {
+    if (BeeToolbox && BeeToolbox.isNpcHostileStruct) return BeeToolbox.isNpcHostileStruct(s);
     // [1] Same ownership check as creeps so PvP possessions are respected.
     return !!(s && s.owner && s.owner.username === 'Invader');
   }
@@ -146,6 +150,14 @@ var TaskSquad = (function () {
   function _myUsername() {
     // [1] Fast path: reuse cached name within the same tick to avoid repeated scans.
     if (!Game) return null;
+    if (BeeToolbox && BeeToolbox.myUsername) {
+      var cached = BeeToolbox.myUsername();
+      if (cached != null) {
+        _myNameCacheTick = Game.time;
+        _myNameCache = cached;
+        return _myNameCache;
+      }
+    }
     if (_myNameCacheTick === Game.time && _myNameCache !== undefined) return _myNameCache;
 
     // [2] Refresh cache timestamp and pessimistically reset cached name.
@@ -192,6 +204,8 @@ var TaskSquad = (function () {
     if (!room || !room.controller) return false;
     var ctrl = room.controller;
     var me = _myUsername();
+
+    if (BeeToolbox && BeeToolbox.isAllyRoom && BeeToolbox.isAllyRoom(room)) return true;
 
     // [2] Owned by self is considered safe PvE ground, so return false.
     if (ctrl.my) return false;
@@ -598,37 +612,83 @@ var TaskSquad = (function () {
    * Postconditions: none here (caller stores target in Memory if needed).
    * Handles PvP rooms by returning null, causing squads to disengage.
    */
-  function _chooseRoomTarget(me, S) {
+  function _chooseRoomTarget(me, S, outReason) {
     // [1] Guard against missing vision; without a room object there is nothing to target.
-    var room = me.room; if (!room) return null;
+    var room = me.room; if (!room) {
+      if (outReason) { outReason.reason = 'no-vision'; outReason.anyHostiles = false; }
+      return null;
+    }
     var id = getSquadId(me);
     var roomName = room.name;
     var myRoom = _roomIsMineOrReserved(room);
     var boundRoom = _targetRoomForSquad(id, S);
     var inBoundRoom = !!(boundRoom && boundRoom === roomName);
 
-    // [2] Respect PvP etiquette by avoiding aggression in other players' rooms.
-    if (_isPlayerControlledRoom(room) && !myRoom) {
-      return null; // PvE acceptance: sharedTarget returns null in player rooms
+    var reason = null;
+
+    var useToolbox = !!(BeeToolbox && BeeToolbox.canEngageTarget);
+    if (useToolbox && BeeToolbox.isAllyRoom && BeeToolbox.isAllyRoom(room)) {
+      if (outReason) {
+        var seen = room.find(FIND_HOSTILE_CREEPS);
+        outReason.reason = 'ally-room';
+        outReason.anyHostiles = !!(seen && seen.length);
+      }
+      return null;
     }
 
     // [3] Determine whether we can engage any hostile or only Invader NPCs.
     var allowAnyHostile = myRoom || inBoundRoom;
     var myName = _myUsername();
 
-    // [4] Gather hostiles, filtering out allies and optional PvE restrictions.
-    var hostiles = room.find(FIND_HOSTILE_CREEPS, { filter: function (h) {
-      if (!h || !h.hits || h.hits <= 0) return false;
-      if (h.owner && h.owner.username && myName && h.owner.username === myName) return false;
-      if (!allowAnyHostile) return _isInvaderCreep(h);
-      return true;
-    }});
+    var hostiles = room.find(FIND_HOSTILE_CREEPS);
+    var anyHostiles = hostiles && hostiles.length;
+    var validHostiles = [];
+    var skippedFriendly = false;
+    var skippedNpc = false;
+    var skippedPvp = false;
+
+    if (hostiles && hostiles.length) {
+      for (var hi = 0; hi < hostiles.length; hi++) {
+        var h = hostiles[hi];
+        if (!h || !h.hits || h.hits <= 0) continue;
+        if (h.owner && h.owner.username && myName && h.owner.username === myName) {
+          skippedFriendly = true; continue;
+        }
+        if (useToolbox) {
+          if (BeeToolbox.isFriendlyObject && BeeToolbox.isFriendlyObject(h)) {
+            skippedFriendly = true; continue;
+          }
+          if (!BeeToolbox.canEngageTarget(me, h)) {
+            if (BeeToolbox.isNpcHostileCreep && BeeToolbox.isNpcHostileCreep(h)) {
+              skippedNpc = true;
+            } else {
+              skippedPvp = true;
+            }
+            continue;
+          }
+        } else {
+          if (!allowAnyHostile && !_isInvaderCreep(h)) {
+            skippedPvp = true;
+            continue;
+          }
+        }
+        validHostiles.push(h);
+      }
+    }
 
     // [5] Score and pick best hostile creep when available.
-    if (hostiles && hostiles.length) {
-      var scored = _.map(hostiles, function (h) { return { h: h, s: _scoreHostile(me, h) }; });
+    if (validHostiles.length) {
+      var scored = _.map(validHostiles, function (h) { return { h: h, s: _scoreHostile(me, h) }; });
       var best = _.min(scored, 's');
       if (best && best.h) return best.h;
+    }
+
+    if (!validHostiles.length) {
+      if (!reason) {
+        if (skippedFriendly) reason = 'friendly-target';
+        else if (skippedNpc) reason = 'npc-blocked';
+        else if (skippedPvp) reason = 'pvp-disabled';
+      }
     }
 
     // [6] Prioritize Invader towers next because they threaten the entire squad.
@@ -655,11 +715,17 @@ var TaskSquad = (function () {
       if (s.structureType === STRUCTURE_CONTROLLER) return false;
       if (allowAnyHostile) {
         if (s.owner && s.owner.username && myName && s.owner.username === myName) return false;
+        if (BeeToolbox && BeeToolbox.isFriendlyObject && BeeToolbox.isFriendlyObject(s)) return false;
         return true;
       }
       return _isInvaderStruct(s) && s.structureType !== STRUCTURE_TOWER && s.structureType !== STRUCTURE_SPAWN;
     }});
     if (others.length) return me.pos.findClosestByRange(others);
+
+    if (outReason) {
+      outReason.reason = reason;
+      outReason.anyHostiles = !!anyHostiles;
+    }
 
     // [10] Nothing worth attacking; roles will default to regroup or hold actions.
     return null;
@@ -709,7 +775,8 @@ var TaskSquad = (function () {
     }
 
     // [4] Fall back to fresh room scan for a new target candidate.
-    var nxt = _chooseRoomTarget(creep, S);
+    var reasonInfo = {};
+    var nxt = _chooseRoomTarget(creep, S, reasonInfo);
     if (nxt) {
       S.targetId = nxt.id; S.targetAt = Game.time;
       if (mem) {
@@ -727,11 +794,20 @@ var TaskSquad = (function () {
     }
 
     // [6] Diagnostic logging helps detect fog-of-war issues where hostiles are visible but filtered out.
-    var room = creep.room;
-    if (room) {
-      var anyHostiles = room.find(FIND_HOSTILE_CREEPS);
-      if (anyHostiles && anyHostiles.length && Game.time % 5 === 0) {
-        console.log('[Squad]', creep.name, 'null target despite hostiles in', room.name);
+    if (reasonInfo && reasonInfo.anyHostiles) {
+      var roomName = (creep.room && creep.room.name) || (mem && mem.targetRoom) || 'unknown';
+      var tag = reasonInfo.reason || 'unspecified';
+      var key = roomName + ':' + tag;
+      var lastLog = _nullTargetLog[key] || 0;
+      if ((Game.time - lastLog) >= 50) {
+        var msg;
+        if (tag === 'ally-room') msg = 'holding fire in ally room';
+        else if (tag === 'pvp-disabled') msg = 'PvP disabled for room';
+        else if (tag === 'npc-blocked') msg = 'NPC blocked by room policy';
+        else if (tag === 'friendly-target') msg = 'filtered friendly units';
+        else msg = 'no valid targets';
+        console.log('[Squad]', id, 'skipping hostiles in', roomName, '-', msg);
+        _nullTargetLog[key] = Game.time;
       }
     }
     return null;
