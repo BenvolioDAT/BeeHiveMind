@@ -68,9 +68,18 @@ var creepRoles = {
   CombatMelee: roleCombatMelee.run
 };
 
-var ROLE_ALIAS_MAP = (function () {
+/**
+ * Helper factory that builds our alias lookup object.
+ * Extracted from an IIFE so newer developers can read it step-by-step,
+ * place breakpoints, or expand the logic without digging through
+ * nested scopes.
+ */
+function createRoleAliasMap() {
   var map = Object.create(null);
-  var canon = [
+
+  // Canonical roles are the ones that exist in code.  Aliases (like
+  // "worker_bee") are mapped to one of these canonical spellings.
+  var canonicalRoles = [
     'Idle',
     'BaseHarvest',
     'Builder',
@@ -87,18 +96,29 @@ var ROLE_ALIAS_MAP = (function () {
     'CombatMedic',
     'CombatMelee'
   ];
-  for (var i = 0; i < canon.length; i++) {
-    var name = canon[i];
+
+  // The loop below intentionally uses a classic "for" so that folks who
+  // are new to Screeps (and maybe coding in general) can easily translate
+  // it to pseudocode or another language.
+  for (var i = 0; i < canonicalRoles.length; i++) {
+    var name = canonicalRoles[i];
     map[name] = name;
     map[name.toLowerCase()] = name;
   }
+
+  // Friendly aliases that appear in historical memory dumps.
   map.worker_bee = 'Idle';
   map['Worker_Bee'] = 'Idle';
   map.remoteharvest = 'Luna';
+
   return map;
-})();
+}
+
+var ROLE_ALIAS_MAP = createRoleAliasMap();
 
 function canonicalRoleName(name) {
+  // Defensive coding pattern: immediately handle null/undefined to avoid
+  // sprinkling guard clauses everywhere else.
   if (!name) return null;
   if (creepRoles[name]) return name;
   var key = String(name);
@@ -109,9 +129,12 @@ function canonicalRoleName(name) {
 }
 
 function ensureCreepRole(creep) {
+  // Novice tip: always guard against falsy values before dereferencing.
   if (!creep) return 'Idle';
   var mem = creep.memory || (creep.memory = {});
 
+  // Prefer deterministic values; canonicalRoleName normalises any
+  // mis-capitalised or legacy entries.
   var canonical = canonicalRoleName(mem.role) || canonicalRoleName(mem.task);
   if (!canonical) canonical = 'Idle';
 
@@ -158,6 +181,7 @@ function objectValues(obj) {
 function prepareTickCaches() {
   var C = global.__BHM;
   var now = Game.time;
+  // Early return: if we've already computed caches this tick, reuse them.
   if (C.tick === now) return C;
 
   C.tick = now;
@@ -186,6 +210,8 @@ function prepareTickCaches() {
         C.roomSnapshots[room.name] = BeeSelectors.prepareRoomSnapshot(room);
       } catch (err) {
         hiveLog.debug('⚠️ Selector snapshot failed for', fmt(room), err);
+        // Teaching moment: catching errors allows the tick to continue even
+        // if one room fails to generate a snapshot.
       }
     }
   }
@@ -203,6 +229,7 @@ function getOwnedRooms() {
     var room = Game.rooms[names[i]];
     if (room && room.controller && room.controller.my) {
       result.push(room);
+      // Habit: only push valid items so later functions can assume clean data.
     }
   }
   return result;
@@ -315,6 +342,8 @@ var BeeHiveMind = {
 
     // Expose action/selectors globally for console debugging and legacy modules
     // expecting global symbols.
+    // Teaching tip: doing this up-front ensures any role file that executes
+    // later in the tick can immediately access the helpers.
     if (BeeActions) global.BeeActions = BeeActions;
     if (BeeSelectors) global.BeeSelectors = BeeSelectors;
 
@@ -331,6 +360,8 @@ var BeeHiveMind = {
     var C = prepareTickCaches();
 
     // 1) Per-room planning
+    // Working from general to specific keeps the mental model tidy: rooms
+    // come first, then creeps that exist inside those rooms.
     var rooms = C.roomsOwned;
     for (var i = 0; i < rooms.length; i++) {
       BeeHiveMind.manageRoom(rooms[i], C);
@@ -341,6 +372,8 @@ var BeeHiveMind = {
 
     if (MovementManager && typeof MovementManager.resolveAndMove === 'function') {
       // Execute queued movement intents after all roles finish issuing actions.
+      // This mirrors a "commit" phase in a database transaction—everyone
+      // proposes moves, then we resolve conflicts once.
       MovementManager.resolveAndMove();
     }
 
@@ -362,6 +395,8 @@ var BeeHiveMind = {
     if (!room) return;
 
     if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
+      // Encourage small, single-purpose helpers: ensureSites focuses purely
+      // on layout decisions so this coordinator stays readable.
       RoomPlanner.ensureSites(room);
     }
     if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
@@ -381,6 +416,7 @@ var BeeHiveMind = {
       var roleName = ensureCreepRole(creep);
       var roleFn = creepRoles[roleName];
       if (typeof roleFn !== 'function') {
+        // Soft fallback so a mis-typed role never crashes the tick.
         roleFn = roleIdle.run;
       }
       try {
@@ -403,6 +439,9 @@ var BeeHiveMind = {
   // Inputs: tick cache C (roomsOwned, spawns arrays, role counts)
   // Output: none; keeps per-room spawn queues and triggers spawnLogic.
   manageSpawns: function manageSpawns(C) {
+    // By delegating to BeeSpawnManager we practice "composition": this file
+    // orchestrates high-level flow, while the spawn manager owns the details
+    // of quota math and energy budgeting.
     BeeSpawnManager.manageSpawns(C);
   },
 
@@ -421,6 +460,8 @@ var BeeHiveMind = {
     for (var i = 0; i < roomNames.length; i++) {
       var roomName = roomNames[i];
       if (!Memory.rooms[roomName]) {
+        // Always initialise to an object so downstream code can safely do
+        // Memory.rooms[name].foo without crashing.
         Memory.rooms[roomName] = {};
       }
     }

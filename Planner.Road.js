@@ -82,220 +82,190 @@ function hasRoadOrRoadSiteFast(room, x, y) {
 }
 
 /** =========================
- *  RoadPlanner module
+ *  RoadPlanner module helpers
  *  ========================= */
-const RoadPlanner = {
-  /**
-   * Call this from your main loop (once per owned room, or just your primary room).
-   * CPU guards:
-   *  - Stagger by room via plannerTickModulo
-   *  - Remote list cached once per tick
-   *  - Per-room CostMatrix cached per tick
-   * @param {Room} homeRoom
-   */
-  ensureRemoteRoads(homeRoom) {
-    if (!homeRoom || !homeRoom.controller || !homeRoom.controller.my) return;
 
-    // Stagger work across rooms/ticks to flatten spikes:
-    if (CFG.plannerTickModulo > 1) {
-      let h = 0;
-      for (let i = 0; i < homeRoom.name.length; i++) h = (h * 31 + homeRoom.name.charCodeAt(i)) | 0;
-      if (((_tick() + (h & 3)) % CFG.plannerTickModulo) !== 0) return;
-    }
+/** Quick ownership guard so we never work on neutral/safe-mode rooms. */
+function isOwnedRoom(room) {
+  return room && room.controller && room.controller.my;
+}
 
-    const mem = this._memory(homeRoom);
+/**
+ * Pseudo-randomly stagger the heavy planner work so multi-room empires
+ * do not pile all the CPU on the same tick. We hash the name just once
+ * per call and compare it to the configured modulo cadence.
+ */
+function shouldSkipTick(homeRoom) {
+  if (CFG.plannerTickModulo <= 1) return false;
+  let hash = 0;
+  const name = homeRoom.name;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  return (((_tick() + (hash & 3)) % CFG.plannerTickModulo) !== 0);
+}
 
-    // NEW: prune any previously stored remote paths that are now beyond the radius cap
-    this._pruneOutOfRadiusPaths(homeRoom, mem);
+function ensureRemoteRoads(homeRoom) {
+  if (!isOwnedRoom(homeRoom)) return;
+  if (shouldSkipTick(homeRoom)) return;
 
-    // Require some anchor in early game
+  const mem = memoryFor(homeRoom);
+  pruneOutOfRadiusPaths(homeRoom, mem);
+
+  if (!hasAnchorReady(homeRoom)) return; // still waiting for spawn/storage
+
+  const anchor = getAnchorPos(homeRoom);
+  ensureStagedHomeNetwork(homeRoom, anchor);
+  ensureRemoteSpokes(homeRoom, mem, anchor);
+}
+
+// ---------- Home network (staged) ----------
+
+function hasAnchorReady(homeRoom) {
+  if (homeRoom.storage) return true;
+  return homeRoom.find(FIND_MY_SPAWNS).length > 0;
+}
+
+function getAnchorPos(homeRoom) {
+  if (homeRoom.storage) return homeRoom.storage.pos;
+  const spawns = homeRoom.find(FIND_MY_SPAWNS);
+  return spawns.length ? spawns[0].pos : null;
+}
+
+/**
+ * Friendly wrapper that plans (if needed), drip-places, and audits a track
+ * between two in-room positions. Novice contributors can call this for any
+ * “from → goal” pair without touching the lower-level PathFinder code.
+ */
+function planTrackPlaceAudit(homeRoom, fromPos, goalPos, key, range = 1) {
+  if (!fromPos || !goalPos) return;
+  const mem = memoryFor(homeRoom);
+
+  if (!mem.paths[key]) {
+    const pathRecord = planPathRecord(fromPos, { pos: goalPos, range });
+    if (!pathRecord) return;
+    mem.paths[key] = pathRecord;
+  }
+
+  dripPlaceAlongPath(homeRoom, key, CFG.placeBudgetPerTick);
+  auditAndRelaunch(homeRoom, key, /*maxFixes*/ 1);
+}
+
+function planPathRecord(fromPos, goal) {
+  const ret = PathFinder.search(fromPos, goal, {
+    plainCost: CFG.plainCost,
+    swampCost: CFG.swampCost,
+    maxRooms: CFG.maxRoomsPlanning,
+    maxOps: CFG.maxOpsPlanning,
+    roomCallback: (roomName) => roomCostMatrix(roomName)
+  });
+  if (!ret.path || !ret.path.length || ret.incomplete) return null;
+  return {
+    i: 0,
+    done: false,
+    path: ret.path.map(p => ({ x: p.x, y: p.y, roomName: p.roomName }))
+  };
+}
+
+function ensureStagedHomeNetwork(homeRoom, anchor) {
+  if (!anchor) return;
+
+  // (A) Spokes to sources
+  const sources = homeRoom.find(FIND_SOURCES);
+  for (let i = 0; i < sources.length; i++) {
+    const src = sources[i];
+    const harv = chooseHarvestTile(src) || src.pos;
+    const range = (harv === src.pos) ? 1 : 0;
+    const stage = homeRoom.storage ? 'storage' : 'spawn';
+    const key = `${homeRoom.name}:LOCAL:source${i}:from=${stage}`;
+    planTrackPlaceAudit(homeRoom, anchor, harv, key, range);
+  }
+
+  // (B) Optional spoke to controller
+  if (CFG.includeControllerSpoke && homeRoom.controller) {
+    const stage = homeRoom.storage ? 'storage' : 'spawn';
+    const keyC = `${homeRoom.name}:LOCAL:controller:from=${stage}`;
+    planTrackPlaceAudit(homeRoom, anchor, homeRoom.controller.pos, keyC, 1);
+  }
+
+  // (C) Spawn ↔ storage backbone once storage exists
+  if (homeRoom.storage) {
     const spawns = homeRoom.find(FIND_MY_SPAWNS);
-    if (!spawns.length && !homeRoom.storage) return;
-
-    // 1) Staged home logistics network
-    this._ensureStagedHomeNetwork(homeRoom);
-
-    // 2) Remote spokes for any active remote-harvest creeps (list cached once per tick)
-    const activeRemotes = activeRemotesOncePerTick();
-    for (const remoteName of activeRemotes) {
-      // NEW: skip remotes beyond the configured radius from this home
-      if (CFG.maxRemoteRadius > 0) {
-        const dist = Game.map.getRoomLinearDistance(homeRoom.name, remoteName);
-        if (dist > CFG.maxRemoteRadius) continue;
-      }
-
-      const rmem = Memory.rooms && Memory.rooms[remoteName];
-      if (!rmem || !rmem.sources) continue;            // needs your exploration/memory elsewhere
-      const remoteRoom = Game.rooms[remoteName];
-      if (!remoteRoom) continue;                       // only plan when visible (safe + accurate)
-
-      const sources = remoteRoom.find(FIND_SOURCES);
-      for (const src of sources) {
-        const key = `${remoteName}:${src.id}`;
-        // Plan once, then drip-place and audit thereafter
-        if (!mem.paths[key]) {
-          const harvestPos = this._chooseHarvestTile(src);
-          const goal = harvestPos ? { pos: harvestPos, range: 0 } : { pos: src.pos, range: 1 };
-
-          const ret = PathFinder.search(this._getAnchorPos(homeRoom), goal, {
-            plainCost: CFG.plainCost,
-            swampCost: CFG.swampCost,
-            maxRooms: CFG.maxRoomsPlanning,
-            maxOps: CFG.maxOpsPlanning,
-            roomCallback: (roomName) => this._roomCostMatrix(roomName)
-          });
-
-          if (!ret.path || !ret.path.length || ret.incomplete) continue;
-
-          mem.paths[key] = {
-            i: 0,
-            done: false,
-            // Store minimal plain objects (no RoomPosition instances)
-            path: ret.path.map(p => ({ x: p.x, y: p.y, roomName: p.roomName }))
-          };
-        }
-
-        this._dripPlaceAlongPath(homeRoom, key, CFG.placeBudgetPerTick);
-        this._auditAndRelaunch(homeRoom, key, /*maxFixes*/ 1);
-      }
+    if (spawns.length) {
+      const keyS = `${homeRoom.name}:LOCAL:spawn0-to-storage`;
+      planTrackPlaceAudit(homeRoom, spawns[0].pos, homeRoom.storage.pos, keyS, 1);
     }
-  },
+  }
+}
 
-  // ---------- Home network (staged) ----------
+// ---------- Path placement + auditing ----------
 
-  _getAnchorPos(homeRoom) {
-    if (homeRoom.storage) return homeRoom.storage.pos;
-    const spawns = homeRoom.find(FIND_MY_SPAWNS);
-    return spawns.length ? spawns[0].pos : null;
-  },
+function dripPlaceAlongPath(homeRoom, key, budget) {
+  if (getCSiteCountOnce() > CFG.globalCSiteSafetyLimit) return;
 
-  _planTrackPlaceAudit(homeRoom, fromPos, goalPos, key, range = 1) {
-    if (!fromPos || !goalPos) return;
-    const mem = this._memory(homeRoom);
+  const mem = memoryFor(homeRoom);
+  const rec = mem.paths[key];
+  if (!rec || rec.done) return;
 
-    if (!mem.paths[key]) {
-      const ret = PathFinder.search(fromPos, { pos: goalPos, range }, {
-        plainCost: CFG.plainCost,
-        swampCost: CFG.swampCost,
-        maxRooms: CFG.maxRoomsPlanning,
-        maxOps: CFG.maxOpsPlanning,
-        roomCallback: (roomName) => this._roomCostMatrix(roomName)
-      });
-      if (!ret.path || !ret.path.length || ret.incomplete) return;
+  let placed = 0;
+  let iterations = 0;
 
-      mem.paths[key] = {
-        i: 0,
-        done: false,
-        path: ret.path.map(p => ({ x: p.x, y: p.y, roomName: p.roomName }))
-      };
-    }
+  while (rec.i < rec.path.length && placed < budget) {
+    if (++iterations > budget + 10) break;
 
-    this._dripPlaceAlongPath(homeRoom, key, CFG.placeBudgetPerTick);
-    this._auditAndRelaunch(homeRoom, key, /*maxFixes*/ 1);
-  },
+    const step = rec.path[rec.i];
+    const roomObj = Game.rooms[step.roomName];
+    if (!roomObj) break; // need visibility to place
 
-  _ensureStagedHomeNetwork(homeRoom) {
-    const anchor = this._getAnchorPos(homeRoom);
-    if (!anchor) return;
-
-    // (A) Spokes to sources
-    const sources = homeRoom.find(FIND_SOURCES);
-    for (let i = 0; i < sources.length; i++) {
-      const src = sources[i];
-      const harv = this._chooseHarvestTile(src) || src.pos;
-      const range = (harv === src.pos) ? 1 : 0;
-      const stage = homeRoom.storage ? 'storage' : 'spawn';
-      const key = `${homeRoom.name}:LOCAL:source${i}:from=${stage}`;
-      this._planTrackPlaceAudit(homeRoom, anchor, harv, key, range);
-    }
-
-    // (B) Optional spoke to controller
-    if (CFG.includeControllerSpoke && homeRoom.controller) {
-      const stage = homeRoom.storage ? 'storage' : 'spawn';
-      const keyC = `${homeRoom.name}:LOCAL:controller:from=${stage}`;
-      this._planTrackPlaceAudit(homeRoom, anchor, homeRoom.controller.pos, keyC, 1);
-    }
-
-    // (C) Spawn ↔ storage backbone once storage exists
-    if (homeRoom.storage) {
-      const spawns = homeRoom.find(FIND_MY_SPAWNS);
-      if (spawns.length) {
-        const keyS = `${homeRoom.name}:LOCAL:spawn0-to-storage`;
-        this._planTrackPlaceAudit(homeRoom, spawns[0].pos, homeRoom.storage.pos, keyS, 1);
-      }
-    }
-  },
-
-  // ---------- Path placement + auditing ----------
-
-  _dripPlaceAlongPath(homeRoom, key, budget) {
-    if (getCSiteCountOnce() > CFG.globalCSiteSafetyLimit) return;
-
-    const mem = this._memory(homeRoom);
-    const rec = mem.paths[key];
-    if (!rec || rec.done) return;
-
-    let placed = 0;
-    let iterations = 0;
-
-    while (rec.i < rec.path.length && placed < budget) {
-      if (++iterations > budget + 10) break;
-
-      const step = rec.path[rec.i];
-      const roomObj = Game.rooms[step.roomName];
-      if (!roomObj) break; // need visibility to place
-
-      if (roomObj.getTerrain().get(step.x, step.y) !== TERRAIN_MASK_WALL) {
-        if (!hasRoadOrRoadSiteFast(roomObj, step.x, step.y)) {
-          const rc = roomObj.createConstructionSite(step.x, step.y, STRUCTURE_ROAD);
-          if (rc === OK) {
-            placed++;
-            if (getCSiteCountOnce() > CFG.globalCSiteSafetyLimit) break;
-          } else if (rc === ERR_FULL) {
-            break;
-          }
-        }
-      }
-      rec.i++;
-    }
-
-    if (rec.i >= rec.path.length) rec.done = true;
-  },
-
-  _auditAndRelaunch(homeRoom, key, maxFixes = 1) {
-    const mem = this._memory(homeRoom);
-    const rec = mem.paths[key];
-    if (!rec || !rec.done || !Array.isArray(rec.path) || !rec.path.length) return;
-
-    const onInterval = (_tick() % CFG.auditInterval) === 0;
-    const randomTick = Math.random() < CFG.randomAuditChance;
-    if (!onInterval && !randomTick) return;
-
-    let fixed = 0;
-    for (let idx = 0; idx < rec.path.length && fixed < maxFixes; idx++) {
-      const step = rec.path[idx];
-      const roomObj = Game.rooms[step.roomName];
-      if (!roomObj) continue;
-
-      if (roomObj.getTerrain().get(step.x, step.y) === TERRAIN_MASK_WALL) continue;
-
+    if (roomObj.getTerrain().get(step.x, step.y) !== TERRAIN_MASK_WALL) {
       if (!hasRoadOrRoadSiteFast(roomObj, step.x, step.y)) {
         const rc = roomObj.createConstructionSite(step.x, step.y, STRUCTURE_ROAD);
         if (rc === OK) {
-          if (typeof rec.i !== 'number' || rec.i > idx) rec.i = idx;
-          rec.done = false;
-          fixed++;
+          placed++;
           if (getCSiteCountOnce() > CFG.globalCSiteSafetyLimit) break;
         } else if (rc === ERR_FULL) {
           break;
         }
       }
     }
-  },
+    rec.i++;
+  }
 
-  // ---------- Cost matrix (per-tick cache) ----------
+  if (rec.i >= rec.path.length) rec.done = true;
+}
 
-  _roomCostMatrix(roomName) {
+function auditAndRelaunch(homeRoom, key, maxFixes = 1) {
+  const mem = memoryFor(homeRoom);
+  const rec = mem.paths[key];
+  if (!rec || !rec.done || !Array.isArray(rec.path) || !rec.path.length) return;
+
+  const onInterval = (_tick() % CFG.auditInterval) === 0;
+  const randomTick = Math.random() < CFG.randomAuditChance;
+  if (!onInterval && !randomTick) return;
+
+  let fixed = 0;
+  for (let idx = 0; idx < rec.path.length && fixed < maxFixes; idx++) {
+    const step = rec.path[idx];
+    const roomObj = Game.rooms[step.roomName];
+    if (!roomObj) continue;
+
+    if (roomObj.getTerrain().get(step.x, step.y) === TERRAIN_MASK_WALL) continue;
+
+    if (!hasRoadOrRoadSiteFast(roomObj, step.x, step.y)) {
+      const rc = roomObj.createConstructionSite(step.x, step.y, STRUCTURE_ROAD);
+      if (rc === OK) {
+        if (typeof rec.i !== 'number' || rec.i > idx) rec.i = idx;
+        rec.done = false;
+        fixed++;
+        if (getCSiteCountOnce() > CFG.globalCSiteSafetyLimit) break;
+      } else if (rc === ERR_FULL) {
+        break;
+      }
+    }
+  }
+}
+
+// ---------- Cost matrix (per-tick cache) ----------
+
+function roomCostMatrix(roomName) {
     const room = Game.rooms[roomName];
     if (!room) return;
 
@@ -342,111 +312,155 @@ const RoadPlanner = {
 
     __RPM.cm[roomName] = costs;
     return costs;
-  },
+}
 
   // ---------- Memory + info ----------
 
-  _memory(homeRoom) {
+function memoryFor(homeRoom) {
     if (!Memory.rooms) Memory.rooms = {};
     if (!Memory.rooms[homeRoom.name]) Memory.rooms[homeRoom.name] = {};
     const r = Memory.rooms[homeRoom.name];
     if (!r.roadPlanner) r.roadPlanner = { paths: {} };
     if (!r.roadPlanner.paths) r.roadPlanner.paths = {};
     return r.roadPlanner;
-  },
-
-  getActiveRemoteRooms(homeRoom) {
-    const mem = this._memory(homeRoom);
-    const rooms = new Set();
-    for (const key of Object.keys(mem.paths || {})) {
-      rooms.add(key.split(':')[0]);
-    }
-    return [...rooms];
-  },
-
-  _discoverActiveRemoteRoomsFromCreeps() {
-    return activeRemotesOncePerTick();
-  },
-
-  // ---------- NEW: radius pruning ----------
-
-  /**
-   * Remove any stored path keyed to a remote room that exceeds CFG.maxRemoteRadius
-   * from this home. Keeps LOCAL keys intact.
-   * @param {Room} homeRoom
-   * @param {*} mem roadPlanner memory (this._memory(homeRoom))
-   */
-  _pruneOutOfRadiusPaths(homeRoom, mem) {
-    if (!mem || !mem.paths) return;
-    if (CFG.maxRemoteRadius <= 0) return; // disabled
-
-    const home = homeRoom.name;
-    for (const key of Object.keys(mem.paths)) {
-      // Keys are either "RoomName:sourceId" for remotes or "Home:LOCAL:..." for local
-      // We only prune when the prefix is a room name different from home (remote case)
-      const remotePrefix = key.split(':')[0];
-      if (!remotePrefix || remotePrefix === home || remotePrefix === 'LOCAL') continue;
-
-      const dist = Game.map.getRoomLinearDistance(home, remotePrefix);
-      if (dist > CFG.maxRemoteRadius) {
-        delete mem.paths[key];
-      }
-    }
-  },
-
-  // ---------- Discovery helpers ----------
-
-  _chooseHarvestTile(src) {
-    const room = Game.rooms[src.pos.roomName];
-    if (!room) return null;
-
-    const terrain = room.getTerrain();
-
-    // Any container-adjacent tile? Return immediately.
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        if (dx === 0 && dy === 0) continue;
-        const x = src.pos.x + dx;
-        const y = src.pos.y + dy;
-        if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
-        if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
-        const structs = room.lookForAt(LOOK_STRUCTURES, x, y);
-        for (let i = 0; i < structs.length; i++) {
-          if (structs[i].structureType === STRUCTURE_CONTAINER) {
-            return new RoomPosition(x, y, room.name);
-          }
-        }
-      }
-    }
-
-    // Otherwise score tiles (road bonus, swamp penalty)
-    let best = null;
-    let bestScore = -Infinity;
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        if (dx === 0 && dy === 0) continue;
-        const x = src.pos.x + dx;
-        const y = src.pos.y + dy;
-        if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
-
-        const t = terrain.get(x, y);
-        if (t === TERRAIN_MASK_WALL) continue;
-
-        const structs = room.lookForAt(LOOK_STRUCTURES, x, y);
-        let score = 0;
-        for (let i = 0; i < structs.length; i++) {
-          if (structs[i].structureType === STRUCTURE_ROAD) score += 5;
-        }
-        if (t === TERRAIN_MASK_SWAMP) score -= 2;
-
-        if (score > bestScore) {
-          bestScore = score;
-          best = new RoomPosition(x, y, room.name);
-        }
-      }
-    }
-    return best;
+}
+ 
+function getActiveRemoteRooms(homeRoom) {
+  const mem = memoryFor(homeRoom);
+  const rooms = new Set();
+  for (const key of Object.keys(mem.paths || {})) {
+    rooms.add(key.split(':')[0]);
   }
+  return [...rooms];
+}
+
+function discoverActiveRemoteRoomsFromCreeps() {
+  return activeRemotesOncePerTick();
+}
+
+// ---------- Remote spokes ----------
+
+function ensureRemoteSpokes(homeRoom, mem, anchor) {
+  const activeRemotes = activeRemotesOncePerTick();
+  for (const remoteName of activeRemotes) {
+    if (shouldSkipRemoteByRadius(homeRoom.name, remoteName)) continue;
+
+    const remoteRoom = Game.rooms[remoteName];
+    if (!remoteRoom) continue; // only plan while visible so we avoid stale terrain
+
+    const rmem = Memory.rooms && Memory.rooms[remoteName];
+    if (!rmem || !rmem.sources) continue; // needs intel before we can pick sources
+
+    const sources = remoteRoom.find(FIND_SOURCES);
+    for (const src of sources) {
+      const key = `${remoteName}:${src.id}`;
+      if (!mem.paths[key]) {
+        const record = planRemotePath(anchor, src);
+        if (!record) continue;
+        mem.paths[key] = record;
+      }
+
+      dripPlaceAlongPath(homeRoom, key, CFG.placeBudgetPerTick);
+      auditAndRelaunch(homeRoom, key, /*maxFixes*/ 1);
+    }
+  }
+}
+
+function shouldSkipRemoteByRadius(homeName, remoteName) {
+  if (CFG.maxRemoteRadius <= 0) return false;
+  const dist = Game.map.getRoomLinearDistance(homeName, remoteName);
+  return dist > CFG.maxRemoteRadius;
+}
+
+function planRemotePath(anchorPos, src) {
+  if (!anchorPos || !src) return null;
+  const harvestPos = chooseHarvestTile(src);
+  const goal = harvestPos ? { pos: harvestPos, range: 0 } : { pos: src.pos, range: 1 };
+  return planPathRecord(anchorPos, goal);
+}
+
+// ---------- NEW: radius pruning ----------
+
+function pruneOutOfRadiusPaths(homeRoom, mem) {
+  if (!mem || !mem.paths) return;
+  if (CFG.maxRemoteRadius <= 0) return; // disabled
+
+  const home = homeRoom.name;
+  for (const key of Object.keys(mem.paths)) {
+    const remotePrefix = key.split(':')[0];
+    if (!remotePrefix || remotePrefix === home || remotePrefix === 'LOCAL') continue;
+
+    if (shouldSkipRemoteByRadius(home, remotePrefix)) {
+      delete mem.paths[key];
+    }
+  }
+}
+
+// ---------- Discovery helpers ----------
+
+function chooseHarvestTile(src) {
+  const room = Game.rooms[src.pos.roomName];
+  if (!room) return null;
+
+  const terrain = room.getTerrain();
+
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      const x = src.pos.x + dx;
+      const y = src.pos.y + dy;
+      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
+      if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
+      const structs = room.lookForAt(LOOK_STRUCTURES, x, y);
+      for (let i = 0; i < structs.length; i++) {
+        if (structs[i].structureType === STRUCTURE_CONTAINER) {
+          return new RoomPosition(x, y, room.name);
+        }
+      }
+    }
+  }
+
+  let best = null;
+  let bestScore = -Infinity;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      const x = src.pos.x + dx;
+      const y = src.pos.y + dy;
+      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
+
+      const t = terrain.get(x, y);
+      if (t === TERRAIN_MASK_WALL) continue;
+
+      const structs = room.lookForAt(LOOK_STRUCTURES, x, y);
+      let score = 0;
+      for (let i = 0; i < structs.length; i++) {
+        if (structs[i].structureType === STRUCTURE_ROAD) score += 5;
+      }
+      if (t === TERRAIN_MASK_SWAMP) score -= 2;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = new RoomPosition(x, y, room.name);
+      }
+    }
+  }
+  return best;
+}
+
+const RoadPlanner = {
+  ensureRemoteRoads,
+  getActiveRemoteRooms,
+  _memory: memoryFor,
+  _pruneOutOfRadiusPaths: pruneOutOfRadiusPaths,
+  _planTrackPlaceAudit: planTrackPlaceAudit,
+  _ensureStagedHomeNetwork: ensureStagedHomeNetwork,
+  _dripPlaceAlongPath: dripPlaceAlongPath,
+  _auditAndRelaunch: auditAndRelaunch,
+  _roomCostMatrix: roomCostMatrix,
+  _getAnchorPos: getAnchorPos,
+  _chooseHarvestTile: chooseHarvestTile,
+  _discoverActiveRemoteRoomsFromCreeps: discoverActiveRemoteRoomsFromCreeps
 };
 
 module.exports = RoadPlanner;

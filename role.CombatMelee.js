@@ -24,28 +24,54 @@ function _deserializePos(posData) {
   return new RoomPosition(posData.x, posData.y, posData.roomName);
 }
 
+function _buildMeleeContext(creep) {
+  var flagName = _resolveFlagName(creep);
+  if (!flagName) return null;
+
+  var squad = _squadBucket(flagName) || {};
+  return {
+    flagName: flagName,
+    rallyPos: squad.rally ? _deserializePos(squad.rally) : null,
+    state: CombatAPI.getSquadState(flagName)
+  };
+}
+
+function _resolveMeleeTarget(context) {
+  if (!context) return null;
+  var targetId = CombatAPI.focusFireTarget(context.flagName);
+  if (context.state === 'RETREAT') targetId = null;
+  return targetId ? Game.getObjectById(targetId) : null;
+}
+
+function _swingOrAdvance(creep, target) {
+  if (!target) return false;
+  if (creep.pos.inRangeTo(target, 1)) {
+    // Teaching habit: gate active-part checks so we avoid pointless intents if the
+    // unit was partially dismantled.
+    if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
+    if (creep.getActiveBodyparts(RANGED_ATTACK) > 0) creep.rangedAttack(target);
+  } else {
+    Traveler.travelTo(creep, target, { range: 1, ignoreCreeps: false });
+  }
+  return true;
+}
+
+function _fallbackToRally(creep, context) {
+  if (context && context.rallyPos) {
+    Traveler.travelTo(creep, context.rallyPos, { range: 1, ignoreCreeps: false });
+  }
+}
+
 var roleCombatMelee = {
   run: function (creep) {
     if (!creep) return;
-    var flagName = _resolveFlagName(creep);
-    if (!flagName) return;
 
-    var squad = _squadBucket(flagName) || {};
-    var rallyPos = squad.rally ? _deserializePos(squad.rally) : null;
-    var state = CombatAPI.getSquadState(flagName);
+    var context = _buildMeleeContext(creep);
+    if (!context) return;
 
-    var targetId = CombatAPI.focusFireTarget(flagName);
-    if (state === 'RETREAT') targetId = null;
-    var target = targetId ? Game.getObjectById(targetId) : null;
-    if (target) {
-      if (creep.pos.inRangeTo(target, 1)) {
-        if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
-        if (creep.getActiveBodyparts(RANGED_ATTACK) > 0) creep.rangedAttack(target);
-      } else {
-        Traveler.travelTo(creep, target, { range: 1, ignoreCreeps: false });
-      }
-    } else if (rallyPos) {
-      Traveler.travelTo(creep, rallyPos, { range: 1, ignoreCreeps: false });
+    var target = _resolveMeleeTarget(context);
+    if (!_swingOrAdvance(creep, target)) {
+      _fallbackToRally(creep, context);
     }
 
     if (creep.hits < creep.hitsMax && creep.getActiveBodyparts(HEAL) > 0) {

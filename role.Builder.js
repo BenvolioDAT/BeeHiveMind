@@ -185,6 +185,61 @@ function collectEnergy(creep) {
   return false;
 }
 
+function toggleBuilderState(creep) {
+  if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
+    creep.memory.building = false;
+    debugSay(creep, '⤵️REFUEL');
+  }
+  if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
+    creep.memory.building = true;
+    debugSay(creep, '⤴️BUILD');
+  }
+}
+
+function idleNearAnchor(creep) {
+  var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
+  if (anchor && anchor.pos) {
+    debugSay(creep, '🧘');
+    debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
+    go(creep, anchor, 2, 20);
+  }
+}
+
+function dumpEnergyToSink(creep) {
+  if ((creep.store[RESOURCE_ENERGY] | 0) <= 0) return false;
+  var sink = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+    filter: function (s) {
+      if (!s.store) return false;
+      return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0 &&
+             (s.structureType === STRUCTURE_STORAGE   ||
+              s.structureType === STRUCTURE_TERMINAL  ||
+              s.structureType === STRUCTURE_SPAWN     ||
+              s.structureType === STRUCTURE_EXTENSION ||
+              s.structureType === STRUCTURE_TOWER     ||
+              s.structureType === STRUCTURE_CONTAINER ||
+              s.structureType === STRUCTURE_LINK);
+    }
+  });
+  if (!sink) return false;
+  debugSay(creep, '➡️SINK');
+  debugDraw(creep, sink, CFG.DRAW.SINK_COLOR, "SINK");
+  if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) go(creep, sink, 1, 20);
+  return true;
+}
+
+function runBuildPhase(creep) {
+  var site = pickBuildSite(creep);
+  if (site) {
+    if (doBuild(creep, site)) return;
+    if ((creep.store[RESOURCE_ENERGY] | 0) === 0) creep.memory.building = false;
+    else creep.memory.siteId = null;
+    return;
+  }
+
+  if (dumpEnergyToSink(creep)) return;
+  idleNearAnchor(creep);
+}
+
 // ==============================
 // Pick a build target (simple + sticky)
 // ==============================
@@ -256,59 +311,14 @@ function doBuild(creep, site) {
 var roleBuilder = {
   role: 'Builder',
   run: function (creep) {
-    // state flip
-    if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
-      creep.memory.building = false;
-      debugSay(creep, '⤵️REFUEL');
-    }
-    if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
-      creep.memory.building = true;
-      debugSay(creep, '⤴️BUILD');
-    }
+    toggleBuilderState(creep);
 
     if (creep.memory.building) {
-      var site = pickBuildSite(creep);
-      if (site) {
-        if (!doBuild(creep, site)) {
-          if ((creep.store[RESOURCE_ENERGY] | 0) === 0) creep.memory.building = false;
-          else creep.memory.siteId = null;
-        }
-        return;
-      }
-
-      // no sites: dump energy into anything useful, then idle
-      if ((creep.store[RESOURCE_ENERGY] | 0) > 0) {
-        var sink = creep.pos.findClosestByRange(FIND_STRUCTURES, {
-          filter: function (s) {
-            if (!s.store) return false;
-            return (s.store.getFreeCapacity(RESOURCE_ENERGY) | 0) > 0 &&
-                   (s.structureType === STRUCTURE_STORAGE   ||
-                    s.structureType === STRUCTURE_TERMINAL  ||
-                    s.structureType === STRUCTURE_SPAWN     ||
-                    s.structureType === STRUCTURE_EXTENSION ||
-                    s.structureType === STRUCTURE_TOWER     ||
-                    s.structureType === STRUCTURE_CONTAINER ||
-                    s.structureType === STRUCTURE_LINK);
-          }
-        });
-        if (sink) {
-          debugSay(creep, '➡️SINK');
-          debugDraw(creep, sink, CFG.DRAW.SINK_COLOR, "SINK");
-          if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) go(creep, sink, 1, 20);
-          return;
-        }
-      }
-
-      var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
-      if (anchor && anchor.pos) {
-        debugSay(creep, '🧘');
-        debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-        go(creep, anchor, 2, 20);
-      }
+      runBuildPhase(creep);
       return;
     }
 
-    // refuel phase (no mining unless allowed)
+    // Refuel phase (no mining unless allowed)
     collectEnergy(creep);
   }
 };

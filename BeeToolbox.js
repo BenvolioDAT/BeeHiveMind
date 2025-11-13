@@ -5,6 +5,10 @@ var CoreConfig = require('core.config');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+// This utility file gets touched by nearly every role.  The more we can keep the
+// helpers flat and well-named, the easier it is for a new contributor to spot a
+// guard or data cache they can reuse in their own logic.
+
 function _norm(name) {
   if (!name) return '';
   return String(name).toLowerCase();
@@ -169,10 +173,202 @@ function _canEngageTarget(attacker, target) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// 🚶 Shared Traveler wrapper
+// ---------------------------------------------------------------------------
+
+/**
+ * BeeTravel — Unified wrapper around Traveler.
+ * Supports BOTH call styles:
+ *   BeeTravel(creep, target, { range: 1, ignoreCreeps: true })
+ *   BeeTravel(creep, target, 1, /* reuse= * / 30, { ignoreCreeps:true })
+ */
+function BeeTravel(creep, target, a3, a4, a5) {
+  if (!creep || !target) return ERR_INVALID_TARGET;
+
+  // Normalize destination
+  var destination = (target && target.pos) ? target.pos : target;
+
+  // Parse arguments (support old signature)
+  var opts = {};
+  if (typeof a3 === 'object') {
+    opts = a3 || {};
+  } else {
+    // legacy: (range, reuse, opts)
+    if (typeof a3 === 'number') opts.range = a3;
+    if (typeof a5 === 'object') {
+      // copy a5 into opts
+      for (var k5 in a5) { if (a5.hasOwnProperty(k5)) opts[k5] = a5[k5]; }
+    }
+    // a4 was "reusePath" in older code; Traveler manages caching itself.
+  }
+
+  // Defaults (ES5 extend)
+  var options = {
+    range: (opts.range != null) ? opts.range : 1,
+    ignoreCreeps: (opts.ignoreCreeps != null) ? opts.ignoreCreeps : true,
+    useFindRoute: (opts.useFindRoute != null) ? opts.useFindRoute : true,
+    stuckValue: (opts.stuckValue != null) ? opts.stuckValue : 2,
+    repath: (opts.repath != null) ? opts.repath : 0.05,
+    returnData: {}
+  };
+  for (var k in opts) { if (opts.hasOwnProperty(k)) options[k] = opts[k]; }
+
+  try {
+    return Traveler.travelTo(creep, destination, options);
+  } catch (e) {
+    // Fallback to vanilla moveTo if something odd happens
+    if (creep.pos && destination) {
+      var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
+      return creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
+    }
+  }
+}
+
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
 // to avoid expensive FIND_STRUCTURES work every few ticks.
 var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
+
+// ---------------------------------------------------------------------------
+// ⚡ Energy cache builders (shared by couriers, builders, etc.)
+// ---------------------------------------------------------------------------
+
+function ensureGlobalEnergyCache() {
+  if (typeof global === 'undefined') return null;
+  if (!global.__energyTargets || global.__energyTargets.tick !== Game.time) {
+    global.__energyTargets = { tick: Game.time, rooms: {} };
+  }
+  if (!global.__energyTargets.rooms) {
+    global.__energyTargets.rooms = {};
+  }
+  return global.__energyTargets;
+}
+
+function buildEnergyCacheForRoom(room) {
+  var cache = { ruins: [], tombstones: [], dropped: [], containers: [] };
+  if (!room) return cache;
+
+  var ruins = room.find(FIND_RUINS, {
+    filter: function (r) { return r.store && r.store[RESOURCE_ENERGY] > 0; }
+  });
+  for (var i = 0; i < ruins.length; i++) {
+    cache.ruins.push(ruins[i].id);
+  }
+
+  var tombstones = room.find(FIND_TOMBSTONES, {
+    filter: function (t) { return t.store && t.store[RESOURCE_ENERGY] > 0; }
+  });
+  for (var j = 0; j < tombstones.length; j++) {
+    cache.tombstones.push(tombstones[j].id);
+  }
+
+  var dropped = room.find(FIND_DROPPED_RESOURCES, {
+    filter: function (r) { return r.resourceType === RESOURCE_ENERGY && r.amount > 0; }
+  });
+  for (var k = 0; k < dropped.length; k++) {
+    cache.dropped.push(dropped[k].id);
+  }
+
+  var containers = room.find(FIND_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER && s.store && s.store[RESOURCE_ENERGY] > 0;
+    }
+  });
+  for (var m = 0; m < containers.length; m++) {
+    cache.containers.push(containers[m].id);
+  }
+
+  return cache;
+}
+
+function getRoomEnergyCache(room) {
+  if (!room) return { ruins: [], tombstones: [], dropped: [], containers: [] };
+  var globalCache = ensureGlobalEnergyCache();
+  if (!globalCache) {
+    return buildEnergyCacheForRoom(room);
+  }
+
+  var roomCache = globalCache.rooms[room.name];
+  if (!roomCache) {
+    roomCache = buildEnergyCacheForRoom(room);
+    globalCache.rooms[room.name] = roomCache;
+  }
+  return roomCache;
+}
+
+function refreshRoomEnergyCache(room) {
+  if (!room) return { ruins: [], tombstones: [], dropped: [], containers: [] };
+  var globalCache = ensureGlobalEnergyCache();
+  var newCache = buildEnergyCacheForRoom(room);
+  if (globalCache) {
+    globalCache.rooms[room.name] = newCache;
+  }
+  return newCache;
+}
+
+function getEnergyTargetsFromCache(room, key, validator) {
+  var cache = getRoomEnergyCache(room);
+  var ids = cache[key] || [];
+  var valid = [];
+  var updatedIds = [];
+
+  for (var i = 0; i < ids.length; i++) {
+    var obj = Game.getObjectById(ids[i]);
+    if (!obj || (validator && !validator(obj))) {
+      continue;
+    }
+    valid.push(obj);
+    updatedIds.push(ids[i]);
+  }
+
+  cache[key] = updatedIds;
+
+  if (valid.length === 0) {
+    cache = refreshRoomEnergyCache(room);
+    ids = cache[key] || [];
+    valid = [];
+    updatedIds = [];
+    for (var j = 0; j < ids.length; j++) {
+      var refreshedObj = Game.getObjectById(ids[j]);
+      if (!refreshedObj || (validator && !validator(refreshedObj))) {
+        continue;
+      }
+      valid.push(refreshedObj);
+      updatedIds.push(ids[j]);
+    }
+    cache[key] = updatedIds;
+  }
+
+  return valid;
+}
+
+function withdrawOrPickup(creep, targets, action) {
+  if (!targets || !targets.length) return false;
+
+  var target = creep.pos.findClosestByPath(targets);
+  if (!target) return false;
+
+  var result;
+  if (action === 'pickup') {
+    result = creep.pickup(target);
+  } else {
+    result = creep.withdraw(target, RESOURCE_ENERGY);
+  }
+  if (result === ERR_NOT_IN_RANGE) {
+    BeeTravel(creep, target, { range: 1, ignoreCreeps: true });
+  }
+  return result === OK;
+}
+
+// Helper used by collectEnergy: gives us a single line per category, which is
+// much easier for a new reader to reason about than inlining the filtering and
+// movement calls four times in a row.
+function gatherEnergyFromCategory(creep, room, key, validator, action) {
+  if (!creep || !room) return false;
+  var targets = getEnergyTargetsFromCache(room, key, validator);
+  return withdrawOrPickup(creep, targets, action);
+}
 
 var BeeToolbox = {
 
@@ -374,165 +570,41 @@ var BeeToolbox = {
   // ⚡ ENERGY GATHER & DELIVERY
   // ---------------------------------------------------------------------------
 
- _ensureGlobalEnergyCache: function () {
-    if (typeof global === 'undefined') return null;
-    if (!global.__energyTargets || global.__energyTargets.tick !== Game.time) {
-      global.__energyTargets = { tick: Game.time, rooms: {} };
-    }
-    if (!global.__energyTargets.rooms) {
-      global.__energyTargets.rooms = {};
-    }
-    return global.__energyTargets;
-  },
-
- _buildEnergyCacheForRoom: function (room) {
-    var cache = { ruins: [], tombstones: [], dropped: [], containers: [] };
-    if (!room) return cache;
-
-    var ruins = room.find(FIND_RUINS, {
-      filter: function (r) { return r.store && r.store[RESOURCE_ENERGY] > 0; }
-    });
-    for (var i = 0; i < ruins.length; i++) {
-      cache.ruins.push(ruins[i].id);
-    }
-
-    var tombstones = room.find(FIND_TOMBSTONES, {
-      filter: function (t) { return t.store && t.store[RESOURCE_ENERGY] > 0; }
-    });
-    for (var j = 0; j < tombstones.length; j++) {
-      cache.tombstones.push(tombstones[j].id);
-    }
-
-    var dropped = room.find(FIND_DROPPED_RESOURCES, {
-      filter: function (r) { return r.resourceType === RESOURCE_ENERGY && r.amount > 0; }
-    });
-    for (var k = 0; k < dropped.length; k++) {
-      cache.dropped.push(dropped[k].id);
-    }
-
-    var containers = room.find(FIND_STRUCTURES, {
-      filter: function (s) {
-        return s.structureType === STRUCTURE_CONTAINER && s.store && s.store[RESOURCE_ENERGY] > 0;
-      }
-    });
-    for (var m = 0; m < containers.length; m++) {
-      cache.containers.push(containers[m].id);
-    }
-
-    return cache;
-  },
-
-  _getRoomEnergyCache: function (room) {
-    if (!room) return { ruins: [], tombstones: [], dropped: [], containers: [] };
-    var globalCache = BeeToolbox._ensureGlobalEnergyCache();
-    if (!globalCache) {
-      return BeeToolbox._buildEnergyCacheForRoom(room);
-    }
-
-    var roomCache = globalCache.rooms[room.name];
-    if (!roomCache) {
-      roomCache = BeeToolbox._buildEnergyCacheForRoom(room);
-      globalCache.rooms[room.name] = roomCache;
-    }
-    return roomCache;
-  },
-
-  _refreshRoomEnergyCache: function (room) {
-    if (!room) return { ruins: [], tombstones: [], dropped: [], containers: [] };
-    var globalCache = BeeToolbox._ensureGlobalEnergyCache();
-    var newCache = BeeToolbox._buildEnergyCacheForRoom(room);
-    if (globalCache) {
-      globalCache.rooms[room.name] = newCache;
-    }
-    return newCache;
-  },
-
-  _getEnergyTargetsFromCache: function (room, key, validator) {
-    var cache = BeeToolbox._getRoomEnergyCache(room);
-    var ids = cache[key] || [];
-    var valid = [];
-    var updatedIds = [];
-
-    for (var i = 0; i < ids.length; i++) {
-      var obj = Game.getObjectById(ids[i]);
-      if (!obj || (validator && !validator(obj))) {
-        continue;
-      }
-      valid.push(obj);
-      updatedIds.push(ids[i]);
-    }
-
-    cache[key] = updatedIds;
-
-    if (valid.length === 0) {
-      cache = BeeToolbox._refreshRoomEnergyCache(room);
-      ids = cache[key] || [];
-      valid = [];
-      updatedIds = [];
-      for (var j = 0; j < ids.length; j++) {
-        var refreshedObj = Game.getObjectById(ids[j]);
-        if (!refreshedObj || (validator && !validator(refreshedObj))) {
-          continue;
-        }
-        valid.push(refreshedObj);
-        updatedIds.push(ids[j]);
-      }
-      cache[key] = updatedIds;
-    }
-
-    return valid;
-  },
+  _ensureGlobalEnergyCache: ensureGlobalEnergyCache,
+  _buildEnergyCacheForRoom: buildEnergyCacheForRoom,
+  _getRoomEnergyCache: getRoomEnergyCache,
+  _refreshRoomEnergyCache: refreshRoomEnergyCache,
+  _getEnergyTargetsFromCache: getEnergyTargetsFromCache,
   
   collectEnergy: function (creep) {
     if (!creep) return;
-
-    function tryWithdraw(targets, action) {
-      if (!targets || !targets.length) return false;
-
-      var target = creep.pos.findClosestByPath(targets);
-      if (!target) return false;
-
-      var result;
-      if (action === 'pickup') {
-        result = creep.pickup(target);
-      } else {
-        result = creep.withdraw(target, RESOURCE_ENERGY);
-      }
-      if (result === ERR_NOT_IN_RANGE) {
-        BeeToolbox.BeeTravel(creep, target, { range: 1, ignoreCreeps: true });
-      }
-      return result === OK;
-    }
-
     var room = creep.room;
-    
-    // Ruins with energy
-    //if (tryWithdraw(creep.room.find(FIND_RUINS, { filter: function (r) { return r.store && r.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
-    if (tryWithdraw(BeeToolbox._getEnergyTargetsFromCache(room, 'ruins', function (target) {
+    if (!room) return;
+
+    // Learner tip: when you have a waterfall of similar attempts, hide the
+    // repeated logic in a helper (gatherEnergyFromCategory) so the high level
+    // tells a clear story of "check ruins → tombstones → dropped → containers".
+    if (gatherEnergyFromCategory(creep, room, 'ruins', function (target) {
       return target.store && target.store[RESOURCE_ENERGY] > 0;
-    }), 'withdraw')) return;
-    // Tombstones with energy
-    //if (tryWithdraw(creep.room.find(FIND_TOMBSTONES, { filter: function (t) { return t.store && t.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
-    if (tryWithdraw(BeeToolbox._getEnergyTargetsFromCache(room, 'tombstones', function (target) {
+    }, 'withdraw')) return;
+
+    if (gatherEnergyFromCategory(creep, room, 'tombstones', function (target) {
       return target.store && target.store[RESOURCE_ENERGY] > 0;
-    }), 'withdraw')) return;
-    // Dropped energy
-    //if (tryWithdraw(creep.room.find(FIND_DROPPED_RESOURCES, { filter: function (r) { return r.resourceType === RESOURCE_ENERGY; } }), 'pickup')) return;
-    if (tryWithdraw(BeeToolbox._getEnergyTargetsFromCache(room, 'dropped', function (target) {
+    }, 'withdraw')) return;
+
+    if (gatherEnergyFromCategory(creep, room, 'dropped', function (target) {
       return target.resourceType === RESOURCE_ENERGY && target.amount > 0;
-    }), 'pickup')) return;
-    // Containers with energy
-    //if (tryWithdraw(creep.room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store && s.store[RESOURCE_ENERGY] > 0; } }), 'withdraw')) return;
-    if (tryWithdraw(BeeToolbox._getEnergyTargetsFromCache(room, 'containers', function (target) {
+    }, 'pickup')) return;
+
+    if (gatherEnergyFromCategory(creep, room, 'containers', function (target) {
       return target.structureType === STRUCTURE_CONTAINER && target.store && target.store[RESOURCE_ENERGY] > 0;
-    }), 'withdraw')) return;
-    
-    // Storage
+    }, 'withdraw')) return;
+
     var storage = creep.room.storage;
     if (storage && storage.store && storage.store[RESOURCE_ENERGY] > 0) {
       var res = creep.withdraw(storage, RESOURCE_ENERGY);
       if (res === ERR_NOT_IN_RANGE) {
-        BeeToolbox.BeeTravel(creep, storage, { range: 1 });
+        BeeTravel(creep, storage, { range: 1 });
       }
     }
   },
@@ -711,53 +783,7 @@ var BeeToolbox = {
   // 🚚 MOVEMENT: Traveler wrapper
   // ---------------------------------------------------------------------------
 
-  /**
-   * BeeTravel — Unified wrapper around Traveler.
-   * Supports BOTH call styles:
-   *   BeeTravel(creep, target, { range: 1, ignoreCreeps: true })
-   *   BeeTravel(creep, target, 1, /* reuse= * / 30, { ignoreCreeps:true })
-   */
-  BeeTravel: function (creep, target, a3, a4, a5) {
-    if (!creep || !target) return ERR_INVALID_TARGET;
-
-    // Normalize destination
-    var destination = (target && target.pos) ? target.pos : target;
-
-    // Parse arguments (support old signature)
-    var opts = {};
-    if (typeof a3 === 'object') {
-      opts = a3 || {};
-    } else {
-      // legacy: (range, reuse, opts)
-      if (typeof a3 === 'number') opts.range = a3;
-      if (typeof a5 === 'object') {
-        // copy a5 into opts
-        for (var k5 in a5) { if (a5.hasOwnProperty(k5)) opts[k5] = a5[k5]; }
-      }
-      // a4 was "reusePath" in older code; Traveler manages caching itself.
-    }
-
-    // Defaults (ES5 extend)
-    var options = {
-      range: (opts.range != null) ? opts.range : 1,
-      ignoreCreeps: (opts.ignoreCreeps != null) ? opts.ignoreCreeps : true,
-      useFindRoute: (opts.useFindRoute != null) ? opts.useFindRoute : true,
-      stuckValue: (opts.stuckValue != null) ? opts.stuckValue : 2,
-      repath: (opts.repath != null) ? opts.repath : 0.05,
-      returnData: {}
-    };
-    for (var k in opts) { if (opts.hasOwnProperty(k)) options[k] = opts[k]; }
-
-    try {
-      return Traveler.travelTo(creep, destination, options);
-    } catch (e) {
-      // Fallback to vanilla moveTo if something odd happens
-      if (creep.pos && destination) {
-        var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
-        return creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
-      }
-    }
-  }
+  BeeTravel: BeeTravel
 
 }; // end BeeToolbox
 

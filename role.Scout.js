@@ -598,6 +598,117 @@ function computeNextHop(fromRoom, toRoom) {
   return desc[dir] || null;
 }
 
+// ---------- Run helpers (teaching oriented) ----------
+function enforceScoutLeash(creep, mem) {
+  var curDist = Game.map.getRoomLinearDistance(mem.home, creep.room.name);
+  if (curDist <= EXPLORE_RADIUS) return;
+  var back = inwardNeighborTowardHome(creep.room.name, mem.home);
+  if (back) {
+    creep.memory.targetRoom = back;
+    creep.memory.nextHop = back;
+    debugSay(creep, '↩');
+  }
+}
+
+function handleRoomArrival(creep, mem) {
+  if (!creep.memory.lastRoom) creep.memory.lastRoom = creep.room.name;
+  if (creep.memory.lastRoom === creep.room.name) {
+    stampVisit(creep.room.name);
+    if (shouldLogIntel(creep.room)) logRoomIntel(creep.room);
+    return false;
+  }
+
+  if (!creep.memory.prevRoom) creep.memory.prevRoom = null;
+  creep.memory.prevRoom = creep.memory.lastRoom;
+  creep.memory.lastRoom = creep.room.name;
+  mem.prevRoom = creep.memory.prevRoom || null;
+
+  stampVisit(creep.room.name);
+  logRoomIntel(creep.room);
+
+  if (CFG.DEBUG_DRAW) {
+    debugRing(creep.room, creep.pos, CFG.DRAW.ROOM, "ARRIVE");
+    debugLabel(creep.room, creep.pos, creep.room.name, CFG.DRAW.TEXT);
+  }
+
+  if (creep.memory.targetRoom === creep.room.name) {
+    creep.memory.targetRoom = null;
+    creep.memory.nextHop = null;
+    return true;
+  }
+  return false;
+}
+
+function moveTowardTarget(creep) {
+  var targetRoom = creep.memory.targetRoom;
+  if (!targetRoom) return false;
+  if (creep.room.name === targetRoom) {
+    creep.memory.targetRoom = null;
+    creep.memory.nextHop = null;
+    return false;
+  }
+
+  var hop = creep.memory.nextHop;
+  if (!hop || hop === creep.room.name) {
+    hop = computeNextHop(creep.room.name, targetRoom);
+    creep.memory.nextHop = hop;
+  }
+  if (!hop) {
+    markBlocked(targetRoom);
+    debugSay(creep, '⛔');
+    creep.memory.targetRoom = null;
+    creep.memory.nextHop = null;
+    return true;
+  }
+
+  var dir = creep.room.findExitTo(hop);
+  if (dir < 0) {
+    markBlocked(hop);
+    creep.memory.nextHop = null;
+    return true;
+  }
+  if (isExitBlockedCached(creep.room, dir)) {
+    markBlocked(hop);
+    drawExitMarker(creep.room, dir, "X", CFG.DRAW.EXIT_BAD);
+    creep.memory.nextHop = null;
+    return true;
+  }
+  drawExitMarker(creep.room, dir, "→", CFG.DRAW.EXIT_OK);
+  debugSay(creep, '➡');
+  go(creep, new RoomPosition(25, 25, hop), { range: 20, reusePath: PATH_REUSE });
+  return true;
+}
+
+function ensureQueueReady(mem, creep) {
+  if (!mem.queue.length) rebuildQueueAllRings(mem, creep);
+}
+
+function chooseNextTarget(creep, mem) {
+  var allowGatewayShare = isGatewayHome(mem.home);
+  while (mem.queue.length) {
+    var next = mem.queue.shift();
+    if (!okRoomName(next) || isBlockedRecently(next)) continue;
+    if (Game.map.getRoomLinearDistance(mem.home, next) > EXPLORE_RADIUS) continue;
+    if (next === (mem.prevRoom || null) && mem.queue.length) continue;
+
+    var claimOK = tryClaimRoomThisTick(creep, next);
+    if (!claimOK && !(allowGatewayShare && isAdjToHome(mem.home, next))) continue;
+
+    creep.memory.targetRoom = next;
+    creep.memory.nextHop = computeNextHop(creep.room.name, next);
+    if (CFG.DEBUG_DRAW && Game.rooms[creep.room.name]) {
+      debugLabel(Game.rooms[creep.room.name], creep.pos, '🎯 ' + next, CFG.DRAW.TARGET);
+    }
+    return true;
+  }
+  return false;
+}
+
+function idleScout(creep) {
+  debugSay(creep, '🕊');
+  go(creep, new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE });
+}
+
 // ---------- API ----------
 var roleScout = {
   role: 'Scout',
@@ -605,144 +716,18 @@ var roleScout = {
 
   run: function (creep) {
     var M = ensureScoutMem(creep); // {home, queue, prevRoom?}
-    if (!creep.memory.lastRoom) creep.memory.lastRoom = creep.room.name;
 
-    // leash: if we're outside radius, step one room inward first
-    var curDist = Game.map.getRoomLinearDistance(M.home, creep.room.name);
-    if (curDist > EXPLORE_RADIUS) {
-      var back = inwardNeighborTowardHome(creep.room.name, M.home);
-      if (back) {
-        creep.memory.targetRoom = back;
-        creep.memory.nextHop = back;
-        debugSay(creep, '↩');
-      }
-    }
+    enforceScoutLeash(creep, M);
+    if (handleRoomArrival(creep, M)) return; // arrival clears target + logs intel
 
-    // Entered a new room: stamp & intel
-    if (creep.memory.lastRoom !== creep.room.name) {
-      if (!creep.memory.prevRoom) creep.memory.prevRoom = null;
-      creep.memory.prevRoom = creep.memory.lastRoom;
-      creep.memory.lastRoom = creep.room.name;
-      M.prevRoom = creep.memory.prevRoom || null;
+    if (moveTowardTarget(creep)) return; // existing waypoint already active
 
-      stampVisit(creep.room.name);
-      logRoomIntel(creep.room);
+    ensureQueueReady(M, creep);
+    if (!chooseNextTarget(creep, M)) { idleScout(creep); return; }
 
-      // draw arrival mark
-      if (CFG.DEBUG_DRAW) {
-        debugRing(creep.room, creep.pos, CFG.DRAW.ROOM, "ARRIVE");
-        debugLabel(creep.room, creep.pos, creep.room.name, CFG.DRAW.TEXT);
-      }
-
-      // clear per-room waypoint on arrival
-      if (creep.memory.targetRoom === creep.room.name) {
-        creep.memory.targetRoom = null;
-        creep.memory.nextHop = null;
-        return;
-      }
-    } else {
-      stampVisit(creep.room.name);
-      if (shouldLogIntel(creep.room)) logRoomIntel(creep.room);
-    }
-
-    // If we have a target, ensure nextHop is set and go via waypoint
-    if (creep.memory.targetRoom && creep.room.name !== creep.memory.targetRoom) {
-      // ensure we have a nextHop
-      var hop = creep.memory.nextHop;
-      if (!hop || hop === creep.room.name) {
-        hop = computeNextHop(creep.room.name, creep.memory.targetRoom);
-        creep.memory.nextHop = hop;
-      }
-      if (!hop) {
-        // route no longer valid; mark and drop
-        markBlocked(creep.memory.targetRoom);
-        debugSay(creep, '⛔');
-        creep.memory.targetRoom = null;
-        creep.memory.nextHop = null;
-        return;
-      }
-
-      var dir = creep.room.findExitTo(hop);
-      if (dir < 0) {
-        markBlocked(hop);
-        creep.memory.nextHop = null;
-        return;
-      }
-      if (isExitBlockedCached(creep.room, dir)) {
-        markBlocked(hop);
-        drawExitMarker(creep.room, dir, "X", CFG.DRAW.EXIT_BAD);
-        creep.memory.nextHop = null;
-        return;
-      } else {
-        drawExitMarker(creep.room, dir, "→", CFG.DRAW.EXIT_OK);
-      }
-
-      // step toward the center of hop (waypoint)
-      debugSay(creep, '➡');
-      go(creep, new RoomPosition(25, 25, hop), { range: 20, reusePath: PATH_REUSE });
-      return;
-    }
-
-    // No target (or we just arrived) — ensure a queue spanning all rings
-    if (!M.queue.length) {
-      rebuildQueueAllRings(M, creep);
-    }
-
-    // Choose next target with same-tick claim — but allow shared gateways if home has ≤2 exits
-    var allowGatewayShare = isGatewayHome(M.home);
-    while (M.queue.length) {
-      var next = M.queue.shift();
-      if (!okRoomName(next) || isBlockedRecently(next)) continue;
-      if (Game.map.getRoomLinearDistance(M.home, next) > EXPLORE_RADIUS) continue;
-      if (next === (M.prevRoom || null) && M.queue.length) continue;
-
-      var claimOK = tryClaimRoomThisTick(creep, next);
-      if (!claimOK) {
-        // If this is an adjacent gateway off a low-exit home, allow sharing
-        if (!(allowGatewayShare && isAdjToHome(M.home, next))) continue; // still skip if not a gateway
-      }
-
-      creep.memory.targetRoom = next;
-      creep.memory.nextHop = computeNextHop(creep.room.name, next);
-
-      // visuals for chosen target (if visible)
-      if (CFG.DEBUG_DRAW && Game.rooms[creep.room.name]) {
-        debugLabel(Game.rooms[creep.room.name], creep.pos, '🎯 ' + next, CFG.DRAW.TARGET);
-      }
-      break;
-    }
-
-    // If still nothing to do, idle slightly off-center
-    if (!creep.memory.targetRoom) {
-      debugSay(creep, '🕊');
-      go(creep, new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE });
-      return;
-    }
-
-    // Start moving toward first hop of the route
-    if (creep.room.name !== creep.memory.targetRoom) {
-      var nh = creep.memory.nextHop || computeNextHop(creep.room.name, creep.memory.targetRoom);
-      if (!nh) {
-        markBlocked(creep.memory.targetRoom);
-        creep.memory.targetRoom = null;
-        creep.memory.nextHop = null;
-        return;
-      }
-      creep.memory.nextHop = nh;
-
-      var dir2 = creep.room.findExitTo(nh);
-      if (dir2 < 0 || isExitBlockedCached(creep.room, dir2)) {
-        markBlocked(nh);
-        drawExitMarker(creep.room, dir2, "X", CFG.DRAW.EXIT_BAD);
-        creep.memory.nextHop = null;
-        return;
-      }
-      drawExitMarker(creep.room, dir2, "→", CFG.DRAW.EXIT_OK);
-      debugSay(creep, '➡');
-      go(creep, new RoomPosition(25, 25, nh), { range: 20, reusePath: PATH_REUSE });
-    } else {
-      creep.memory.targetRoom = null; // arrived
-      creep.memory.nextHop = null;
+    if (!moveTowardTarget(creep)) {
+      // Could happen if we spawned inside the target room this tick.
+      idleScout(creep);
     }
   }
 };

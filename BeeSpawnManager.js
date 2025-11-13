@@ -157,6 +157,8 @@ function enqueue(roomName, role, opts) {
     return false;
   }
 
+  // Teaching habit: build objects in a single literal so it is obvious which
+  // metadata we persist for each queued role.
   var item = {
     role: role,
     home: roomName,
@@ -189,6 +191,8 @@ function pruneOverfilledQueue(roomName, quotas, C) {
 
   q.sort(compareQueueItems);
 
+  // Defensive habit: track how many spawn slots remain per role so we do not
+  // waste CPU dequeuing later.
   var remaining = {};
   var quotaRoles = Object.keys(quotas);
   for (var i = 0; i < quotaRoles.length; i++) {
@@ -220,6 +224,21 @@ function pruneOverfilledQueue(roomName, quotas, C) {
       'before=', before, 'kept=', kept.length, 'dropped=', dropped,
       'remaining=', JSON.stringify(remaining));
   }
+}
+
+// Novice tip: keep state lookups tiny helpers so you can audit each role's math.
+function activeCountForRole(C, role, roomName) {
+  var canonical = canonicalRole(role);
+  if (canonical === 'Luna') {
+    return (C.lunaCountsByHome && C.lunaCountsByHome[roomName]) | 0;
+  }
+  return C.roleCounts[canonical] | 0;
+}
+
+function roleDeficit(C, roomName, role, limit) {
+  var active = activeCountForRole(C, role, roomName);
+  var queued = queuedCount(roomName, role);
+  return Math.max(0, (limit | 0) - active - queued);
 }
 
 // ------------------------------ Signals ---------------------------------
@@ -308,6 +327,8 @@ function determineLunaQuota(C, room) {
 }
 
 function computeRoomQuotas(C, room) {
+  // Teaching habit: start with conservative defaults, then patch in signals
+  // (builder need, remote miners, etc.) so every change is a single diff.
   var quotas = {
     baseharvest:  2,
     courier:      1,
@@ -336,18 +357,16 @@ function fillQueueForRoom(C, room) {
 
   pruneOverfilledQueue(roomName, quotas, C);
 
+  // Iterate quotas in plain English order so future maintainers can eyeball
+  // which roles will be enqueued before touching the code.
   var roles = Object.keys(quotas);
   for (var i = 0; i < roles.length; i++) {
     var role = roles[i];
     var limit = quotas[role] | 0;
-    var canonical = canonicalRole(role);
-    var active = (canonical === 'Luna')
-      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) | 0)
-      : (C.roleCounts[canonical] | 0);
-    var queued = queuedCount(roomName, role);
-    var deficit = Math.max(0, limit - active - queued);
-
+    var deficit = roleDeficit(C, roomName, role, limit);
     if (deficit > 0 && tickEvery(DBG_EVERY)) {
+      var active = activeCountForRole(C, role, roomName);
+      var queued = queuedCount(roomName, role);
       dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit,
         'active=', active, 'queued=', queued, 'deficit=', deficit);
     }
@@ -407,6 +426,8 @@ function dequeueAndSpawn(spawner) {
   dlog('🎬 [SpawnTry]', roomName, 'role=', item.role, 'prio=', item.priority,
     'age=', (Game.time - item.created), 'energy=', energyStatus(room));
 
+  // Calculate_Spawn_Resource lets us centralize "what counts as energy" logic
+  // (spawns-only vs room energy) without duplicating it inside every manager.
   var spawnResource = null;
   if (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function') {
     spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
@@ -429,40 +450,48 @@ function dequeueAndSpawn(spawner) {
   return false;
 }
 
+// Teaching habit: split orchestration into obvious verbs (prepare, run) so
+// extending the manager later is painless.
+function prepareRoomQueues(C) {
+  var rooms = C.roomsOwned;
+  for (var i = 0; i < rooms.length; i++) {
+    var room = rooms[i];
+    if (!room.find(FIND_MY_SPAWNS).length) continue;
+    ensureRoomQueue(room.name);
+    fillQueueForRoom(C, room);
+  }
+}
+
+// Squad spawns are intentionally serialized so they do not starve workers.
+function trySpawnSquad(spawner, squadState) {
+  if (!spawnLogic || typeof spawnLogic.Spawn_Squad !== 'function') return false;
+  if (squadState.handled) return false;
+  var ok = spawnLogic.Spawn_Squad(spawner, 'Alpha');
+  if (!ok) return false;
+  squadState.handled = true;
+  dlog('🛡️ [Squad]', spawner.room.name, 'Alpha maintained at', spawner.name);
+  return true;
+}
+
+function runSpawnPass(C) {
+  var spawns = C.spawns;
+  var squadState = { handled: false };
+  for (var i = 0; i < spawns.length; i++) {
+    var spawner = spawns[i];
+    if (!spawner || spawner.spawning) continue;
+    if (trySpawnSquad(spawner, squadState)) {
+      continue;
+    }
+    dequeueAndSpawn(spawner);
+  }
+}
+
 // ------------------------------ Public API ------------------------------
 var BeeSpawnManager = {
   manageSpawns: function manageSpawns(C) {
     if (!C || !Array.isArray(C.spawns) || !Array.isArray(C.roomsOwned)) return;
-
-    var rooms = C.roomsOwned;
-    for (var i = 0; i < rooms.length; i++) {
-      var room = rooms[i];
-      if (!room.find(FIND_MY_SPAWNS).length) continue;
-      ensureRoomQueue(room.name);
-      fillQueueForRoom(C, room);
-    }
-
-    var squadHandled = false;
-
-    var spawns = C.spawns;
-    for (var j = 0; j < spawns.length; j++) {
-      var spawner = spawns[j];
-      if (!spawner || spawner.spawning) continue;
-
-      if (!squadHandled && spawnLogic && typeof spawnLogic.Spawn_Squad === 'function') {
-        var didSquad = spawnLogic.Spawn_Squad(spawner, 'Alpha');
-        if (didSquad) {
-          squadHandled = true;
-          dlog('🛡️ [Squad]', spawner.room.name, 'Alpha maintained at', spawner.name);
-          continue;
-        }
-        // add more formations as you enable them:
-        // if (spawnLogic.Spawn_Squad(spawner, 'Bravo')) { squadHandled = true; dlog(...); continue; }
-        // if (spawnLogic.Spawn_Squad(spawner, 'Charlie')) { squadHandled = true; dlog(...); continue; }
-      }
-
-      dequeueAndSpawn(spawner);
-    }
+    prepareRoomQueues(C);
+    runSpawnPass(C);
   }
 };
 

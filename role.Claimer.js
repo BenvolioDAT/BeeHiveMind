@@ -299,6 +299,97 @@ function resolveTargetRoom(creep) {
 }
 
 /** =========================
+ *  Orchestration helpers so new contributors can follow the run() pipeline.
+ *  ========================= */
+function claimerMode(creep) {
+  return (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
+}
+
+function ensureReserveRoleScan() {
+  if (RESERVE_CONFIG.scanRoleNames.indexOf('luna') === -1) {
+    RESERVE_CONFIG.scanRoleNames.push('luna');
+  }
+}
+
+function releaseLockIfPlanDropped(creep, plan) {
+  if (creep.memory.targetRoom && plan.indexOf(creep.memory.targetRoom) === -1) {
+    releaseRoomLock(creep.memory.targetRoom, creep);
+    creep.memory.targetRoom = null;
+  }
+}
+
+function claimReserveRoom(creep, plan) {
+  var pick = pickNextReserveTarget(creep, plan);
+  if (pick && acquireRoomLock(pick, creep)) {
+    creep.memory.targetRoom = pick;
+    debugSay(creep, '🎯');
+    return true;
+  }
+  for (var i = 0; i < plan.length; i++) {
+    var alt = plan[i];
+    if (alt === pick) continue;
+    if (acquireRoomLock(alt, creep)) {
+      creep.memory.targetRoom = alt;
+      return true;
+    }
+  }
+  return false;
+}
+
+function ensureTargetRoom(creep, plan) {
+  if (creep.memory.targetRoom) {
+    refreshRoomLock(creep.memory.targetRoom, creep);
+    return creep.memory.targetRoom;
+  }
+
+  var mode = claimerMode(creep);
+  if (mode === 'reserve') {
+    if (!claimReserveRoom(creep, plan)) {
+      debugSay(creep, '🔒');
+      return null;
+    }
+    return creep.memory.targetRoom;
+  }
+
+  creep.memory.targetRoom = resolveTargetRoom(creep);
+  if (!creep.memory.targetRoom) debugSay(creep, '❌');
+  return creep.memory.targetRoom;
+}
+
+function drawLockVisual(targetRoom) {
+  if (!CFG.DEBUG_DRAW) return;
+  if (!Game.rooms[targetRoom]) return;
+  if (!isRoomLocked(targetRoom)) return;
+  var center = new RoomPosition(25,25,targetRoom);
+  debugRing(Game.rooms[targetRoom], center, CFG.DRAW.LOCK, "LOCK");
+}
+
+function runControllerMode(creep, ctl) {
+  var mode = claimerMode(creep);
+  if (mode === 'claim') { doClaim(creep, ctl); }
+  else if (mode === 'attack') { doAttack(creep, ctl); }
+  else { doReserve(creep, ctl); }
+}
+
+function rotateIfSatisfied(creep, ctl, targetRoom) {
+  if (!ctl) return;
+  if (ctl.reservation && ctl.reservation.username === creep.owner.username) {
+    var ticks = ctl.reservation.ticksToEnd || 0;
+    if (ticks >= RESERVE_CONFIG.rotateAt) {
+      releaseRoomLock(targetRoom, creep);
+      debugSay(creep, '➡');
+      creep.memory.targetRoom = null;
+    }
+    return;
+  }
+  if (ctl.my) {
+    releaseRoomLock(targetRoom, creep);
+    debugSay(creep, '🏠');
+    creep.memory.targetRoom = null;
+  }
+}
+
+/** =========================
  *  Movement helpers
  *  ========================= */
 function moveToRoom(creep, roomName) {
@@ -440,85 +531,35 @@ function doAttack(creep, controller) {
 var roleClaimer = {
   role: 'Claimer',
   run: function(creep) {
-    // Update intel for any room we’re in
     rememberReservationIntel(creep.room);
-
-    // Make sure 'luna' is in the scan set
-    if (RESERVE_CONFIG.scanRoleNames.indexOf('luna') === -1)
-      RESERVE_CONFIG.scanRoleNames.push('luna');
+    ensureReserveRoleScan();
 
     var plan = gatherReserveTargets();
+    releaseLockIfPlanDropped(creep, plan);
 
-    // If our target vanished from plan, release lock
-    if (creep.memory.targetRoom && plan.indexOf(creep.memory.targetRoom) === -1) {
-      releaseRoomLock(creep.memory.targetRoom, creep);
-      creep.memory.targetRoom = null;
-    }
+    var targetRoom = ensureTargetRoom(creep, plan);
+    if (!targetRoom) return;
 
-    // Choose target room
-    if (!creep.memory.targetRoom) {
-      var modeTmp = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
+    drawLockVisual(targetRoom);
 
-      if (modeTmp === 'reserve') {
-        var pick = pickNextReserveTarget(creep, plan);
-        if (pick && acquireRoomLock(pick, creep)) {
-          creep.memory.targetRoom = pick;
-          debugSay(creep, '🎯');
-        } else {
-          for (var i = 0; i < plan.length && !creep.memory.targetRoom; i++) {
-            var alt = plan[i];
-            if (alt !== pick && acquireRoomLock(alt, creep)) creep.memory.targetRoom = alt;
-          }
-          if (!creep.memory.targetRoom) { debugSay(creep, '🔒'); return; }
-        }
-      } else {
-        creep.memory.targetRoom = resolveTargetRoom(creep);
-        if (!creep.memory.targetRoom) { debugSay(creep, '❌'); return; }
-      }
-    } else {
-      refreshRoomLock(creep.memory.targetRoom, creep);
-    }
-
-    var targetRoom = creep.memory.targetRoom;
-    if (!targetRoom) { debugSay(creep, '❌'); return; }
-
-    // Show lock status (if we’re in the room with the flag/ctl)
-    if (CFG.DEBUG_DRAW && Game.rooms[targetRoom] && isRoomLocked(targetRoom)) {
-      var center = new RoomPosition(25,25,targetRoom);
-      debugRing(Game.rooms[targetRoom], center, CFG.DRAW.LOCK, "LOCK");
-    }
-
-    // Travel to room
     if (!moveToRoom(creep, targetRoom)) {
       refreshRoomLock(targetRoom, creep);
       return;
     }
 
-    // We are in target — act on controller
     var ctl = creep.room.controller;
-    if (!ctl) { releaseRoomLock(targetRoom, creep); debugSay(creep, '🚫'); creep.memory.targetRoom = null; return; }
+    if (!ctl) {
+      releaseRoomLock(targetRoom, creep);
+      debugSay(creep, '🚫');
+      creep.memory.targetRoom = null;
+      return;
+    }
 
-    var mode = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
-    if (mode === 'claim') { doClaim(creep, ctl); }
-    else if (mode === 'attack') { doAttack(creep, ctl); }
-    else { doReserve(creep, ctl); }
+    runControllerMode(creep, ctl);
 
     rememberReservationIntel(creep.room);
     refreshRoomLock(targetRoom, creep);
-
-    // Rotation logic when reserved enough
-    if (ctl.reservation && ctl.reservation.username === creep.owner.username) {
-      var ticks = ctl.reservation.ticksToEnd || 0;
-      if (ticks >= RESERVE_CONFIG.rotateAt) {
-        releaseRoomLock(targetRoom, creep);
-        debugSay(creep, '➡');
-        creep.memory.targetRoom = null;
-      }
-    } else if (ctl.my) {
-      releaseRoomLock(targetRoom, creep);
-      debugSay(creep, '🏠');
-      creep.memory.targetRoom = null;
-    }
+    rotateIfSatisfied(creep, ctl, targetRoom);
   }
 };
 
