@@ -417,7 +417,7 @@ var BeeHiveMind = {
       var roleFn = creepRoles[roleName];
       if (typeof roleFn !== 'function') {
         // Soft fallback so a mis-typed role never crashes the tick.
-        roleFn = roleIdle.run;
+        //roleFn = roleIdle.run;
       }
       try {
         roleFn(creep);
