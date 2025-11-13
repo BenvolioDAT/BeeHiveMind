@@ -140,99 +140,115 @@ module.exports = {
 
   run: function (creep) {
     if (!creep) return;
-    if (creep.memory && !creep.memory.role) creep.memory.role = 'Upgrader';
-
-    // State flip
-    if (creep.memory.upgrading && creep.store[RESOURCE_ENERGY] === 0) {
-      creep.memory.upgrading = false;
-      creep.memory.targetDroppedEnergyId = null;
-      debugSay(creep, "🔄 refuel");
-    } else if (!creep.memory.upgrading && creep.store.getFreeCapacity() === 0) {
-      creep.memory.upgrading = true;
-      debugSay(creep, "⚡ upgrade");
-    }
+    ensureRoleIdentity(creep);
+    toggleUpgradingState(creep);
 
     if (creep.memory.upgrading) {
-      var controller = creep.room.controller;
-      if (controller) {
-        // optional pause at safe RCL8
-        if (CFG.SKIP_RCL8_IF_SAFE &&
-            controller.level === 8 &&
-            (controller.ticksToDowngrade | 0) > CFG.RCL8_SAFE_TTL) {
-          // still keep the sign fresh
-          checkAndUpdateControllerSign(creep, controller);
-          debugSay(creep, "⏸");
-          debugRing(controller, CFG.DRAW.CTRL, "safe");
-          return;
-        }
-
-        var ur = creep.upgradeController(controller);
-        if (ur === ERR_NOT_IN_RANGE) {
-          debugLine(creep, controller, CFG.DRAW.CTRL);
-          go(creep, controller, 3);
-        } else if (ur === OK) {
-          debugRing(controller, CFG.DRAW.CTRL, "UP");
-        }
-        // Even if skipping or working, maintain sign
-        checkAndUpdateControllerSign(creep, controller);
-      }
+      runUpgradePhase(creep);
       return;
     }
-
-    // =========================
-    // Refuel phase (priority order)
-    // 1) Link near controller (fastest loop)
-    // =========================
-    var ctrl = creep.room.controller;
-    var linkNearController = ctrl && creep.pos.findClosestByRange(FIND_STRUCTURES, {
-      filter: function (s) {
-        return s.structureType === STRUCTURE_LINK &&
-               s.store && (s.store[RESOURCE_ENERGY] | 0) > 0 &&
-               s.pos.inRangeTo(ctrl, 3);
-      }
-    });
-
-    if (linkNearController) {
-      var lr = creep.withdraw(linkNearController, RESOURCE_ENERGY);
-      debugRing(linkNearController, CFG.DRAW.LINK, "LINK");
-      debugLine(creep, linkNearController, CFG.DRAW.LINK);
-      if (lr === ERR_NOT_IN_RANGE) go(creep, linkNearController, 1);
-      return; // early exit if valid link path found
-    }
-
-    // 2) Toolbox opportunistic sweep (dropped/tombs/ruins/etc. depending on your impl)
-    try { if (BeeToolbox && typeof BeeToolbox.collectEnergy === 'function') BeeToolbox.collectEnergy(creep); } catch (e2) {}
-
-    // 3) Storage (cheap travel)
-    var stor = creep.room.storage;
-    if (stor && stor.store && (stor.store[RESOURCE_ENERGY] | 0) > 0) {
-      debugRing(stor, CFG.DRAW.STORE, "STO");
-      debugLine(creep, stor, CFG.DRAW.STORE);
-      var sr = creep.withdraw(stor, RESOURCE_ENERGY);
-      if (sr === ERR_NOT_IN_RANGE) go(creep, stor, 1);
-      return;
-    }
-
-    // 4) Containers
-    var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-      filter: function (s) {
-        return s.structureType === STRUCTURE_CONTAINER &&
-               s.store && (s.store[RESOURCE_ENERGY] | 0) > 0;
-      }
-    });
-    if (containerWithEnergy) {
-      debugRing(containerWithEnergy, CFG.DRAW.CONT, "CONT");
-      debugLine(creep, containerWithEnergy, CFG.DRAW.CONT);
-      var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY);
-      if (cr === ERR_NOT_IN_RANGE) go(creep, containerWithEnergy, 1);
-      return;
-    }
-
-    // 5) Dropped energy (sticky by memory)
-    if (pickDroppedEnergy(creep)) return;
-
-    if (CFG.DEBUG_DRAW) {
-      debugSay(creep, "❓");
-    }
+    runRefuelPhase(creep);
   }
 };
+
+function ensureRoleIdentity(creep) {
+  if (creep.memory && !creep.memory.role) creep.memory.role = 'Upgrader';
+}
+
+function toggleUpgradingState(creep) {
+  if (creep.memory.upgrading && creep.store[RESOURCE_ENERGY] === 0) {
+    creep.memory.upgrading = false;
+    creep.memory.targetDroppedEnergyId = null;
+    debugSay(creep, "🔄 refuel");
+  } else if (!creep.memory.upgrading && creep.store.getFreeCapacity() === 0) {
+    creep.memory.upgrading = true;
+    debugSay(creep, "⚡ upgrade");
+  }
+}
+
+function runUpgradePhase(creep) {
+  var controller = creep.room.controller;
+  if (!controller) return;
+
+  if (shouldPauseAtSafeRCL8(controller)) {
+    checkAndUpdateControllerSign(creep, controller);
+    debugSay(creep, "⏸");
+    debugRing(controller, CFG.DRAW.CTRL, "safe");
+    return;
+  }
+
+  var ur = creep.upgradeController(controller);
+  if (ur === ERR_NOT_IN_RANGE) {
+    debugLine(creep, controller, CFG.DRAW.CTRL);
+    go(creep, controller, 3);
+  } else if (ur === OK) {
+    debugRing(controller, CFG.DRAW.CTRL, "UP");
+  }
+  checkAndUpdateControllerSign(creep, controller);
+}
+
+function shouldPauseAtSafeRCL8(controller) {
+  if (!CFG.SKIP_RCL8_IF_SAFE) return false;
+  if (controller.level !== 8) return false;
+  return (controller.ticksToDowngrade | 0) > CFG.RCL8_SAFE_TTL;
+}
+
+function runRefuelPhase(creep) {
+  if (tryLinkPull(creep)) return;
+  tryToolboxSweep(creep);
+  if (tryWithdrawStorage(creep)) return;
+  if (tryWithdrawContainer(creep)) return;
+  if (pickDroppedEnergy(creep)) return;
+  if (CFG.DEBUG_DRAW) debugSay(creep, "❓");
+}
+
+function tryLinkPull(creep) {
+  var ctrl = creep.room.controller;
+  if (!ctrl) return false;
+  var linkNearController = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_LINK &&
+        s.store && (s.store[RESOURCE_ENERGY] | 0) > 0 &&
+        s.pos.inRangeTo(ctrl, 3);
+    }
+  });
+  if (!linkNearController) return false;
+  var lr = creep.withdraw(linkNearController, RESOURCE_ENERGY);
+  debugRing(linkNearController, CFG.DRAW.LINK, "LINK");
+  debugLine(creep, linkNearController, CFG.DRAW.LINK);
+  if (lr === ERR_NOT_IN_RANGE) go(creep, linkNearController, 1);
+  return true;
+}
+
+function tryToolboxSweep(creep) {
+  try {
+    if (BeeToolbox && typeof BeeToolbox.collectEnergy === 'function') {
+      BeeToolbox.collectEnergy(creep);
+    }
+  } catch (e) {}
+}
+
+function tryWithdrawStorage(creep) {
+  var stor = creep.room.storage;
+  if (!stor || !stor.store || (stor.store[RESOURCE_ENERGY] | 0) <= 0) return false;
+  debugRing(stor, CFG.DRAW.STORE, "STO");
+  debugLine(creep, stor, CFG.DRAW.STORE);
+  var sr = creep.withdraw(stor, RESOURCE_ENERGY);
+  if (sr === ERR_NOT_IN_RANGE) go(creep, stor, 1);
+  return true;
+}
+
+function tryWithdrawContainer(creep) {
+  var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER &&
+        s.store && (s.store[RESOURCE_ENERGY] | 0) > 0;
+    }
+  });
+  if (!containerWithEnergy) return false;
+  debugRing(containerWithEnergy, CFG.DRAW.CONT, "CONT");
+  debugLine(creep, containerWithEnergy, CFG.DRAW.CONT);
+  var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY);
+  if (cr === ERR_NOT_IN_RANGE) go(creep, containerWithEnergy, 1);
+  return true;
+}

@@ -756,66 +756,103 @@ function tryBuildOrUpgrade(creep) {
 }
 
 // ============================
+// Teaching helpers for the run loop
+// ============================
+function ensureLunaIdentity(creep) {
+  if (creep && creep.memory && creep.memory.task === 'remoteharvest') {
+    creep.memory.task = 'luna';
+  }
+}
+
+function trackMovementBreadcrumb(creep) {
+  if (!creep || !creep.memory) return;
+  var lastX=creep.memory._lx|0, lastY=creep.memory._ly|0, lastR=creep.memory._lr||'';
+  var samePos = (lastX===creep.pos.x && lastY===creep.pos.y && lastR===creep.pos.roomName);
+  creep.memory._stuck = samePos ? ((creep.memory._stuck|0)+1) : 0;
+  creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
+}
+
+function idleAtAnchor(creep, label) {
+  var anchor = getAnchorPos(getHomeName(creep));
+  debugSay(creep, label || 'IDLE');
+  debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, label || 'IDLE');
+  go(creep, anchor, { range: 2 });
+}
+
+function shouldReleaseForEndOfLife(creep) {
+  if (creep.ticksToLive!==undefined && creep.ticksToLive<5 && creep.memory.assigned){
+    releaseAssignment(creep);
+    return true;
+  }
+  return false;
+}
+
+function respectCooldown(creep) {
+  if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt){
+    idleAtAnchor(creep, '…cd');
+    return true;
+  }
+  return false;
+}
+
+function handleForcedYield(creep) {
+  if (!creep.memory._forceYield) return false;
+  delete creep.memory._forceYield;
+  releaseAssignment(creep);
+  return true;
+}
+
+function ensureActiveAssignment(creep) {
+  if (creep.memory.sourceId) return true;
+
+  var pick = pickRemoteSource(creep);
+  if (pick){
+    creep.memory.sourceId   = pick.id;
+    creep.memory.targetRoom = pick.roomName;
+    creep.memory.assigned   = true;
+    creep.memory._assignTick = Game.time;
+    return true;
+  }
+
+  roleLuna.initializeAndAssign(creep);
+  if (!creep.memory.sourceId){
+    idleAtAnchor(creep, 'IDLE');
+    return false;
+  }
+  creep.memory._assignTick = creep.memory._assignTick || Game.time;
+  return true;
+}
+
+function travelToAssignedRoom(creep) {
+  if (!creep.memory.targetRoom || creep.pos.roomName === creep.memory.targetRoom) return false;
+  var dest = new RoomPosition(25,25,creep.memory.targetRoom);
+  debugSay(creep, '➡️'+creep.memory.targetRoom);
+  debugDraw(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
+  go(creep, dest, { range:20, reusePath:20 });
+  return true;
+}
+
+// ============================
 // Main role
 // ============================
 var roleLuna = {
   role: 'Luna',
   run: function(creep){
-    if (creep && creep.memory && creep.memory.task === 'remoteharvest') {
-      creep.memory.task = 'luna';
-    }
+    ensureLunaIdentity(creep);
     auditOncePerTick();
     if (!creep.memory.home) getHomeName(creep);
 
-    // Anti-stuck tracking
-    var lastX=creep.memory._lx|0, lastY=creep.memory._ly|0, lastR=creep.memory._lr||'';
-    var samePos = (lastX===creep.pos.x && lastY===creep.pos.y && lastR===creep.pos.roomName);
-    creep.memory._stuck = samePos ? ((creep.memory._stuck|0)+1) : 0;
-    creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
+    trackMovementBreadcrumb(creep);
 
-    // Carry state
+    // Carry state lives in one place; from here on we trust the boolean.
     roleLuna.updateReturnState(creep);
     if (creep.memory.returning){ roleLuna.returnToStorage(creep); return; }
 
-    // Gentle EOL slot free
-    if (creep.ticksToLive!==undefined && creep.ticksToLive<5 && creep.memory.assigned){ releaseAssignment(creep); }
+    if (shouldReleaseForEndOfLife(creep)) return;
+    if (respectCooldown(creep)) return;
+    if (handleForcedYield(creep)) return;
 
-    // Cooldown after yield
-    if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt){
-      var _anchor = getAnchorPos(getHomeName(creep));
-      debugSay(creep, '…cd');
-      debugDraw(creep, _anchor, CFG.DRAW.IDLE_COLOR, "COOLDOWN");
-      go(creep,_anchor,{range:2,reusePath:10}); return;
-    }
-
-    // If we were flagged to yield by resolver, obey & stop
-    if (creep.memory._forceYield){
-      delete creep.memory._forceYield;
-      releaseAssignment(creep);
-      return;
-    }
-
-    // Assignment phase
-    if (!creep.memory.sourceId){
-      var pick = pickRemoteSource(creep);
-      if (pick){
-        creep.memory.sourceId   = pick.id;
-        creep.memory.targetRoom = pick.roomName;
-        creep.memory.assigned   = true;
-        creep.memory._assignTick = Game.time;
-      }else{
-        roleLuna.initializeAndAssign(creep);
-        if (!creep.memory.sourceId){
-          var anchor=getAnchorPos(getHomeName(creep));
-          debugSay(creep, 'IDLE');
-          debugDraw(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-          go(creep,anchor,{range:2});
-          return;
-        } else {
-          creep.memory._assignTick = Game.time;
-        }
-      }
-    }
+    if (!ensureActiveAssignment(creep)) return;
 
     // If room got locked by invader activity, drop and repick
     if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)){
@@ -827,17 +864,8 @@ var roleLuna = {
       return;
     }
 
-    // Ensure exclusivity or yield
     if (!validateExclusiveSource(creep)) return;
-
-    // Travel to target room
-    if (creep.memory.targetRoom && creep.pos.roomName !== creep.memory.targetRoom){
-      var dest = new RoomPosition(25,25,creep.memory.targetRoom);
-      debugSay(creep, '➡️'+creep.memory.targetRoom);
-      debugDraw(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-      go(creep, dest, { range:20, reusePath:20 });
-      return;
-    }
+    if (travelToAssignedRoom(creep)) return;
 
     // Defensive: memory wipe mid-run
     if (!creep.memory.targetRoom || !creep.memory.sourceId){
@@ -863,7 +891,6 @@ var roleLuna = {
     var ctl = targetRoomObj && targetRoomObj.controller;
     if (ctl) { ensureControllerFlag(ctl); debugRing(targetRoomObj, ctl.pos, CFG.DRAW.TRAVEL_COLOR, "CTRL"); }
 
-    // Work the source
     roleLuna.harvestSource(creep);
   },
 

@@ -1,377 +1,389 @@
-var CFG = Object.freeze({
-  maxSitesPerTick: 5,            // gentle drip; global cap is 100
-  csiteSafetyLimit: 40,          // stop early if we’re near the global cap
-  tickModulo: 2,                 // stagger planners across rooms; set to 1 to run every tick
-  noPlacementCooldownPlaced: 4,  // ticks to wait after we successfully place >=1 site
-  noPlacementCooldownNone: 10    // ticks to wait when nothing placed
+// Teaching note: this planner intentionally keeps its knobs in one object
+// so novice contributors can tweak behavior without spelunking the code.
+const CFG = Object.freeze({
+  maxSitesPerTick: 5,
+  csiteSafetyLimit: 40,
+  tickModulo: 2,
+  noPlacementCooldownPlaced: 4,
+  noPlacementCooldownNone: 10
 });
 
-var RoomPlanner = {
-  // Hard caps (upper bounds). Also clamped by CONTROLLER_STRUCTURES per RCL.
-  structureLimits: (function () {
-    var o = {};
-    o[STRUCTURE_TOWER]     = 6;
-    o[STRUCTURE_EXTENSION] = 60;
-    o[STRUCTURE_CONTAINER] = 10;
-    o[STRUCTURE_RAMPART]   = 2;
-    o[STRUCTURE_ROAD]      = 150;
-    return o;
-  })(),
+// Hard caps (upper bounds). Still clamped by CONTROLLER_STRUCTURES per RCL.
+const STRUCTURE_LIMITS = (() => {
+  const limits = {};
+  limits[STRUCTURE_TOWER] = 6;
+  limits[STRUCTURE_EXTENSION] = 60;
+  limits[STRUCTURE_CONTAINER] = 10;
+  limits[STRUCTURE_RAMPART] = 2;
+  limits[STRUCTURE_ROAD] = 150;
+  return limits;
+})();
 
-  BASE_OFFSETS: [
-    { type: STRUCTURE_STORAGE,   x:  8, y:  0 },
-    { type: STRUCTURE_SPAWN,     x: -5, y:  0 },
-    { type: STRUCTURE_SPAWN,     x:  5, y:  0 },
+// Base layout blueprint: offsets around the anchor spawn. Keeping the
+// array flat makes it easy to tweak or visualize.
+const BASE_OFFSETS = [
+  { type: STRUCTURE_STORAGE,   x:  8, y:  0 },
+  { type: STRUCTURE_SPAWN,     x: -5, y:  0 },
+  { type: STRUCTURE_SPAWN,     x:  5, y:  0 },
 
-    { type: STRUCTURE_EXTENSION, x:  0, y:  2 },
-    { type: STRUCTURE_EXTENSION, x:  0, y: -2 },
-    { type: STRUCTURE_EXTENSION, x:  0, y:  3 },
-    { type: STRUCTURE_EXTENSION, x:  0, y: -3 },
-    { type: STRUCTURE_EXTENSION, x: -1, y:  3 },
-    { type: STRUCTURE_EXTENSION, x: -1, y: -3 },
-    { type: STRUCTURE_EXTENSION, x:  1, y: -3 },
-    { type: STRUCTURE_EXTENSION, x:  1, y:  3 },
-    { type: STRUCTURE_EXTENSION, x: -1, y:  2 },
-    { type: STRUCTURE_EXTENSION, x: -1, y: -2 },
-    { type: STRUCTURE_EXTENSION, x:  1, y:  2 },
-    { type: STRUCTURE_EXTENSION, x:  1, y: -2 },
-    { type: STRUCTURE_EXTENSION, x: -2, y: -1 },
-    { type: STRUCTURE_EXTENSION, x: -2, y:  1 },
-    { type: STRUCTURE_EXTENSION, x:  2, y: -1 },
-    { type: STRUCTURE_EXTENSION, x:  2, y:  1 },
-    { type: STRUCTURE_EXTENSION, x: -3, y:  1 },
-    { type: STRUCTURE_EXTENSION, x: -3, y: -1 },
-    { type: STRUCTURE_EXTENSION, x:  3, y:  1 },
-    { type: STRUCTURE_EXTENSION, x:  3, y: -1 },
-    { type: STRUCTURE_EXTENSION, x: -3, y:  2 },
-    { type: STRUCTURE_EXTENSION, x: -3, y: -2 },
-    { type: STRUCTURE_EXTENSION, x:  3, y:  2 },
-    { type: STRUCTURE_EXTENSION, x:  3, y: -2 },
-    { type: STRUCTURE_EXTENSION, x: -4, y:  2 },
-    { type: STRUCTURE_EXTENSION, x: -4, y: -2 },
-    { type: STRUCTURE_EXTENSION, x:  4, y:  2 },
-    { type: STRUCTURE_EXTENSION, x:  4, y: -2 },
-    { type: STRUCTURE_EXTENSION, x:  4, y:  3 },
-    { type: STRUCTURE_EXTENSION, x:  4, y: -3 },
-    { type: STRUCTURE_EXTENSION, x: -4, y:  3 },
-    { type: STRUCTURE_EXTENSION, x: -4, y: -3 },
-    { type: STRUCTURE_EXTENSION, x: -4, y:  4 },
-    { type: STRUCTURE_EXTENSION, x: -4, y: -4 },
-    { type: STRUCTURE_EXTENSION, x:  4, y:  4 },
-    { type: STRUCTURE_EXTENSION, x:  4, y: -4 },
-    { type: STRUCTURE_EXTENSION, x:  3, y:  4 },
-    { type: STRUCTURE_EXTENSION, x:  3, y: -4 },
-    { type: STRUCTURE_EXTENSION, x: -3, y:  4 },
-    { type: STRUCTURE_EXTENSION, x: -3, y: -4 },
-    { type: STRUCTURE_EXTENSION, x: -2, y:  4 },
-    { type: STRUCTURE_EXTENSION, x: -2, y: -4 },
-    { type: STRUCTURE_EXTENSION, x:  2, y:  4 },
-    { type: STRUCTURE_EXTENSION, x:  2, y: -4 },
-    { type: STRUCTURE_EXTENSION, x:  2, y:  5 },
-    { type: STRUCTURE_EXTENSION, x:  2, y: -5 },
-    { type: STRUCTURE_EXTENSION, x: -2, y: -5 },
-    { type: STRUCTURE_EXTENSION, x: -2, y:  5 },
-    { type: STRUCTURE_EXTENSION, x: -1, y: -5 },
-    { type: STRUCTURE_EXTENSION, x: -1, y:  5 },
-    { type: STRUCTURE_EXTENSION, x:  1, y:  5 },
-    { type: STRUCTURE_EXTENSION, x:  1, y: -5 },
-    { type: STRUCTURE_EXTENSION, x:  0, y:  5 },
-    { type: STRUCTURE_EXTENSION, x:  0, y: -5 },
-    { type: STRUCTURE_EXTENSION, x: -4, y:  0 },
-    { type: STRUCTURE_EXTENSION, x:  4, y:  0 },
-    { type: STRUCTURE_EXTENSION, x: -5, y:  1 },
-    { type: STRUCTURE_EXTENSION, x: -5, y: -1 },
-    { type: STRUCTURE_EXTENSION, x:  5, y:  1 },
-    { type: STRUCTURE_EXTENSION, x:  5, y: -1 },
+  { type: STRUCTURE_EXTENSION, x:  0, y:  2 },
+  { type: STRUCTURE_EXTENSION, x:  0, y: -2 },
+  { type: STRUCTURE_EXTENSION, x:  0, y:  3 },
+  { type: STRUCTURE_EXTENSION, x:  0, y: -3 },
+  { type: STRUCTURE_EXTENSION, x: -1, y:  3 },
+  { type: STRUCTURE_EXTENSION, x: -1, y: -3 },
+  { type: STRUCTURE_EXTENSION, x:  1, y: -3 },
+  { type: STRUCTURE_EXTENSION, x:  1, y:  3 },
+  { type: STRUCTURE_EXTENSION, x: -1, y:  2 },
+  { type: STRUCTURE_EXTENSION, x: -1, y: -2 },
+  { type: STRUCTURE_EXTENSION, x:  1, y:  2 },
+  { type: STRUCTURE_EXTENSION, x:  1, y: -2 },
+  { type: STRUCTURE_EXTENSION, x: -2, y: -1 },
+  { type: STRUCTURE_EXTENSION, x: -2, y:  1 },
+  { type: STRUCTURE_EXTENSION, x:  2, y: -1 },
+  { type: STRUCTURE_EXTENSION, x:  2, y:  1 },
+  { type: STRUCTURE_EXTENSION, x: -3, y:  1 },
+  { type: STRUCTURE_EXTENSION, x: -3, y: -1 },
+  { type: STRUCTURE_EXTENSION, x:  3, y:  1 },
+  { type: STRUCTURE_EXTENSION, x:  3, y: -1 },
+  { type: STRUCTURE_EXTENSION, x: -3, y:  2 },
+  { type: STRUCTURE_EXTENSION, x: -3, y: -2 },
+  { type: STRUCTURE_EXTENSION, x:  3, y:  2 },
+  { type: STRUCTURE_EXTENSION, x:  3, y: -2 },
+  { type: STRUCTURE_EXTENSION, x: -4, y:  2 },
+  { type: STRUCTURE_EXTENSION, x: -4, y: -2 },
+  { type: STRUCTURE_EXTENSION, x:  4, y:  2 },
+  { type: STRUCTURE_EXTENSION, x:  4, y: -2 },
+  { type: STRUCTURE_EXTENSION, x:  4, y:  3 },
+  { type: STRUCTURE_EXTENSION, x:  4, y: -3 },
+  { type: STRUCTURE_EXTENSION, x: -4, y:  3 },
+  { type: STRUCTURE_EXTENSION, x: -4, y: -3 },
+  { type: STRUCTURE_EXTENSION, x: -4, y:  4 },
+  { type: STRUCTURE_EXTENSION, x: -4, y: -4 },
+  { type: STRUCTURE_EXTENSION, x:  4, y:  4 },
+  { type: STRUCTURE_EXTENSION, x:  4, y: -4 },
+  { type: STRUCTURE_EXTENSION, x:  3, y:  4 },
+  { type: STRUCTURE_EXTENSION, x:  3, y: -4 },
+  { type: STRUCTURE_EXTENSION, x: -3, y:  4 },
+  { type: STRUCTURE_EXTENSION, x: -3, y: -4 },
+  { type: STRUCTURE_EXTENSION, x: -2, y:  4 },
+  { type: STRUCTURE_EXTENSION, x: -2, y: -4 },
+  { type: STRUCTURE_EXTENSION, x:  2, y:  4 },
+  { type: STRUCTURE_EXTENSION, x:  2, y: -4 },
+  { type: STRUCTURE_EXTENSION, x:  2, y:  5 },
+  { type: STRUCTURE_EXTENSION, x:  2, y: -5 },
+  { type: STRUCTURE_EXTENSION, x: -2, y: -5 },
+  { type: STRUCTURE_EXTENSION, x: -2, y:  5 },
+  { type: STRUCTURE_EXTENSION, x: -1, y: -5 },
+  { type: STRUCTURE_EXTENSION, x: -1, y:  5 },
+  { type: STRUCTURE_EXTENSION, x:  1, y:  5 },
+  { type: STRUCTURE_EXTENSION, x:  1, y: -5 },
+  { type: STRUCTURE_EXTENSION, x:  0, y:  5 },
+  { type: STRUCTURE_EXTENSION, x:  0, y: -5 },
+  { type: STRUCTURE_EXTENSION, x: -4, y:  0 },
+  { type: STRUCTURE_EXTENSION, x:  4, y:  0 },
+  { type: STRUCTURE_EXTENSION, x: -5, y:  1 },
+  { type: STRUCTURE_EXTENSION, x: -5, y: -1 },
+  { type: STRUCTURE_EXTENSION, x:  5, y:  1 },
+  { type: STRUCTURE_EXTENSION, x:  5, y: -1 }
+];
 
-    // roads
-    /*
-    { type: STRUCTURE_ROAD, x:  1, y:  1 },
-    { type: STRUCTURE_ROAD, x:  0, y:  1 },
-    { type: STRUCTURE_ROAD, x: -1, y:  1 },
-    { type: STRUCTURE_ROAD, x: -1, y:  0 },
-    { type: STRUCTURE_ROAD, x: -1, y: -1 },
-    { type: STRUCTURE_ROAD, x:  0, y: -1 },
-    { type: STRUCTURE_ROAD, x:  1, y: -1 },
-    { type: STRUCTURE_ROAD, x:  1, y:  0 },
-    { type: STRUCTURE_ROAD, x:  2, y:  0 },
-    { type: STRUCTURE_ROAD, x:  3, y:  0 },
-    { type: STRUCTURE_ROAD, x: -2, y:  0 },
-    { type: STRUCTURE_ROAD, x: -3, y:  0 },
-    { type: STRUCTURE_ROAD, x: -4, y:  1 },
-    { type: STRUCTURE_ROAD, x: -4, y: -1 },
-    { type: STRUCTURE_ROAD, x:  4, y: -1 },
-    { type: STRUCTURE_ROAD, x:  4, y:  1 },
-    { type: STRUCTURE_ROAD, x:  2, y:  2 },
-    { type: STRUCTURE_ROAD, x:  2, y: -2 },
-    { type: STRUCTURE_ROAD, x:  3, y: -3 },
-    { type: STRUCTURE_ROAD, x:  3, y:  3 },
-    { type: STRUCTURE_ROAD, x: -2, y:  2 },
-    { type: STRUCTURE_ROAD, x: -2, y: -2 },
-    { type: STRUCTURE_ROAD, x: -3, y: -3 },
-    { type: STRUCTURE_ROAD, x: -3, y:  3 },
-    { type: STRUCTURE_ROAD, x: -2, y:  3 },
-    { type: STRUCTURE_ROAD, x:  2, y:  3 },
-    { type: STRUCTURE_ROAD, x: -2, y: -3 },
-    { type: STRUCTURE_ROAD, x:  2, y: -3 },
-    { type: STRUCTURE_ROAD, x: -1, y:  4 },
-    { type: STRUCTURE_ROAD, x:  1, y:  4 },
-    { type: STRUCTURE_ROAD, x: -1, y: -4 },
-    { type: STRUCTURE_ROAD, x:  1, y: -4 },
-    { type: STRUCTURE_ROAD, x:  0, y:  4 },
-    { type: STRUCTURE_ROAD, x:  0, y: -4 }
-     */
-  ],
+function isOwnedRoom(room) {
+  return room && room.controller && room.controller.my;
+}
 
-  ensureSites: function (room) {
-    if (!room || !room.controller || !room.controller.my) return;
+function shouldSkipTick(room) {
+  if (CFG.tickModulo <= 1) return false;
+  let hash = 0;
+  const name = room.name;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  return (((Game.time + (hash & 3)) % CFG.tickModulo) !== 0);
+}
 
-    // stagger per room to flatten CPU spikes
-    if (CFG.tickModulo > 1) {
-      var h = 0, n = room.name;
-      for (var iHash = 0; iHash < n.length; iHash++) h = (h * 31 + n.charCodeAt(iHash)) | 0;
-      if (((Game.time + (h & 3)) % CFG.tickModulo) !== 0) return;
+function plannerMemory(room) {
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+  if (!Memory.rooms[room.name].planner) Memory.rooms[room.name].planner = {};
+  return Memory.rooms[room.name].planner;
+}
+
+function globalConstructionSiteCount() {
+  return Object.keys(Game.constructionSites).length;
+}
+
+function pickAnchor(room) {
+  const spawns = room.find(FIND_MY_SPAWNS);
+  return spawns.length ? spawns[0].pos : null;
+}
+
+/** Snapshot the room once so we do not repeatedly scan structures/sites. */
+function scanRoomState(room) {
+  const built = Object.create(null);
+  const sites = Object.create(null);
+  const terrain = room.getTerrain();
+
+  const arrStructs = room.find(FIND_STRUCTURES);
+  for (let i = 0; i < arrStructs.length; i++) {
+    const stype = arrStructs[i].structureType;
+    built[stype] = (built[stype] | 0) + 1;
+  }
+
+  const arrSites = room.find(FIND_CONSTRUCTION_SITES);
+  for (let j = 0; j < arrSites.length; j++) {
+    const sType = arrSites[j].structureType;
+    sites[sType] = (sites[sType] | 0) + 1;
+  }
+
+  return { built, sites, terrain };
+}
+
+function allowedCount(type, room) {
+  const hard = (STRUCTURE_LIMITS[type] !== undefined) ? STRUCTURE_LIMITS[type] : Infinity;
+  let controllerLimit = Infinity;
+  if (room.controller && typeof CONTROLLER_STRUCTURES !== 'undefined') {
+    const table = CONTROLLER_STRUCTURES[type];
+    if (table) {
+      const lvl = room.controller.level | 0;
+      controllerLimit = (table[lvl] != null) ? table[lvl] : 0;
+    } else {
+      controllerLimit = 0;
+    }
+  }
+  return (hard < controllerLimit) ? hard : controllerLimit;
+}
+
+function buildOccupancyChecker(room) {
+  return function hasAnythingAt(x, y) {
+    if (room.lookForAt(LOOK_STRUCTURES, x, y).length) return true;
+    if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return true;
+    return false;
+  };
+}
+
+/**
+ * High level orchestration:
+ *  1. Skip work unless this is our tick slice (smooth CPU).
+ *  2. Bail early if global construction sites are near the limit.
+ *  3. Place one container per owned source before touching the core base.
+ *  4. Lay out the base blueprint offsets as the final drip.
+ */
+function ensureSites(room) {
+  if (!isOwnedRoom(room)) return;
+  if (shouldSkipTick(room)) return;
+
+  const mem = plannerMemory(room);
+  if (mem.nextPlanTick && Game.time < mem.nextPlanTick) return;
+
+  const anchor = pickAnchor(room);
+  if (!anchor) return;
+
+  const globalCount = globalConstructionSiteCount();
+  if (globalCount >= CFG.csiteSafetyLimit) {
+    mem.nextPlanTick = Game.time + CFG.noPlacementCooldownNone;
+    return;
+  }
+
+  const snapshot = scanRoomState(room);
+  const allowedFn = (type) => allowedCount(type, room);
+  let placed = 0;
+  let cCount = globalCount;
+
+  // Phase 1: shore up source containers so harvesters always have parking.
+  const containerDelta = ensureSourceContainers(
+    room,
+    snapshot.terrain,
+    snapshot.built,
+    snapshot.sites,
+    allowedFn,
+    CFG.maxSitesPerTick - placed,
+    CFG.csiteSafetyLimit - cCount
+  );
+  placed += containerDelta.placed;
+  cCount += containerDelta.placed;
+
+  if (placed >= CFG.maxSitesPerTick || cCount >= CFG.csiteSafetyLimit) {
+    mem.nextPlanTick = Game.time + CFG.noPlacementCooldownPlaced;
+    return;
+  }
+
+  // Phase 2: follow the base offsets as long as we have placements left.
+  const basePlaced = ensureBaseLayout(
+    room,
+    anchor,
+    snapshot,
+    allowedFn,
+    CFG.maxSitesPerTick - placed,
+    CFG.csiteSafetyLimit - cCount
+  );
+  placed += basePlaced;
+  cCount += basePlaced;
+
+  mem.nextPlanTick = Game.time + (placed ? CFG.noPlacementCooldownPlaced : CFG.noPlacementCooldownNone);
+}
+
+/**
+ * Given the anchor spawn/storage, iterate the BASE_OFFSETS blueprint and
+ * place whatever is still missing. Everything is kept tiny and linear so
+ * new contributors can trace the decision making.
+ */
+function ensureBaseLayout(room, anchor, snapshot, allowedFn, slotsLeft, globalCapLeft) {
+  if (!anchor) return 0;
+  if (slotsLeft <= 0 || globalCapLeft <= 0) return 0;
+
+  const hasAnythingAt = buildOccupancyChecker(room);
+  let placed = 0;
+
+  for (let i = 0; i < BASE_OFFSETS.length; i++) {
+    if (slotsLeft <= 0 || globalCapLeft <= 0) break;
+
+    const plan = BASE_OFFSETS[i];
+    const tx = anchor.x + plan.x;
+    const ty = anchor.y + plan.y;
+
+    if (tx < 1 || tx > 48 || ty < 1 || ty > 48) continue;
+    if (snapshot.terrain.get(tx, ty) === TERRAIN_MASK_WALL) continue;
+    if (hasAnythingAt(tx, ty)) continue;
+
+    const have = (snapshot.built[plan.type] | 0) + (snapshot.sites[plan.type] | 0);
+    const cap = allowedFn(plan.type);
+    if (have >= cap) continue;
+
+    const rc = room.createConstructionSite(tx, ty, plan.type);
+    if (rc === OK) {
+      placed++;
+      slotsLeft--;
+      globalCapLeft--;
+      snapshot.sites[plan.type] = (snapshot.sites[plan.type] | 0) + 1;
+    }
+  }
+
+  return placed;
+}
+
+/**
+ * Place exactly one container per source in an owned room that has a spawn.
+ * Updates Memory.rooms[roomName].sources[sourceId].container = {status, x, y, id/siteId}
+ *
+ * Status values:
+ *  - "Good"    : container exists and is healthy
+ *  - "Repair"  : container exists but needs TLC
+ *  - "Building": csite exists within range 1 of the source
+ *  - "Need"    : no container/csite; we will attempt to place (respecting caps)
+ */
+function ensureSourceContainers(room, terrain, built, sites, allowedFn, slotsLeft, globalCapLeft) {
+  let placed = 0;
+
+  if (!room) return { placed: 0 };
+  if (slotsLeft <= 0 || globalCapLeft <= 0) return { placed: 0 };
+
+  const capContainers = allowedFn(STRUCTURE_CONTAINER);
+  let haveContainers = (built[STRUCTURE_CONTAINER] | 0) + (sites[STRUCTURE_CONTAINER] | 0);
+  if (haveContainers >= capContainers) return { placed: 0 };
+
+  const sourcesMem = ensureRoomSourceMemory(room);
+  const passable = buildPassableChecker(room, terrain);
+  const sources = room.find(FIND_SOURCES);
+
+  for (let s = 0; s < sources.length; s++) {
+    const src = sources[s];
+    const sid = src.id;
+    if (!sourcesMem[sid]) sourcesMem[sid] = {};
+    if (!sourcesMem[sid].container) sourcesMem[sid].container = {};
+    const cmem = sourcesMem[sid].container;
+
+    const structs = src.pos.findInRange(FIND_STRUCTURES, 1, {
+      filter: (o) => o.structureType === STRUCTURE_CONTAINER
+    });
+    if (structs.length) {
+      const cont = structs[0];
+      cmem.x = cont.pos.x;
+      cmem.y = cont.pos.y;
+      cmem.id = cont.id;
+      cmem.siteId = undefined;
+      const healthy = (cont.hits != null && cont.hitsMax != null) ? (cont.hits / cont.hitsMax) : 1;
+      cmem.status = (healthy < 0.60) ? 'Repair' : 'Good';
+      continue;
     }
 
-    var mem = RoomPlanner._memory(room);
-    if (mem.nextPlanTick && Game.time < mem.nextPlanTick) return;
-
-    // anchor = first spawn (stable & cheap)
-    var spawns = room.find(FIND_MY_SPAWNS);
-    if (!spawns.length) return;
-    var anchor = spawns[0].pos;
-
-    // global csite count once, bail if near cap
-    var globalCsiteCount = Object.keys(Game.constructionSites).length;
-    if (globalCsiteCount >= CFG.csiteSafetyLimit) {
-      mem.nextPlanTick = Game.time + CFG.noPlacementCooldownNone;
-      return;
+    const cs = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
+      filter: (c) => c.structureType === STRUCTURE_CONTAINER
+    });
+    if (cs.length) {
+      cmem.x = cs[0].pos.x;
+      cmem.y = cs[0].pos.y;
+      cmem.id = undefined;
+      cmem.siteId = cs[0].id;
+      cmem.status = 'Building';
+      continue;
     }
 
-    // pre-scan structures & sites once (CPU saver)
-    var built = Object.create(null);
-    var sites = Object.create(null);
-    var terrain = room.getTerrain();
+    cmem.status = 'Need';
+    if (slotsLeft <= 0 || globalCapLeft <= 0) continue;
+    if (haveContainers >= capContainers) continue;
 
-    var arrStructs = room.find(FIND_STRUCTURES);
-    for (var i = 0; i < arrStructs.length; i++) {
-      var stype = arrStructs[i].structureType;
-      built[stype] = (built[stype] | 0) + 1;
-    }
+    let placedHere = false;
+    for (let dx = -1; dx <= 1 && !placedHere; dx++) {
+      for (let dy = -1; dy <= 1 && !placedHere; dy++) {
+        if (dx === 0 && dy === 0) continue;
+        const tx = src.pos.x + dx;
+        const ty = src.pos.y + dy;
+        if (!passable(tx, ty)) continue;
 
-    var arrSites = room.find(FIND_CONSTRUCTION_SITES);
-    for (var j = 0; j < arrSites.length; j++) {
-      var sType = arrSites[j].structureType;
-      sites[sType] = (sites[sType] | 0) + 1;
-    }
+        const rc = room.createConstructionSite(tx, ty, STRUCTURE_CONTAINER);
+        if (rc === OK) {
+          cmem.x = tx;
+          cmem.y = ty;
+          cmem.id = undefined;
+          cmem.status = 'Building';
+          const lookup = room.lookForAt(LOOK_CONSTRUCTION_SITES, tx, ty);
+          cmem.siteId = (lookup && lookup.length) ? lookup[0].id : undefined;
 
-    function allowed(type) {
-      var hard = (RoomPlanner.structureLimits && RoomPlanner.structureLimits[type] !== undefined)
-        ? RoomPlanner.structureLimits[type] : Infinity;
-      var ctrl = Infinity;
-      if (room.controller && typeof CONTROLLER_STRUCTURES !== 'undefined') {
-        var table = CONTROLLER_STRUCTURES[type];
-        if (table) {
-          var lvl = room.controller.level | 0;
-          ctrl = (table[lvl] != null) ? table[lvl] : 0;
-        } else {
-          ctrl = 0;
+          placed++;
+          slotsLeft--;
+          globalCapLeft--;
+          haveContainers++;
+          sites[STRUCTURE_CONTAINER] = (sites[STRUCTURE_CONTAINER] | 0) + 1;
+          placedHere = true;
         }
       }
-      return (hard < ctrl) ? hard : ctrl;
     }
+  }
 
-    var placed = 0;
-    var cCount = globalCsiteCount;
+  return { placed };
+}
 
-    function hasAnythingAt(x, y) {
-      if (room.lookForAt(LOOK_STRUCTURES, x, y).length) return true;
-      if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return true;
+function ensureRoomSourceMemory(room) {
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+  if (!Memory.rooms[room.name].sources) Memory.rooms[room.name].sources = {};
+  return Memory.rooms[room.name].sources;
+}
+
+function buildPassableChecker(room, terrain) {
+  return function isPassable(x, y) {
+    if (x < 1 || x > 48 || y < 1 || y > 48) return false;
+    if (terrain.get(x, y) === TERRAIN_MASK_WALL) return false;
+
+    const ss = room.lookForAt(LOOK_STRUCTURES, x, y);
+    for (let i = 0; i < ss.length; i++) {
+      const st = ss[i].structureType;
+      if (st === STRUCTURE_ROAD) continue;
+      if (st === STRUCTURE_CONTAINER) continue;
+      if (st === STRUCTURE_RAMPART && ss[i].my) continue;
       return false;
     }
 
-    // ============================================================
-    // 1) PRIORITY: ensure ONE container near each owned-room source
-    // ============================================================
-    var delta = RoomPlanner._ensureSourceContainers(
-      room, anchor, terrain, built, sites, allowed,
-      CFG.maxSitesPerTick - placed,
-      CFG.csiteSafetyLimit - cCount
-    );
-    placed += delta.placed;
-    cCount += delta.placed; // one site per placement
+    if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return false;
+    return true;
+  };
+}
 
-    // Stop early if we hit limits during source-container placement
-    if (placed >= CFG.maxSitesPerTick || cCount >= CFG.csiteSafetyLimit) {
-      mem.nextPlanTick = Game.time + CFG.noPlacementCooldownPlaced;
-      return;
-    }
-
-    // ============================================================
-    // 2) BASE LAYOUT (existing behavior)
-    // ============================================================
-    for (var k = 0; k < RoomPlanner.BASE_OFFSETS.length; k++) {
-      if (placed >= CFG.maxSitesPerTick) break;
-      if (cCount >= CFG.csiteSafetyLimit) break;
-
-      var p = RoomPlanner.BASE_OFFSETS[k];
-      var tx = anchor.x + p.x;
-      var ty = anchor.y + p.y;
-
-      // bounds + terrain check (walls are out)
-      if (tx < 1 || tx > 48 || ty < 1 || ty > 48) continue;
-      if (terrain.get(tx, ty) === TERRAIN_MASK_WALL) continue;
-
-      // skip if already occupied (built or site)
-      if (hasAnythingAt(tx, ty)) continue;
-
-      // respect limits now (built + sites < allowed)
-      var t = p.type;
-      var have = (built[t] | 0) + (sites[t] | 0);
-      var cap = allowed(t);
-      if (have >= cap) continue;
-
-      // try to place (x,y,type) zero-allocation call
-      var rc = room.createConstructionSite(tx, ty, t);
-      if (rc === OK) {
-        placed++;
-        cCount++;
-        sites[t] = (sites[t] | 0) + 1;
-        if (cCount >= CFG.csiteSafetyLimit) break;
-      }
-      // else ignore errors; will retry on a later pass
-    }
-
-    mem.nextPlanTick = Game.time + (placed ? CFG.noPlacementCooldownPlaced : CFG.noPlacementCooldownNone);
-  },
-
-  /**
-   * Place exactly one container per source in an owned room that has a spawn.
-   * Updates Memory.rooms[roomName].sources[sourceId].container = {status, x, y, id/siteId}
-   *
-   * Status values:
-   *  - "Good"    : container exists and is healthy
-   *  - "Repair"  : container exists but is damaged (hits < 60% of max)
-   *  - "Building": csite exists within range 1 of source
-   *  - "Need"    : no container/csite; will attempt to place (respecting caps)
-   */
-  _ensureSourceContainers: function (room, anchor, terrain, built, sites, allowedFn, slotsLeft, globalCapLeft) {
-    var placed = 0;
-
-    if (!room) return { placed: 0 };
-    if (!anchor) return { placed: 0 };
-
-    // respect overall container cap for the room
-    var haveContainers = (built[STRUCTURE_CONTAINER] | 0) + (sites[STRUCTURE_CONTAINER] | 0);
-    var capContainers  = allowedFn(STRUCTURE_CONTAINER);
-    if (haveContainers >= capContainers) return { placed: 0 };
-
-    // ensure memory path exists
-    if (!Memory.rooms) Memory.rooms = {};
-    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-    if (!Memory.rooms[room.name].sources) Memory.rooms[room.name].sources = {};
-    var sourcesMem = Memory.rooms[room.name].sources;
-
-    // utility: check if tile is passable for a creep to stand (no walls/solid structs/sites)
-    function isPassable(x, y) {
-      if (x < 1 || x > 48 || y < 1 || y > 48) return false;
-      if (terrain.get(x, y) === TERRAIN_MASK_WALL) return false;
-
-      var ss = room.lookForAt(LOOK_STRUCTURES, x, y);
-      for (var i = 0; i < ss.length; i++) {
-        var st = ss[i].structureType;
-        // allow roads, containers, my ramparts; block others (walls, extensions, spawns, etc.)
-        if (st === STRUCTURE_ROAD) continue;
-        if (st === STRUCTURE_CONTAINER) continue;
-        if (st === STRUCTURE_RAMPART && ss[i].my) continue;
-        return false;
-      }
-      // also avoid placing where another site already sits
-      if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return false;
-      return true;
-    }
-
-    var sources = room.find(FIND_SOURCES);
-    for (var s = 0; s < sources.length; s++) {
-      var src = sources[s];
-      var sid = src.id;
-      if (!sourcesMem[sid]) sourcesMem[sid] = {};
-      if (!sourcesMem[sid].container) sourcesMem[sid].container = {};
-      var cmem = sourcesMem[sid].container;
-
-      // 1) If a container already exists within 1, mark Good/Repair and record coords/id.
-      var structs = src.pos.findInRange(FIND_STRUCTURES, 1, {
-        filter: function (o) { return o.structureType === STRUCTURE_CONTAINER; }
-      });
-      if (structs.length) {
-        var cont = structs[0];
-        cmem.x = cont.pos.x; cmem.y = cont.pos.y; cmem.id = cont.id; cmem.siteId = undefined;
-        var healthy = (cont.hits != null && cont.hitsMax != null) ? (cont.hits / cont.hitsMax) : 1;
-        cmem.status = (healthy < 0.60) ? 'Repair' : 'Good';
-        continue;
-      }
-
-      // 2) If a csite (container) already exists within 1, mark Building and record pos/siteId.
-      var cs = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
-        filter: function (c) { return c.structureType === STRUCTURE_CONTAINER; }
-      });
-      if (cs.length) {
-        cmem.x = cs[0].pos.x; cmem.y = cs[0].pos.y; cmem.id = undefined; cmem.siteId = cs[0].id;
-        cmem.status = 'Building';
-        continue;
-      }
-
-      // 3) Otherwise we Need one. Try to place (respecting per-tick/global caps).
-      cmem.status = 'Need';
-      if (slotsLeft <= 0 || globalCapLeft <= 0) continue;
-      if (haveContainers >= capContainers) continue;
-
-      // Pick first good neighbor tile (8-neighborhood)
-      var placedHere = false;
-      for (var dx = -1; dx <= 1 && !placedHere; dx++) {
-        for (var dy = -1; dy <= 1 && !placedHere; dy++) {
-          if (dx === 0 && dy === 0) continue;
-          var tx = src.pos.x + dx;
-          var ty = src.pos.y + dy;
-          if (!isPassable(tx, ty)) continue;
-
-          // final safety: don't double-place if somehow occupied (already checked above)
-          var rc = room.createConstructionSite(tx, ty, STRUCTURE_CONTAINER);
-          if (rc === OK) {
-            // record in memory
-            cmem.x = tx; cmem.y = ty; cmem.id = undefined; cmem.status = 'Building';
-            // try to fetch site id we just created (cheap local look)
-            var lookup = room.lookForAt(LOOK_CONSTRUCTION_SITES, tx, ty);
-            cmem.siteId = (lookup && lookup.length) ? lookup[0].id : undefined;
-
-            // bump counters and caps
-            placed += 1;
-            slotsLeft -= 1;
-            globalCapLeft -= 1;
-            haveContainers += 1;
-            sites[STRUCTURE_CONTAINER] = (sites[STRUCTURE_CONTAINER] | 0) + 1;
-
-            // optional debug breadcrumb (comment out if noisy)
-            // console.log('[Planner] placed container site near source', sid, 'at', room.name, tx + ',' + ty);
-
-            placedHere = true;
-          }
-          // else: ERR_* -> ignore; try another neighbor
-        }
-      }
-      // if we could not place at any neighbor, we keep status = 'Need' and try next tick
-    }
-
-    return { placed: placed };
-  },
-
-  // --- Helpers ---
-  _memory: function (room) {
-    if (!Memory.rooms) Memory.rooms = {};
-    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-    if (!Memory.rooms[room.name].planner) Memory.rooms[room.name].planner = {};
-    return Memory.rooms[room.name].planner;
-  }
+const RoomPlanner = {
+  structureLimits: STRUCTURE_LIMITS,
+  BASE_OFFSETS,
+  ensureSites,
+  _ensureSourceContainers: ensureSourceContainers,
+  _memory: plannerMemory
 };
 
 module.exports = RoomPlanner;

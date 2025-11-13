@@ -166,24 +166,13 @@ function _depositTargets(creep, resType) {
 function run(creep) {
   if (creep.spawning) return;
 
-  // ensure memory defaults
-  if (!creep.memory.pickupFlag)  creep.memory.pickupFlag  = CFG.PICKUP_FLAG_DEFAULT;
-  if (!creep.memory.homeRoom)    creep.memory.homeRoom    = _firstSpawnRoomFallback(creep);
-
-  // Flip "returning" based on carry vs capacity (uses your helper)
-  if (BeeToolbox && typeof BeeToolbox.updateReturnState === "function") {
-    BeeToolbox.updateReturnState(creep);
-  } else {
-    // minimal fallback
-    if (creep.memory.returning && creep.store.getUsedCapacity() === 0) creep.memory.returning = false;
-    if (!creep.memory.returning && creep.store.getFreeCapacity() === 0) creep.memory.returning = true;
-  }
+  ensureRoleDefaults(creep);
+  updateReturnState(creep);
 
   if (creep.memory.returning) {
     return _returnToStorage(creep);
-  } else {
-    return _collectFromFlagRoom(creep);
   }
+  return _collectFromFlagRoom(creep);
 }
 
 // ----------------------------
@@ -322,3 +311,28 @@ module.exports = {
   role: 'Trucker',
   run: run
 };
+
+// ============================
+// Teaching helpers (state)
+// ============================
+function ensureRoleDefaults(creep) {
+  if (!creep.memory.pickupFlag) {
+    creep.memory.pickupFlag = CFG.PICKUP_FLAG_DEFAULT;
+  }
+  if (!creep.memory.homeRoom) {
+    creep.memory.homeRoom = _firstSpawnRoomFallback(creep);
+  }
+}
+
+function updateReturnState(creep) {
+  if (BeeToolbox && typeof BeeToolbox.updateReturnState === 'function') {
+    BeeToolbox.updateReturnState(creep);
+    return;
+  }
+  if (creep.memory.returning && creep.store.getUsedCapacity() === 0) {
+    creep.memory.returning = false;
+  }
+  if (!creep.memory.returning && creep.store.getFreeCapacity() === 0) {
+    creep.memory.returning = true;
+  }
+}

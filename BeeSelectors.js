@@ -328,88 +328,99 @@ function collectSourceFlags() {
   return map;
 }
 
-// Function header: buildRemoteSourcesSnapshot(homeRoomName)
-// Inputs: homeRoomName string (owned room key)
-// Output: array of remote source entries {sourceId, roomName, container, ...}
-// Side-effects: reads Memory.__BHM.remotesByHome[home], scans visible remote
-//               rooms, merges intel from Memory.rooms when fogged.
-// Consumers: role.Luna (remote miners), role.Courier/Trucker.
-function buildRemoteSourcesSnapshot(homeRoomName) {
-  ensureRemoteMemory();
-  var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
-  var flagsByPos = collectSourceFlags();
-  var byId = {};
-  var list = [];
-
-  function pushEntry(data) {
-    // Merge duplicates encountered when both Memory and live room provide data.
-    if (!data || !data.sourceId) return;
-    var existing = byId[data.sourceId];
-    if (existing) {
-      if (data.flag && !existing.flag) existing.flag = data.flag;
-      if (data.container && !existing.container) {
-        existing.container = data.container;
-        existing.containerEnergy = data.containerEnergy;
-      }
-      if (!existing.seatPos && data.seatPos) existing.seatPos = data.seatPos;
-      if (!existing.source && data.source) existing.source = data.source;
-      return;
+// ---------------------------------------------------------------------------
+// Remote snapshot helpers (novice friendly mental model)
+// - We gather data from three sources (live room, Memory intel, SRC flags).
+// - Each helper below handles exactly one source so call sites stay flat.
+// - mergeRemoteEntry deduplicates by sourceId so downstream callers never see
+//   the same source twice even if both live intel + flag exist.
+// ---------------------------------------------------------------------------
+// Function header: mergeRemoteEntry(list, byId, data)
+// Inputs: aggregation arrays/maps used during remote snapshot build
+// Output: none (mutates list/byId); keeps remote source rows unique by id.
+// Side-effects: reuses existing entry when both Memory + visible intel overlap.
+function mergeRemoteEntry(list, byId, data) {
+  if (!data || !data.sourceId) return;
+  var existing = byId[data.sourceId];
+  if (existing) {
+    if (data.flag && !existing.flag) existing.flag = data.flag;
+    if (data.container && !existing.container) {
+      existing.container = data.container;
+      existing.containerEnergy = data.containerEnergy;
     }
-    byId[data.sourceId] = data;
-    list.push(data);
+    if (!existing.seatPos && data.seatPos) existing.seatPos = data.seatPos;
+    if (!existing.source && data.source) existing.source = data.source;
+    return;
   }
+  byId[data.sourceId] = data;
+  list.push(data);
+}
 
-  for (var i = 0; i < remotes.length; i++) {
-    var roomName = remotes[i];
-    var room = Game.rooms[roomName];
-    if (room) {
-      // Visible remote: gather live source/seat/container info.
-      var sources = room.find(FIND_SOURCES);
-      for (var j = 0; j < sources.length; j++) {
-        var src = sources[j];
-        var seatInfo = getSourceContainerOrSiteImpl(src);
-        var key = roomName + ':' + src.pos.x + ':' + src.pos.y;
-        pushEntry({
-          sourceId: src.id,
-          roomName: roomName,
-          source: src,
-          container: seatInfo.container,
-          containerEnergy: seatInfo.containerEnergy,
-          site: seatInfo.site,
-          seatPos: seatInfo.seatPos,
-          flag: flagsByPos[key] || null
-        });
-      }
-    } else {
-      // Fogged remote: rely on Memory.rooms intel; seat positions approximated
-      // via stored seat or fallback chooseBestSeatForSource.
-      var mem = (Memory.rooms && Memory.rooms[roomName] && Memory.rooms[roomName].sources) || null;
-      if (!mem) continue;
-      for (var sid in mem) {
-        if (!Object.prototype.hasOwnProperty.call(mem, sid)) continue;
-        var entry = mem[sid] || {};
-        var seatPos = null;
-        if (entry.seat) {
-          seatPos = { x: entry.seat.x, y: entry.seat.y, roomName: entry.seat.roomName || roomName };
-        } else if (entry.x != null && entry.y != null) {
-          seatPos = chooseBestSeatForSource(new RoomPosition(entry.x, entry.y, roomName));
-        }
-        var keyMem = roomName + ':' + (entry.x != null ? entry.x : (entry.seat ? entry.seat.x : '')) + ':' + (entry.y != null ? entry.y : (entry.seat ? entry.seat.y : ''));
-        pushEntry({
-          sourceId: sid,
-          roomName: roomName,
-          source: null,
-          container: null,
-          containerEnergy: 0,
-          site: null,
-          seatPos: seatPos,
-          flag: flagsByPos[keyMem] || null
-        });
-      }
-    }
+// Function header: addVisibleRemoteSources(roomName, room, flagsByPos, list, byId)
+// Inputs: visible Room object from Game.rooms
+// Output: none; calls mergeRemoteEntry for each live source discovered
+// Side-effects: none beyond list/byId
+function addVisibleRemoteSources(roomName, room, flagsByPos, list, byId) {
+  if (!room) return;
+  var sources = room.find(FIND_SOURCES);
+  for (var j = 0; j < sources.length; j++) {
+    var src = sources[j];
+    var seatInfo = getSourceContainerOrSiteImpl(src);
+    var key = roomName + ':' + src.pos.x + ':' + src.pos.y;
+    mergeRemoteEntry(list, byId, {
+      sourceId: src.id,
+      roomName: roomName,
+      source: src,
+      container: seatInfo.container,
+      containerEnergy: seatInfo.containerEnergy,
+      site: seatInfo.site,
+      seatPos: seatInfo.seatPos,
+      flag: flagsByPos[key] || null
+    });
   }
+}
 
-  // Flags may indicate additional rooms not listed yet
+// Function header: buildSeatFromIntel(entry, roomName)
+// Inputs: Memory.rooms entry describing a source
+// Output: serialized seat {x,y,roomName} best guess for miner standing tile
+function buildSeatFromIntel(entry, roomName) {
+  if (!entry) return null;
+  if (entry.seat) {
+    return { x: entry.seat.x, y: entry.seat.y, roomName: entry.seat.roomName || roomName };
+  }
+  if (entry.x != null && entry.y != null) {
+    return chooseBestSeatForSource(new RoomPosition(entry.x, entry.y, roomName));
+  }
+  return null;
+}
+
+// Function header: addMemoryRemoteSources(roomName, sourcesIntel, flagsByPos, list, byId)
+// Inputs: sources intel block stored under Memory.rooms[roomName].sources
+// Output: none; extends snapshot with fogged-room guesses
+function addMemoryRemoteSources(roomName, sourcesIntel, flagsByPos, list, byId) {
+  if (!sourcesIntel) return;
+  for (var sid in sourcesIntel) {
+    if (!Object.prototype.hasOwnProperty.call(sourcesIntel, sid)) continue;
+    var entry = sourcesIntel[sid] || {};
+    var seatPos = buildSeatFromIntel(entry, roomName);
+    var keyMem = roomName + ':' + (entry.x != null ? entry.x : (entry.seat ? entry.seat.x : '')) + ':' + (entry.y != null ? entry.y : (entry.seat ? entry.seat.y : ''));
+    mergeRemoteEntry(list, byId, {
+      sourceId: sid,
+      roomName: roomName,
+      source: null,
+      container: null,
+      containerEnergy: 0,
+      site: null,
+      seatPos: seatPos,
+      flag: flagsByPos[keyMem] || null
+    });
+  }
+}
+
+// Function header: addFlagOnlyRemotes(flagsByPos, remotes, list, byId)
+// Inputs: map of SRC flags, array of remote room names
+// Output: none; ensures flag-labelled nodes join snapshot even if not in intel
+function addFlagOnlyRemotes(flagsByPos, remotes, list, byId) {
   for (var key in flagsByPos) {
     if (!Object.prototype.hasOwnProperty.call(flagsByPos, key)) continue;
     var parts = key.split(':');
@@ -423,10 +434,9 @@ function buildRemoteSourcesSnapshot(homeRoomName) {
     var look = roomObj.lookForAt(LOOK_SOURCES, fx, fy);
     if (!look || !look.length) continue;
     var srcObj = look[0];
-    if (!srcObj || !srcObj.id) continue;
-    if (byId[srcObj.id]) continue;
+    if (!srcObj || !srcObj.id || byId[srcObj.id]) continue;
     var seatInfo2 = getSourceContainerOrSiteImpl(srcObj);
-    pushEntry({
+    mergeRemoteEntry(list, byId, {
       sourceId: srcObj.id,
       roomName: fRoom,
       source: srcObj,
@@ -437,11 +447,39 @@ function buildRemoteSourcesSnapshot(homeRoomName) {
       flag: flagsByPos[key]
     });
   }
+}
 
+// Function header: buildRemoteSourcesSnapshot(homeRoomName)
+// Inputs: homeRoomName string (owned room key)
+// Output: array of remote source entries {sourceId, roomName, container, ...}
+// Side-effects: reads Memory.__BHM.remotesByHome[home], scans visible remote
+//               rooms, merges intel from Memory.rooms when fogged.
+// Consumers: role.Luna (remote miners), role.Courier/Trucker.
+function buildRemoteSourcesSnapshot(homeRoomName) {
+  ensureRemoteMemory();
+  var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
+  var flagsByPos = collectSourceFlags();
+  var byId = {};
+  var list = [];
+  for (var i = 0; i < remotes.length; i++) {
+    var roomName = remotes[i];
+    var room = Game.rooms[roomName];
+    if (room) addVisibleRemoteSources(roomName, room, flagsByPos, list, byId);
+    else {
+      var intel = (Memory.rooms && Memory.rooms[roomName] && Memory.rooms[roomName].sources) || null;
+      addMemoryRemoteSources(roomName, intel, flagsByPos, list, byId);
+    }
+  }
+  addFlagOnlyRemotes(flagsByPos, remotes, list, byId);
   return list;
 }
 
 var BeeSelectors = {
+  // -----------------------------------------------------------------------
+  // Owned-room snapshot helpers: role modules call these to grab the cached
+  // per-room state built in buildSnapshot(). Keeping them grouped reminds
+  // new contributors that these all return slices of the same snapshot.
+  // -----------------------------------------------------------------------
   prepareRoomSnapshot: function (room) {
     // Function header: prepareRoomSnapshot(room)
     // Inputs: Room object
@@ -480,6 +518,11 @@ var BeeSelectors = {
     return getSourceContainerOrSiteImpl(source);
   },
 
+  // -----------------------------------------------------------------------
+  // Remote mining selectors: these coordinate role.Luna (miners) and the
+  // hauler roles. They all build on the helper stack above, so their bodies
+  // stay short and easy to read.
+  // -----------------------------------------------------------------------
   getRemoteSourcesSnapshot: function (homeRoomName) {
     // Remote mining summary for BeeHiveMind & role.Luna planning.
     return buildRemoteSourcesSnapshot(homeRoomName);
@@ -503,6 +546,10 @@ var BeeSelectors = {
     return out;
   },
 
+  // -----------------------------------------------------------------------
+  // Energy target scoring + misc utilities shared across modules.
+  // Think of these as single-purpose lenses over the raw snapshot data.
+  // -----------------------------------------------------------------------
   pickBestHaulTarget: function (containers, homeRoomName) {
     // Choose container entry by energy minus distance penalty (linear distance).
     // Used by role.Courier/role.Trucker to pick next haul job.

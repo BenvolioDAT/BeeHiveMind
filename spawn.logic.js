@@ -397,52 +397,97 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 // -----------------------------------------------------------------------------
 // Squad spawning (delegates to spawnRole)
 // -----------------------------------------------------------------------------
-function Spawn_Squad(spawn, squadId) {
-  var id = squadId || 'Alpha';
-  if (!spawn || spawn.spawning) return false;
+var SQUAD_COOLDOWN_TICKS = 1;
 
+// Novice tip: hide the boilerplate Memory guards so orchestration logic stays
+// focused on decisions, not on `if (!Memory.foo)` noise.
+function ensureSquadMemory(id) {
   if (!Memory.squads) Memory.squads = {};
   if (!Memory.squads[id]) Memory.squads[id] = {};
-  var S = Memory.squads[id];
-  var COOLDOWN_TICKS = 1;
+  return Memory.squads[id];
+}
 
-  function desiredLayout(score) {
-    var threat = score | 0;
-    var melee = 2;
-    var medic = 1;
-    var archer = 0;
+// Teaching habit: keep combat math in one helper so adjusting threat levels
+// never requires scrolling through spawn orchestration code.
+function desiredSquadLayout(score) {
+  var threat = score | 0;
+  var melee = 2;
+  var medic = 1;
+  var archer = 0;
 
-    if (threat >= 12) melee = 2;
-    if (threat >= 18) medic = 2;
-    if (threat >= 10 && threat < 22) archer = 1;
-    else if (threat >= 22) archer = 2;
+  if (threat >= 12) melee = 2;
+  if (threat >= 18) medic = 2;
+  if (threat >= 10 && threat < 22) archer = 1;
+  else if (threat >= 22) archer = 2;
 
-    var order = [{ role: 'CombatMelee', need: melee }];
-    if (archer > 0) order.push({ role: 'CombatArcher', need: archer });
-    order.push({ role: 'CombatMedic', need: medic });
-    return order;
-  }
+  var order = [{ role: 'CombatMelee', need: melee }];
+  if (archer > 0) order.push({ role: 'CombatArcher', need: archer });
+  order.push({ role: 'CombatMedic', need: medic });
+  return order;
+}
 
+// Resolving target info is a pure helper: it reads flags + Memory and returns
+// everything the orchestration layer needs to know about the squad's goal.
+function resolveSquadFlag(id) {
   var flagName = 'Squad' + id;
   var altFlagName = 'Squad_' + id;
   var flag = Game.flags[flagName] || Game.flags[altFlagName] || Game.flags[id] || null;
   var squadFlagsMem = Memory.squadFlags || {};
   var bindings = squadFlagsMem.bindings || {};
-
   var targetRoom = bindings[flagName] || bindings[altFlagName] || bindings[id] || null;
   if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
-  if (!targetRoom) return false;
+  return {
+    flag: flag,
+    targetRoom: targetRoom,
+    mem: squadFlagsMem
+  };
+}
 
-  if (Game.map && typeof Game.map.getRoomLinearDistance === 'function') {
-    var dist = Game.map.getRoomLinearDistance(spawn.room.name, targetRoom, true);
-    if (typeof dist === 'number' && dist > 3) return false;
-  }
+// Guard rails: don't march squads across the whole shard accidentally.
+function distanceTooFar(spawnRoomName, targetRoom) {
+  if (!Game.map || typeof Game.map.getRoomLinearDistance !== 'function') return false;
+  var dist = Game.map.getRoomLinearDistance(spawnRoomName, targetRoom, true);
+  return typeof dist === 'number' && dist > 3;
+}
 
+function getThreatScore(squadFlagsMem, targetRoom) {
   var roomInfo = squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom] ? squadFlagsMem.rooms[targetRoom] : null;
-  var threatScore = roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
-  var layout = desiredLayout(threatScore);
-  if (!layout.length) return false;
+  return roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
+}
 
+function matchesSquadRole(mem, taskName) {
+  if (!mem || !taskName) return false;
+  var target = String(taskName).toLowerCase();
+  var role = mem.role ? String(mem.role).toLowerCase() : null;
+  if (role === target) return true;
+  var bornRole = mem.bornRole ? String(mem.bornRole).toLowerCase() : null;
+  if (bornRole === target) return true;
+  var task = mem.task ? String(mem.task).toLowerCase() : null;
+  if (task === target) return true;
+  var bornTask = mem.bornTask ? String(mem.bornTask).toLowerCase() : null;
+  if (bornTask === target) return true;
+  return false;
+}
+
+// Separate counting logic lets beginners test the squad pipeline in isolation.
+function haveSquadCount(id, taskName) {
+  var live = _.sum(Game.creeps, function (c) {
+    if (!c || !c.my || !c.memory) return 0;
+    if (c.memory.squadId !== id) return 0;
+    return matchesSquadRole(c.memory, taskName) ? 1 : 0;
+  });
+  var hatching = _.sum(Memory.creeps, function (mem, name) {
+    if (!mem) return 0;
+    if (mem.squadId !== id) return 0;
+    if (!matchesSquadRole(mem, taskName)) return 0;
+    return Game.creeps[name] ? 0 : 1;
+  });
+  return live + hatching;
+}
+
+// Teaching habit: whenever you mutate Memory, wrap it in a helper and list
+// every field you touch. Future you will thank you during bug hunts.
+function stampSquadPlanMemory(S, layout, targetRoom, threatScore, flag) {
   S.targetRoom = targetRoom;
   S.lastKnownScore = threatScore;
   S.flagName = flag ? flag.name : null;
@@ -452,46 +497,14 @@ function Spawn_Squad(spawn, squadId) {
     S.desiredCounts[plan.role] = plan.need | 0;
   }
   S.lastEvaluated = Game.time;
+}
 
-  function matchesSquadRole(mem, taskName) {
-    if (!mem || !taskName) return false;
-    var target = String(taskName).toLowerCase();
-    var role = mem.role ? String(mem.role).toLowerCase() : null;
-    if (role === target) return true;
-    var bornRole = mem.bornRole ? String(mem.bornRole).toLowerCase() : null;
-    if (bornRole === target) return true;
-    var task = mem.task ? String(mem.task).toLowerCase() : null;
-    if (task === target) return true;
-    var bornTask = mem.bornTask ? String(mem.bornTask).toLowerCase() : null;
-    if (bornTask === target) return true;
-    return false;
-  }
-
-  function haveCount(taskName) {
-    var live = _.sum(Game.creeps, function (c) {
-      if (!c || !c.my || !c.memory) return 0;
-      if (c.memory.squadId !== id) return 0;
-      return matchesSquadRole(c.memory, taskName) ? 1 : 0;
-    });
-    var hatching = _.sum(Memory.creeps, function (mem, name) {
-      if (!mem) return 0;
-      if (mem.squadId !== id) return 0;
-      if (!matchesSquadRole(mem, taskName)) return 0;
-      return Game.creeps[name] ? 0 : 1;
-    });
-    return live + hatching;
-  }
-
-  if (S.lastSpawnAt && Game.time - S.lastSpawnAt < COOLDOWN_TICKS) {
-    return false;
-  }
-
-  var avail = Calculate_Spawn_Resource(spawn);
-
+// Keep spawning side-effects in one loop so it's obvious when we early return.
+function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S) {
   for (var i = 0; i < layout.length; i++) {
     var plan = layout[i];
     if ((plan.need | 0) <= 0) continue;
-    var have = haveCount(plan.role);
+    var have = haveSquadCount(id, plan.role);
     if (have < plan.need) {
       var extraMemory = {
         squadId: id,
@@ -509,6 +522,32 @@ function Spawn_Squad(spawn, squadId) {
     }
   }
   return false;
+}
+
+// The exported entry point becomes a tidy checklist: resolve target ->
+// evaluate plan -> spawn missing roles.
+function Spawn_Squad(spawn, squadId) {
+  var id = squadId || 'Alpha';
+  if (!spawn || spawn.spawning) return false;
+
+  var S = ensureSquadMemory(id);
+  var flagData = resolveSquadFlag(id);
+  var targetRoom = flagData.targetRoom;
+  if (!targetRoom) return false;
+  if (distanceTooFar(spawn.room.name, targetRoom)) return false;
+
+  var threatScore = getThreatScore(flagData.mem, targetRoom);
+  var layout = desiredSquadLayout(threatScore);
+  if (!layout.length) return false;
+
+  stampSquadPlanMemory(S, layout, targetRoom, threatScore, flagData.flag);
+
+  if (S.lastSpawnAt && Game.time - S.lastSpawnAt < SQUAD_COOLDOWN_TICKS) {
+    return false;
+  }
+
+  var avail = Calculate_Spawn_Resource(spawn);
+  return spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S);
 }
 
 // -----------------------------------------------------------------------------
