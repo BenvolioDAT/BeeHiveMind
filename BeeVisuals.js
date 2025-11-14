@@ -5,7 +5,7 @@
  *
  * Draws:
  *  - Debug creep list (left column)
- *  - Optional structure placement markers (role.Builder.structurePlacements)
+ *  - Optional structure placement markers (roleBeeWorker.structurePlacements)
  *  - CPU & bucket stats
  *  - In-room planned roads (debug)
  *  - World/overview overlays (flags + planned road dots)
@@ -13,7 +13,7 @@
  */
 
 // ----------------------------- Dependencies ------------------------------
-var roleBuilder = require('role.Builder'); // optional: structurePlacements
+var roleBeeWorker = require('role.BeeWorker'); // exposes Builder.structurePlacements metadata
 var Logger      = require('core.logger');
 var LOG_LEVEL   = Logger.LOG_LEVEL;
 
@@ -550,7 +550,7 @@ function drawCreepDebugList(visual, room) {
   }
 }
 
-/** Cyan dots near the first spawn showing roleBuilder.structurePlacements, if present. */
+/** Cyan dots near the first spawn showing roleBeeWorker.structurePlacements, if present. */
 function drawStructurePlacementDots(visual, room) {
   var firstSpawn = null;
   for (var sn in Game.spawns) {
@@ -560,10 +560,10 @@ function drawStructurePlacementDots(visual, room) {
   }
   if (!firstSpawn) return;
 
-  if (roleBuilder && roleBuilder.structurePlacements) {
+  if (roleBeeWorker && roleBeeWorker.structurePlacements) {
     var baseX = firstSpawn.pos.x;
     var baseY = firstSpawn.pos.y;
-    var placements = roleBuilder.structurePlacements;
+    var placements = roleBeeWorker.structurePlacements;
 
     for (var p = 0; p < placements.length; p++) {
       var pl = placements[p];

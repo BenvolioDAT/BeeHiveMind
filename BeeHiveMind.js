@@ -30,15 +30,11 @@ var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
-var roleBaseHarvest      = require('role.BaseHarvest');
-var roleBuilder          = require('role.Builder');
-var roleCourier          = require('role.Courier');
+var roleBeeWorker        = require('role.BeeWorker');
 var roleRepair           = require('role.Repair');
-var roleUpgrader         = require('role.Upgrader');
 var roleDismantler       = require('role.Dismantler');
 var roleLuna             = require('role.Luna');
 var roleScout            = require('role.Scout');
-var roleQueen            = require('role.Queen');
 var roleTrucker          = require('role.Trucker');
 var roleClaimer          = require('role.Claimer');
 var roleBeeArmy          = require('role.BeeArmy');
@@ -50,15 +46,15 @@ var TradeEnergy          = require('Trade.Energy');
 // Default role map; specific roles (queen, courier etc.) may be registered
 // elsewhere by mutating this object.
 var creepRoles = {
-  BaseHarvest: roleBaseHarvest.run,
-  Builder: roleBuilder.run,
-  Courier: roleCourier.run,
+  BaseHarvest: roleBeeWorker.runBaseHarvest,
+  Builder: roleBeeWorker.runBuilder,
+  Courier: roleBeeWorker.runCourier,
   Repair: roleRepair.run,
-  Upgrader: roleUpgrader.run,
+  Upgrader: roleBeeWorker.runUpgrader,
   Dismantler: roleDismantler.run,
   Luna: roleLuna.run,
   Scout: roleScout.run,
-  Queen: roleQueen.run,
+  Queen: roleBeeWorker.runQueen,
   Trucker: roleTrucker.run,
   Claimer: roleClaimer.run,
   CombatArcher: roleBeeArmy.runArcher,
