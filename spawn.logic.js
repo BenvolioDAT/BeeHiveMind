@@ -8,6 +8,8 @@
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
+var BeeCombatSquads = require('BeeCombatSquads');
+var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 
 // -----------------------------------------------------------------------------
 // Body builders (ES5-only helpers to construct Screeps body arrays)
@@ -426,33 +428,11 @@ function desiredSquadLayout(score) {
   return order;
 }
 
-// Resolving target info is a pure helper: it reads flags + Memory and returns
-// everything the orchestration layer needs to know about the squad's goal.
-function resolveSquadFlag(id) {
-  var flagName = 'Squad' + id;
-  var altFlagName = 'Squad_' + id;
-  var flag = Game.flags[flagName] || Game.flags[altFlagName] || Game.flags[id] || null;
-  var squadFlagsMem = Memory.squadFlags || {};
-  var bindings = squadFlagsMem.bindings || {};
-  var targetRoom = bindings[flagName] || bindings[altFlagName] || bindings[id] || null;
-  if (!targetRoom && flag && flag.pos) targetRoom = flag.pos.roomName;
-  return {
-    flag: flag,
-    targetRoom: targetRoom,
-    mem: squadFlagsMem
-  };
-}
-
 // Guard rails: don't march squads across the whole shard accidentally.
 function distanceTooFar(spawnRoomName, targetRoom) {
   if (!Game.map || typeof Game.map.getRoomLinearDistance !== 'function') return false;
   var dist = Game.map.getRoomLinearDistance(spawnRoomName, targetRoom, true);
   return typeof dist === 'number' && dist > 3;
-}
-
-function getThreatScore(squadFlagsMem, targetRoom) {
-  var roomInfo = squadFlagsMem.rooms && squadFlagsMem.rooms[targetRoom] ? squadFlagsMem.rooms[targetRoom] : null;
-  return roomInfo && typeof roomInfo.lastScore === 'number' ? roomInfo.lastScore : 0;
 }
 
 function matchesSquadRole(mem, taskName) {
@@ -531,12 +511,16 @@ function Spawn_Squad(spawn, squadId) {
   if (!spawn || spawn.spawning) return false;
 
   var S = ensureSquadMemory(id);
-  var flagData = resolveSquadFlag(id);
+  var flagData = SquadFlagIntel && typeof SquadFlagIntel.resolveSquadTarget === 'function'
+    ? SquadFlagIntel.resolveSquadTarget(id)
+    : { flag: null, targetRoom: null };
   var targetRoom = flagData.targetRoom;
   if (!targetRoom) return false;
   if (distanceTooFar(spawn.room.name, targetRoom)) return false;
 
-  var threatScore = getThreatScore(flagData.mem, targetRoom);
+  var threatScore = SquadFlagIntel && typeof SquadFlagIntel.threatScoreForRoom === 'function'
+    ? SquadFlagIntel.threatScoreForRoom(targetRoom)
+    : 0;
   var layout = desiredSquadLayout(threatScore);
   if (!layout.length) return false;
 

@@ -15,6 +15,8 @@ var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
 var spawnLogic  = require('spawn.logic');
 var roleLuna    = require('role.Luna');
+var BeeCombatSquads = require('BeeCombatSquads');
+var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 
 // --------------------------- Tunables & Constants ------------------------
 var QUEUE_RETRY_COOLDOWN  = 5;
@@ -466,6 +468,13 @@ function prepareRoomQueues(C) {
 function trySpawnSquad(spawner, squadState) {
   if (!spawnLogic || typeof spawnLogic.Spawn_Squad !== 'function') return false;
   if (squadState.handled) return false;
+  var squadIntel = SquadFlagIntel && typeof SquadFlagIntel.resolveSquadTarget === 'function'
+    ? SquadFlagIntel.resolveSquadTarget('Alpha')
+    : null;
+  if (!squadIntel || (!squadIntel.flag && !squadIntel.targetRoom)) {
+    dlog('🛡️ [Squad]', spawner.room.name, 'Skipping Alpha spawn – no flag intel detected.');
+    return false;
+  }
   var ok = spawnLogic.Spawn_Squad(spawner, 'Alpha');
   if (!ok) return false;
   squadState.handled = true;

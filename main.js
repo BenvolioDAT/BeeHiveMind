@@ -8,8 +8,8 @@ const BeeHiveMind = require('BeeHiveMind');
 const towerLogic = require('tower.logic');
 const roleLinkManager = require('role.LinkManager');
 const BeeToolbox = require('BeeToolbox');
+const BeeCombatSquads = require('BeeCombatSquads');
 require('Traveler');
-const SquadFlagManager = require('SquadFlagManager');
 
 const LOG_LEVEL = CoreConfig.LOG_LEVEL;
 
@@ -100,7 +100,7 @@ module.exports.loop = function () {
 
     maintainRepairTargets();
     ensureFirstSpawnMemory();
-    SquadFlagManager.ensureSquadFlags();
+    BeeCombatSquads.ensureSquadFlags();
 
     if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {
         BeeMaintenance.cleanStaleRooms();
