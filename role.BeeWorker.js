@@ -1586,11 +1586,11 @@ roleBeeWorker.Queen = (function () {
 
   
   // External selectors module; see BeeSelectors.js for source/sink scans.
-  var BeeSelectors = require('BeeSelectors');
+  //var BeeSelectors = require('BeeSelectors');
   // Shared action wrappers with movement intents.
-  var BeeActions = require('BeeActions');
+  //var BeeActions = require('BeeActions');
   // Central movement queue; roleQueen enqueues idles here.
-  var MovementManager = require('Movement.Manager');
+  //var MovementManager = require('Movement.Manager');
 
 
 
