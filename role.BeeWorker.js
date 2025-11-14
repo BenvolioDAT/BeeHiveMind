@@ -19,7 +19,14 @@ var CFG = Object.freeze({
   PATH_REUSE: 40,
   MAX_OPS_MOVE: 2000,
   TRAVEL_MAX_OPS: 4000,
-
+  //--- Pathing (used by Queen)----
+  STUCK_TICKS: 6,
+  MOVE_PRIORITIES: {
+    withdraw: 60,
+    pickup: 70,
+    deliver: 55,
+    idle: 5
+    },
   // --- Targeting cadences (Courier) ---
   RETARGET_COOLDOWN: 10,
   GRAVE_SCAN_COOLDOWN: 20,
@@ -1596,7 +1603,7 @@ roleBeeWorker.Queen = (function () {
 
   // Static configuration covering debug outputs, stuck detection, and movement
   // priorities (higher numbers win when Movement.Manager resolves intents).
-  var CFG = Object.freeze({
+ /* var CFG = Object.freeze({
     DEBUG_SAY: false,
     DEBUG_DRAW: true,
     DRAW: {
@@ -1616,7 +1623,7 @@ roleBeeWorker.Queen = (function () {
       idle: 5
     }
   });
-
+*/
   // Function header: debugSay(creep, msg)
   // Inputs: creep (Creep), msg (string emoji/text)
   // Output: none
