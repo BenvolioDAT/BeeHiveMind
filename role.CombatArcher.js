@@ -3,6 +3,7 @@
 var Traveler = require('Traveler');
 var BeeCombatSquads = require('BeeCombatSquads');
 var CombatAPI = BeeCombatSquads.CombatAPI;
+var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 
 function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
@@ -40,11 +41,22 @@ function _buildSquadContext(creep) {
   var leader = _resolveMember(members.leader);
   if (leader && leader.id === creep.id) leader = null; // Don't chase ourselves.
 
+  var plan = SquadFlagIntel && typeof SquadFlagIntel.resolvePlan === 'function'
+    ? SquadFlagIntel.resolvePlan(flagName)
+    : null;
+  var rallyPos = null;
+  if (plan && plan.rally) {
+    rallyPos = _deserializePos(plan.rally);
+  } else if (squad.rally) {
+    rallyPos = _deserializePos(squad.rally);
+  }
+
   return {
     flagName: flagName,
     squad: squad,
     leader: leader,
-    rallyPos: squad.rally ? _deserializePos(squad.rally) : null,
+    plan: plan,
+    rallyPos: rallyPos,
     state: CombatAPI.getSquadState(flagName)
   };
 }
