@@ -4,7 +4,7 @@ const BeeCombatSquads = require('BeeCombatSquads');
 const CombatAPI = BeeCombatSquads.CombatAPI;
 
 const CFG = {
-  DEBUG: true,
+  DEBUG: false,
   SUPPORT_PREFIX: 'SQUAD_',
   TYPES: {
     RALLY: { color: COLOR_GREEN, secondary: COLOR_WHITE },
