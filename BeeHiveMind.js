@@ -41,9 +41,7 @@ var roleScout            = require('role.Scout');
 var roleQueen            = require('role.Queen');
 var roleTrucker          = require('role.Trucker');
 var roleClaimer          = require('role.Claimer');
-var roleCombatArcher     = require('role.CombatArcher');
-var roleCombatMedic      = require('role.CombatMedic');
-var roleCombatMelee      = require('role.CombatMelee');
+var roleBeeArmy          = require('role.BeeArmy');
 var RoomPlanner          = require('Planner.Room');
 var RoadPlanner          = require('Planner.Road');
 var TradeEnergy          = require('Trade.Energy');
@@ -63,9 +61,9 @@ var creepRoles = {
   Queen: roleQueen.run,
   Trucker: roleTrucker.run,
   Claimer: roleClaimer.run,
-  CombatArcher: roleCombatArcher.run,
-  CombatMedic: roleCombatMedic.run,
-  CombatMelee: roleCombatMelee.run
+  CombatArcher: roleBeeArmy.runArcher,
+  CombatMedic: roleBeeArmy.runMedic,
+  CombatMelee: roleBeeArmy.runMelee
 };
 
 /**
