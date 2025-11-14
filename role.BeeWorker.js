@@ -1583,10 +1583,17 @@ roleBeeWorker.Queen = (function () {
   //   the same sink in the same tick.
   // Called from: BeeHiveMind.runCreeps dispatcher -> roleQueen.run.
   // -----------------------------------------------------------------------------
-  'use strict';
+
+  
+  // External selectors module; see BeeSelectors.js for source/sink scans.
+  var BeeSelectors = require('BeeSelectors');
+  // Shared action wrappers with movement intents.
+  var BeeActions = require('BeeActions');
+  // Central movement queue; roleQueen enqueues idles here.
+  var MovementManager = require('Movement.Manager');
 
 
-/*
+
   // Static configuration covering debug outputs, stuck detection, and movement
   // priorities (higher numbers win when Movement.Manager resolves intents).
   var CFG = Object.freeze({
@@ -1609,7 +1616,7 @@ roleBeeWorker.Queen = (function () {
       idle: 5
     }
   });
-*/
+
   // Function header: debugSay(creep, msg)
   // Inputs: creep (Creep), msg (string emoji/text)
   // Output: none
