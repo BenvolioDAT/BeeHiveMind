@@ -67,7 +67,8 @@ var CFG = Object.freeze({
     WIDTH:   0.12,
     OPACITY: 0.45,
     FONT:    0.6
-  }
+  },
+  SIGN_TEXT: "BeeNice Please."
 });
 
 // Namespace
