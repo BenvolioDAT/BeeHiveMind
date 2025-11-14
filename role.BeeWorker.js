@@ -6,7 +6,6 @@
  */
 
 var BeeToolbox = require('BeeToolbox');
-try { require('Traveler'); } catch (e) {} // use if available
 // External selectors module; see BeeSelectors.js for source/sink scans.
 var BeeSelectors = require('BeeSelectors');
 // Shared action wrappers with movement intents.
