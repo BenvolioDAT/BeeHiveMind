@@ -186,6 +186,9 @@ function _applyHealing(creep, target) {
 function _pickMoveTarget(creep, context, healTarget) {
   if (!context) return null;
 
+  if (context.state === 'RETREAT' && context.rallyPos) return context.rallyPos;
+  if (context.state !== 'ENGAGE' && context.rallyPos) return context.rallyPos;
+
   if (context.leader && creep.pos.getRangeTo(context.leader) > 2) return context.leader;
 
   if (
@@ -198,7 +201,6 @@ function _pickMoveTarget(creep, context, healTarget) {
 
   if (context.buddy && creep.pos.getRangeTo(context.buddy) > 2) return context.buddy;
 
-  if (context.state === 'RETREAT' && context.rallyPos) return context.rallyPos;
   if (context.rallyPos) return context.rallyPos;
   return null;
 }
@@ -210,8 +212,15 @@ var roleBeeArmy = {
     var context = _buildArcherContext(creep);
     if (!context) return;
 
-    var target = _resolveFocusTarget(context);
-    if (_kiteOrClose(creep, target)) return;
+    if (context.state === 'RETREAT') {
+      _followLeaderOrRally(creep, context);
+      return;
+    }
+
+    if (context.state === 'ENGAGE') {
+      var target = _resolveFocusTarget(context);
+      if (_kiteOrClose(creep, target)) return;
+    }
 
     _followLeaderOrRally(creep, context);
   },
@@ -222,8 +231,14 @@ var roleBeeArmy = {
     var context = _buildMeleeContext(creep);
     if (!context) return;
 
-    var target = _resolveFocusTarget(context);
-    if (!_swingOrAdvance(creep, target)) {
+    if (context.state === 'RETREAT') {
+      _fallbackToRally(creep, context);
+    } else if (context.state === 'ENGAGE') {
+      var target = _resolveFocusTarget(context);
+      if (!_swingOrAdvance(creep, target)) {
+        _fallbackToRally(creep, context);
+      }
+    } else {
       _fallbackToRally(creep, context);
     }
 

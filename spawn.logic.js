@@ -401,19 +401,37 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 // -----------------------------------------------------------------------------
 var SQUAD_COOLDOWN_TICKS = 1;
 
+function normalizeSquadKey(id) {
+  if (!id) return null;
+  var key = String(id);
+  if (key.indexOf('Squad') === 0) return key;
+  return 'Squad' + key;
+}
+
 // Novice tip: hide the boilerplate Memory guards so orchestration logic stays
 // focused on decisions, not on `if (!Memory.foo)` noise.
 function ensureSquadMemory(id) {
+  if (!id) return {};
   if (!Memory.squads) Memory.squads = {};
-  if (!Memory.squads[id]) Memory.squads[id] = {};
-  return Memory.squads[id];
+  var key = normalizeSquadKey(id);
+  if (!key) return {};
+  if (!Memory.squads[key]) {
+    if (Memory.squads[id] && id !== key) {
+      Memory.squads[key] = Memory.squads[id];
+      delete Memory.squads[id];
+    } else {
+      Memory.squads[key] = {};
+    }
+  }
+  return Memory.squads[key];
 }
 
 // Teaching habit: keep combat math in one helper so adjusting threat levels
 // never requires scrolling through spawn orchestration code.
 function desiredSquadLayout(score) {
   var threat = score | 0;
-  var melee = 2;
+  if (threat <= 0) return [];
+  var melee = 1;
   var medic = 1;
   var archer = 0;
 

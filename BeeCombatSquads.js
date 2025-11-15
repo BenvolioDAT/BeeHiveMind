@@ -22,6 +22,8 @@ var FLAG_CFG = {
   }
 };
 
+var THREAT_DECAY_TICKS = 150;
+
 function flagLogDebug() {
   if (!FLAG_CFG.DEBUG || !console || !console.log) return;
   var args = Array.prototype.slice.call(arguments);
@@ -156,7 +158,13 @@ var FlagIO = {
       return null;
     }
     var existing = Game.flags[name];
-    if (existing && existing.pos && samePos(existing.pos, desired)) {
+    if (existing) {
+      if (existing.pos && !samePos(existing.pos, desired) && existing.setPosition) {
+        var moveRc = existing.setPosition(desired.x, desired.y);
+        if (moveRc !== OK && FLAG_CFG.DEBUG) {
+          flagLogDebug('Failed to move flag', name, '->', moveRc);
+        }
+      }
       var needsPrimary = color != null && existing.color !== color;
       var needsSecondary = secondary != null && existing.secondaryColor !== secondary;
       if ((needsPrimary || needsSecondary) && existing.setColor) {
@@ -256,6 +264,7 @@ function syncPlannedFlags() {
   var expected = {};
   for (var flagName in Memory.squads) {
     if (!Object.prototype.hasOwnProperty.call(Memory.squads, flagName)) continue;
+    if (flagName.indexOf('Squad') !== 0) continue;
     var plan = resolvePlan(flagName);
     if (!plan) continue;
     if (!plan.rally && FLAG_CFG.DEBUG) flagLogDebug('No rally defined for', flagName);
@@ -314,7 +323,12 @@ function threatScoreForRoom(roomName) {
   var rooms = intel.rooms || {};
   var rec = rooms[roomName];
   if (!rec || typeof rec.lastScore !== 'number') return 0;
-  return rec.lastScore;
+  var score = rec.lastScore | 0;
+  if (score <= 0) return 0;
+  var lastThreatTick = rec.lastThreatAt || rec.lastSeen || 0;
+  if (!lastThreatTick) return 0;
+  if ((Game.time - lastThreatTick) > THREAT_DECAY_TICKS) return 0;
+  return score;
 }
 
 function ensureSquadFlags() {
@@ -506,7 +520,7 @@ function buildAvoidanceFromSquadMembers(formation) {
   return avoid;
 }
 
-function resolveRoomForSquad(flagName, formation, currentObj) {
+function resolveRoomForSquad(flagName, formation, currentObj, bucket) {
   // Always try the cheapest data source first (flag cache) before falling
   // back to heavier Game lookups.
   var flag = Game.flags && Game.flags[flagName] ? Game.flags[flagName] : null;
@@ -518,6 +532,17 @@ function resolveRoomForSquad(flagName, formation, currentObj) {
   var medic = formation && formation.medic ? Game.getObjectById(formation.medic) : null;
   if (medic && medic.room) return medic.room;
   if (currentObj && currentObj.room) return currentObj.room;
+  if (bucket) {
+    if (bucket.targetRoom && Game.rooms && Game.rooms[bucket.targetRoom]) {
+      return Game.rooms[bucket.targetRoom];
+    }
+    if (bucket.rally) {
+      var rallyPos = deserializePos(bucket.rally);
+      if (rallyPos && Game.rooms && Game.rooms[rallyPos.roomName]) {
+        return Game.rooms[rallyPos.roomName];
+      }
+    }
+  }
   return null;
 }
 
@@ -533,6 +558,14 @@ function setSquadState(flagName, state) {
   if (!VALID_STATES[state]) return;
   var bucket = ensureSquadMemory(flagName);
   if (!bucket) return;
+  var previous = bucket.state;
+  if (previous !== state && console && console.log) {
+    try {
+      console.log('[Squad]', flagName, 'state', previous || 'INIT', '→', state);
+    } catch (e) {
+      // ignore logging errors in production
+    }
+  }
   bucket.state = state;
 }
 
@@ -656,7 +689,7 @@ function focusFireTarget(flagName) {
   var currentObj = currentId ? Game.getObjectById(currentId) : null;
 
   var formation = bucket && bucket.members ? bucket.members : null;
-  var room = resolveRoomForSquad(flagName, formation, currentObj);
+  var room = resolveRoomForSquad(flagName, formation, currentObj, bucket);
   var avoid = buildAvoidanceFromSquadMembers(bucket ? bucket.members : null);
 
   var nextId = null;
