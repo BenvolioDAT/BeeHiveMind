@@ -160,17 +160,24 @@ var FlagIO = {
     var existing = Game.flags[name];
     if (existing) {
       if (existing.pos && !samePos(existing.pos, desired) && existing.setPosition) {
-        var moveRc = existing.setPosition(desired.x, desired.y);
-        if (moveRc !== OK && FLAG_CFG.DEBUG) {
-          flagLogDebug('Failed to move flag', name, '->', moveRc);
+        var targetRoom = desired.roomName || (existing.pos && existing.pos.roomName);
+        var moveRc = existing.setPosition(desired.x, desired.y, targetRoom);
+        if (moveRc !== OK) {
+          if (FLAG_CFG.DEBUG) {
+            flagLogDebug('Failed to move flag', name, '->', moveRc, 'remaking');
+          }
+          if (existing.remove) existing.remove();
+          existing = null;
         }
       }
-      var needsPrimary = color != null && existing.color !== color;
-      var needsSecondary = secondary != null && existing.secondaryColor !== secondary;
-      if ((needsPrimary || needsSecondary) && existing.setColor) {
-        existing.setColor(color || existing.color, secondary || existing.secondaryColor);
+      if (existing) {
+        var needsPrimary = color != null && existing.color !== color;
+        var needsSecondary = secondary != null && existing.secondaryColor !== secondary;
+        if ((needsPrimary || needsSecondary) && existing.setColor) {
+          existing.setColor(color || existing.color, secondary || existing.secondaryColor);
+        }
+        return existing;
       }
-      return existing;
     }
     var roomName = desired.roomName;
     if (!roomName) {
