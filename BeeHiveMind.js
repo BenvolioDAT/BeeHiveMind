@@ -33,10 +33,6 @@ var BeeSpawnManager      = require('BeeSpawnManager');
 var roleBeeWorker        = require('role.BeeWorker');
 var roleRepair           = require('role.Repair');
 var roleDismantler       = require('role.Dismantler');
-var roleLuna             = require('role.Luna');
-var roleScout            = require('role.Scout');
-var roleTrucker          = require('role.Trucker');
-var roleClaimer          = require('role.Claimer');
 var roleBeeArmy          = require('role.BeeArmy');
 var RoomPlanner          = require('Planner.Room');
 var RoadPlanner          = require('Planner.Road');
@@ -52,11 +48,11 @@ var creepRoles = {
   Repair: roleRepair.run,
   Upgrader: roleBeeWorker.runUpgrader,
   Dismantler: roleDismantler.run,
-  Luna: roleLuna.run,
-  Scout: roleScout.run,
+  Luna: roleBeeWorker.runLuna,
+  Scout: roleBeeWorker.runScout,
   Queen: roleBeeWorker.runQueen,
-  Trucker: roleTrucker.run,
-  Claimer: roleClaimer.run,
+  Trucker: roleBeeWorker.runTrucker,
+  Claimer: roleBeeWorker.runClaimer,
   CombatArcher: roleBeeArmy.runArcher,
   CombatMedic: roleBeeArmy.runMedic,
   CombatMelee: roleBeeArmy.runMelee
