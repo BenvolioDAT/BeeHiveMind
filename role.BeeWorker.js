@@ -69,7 +69,7 @@ var CFG = Object.freeze({
   ALLOW_NON_ENERGY: true,
 
   // Fallback park if no flag & no home (harmless; rarely used)
-  PARK_POS: { x:25, y:25, roomName:"W0N0" }
+  PARK_POS: { x:25, y:25, roomName:"W0N0" },
 });
 
 // Namespace
