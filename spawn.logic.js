@@ -543,6 +543,14 @@ function Spawn_Squad(spawn, squadId) {
   var threatScore = SquadFlagIntel && typeof SquadFlagIntel.threatScoreForRoom === 'function'
     ? SquadFlagIntel.threatScoreForRoom(targetRoom)
     : 0;
+  if ((threatScore | 0) <= 0 && BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
+    // BHM Combat Fix: fall back to live room scans so defenders spawn the tick
+    // a threat appears instead of waiting for intel decay updates.
+    var live = BeeCombatSquads.getLiveThreatForRoom(targetRoom);
+    if (live && live.score > 0) {
+      threatScore = live.score;
+    }
+  }
   var layout = desiredSquadLayout(threatScore);
   if (!layout.length) return false;
 

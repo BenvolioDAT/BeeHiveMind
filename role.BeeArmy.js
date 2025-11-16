@@ -10,7 +10,11 @@ function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
   if (creep.memory.squadFlag) return creep.memory.squadFlag;
   if (creep.memory.squadId != null && creep.memory.squadId !== undefined) {
-    return 'Squad' + creep.memory.squadId;
+    var sid = creep.memory.squadId;
+    if (typeof sid === 'string' && sid.indexOf('Squad') === 0) {
+      return sid;
+    }
+    return 'Squad' + sid;
   }
   return null;
 }
