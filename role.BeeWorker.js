@@ -58,7 +58,7 @@ var CFG = Object.freeze({
     FONT:    0.6
   },
   //Upgrader role Behavior
-  SIGN_TEXT: "BeeNice Please."
+  SIGN_TEXT: "BeeNice Please.",
   //Trucker role Behavior
   PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
   MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
