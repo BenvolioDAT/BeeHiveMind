@@ -4972,26 +4972,10 @@ roleBeeWorker.runBuilder = function(creep) { return roleBeeWorker.Builder.run(cr
 roleBeeWorker.runCourier = function(creep) { return roleBeeWorker.Courier.run(creep); };
 roleBeeWorker.runQueen = function(creep) { return roleBeeWorker.Queen.run(creep); };
 roleBeeWorker.runUpgrader = function(creep) { return roleBeeWorker.Upgrader.run(creep); };
-roleBeeWorker.runLuna = function(creep) {
-  return roleBeeWorker.Luna && typeof roleBeeWorker.Luna.run === 'function'
-    ? roleBeeWorker.Luna.run(creep)
-    : undefined;
-};
-roleBeeWorker.runScout = function(creep) {
-  return roleBeeWorker.Scout && typeof roleBeeWorker.Scout.run === 'function'
-    ? roleBeeWorker.Scout.run(creep)
-    : undefined;
-};
-roleBeeWorker.runTrucker = function(creep) {
-  return roleBeeWorker.Trucker && typeof roleBeeWorker.Trucker.run === 'function'
-    ? roleBeeWorker.Trucker.run(creep)
-    : undefined;
-};
-roleBeeWorker.runClaimer = function(creep) {
-  return roleBeeWorker.Claimer && typeof roleBeeWorker.Claimer.run === 'function'
-    ? roleBeeWorker.Claimer.run(creep)
-    : undefined;
-};
+roleBeeWorker.runLuna = function(creep) { return roleBeeWorker.Luna && typeof roleBeeWorker.Luna.run === 'function' ? roleBeeWorker.Luna.run(creep) : undefined; };
+roleBeeWorker.runScout = function(creep) { return roleBeeWorker.Scout && typeof roleBeeWorker.Scout.run === 'function' ? roleBeeWorker.Scout.run(creep) : undefined; };
+roleBeeWorker.runTrucker = function(creep) { return roleBeeWorker.Trucker && typeof roleBeeWorker.Trucker.run === 'function' ? roleBeeWorker.Trucker.run(creep) : undefined; };
+roleBeeWorker.runClaimer = function(creep) { return roleBeeWorker.Claimer && typeof roleBeeWorker.Claimer.run === 'function' ? roleBeeWorker.Claimer.run(creep) : undefined; };
 
 if (roleBeeWorker.Builder && roleBeeWorker.Builder.structurePlacements) {
   roleBeeWorker.structurePlacements = roleBeeWorker.Builder.structurePlacements;
