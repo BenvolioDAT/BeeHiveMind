@@ -7,7 +7,7 @@ var BeeSelectors = require('BeeSelectors');
 var BeeActions = require('BeeActions');
 // Central movement queue; roleQueen enqueues idles here.
 var MovementManager = require('Movement.Manager');
-// Legacy role modules now live inline in this file (see bottom section).
+
 
 // Shared debug + tuning config
 var CFG = Object.freeze({
@@ -57,7 +57,19 @@ var CFG = Object.freeze({
     OPACITY: 0.45,
     FONT:    0.6
   },
+  //Upgrader role Behavior
   SIGN_TEXT: "BeeNice Please."
+  //Trucker role Behavior
+  PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
+  MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
+  SEARCH_RADIUS: 50,               // how far from flag to look
+  PATH_REUSE: 20,                  // reusePath hint
+
+  // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
+  ALLOW_NON_ENERGY: true,
+
+  // Fallback park if no flag & no home (harmless; rarely used)
+  PARK_POS: { x:25, y:25, roomName:"W0N0" }
 });
 
 // Namespace
@@ -65,28 +77,6 @@ var roleBeeWorker = {};
 
 
 roleBeeWorker.BaseHarvest = (function () {
-
-
-  /** =========================
-   *  Debug UI toggles & styling
-   *  ========================= */
- /* var CFG = Object.freeze({
-    DEBUG_SAY: false,    // creep.say breadcrumbs
-    DEBUG_DRAW: true,   // RoomVisual lines/labels/rings
-    DRAW: {
-      TRAVEL:   "#8ab6ff",
-      SOURCE:   "#ffd16e",
-      SEAT:     "#6effa1",
-      QUEUE:    "#ffe66e",
-      YIELD:    "#ff6e6e",
-      OFFLOAD:  "#6ee7ff",
-      IDLE:     "#bfbfbf",
-      WIDTH: 0.12,
-      OPACITY: 0.45,
-      FONT: 0.6
-    }
-  });*/
-
   /** =========================
    *  Config knobs
    *  ========================= */
@@ -652,31 +642,6 @@ roleBeeWorker.BaseHarvest = (function () {
 })();
 
 roleBeeWorker.Builder = (function () {
-/*
-  // ==============================
-  // Debug UI toggles & styling
-  // ==============================
-  var CFG = Object.freeze({
-    DEBUG_SAY: false,   // creep.say breadcrumbs
-    DEBUG_DRAW: true,  // RoomVisual lines/labels
-    DRAW: {
-      TRAVEL_COLOR:  "#8ab6ff",
-      PICKUP_COLOR:  "#ffe66e",
-      WITHDRAW_COLOR:"#ffd16e",
-      TOMBSTONE_COLOR:"#e6a6ff",
-      RUIN_COLOR:    "#c6b3ff",
-      SRC_CONT_COLOR:"#ffa36e",
-      STORELIKE_COLOR:"#6ee7ff",
-      BUILD_COLOR:   "#e6c16e",
-      SINK_COLOR:    "#6effa1",
-      IDLE_COLOR:    "#bfbfbf",
-      WIDTH: 0.12,
-      OPACITY: 0.45,
-      FONT: 0.6
-    }
-  });
-  */
-
   // ==============================
   // Tunables
   // ==============================
@@ -984,45 +949,7 @@ roleBeeWorker.Courier = (function () {
   // Deliver priority: SPAWNS/EXTENSIONS -> TOWERS (<= pct) -> STORAGE
   //
   // Shares PIB + same-tick reservation scheme with Queen to avoid target dogpiles.
-/*
-  // ============================
-  // Tunables
-  // ============================
-  var CFG = Object.freeze({
-    // Pathing
-    PATH_REUSE: 40,
-    MAX_OPS_MOVE: 2000,
-    TRAVEL_MAX_OPS: 4000,
 
-    // Targeting cadences
-    RETARGET_COOLDOWN: 10,          // ticks before switching pickup container
-    GRAVE_SCAN_COOLDOWN: 20,        // room-level cooldown for tombstone/ruin scans
-    BETTER_CONTAINER_DELTA: 150,    // how much more energy makes a source container "clearly better"
-
-    // Thresholds / radii
-    CONTAINER_MIN: 50,              // ignore tiny trickles in containers
-    DROPPED_BIG_MIN: 150,           // opportunistic pickup threshold
-    DROPPED_NEAR_CONTAINER_R: 2,    // radius around source container
-    DROPPED_ALONG_ROUTE_R: 2,       // radius around the creep while traveling
-
-    // Towers
-    TOWER_REFILL_AT_OR_BELOW: 0.70, // refill towers when <= 70%
-
-    // Debug UI
-    DEBUG_SAY: false,                // creep.say breadcrumbs
-    DEBUG_DRAW: true,               // RoomVisual lines + labels
-    DRAW: {
-      WD_COLOR: "#6ec1ff",          // withdraw lines
-      FILL_COLOR: "#6effa1",        // delivery lines
-      DROP_COLOR: "#ffe66e",        // dropped energy
-      GRAVE_COLOR: "#ffb0e0",       // tombstones/ruins
-      IDLE_COLOR: "#bfbfbf",        // idle
-      WIDTH: 0.12,
-      OPACITY: 0.45,
-      FONT: 0.6
-    }
-  });
-  */
 
   // ============================
   // Per-tick room cache
@@ -1572,41 +1499,13 @@ roleBeeWorker.Queen = (function () {
   // * Uses global.__BHM.queenReservations to avoid multiple Queens double-booking
   //   the same sink in the same tick.
   // Called from: BeeHiveMind.runCreeps dispatcher -> roleQueen.run.
-  // -----------------------------------------------------------------------------
-
-  
+  // -----------------------------------------------------------------------------  
   // External selectors module; see BeeSelectors.js for source/sink scans.
   //var BeeSelectors = require('BeeSelectors');
   // Shared action wrappers with movement intents.
   //var BeeActions = require('BeeActions');
   // Central movement queue; roleQueen enqueues idles here.
   //var MovementManager = require('Movement.Manager');
-
-
-
-  // Static configuration covering debug outputs, stuck detection, and movement
-  // priorities (higher numbers win when Movement.Manager resolves intents).
- /* var CFG = Object.freeze({
-    DEBUG_SAY: false,
-    DEBUG_DRAW: true,
-    DRAW: {
-      WITHDRAW: '#69c3ff',
-      DELIVER: '#7dff85',
-      PICKUP: '#ffe66e',
-      IDLE: '#bfbfbf',
-      WIDTH: 0.12,
-      OPACITY: 0.45,
-      FONT: 0.6
-    },
-    STUCK_TICKS: 6,
-    MOVE_PRIORITIES: {
-      withdraw: 60,
-      pickup: 70,
-      deliver: 55,
-      idle: 5
-    }
-  });
-*/
   // Function header: debugSay(creep, msg)
   // Inputs: creep (Creep), msg (string emoji/text)
   // Output: none
@@ -2120,38 +2019,6 @@ roleBeeWorker.Queen = (function () {
 })();
 
 roleBeeWorker.Upgrader = (function () {
-
-
-  /** =========================
-   *  Debug toggles & styling
-   *  ========================= */
-  /*
-  var CFG = Object.freeze({
-    DEBUG_SAY: false,
-    DEBUG_DRAW: true,
-
-    // Behavior knobs
-    SKIP_RCL8_IF_SAFE: true,
-    RCL8_SAFE_TTL: 180000, // ticksToDowngrade threshold to pause at RCL8
-    TRAVEL_REUSE: 16,
-
-    // Visual palette
-    DRAW: {
-      PATH:   "#8ab6ff",
-      CTRL:   "#ffd16e",
-      LINK:   "#9cff9c",
-      STORE:  "#b0a7ff",
-      CONT:   "#8ef",
-      DROP:   "#ffb27a",
-      TEXT:   "#e0e0e0",
-      WIDTH:  0.12,
-      OPAC:   0.45,
-      FONT:   0.7
-    },
-
-    SIGN_TEXT: "BeeNice Please."
-  });
-*/
   /** =========================
    *  Tiny debug helpers
    *  ========================= */
@@ -2382,33 +2249,6 @@ roleBeeWorker.Upgrader = (function () {
 roleBeeWorker.Luna = (function () {
   var module = { exports: {} };
   var exports = module.exports;
-  // role.Luna – Remote harvester with SAY + DRAW breadcrumbs (ES5-safe)
-  // Visual intent lines help you see: travel, pick, harvest, return, and fallbacks.
-
-  var BeeToolbox = require('BeeToolbox');
-  try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
-
-  // ============================
-  // Debug UI (toggle here)
-  // ============================
-  var CFG = Object.freeze({
-    DEBUG_SAY: false,     // creep.say breadcrumbs
-    DEBUG_DRAW: true,    // RoomVisual lines + labels
-    DRAW: {
-      TRAVEL_COLOR:  "#8ab6ff",  // room travel (to target/home)
-      PICK_COLOR:    "#ffe66e",  // choosing a source / assignment
-      SRC_COLOR:     "#ff9a6e",  // harvesting source
-      DROP_COLOR:    "#ffe66e",  // drops (rare here)
-      DELIVER_COLOR: "#6effa1",  // delivering energy
-      BUILD_COLOR:   "#e6c16e",  // building
-      UPG_COLOR:     "#c1a6ff",  // upgrading
-      IDLE_COLOR:    "#bfbfbf",  // idling / anchor
-      WIDTH: 0.12,
-      OPACITY: 0.45,
-      FONT: 0.6
-    }
-  });
-
   // ============================
   // Tunables (existing behaviour)
   // ============================
@@ -3522,31 +3362,6 @@ roleBeeWorker.Luna = (function () {
 roleBeeWorker.Scout = (function () {
   var module = { exports: {} };
   var exports = module.exports;
-  // role.Scout – ring-based exploration with Debug_say & Debug_draw
-  var BeeToolbox = require('BeeToolbox');
-  try { require('Traveler'); } catch (e) {} // ensure creep.travelTo exists
-
-  /** =========================
-   *  Debug toggles & styling
-   *  ========================= */
-  var CFG = Object.freeze({
-    DEBUG_SAY: false,
-    DEBUG_DRAW: true,
-    DRAW: {
-      TRAVEL:   "#8ab6ff",
-      ROOM:     "#e6f58b",
-      EXIT_OK:  "#9cff9c",
-      EXIT_BAD: "#ff7b7b",
-      BLOCK:    "#ff6e6e",
-      INTEL:    "#ffd16e",
-      TARGET:   "#b0a7ff",
-      TEXT:     "#e0e0e0",
-      WIDTH:    0.12,
-      OPACITY:  0.45,
-      FONT:     0.7
-    }
-  });
-
   /** =========================
    *  Tiny debug helpers
    *  ========================= */
@@ -4267,39 +4082,6 @@ roleBeeWorker.Scout = (function () {
 roleBeeWorker.Trucker = (function () {
   var module = { exports: {} };
   var exports = module.exports;
-  // role.Trucker — Flag-driven loot hauler with Debug_say & Debug_draw (ES5-safe)
-  var BeeToolbox = require('BeeToolbox');
-
-  // ============================
-  // Debug & Tunables
-  // ============================
-  var CFG = Object.freeze({
-    DEBUG_SAY: true,          // creep.say breadcrumbs
-    DEBUG_DRAW: true,         // RoomVisual lines/labels/rings
-
-    // Visual palette
-    DRAW: {
-      TRAVEL:   "#8ab6ff",
-      LOOT:     "#ffd16e",
-      RETURN:   "#6effa1",
-      DEPOSIT:  "#6ee7ff",
-      IDLE:     "#bfbfbf",
-      FLAG:     "#ffc04d"
-    },
-
-    // Behavior
-    PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
-    MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
-    SEARCH_RADIUS: 50,               // how far from flag to look
-    PATH_REUSE: 20,                  // reusePath hint
-
-    // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
-    ALLOW_NON_ENERGY: true,
-
-    // Fallback park if no flag & no home (harmless; rarely used)
-    PARK_POS: { x:25, y:25, roomName:"W0N0" }
-  });
-
   // ============================
   // Tiny debug helpers
   // ============================
@@ -4615,28 +4397,6 @@ roleBeeWorker.Trucker = (function () {
 roleBeeWorker.Claimer = (function () {
   var module = { exports: {} };
   var exports = module.exports;
-  // role.Claimer — Reserve/Claim/Attack with Debug_say & Debug_draw
-  var BeeToolbox = require('BeeToolbox');
-
-  /** =========================
-   *  Debug UI toggles & styling
-   *  ========================= */
-  var CFG = Object.freeze({
-    DEBUG_SAY: false,   // creep.say breadcrumbs
-    DEBUG_DRAW: true,  // RoomVisual lines/labels/rings
-    DRAW: {
-      TRAVEL:   "#8ab6ff",
-      CTRL:     "#ffd16e",
-      FLAG:     "#a0ffa0",
-      LOCK:     "#ff6e6e",
-      SIGN:     "#b0a7ff",
-      TEXT:     "#e0e0e0",
-      WIDTH:    0.12,
-      OPACITY:  0.45,
-      FONT:     0.7
-    }
-  });
-
   /** =========================
    *  Core config
    *  ========================= */
