@@ -10,7 +10,11 @@ function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
   if (creep.memory.squadFlag) return creep.memory.squadFlag;
   if (creep.memory.squadId != null && creep.memory.squadId !== undefined) {
-    return 'Squad' + creep.memory.squadId;
+    var sid = creep.memory.squadId;
+    if (typeof sid === 'string' && sid.indexOf('Squad') === 0) {
+      return sid;
+    }
+    return 'Squad' + sid;
   }
   return null;
 }
@@ -31,6 +35,22 @@ function _deserializePos(posData) {
   return new RoomPosition(posData.x, posData.y, posData.roomName);
 }
 
+function _resolveAttackPos(plan, squad) {
+  if (plan && plan.attack) {
+    var attackFromPlan = _deserializePos(plan.attack);
+    if (attackFromPlan) return attackFromPlan;
+  }
+  if (squad) {
+    var attackKeys = ['targetPos', 'focusTargetPos', 'attack', 'target'];
+    for (var i = 0; i < attackKeys.length; i++) {
+      if (!squad[attackKeys[i]]) continue;
+      var attackFromMem = _deserializePos(squad[attackKeys[i]]);
+      if (attackFromMem) return attackFromMem;
+    }
+  }
+  return null;
+}
+
 function _buildBaseContext(creep) {
   var flagName = _resolveFlagName(creep);
   if (!flagName) return null;
@@ -45,12 +65,14 @@ function _buildBaseContext(creep) {
   } else if (squad.rally) {
     rallyPos = _deserializePos(squad.rally);
   }
+  var attackPos = _resolveAttackPos(plan, squad);
 
   return {
     flagName: flagName,
     squad: squad,
     plan: plan,
     rallyPos: rallyPos,
+    attackPos: attackPos,
     state: CombatAPI.getSquadState(flagName)
   };
 }
@@ -75,6 +97,7 @@ function _buildArcherContext(creep) {
     squad: base.squad,
     plan: base.plan,
     rallyPos: base.rallyPos,
+    attackPos: base.attackPos,
     state: base.state,
     leader: leader
   };
@@ -158,6 +181,7 @@ function _buildMedicContext(creep) {
     flagName: base.flagName,
     plan: base.plan,
     rallyPos: base.rallyPos,
+    attackPos: base.attackPos,
     state: base.state,
     leader: leader,
     buddy: buddy
@@ -188,6 +212,8 @@ function _pickMoveTarget(creep, context, healTarget) {
 
   if (context.state === 'RETREAT' && context.rallyPos) return context.rallyPos;
   if (context.state !== 'ENGAGE' && context.rallyPos) return context.rallyPos;
+
+  if (context.state === 'ENGAGE' && context.attackPos) return context.attackPos;
 
   if (context.leader && creep.pos.getRangeTo(context.leader) > 2) return context.leader;
 
@@ -220,6 +246,12 @@ var roleBeeArmy = {
     if (context.state === 'ENGAGE') {
       var target = _resolveFocusTarget(context);
       if (_kiteOrClose(creep, target)) return;
+      if (context.attackPos) {
+        // BHM Combat Fix: march archers toward the squad's attack position
+        // even if the specific hostile object is not currently visible.
+        Traveler.travelTo(creep, context.attackPos, { range: 3, ignoreCreeps: false });
+        return;
+      }
     }
 
     _followLeaderOrRally(creep, context);
@@ -236,7 +268,13 @@ var roleBeeArmy = {
     } else if (context.state === 'ENGAGE') {
       var target = _resolveFocusTarget(context);
       if (!_swingOrAdvance(creep, target)) {
-        _fallbackToRally(creep, context);
+        if (context.attackPos) {
+          // BHM Combat Fix: melee creeps advance on the stored attack
+          // position so they keep pressure on the hostile area.
+          Traveler.travelTo(creep, context.attackPos, { range: 1, ignoreCreeps: false });
+        } else {
+          _fallbackToRally(creep, context);
+        }
       }
     } else {
       _fallbackToRally(creep, context);
