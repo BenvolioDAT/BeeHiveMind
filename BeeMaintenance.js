@@ -191,14 +191,58 @@ function cleanStaleRooms() {
 // Creep + assignment cleanup
 // -----------------------------
 
+function _releaseRemoteAssignment(creepName, creepMem) {
+  if (!creepMem || !creepMem.sourceId) return;
+  if (!Memory.remoteAssignments) return;
+
+  var entry = Memory.remoteAssignments[creepMem.sourceId];
+  if (entry == null) return;
+
+  // Backwards compatibility: legacy entries may just be numbers (count).
+  if (typeof entry === 'number') {
+    var nextCount = Math.max(0, entry - 1);
+    if (nextCount === 0) delete Memory.remoteAssignments[creepMem.sourceId];
+    else Memory.remoteAssignments[creepMem.sourceId] = nextCount;
+    return;
+  }
+
+  if (typeof entry.count === 'number' && entry.count > 0) {
+    entry.count = Math.max(0, entry.count - 1);
+  }
+  if (entry.owner === creepName) {
+    entry.owner = null;
+    entry.since = null;
+  }
+  Memory.remoteAssignments[creepMem.sourceId] = entry;
+}
+
+function _releaseContainerAssignment(creepName, creepMem) {
+  if (!creepMem || !creepMem.assignedContainer) return;
+  if (!Memory.rooms) return;
+
+  var containerId = creepMem.assignedContainer;
+  for (var roomName in Memory.rooms) {
+    if (!Memory.rooms.hasOwnProperty(roomName)) continue;
+    var roomMem = Memory.rooms[roomName];
+    if (!roomMem || !_isObject(roomMem.sourceContainers)) continue;
+    if (roomMem.sourceContainers[containerId] === creepName) {
+      roomMem.sourceContainers[containerId] = null;
+    }
+  }
+}
+
 function _removeDeadCreepMemory() {
   if (!Memory.creeps) return;
   for (var name in Memory.creeps) {
     if (!Memory.creeps.hasOwnProperty(name)) continue;
-    if (!Game.creeps[name]) {
-      delete Memory.creeps[name];
-      _log('🧼 Removed creep mem: ' + name);
-    }
+    if (Game.creeps[name]) continue;
+
+    var creepMem = Memory.creeps[name];
+    _releaseRemoteAssignment(name, creepMem);
+    _releaseContainerAssignment(name, creepMem);
+
+    delete Memory.creeps[name];
+    _log('🧼 Removed creep mem: ' + name);
   }
 }
 
