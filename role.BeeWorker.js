@@ -1,13 +1,12 @@
 'use strict';
 //* role.BeeWorker – consolidated creep roles that do working task.
-var BeeToolbox = require('BeeToolbox');
+const BeeToolbox = require('BeeToolbox');
 // External selectors module; see BeeSelectors.js for source/sink scans.
-var BeeSelectors = require('BeeSelectors');
+const BeeSelectors = require('BeeSelectors');
 // Shared action wrappers with movement intents.
-var BeeActions = require('BeeActions');
+const BeeActions = require('BeeActions');
 // Central movement queue; roleQueen enqueues idles here.
-var MovementManager = require('Movement.Manager');
-
+const MovementManager = require('Movement.Manager');
 
 // Shared debug + tuning config
 var CFG = Object.freeze({
@@ -71,9 +70,76 @@ var CFG = Object.freeze({
   DROPPED_ALONG_ROUTE_R: 2,
 });
 
+// -------------------------
+// Shared tiny helpers
+// -------------------------
+//=========================
+//      Debug helpers
+//========================= 
+function debugSay(creep, msg) {
+  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+}
+
+function _posOf(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
+}
+
+function debugDrawLine(creep, target, color, label) {
+  if (!CFG.DEBUG_DRAW || !creep || !target) return;
+  var room = creep.room; if (!room || !room.visual) return;
+  var tpos = _posOf(target); if (!tpos || tpos.roomName !== room.name) return;
+  try {
+    room.visual.line(creep.pos, tpos, {
+      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
+        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
+      });
+    }
+  } catch (e) {}
+}
+
+function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
+  try {
+    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
+  } catch (e) {}
+}
+
+function debugLabel(room, pos, text, color) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos || !text) return;
+  try {
+    room.visual.text(text, pos.x, pos.y - 1.2, {
+      color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
+      backgroundColor: "#000000", backgroundOpacity: 0.25
+    });
+  } catch (e) {}
+}
+
+function drawExitMarker(room, exitDir, label, color) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual) return;
+  var x = 25, y = 25;
+  if (exitDir === FIND_EXIT_TOP)    { y = 1;  x = 25; }
+  if (exitDir === FIND_EXIT_BOTTOM) { y = 48; x = 25; }
+  if (exitDir === FIND_EXIT_LEFT)   { x = 1;  y = 25; }
+  if (exitDir === FIND_EXIT_RIGHT)  { x = 48; y = 25; }
+  var pos = new RoomPosition(x, y, room.name);
+  debugRing(room, pos, color, label);
+}
+
+// Role Upgrader debug helper not moved here due to circular dependency issues.
+
+//====================================================
+//        END Debug helpers
+//====================================================
+
 // Namespace
 var roleBeeWorker = {};
-
 
 roleBeeWorker.BaseHarvest = (function () {
   /** =========================
@@ -86,42 +152,6 @@ roleBeeWorker.BaseHarvest = (function () {
     queueRange: 2,               // (kept for semantics; queue finder picks tiles around seat)
     travelReuse: 12              // reusePath hint for travel helper
   };
-
-  /** =========================
-   *  Debug helpers
-   *  ========================= */
-  function debugSay(creep, msg) {
-    if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
-  }
-  function _posOf(target) {
-    if (!target) return null;
-    if (target.pos) return target.pos;
-    if (target.x != null && target.y != null && target.roomName) return target;
-    return null;
-  }
-  function debugDrawLine(creep, target, color, label) {
-    if (!CFG.DEBUG_DRAW || !creep || !target) return;
-    var room = creep.room; if (!room || !room.visual) return;
-    var tpos = _posOf(target); if (!tpos || tpos.roomName !== room.name) return;
-    try {
-      room.visual.line(creep.pos, tpos, {
-        color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
-      });
-      if (label) {
-        room.visual.text(label, tpos.x, tpos.y - 0.3, {
-          color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
-        });
-      }
-    } catch (e) {}
-  }
-  function debugRing(room, pos, color, text) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
-    try {
-      room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-      if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-    } catch (e) {}
-  }
-
   /** =========================
    *  Travel helper (BeeTravel → Traveler → moveTo)
    *  Draws a path hint to the target.
@@ -148,7 +178,6 @@ roleBeeWorker.BaseHarvest = (function () {
   /** =========================
    *  Small utils
    *  ========================= */
-
   // Terrain walkability check (no walls, inside bounds)
   function isWalkable(pos) {
     if (!pos || !pos.roomName) return false;
@@ -647,48 +676,6 @@ roleBeeWorker.Builder = (function () {
   var ALLOW_HARVEST_FALLBACK = false; // flip true if you really want last-resort mining
   var PICKUP_MIN = 50;                // ignore tiny crumbs
   var SRC_CONTAINER_MIN = 100;        // minimum energy to bother at source containers
-
-  // ==============================
-  // Debug helpers
-  // ==============================
-  function debugSay(creep, msg) {
-    if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
-  }
-  function _posOf(target) {
-    if (!target) return null;
-    if (target.pos) return target.pos;
-    if (target.x != null && target.y != null && target.roomName) return target;
-    return null;
-  }
-  function debugDraw(creep, target, color, label) {
-    if (!CFG.DEBUG_DRAW || !creep || !target) return;
-    var room = creep.room; if (!room || !room.visual) return;
-    var tpos = _posOf(target); if (!tpos || tpos.roomName !== room.name) return;
-
-    try {
-      room.visual.line(creep.pos, tpos, {
-        color: color,
-        width: CFG.DRAW.WIDTH,
-        opacity: CFG.DRAW.OPACITY,
-        lineStyle: "solid"
-      });
-      if (label) {
-        room.visual.text(label, tpos.x, tpos.y - 0.3, {
-          color: color,
-          opacity: CFG.DRAW.OPACITY,
-          font: CFG.DRAW.FONT,
-          align: "center"
-        });
-      }
-    } catch (e) {}
-  }
-  function debugRing(room, pos, color, text) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
-    try {
-      room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-      if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-    } catch (e) {}
-  }
 
   // ==============================
   // Tiny movement helper
@@ -2021,10 +2008,6 @@ roleBeeWorker.Upgrader = (function () {
   /** =========================
    *  Tiny debug helpers
    *  ========================= */
-  function debugSay(creep, msg) {
-    if (CFG.DEBUG_SAY && creep && typeof creep.say === 'function') creep.say(msg, true);
-  }
-  function _posOf(t) { return t && t.pos ? t.pos : t; }
   function _roomOf(pos) { return pos && Game.rooms[pos.roomName]; }
 
   function debugLine(from, to, color) {
@@ -2274,49 +2257,6 @@ roleBeeWorker.Luna = (function () {
   // Flag pruning cadence & grace (sources only)
   var FLAG_PRUNE_PERIOD   = 25;   // how often to scan for source-flag deletions
   var FLAG_RETENTION_TTL  = 200;  // keep a source-flag this many ticks since last activity
-
-  // ============================
-  // Helpers: SAY + DRAW
-  // ============================
-  function debugSay(creep, msg) {
-    if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
-  }
-  function _posOf(target) {
-    if (!target) return null;
-    if (target.pos) return target.pos;
-    if (target.x != null && target.y != null && target.roomName) return target; // RoomPosition-like
-    return null;
-  }
-  function debugDraw(creep, target, color, label) {
-    if (!CFG.DEBUG_DRAW || !creep || !target) return;
-    var room = creep.room; if (!room || !room.visual) return;
-
-    var tpos = _posOf(target); if (!tpos || tpos.roomName !== room.name) return;
-
-    try {
-      room.visual.line(creep.pos, tpos, {
-        color: color,
-        width: CFG.DRAW.WIDTH,
-        opacity: CFG.DRAW.OPACITY,
-        lineStyle: "solid"
-      });
-      if (label) {
-        room.visual.text(label, tpos.x, tpos.y - 0.3, {
-          color: color,
-          opacity: CFG.DRAW.OPACITY,
-          font: CFG.DRAW.FONT,
-          align: "center"
-        });
-      }
-    } catch (e) {}
-  }
-  function debugRing(room, pos, color, text) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
-    try {
-      room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-      if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-    } catch (e) {}
-  }
 
   // ============================
   // Helpers: short id, flags
@@ -3361,59 +3301,6 @@ roleBeeWorker.Luna = (function () {
 roleBeeWorker.Scout = (function () {
   var module = { exports: {} };
   var exports = module.exports;
-  /** =========================
-   *  Tiny debug helpers
-   *  ========================= */
-  function debugSay(creep, msg) {
-    if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
-  }
-  function _posOf(target) {
-    if (!target) return null;
-    if (target.pos) return target.pos;
-    if (target.x != null && target.y != null && target.roomName) return target;
-    return null;
-  }
-  function debugDrawLine(from, to, color, label) {
-    if (!CFG.DEBUG_DRAW || !from || !to) return;
-    var fpos = (from.pos || from);
-    var tpos = _posOf(to);
-    if (!fpos || !tpos) return;
-    var room = Game.rooms[fpos.roomName];
-    if (!room || !room.visual || tpos.roomName !== fpos.roomName) return;
-    try {
-      room.visual.line(fpos, tpos, { color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY });
-      if (label) room.visual.text(label, (fpos.x + tpos.x)/2, (fpos.y + tpos.y)/2 - 0.3,
-        { color: color, opacity: 0.9, font: CFG.DRAW.FONT, align: "center",
-          backgroundColor: "#000000", backgroundOpacity: 0.25 });
-    } catch (e) {}
-  }
-  function debugRing(room, pos, color, text) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
-    try {
-      room.visual.circle(pos, { radius: 0.6, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-      if (text) room.visual.text(text, pos.x, pos.y - 0.8, { color: color, font: CFG.DRAW.FONT, opacity: 0.9, align: "center" });
-    } catch (e) {}
-  }
-  function debugLabel(room, pos, text, color) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos || !text) return;
-    try {
-      room.visual.text(text, pos.x, pos.y - 1.2, {
-        color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
-        backgroundColor: "#000000", backgroundOpacity: 0.25
-      });
-    } catch (e) {}
-  }
-  function drawExitMarker(room, exitDir, label, color) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual) return;
-    var x = 25, y = 25;
-    if (exitDir === FIND_EXIT_TOP)    { y = 1;  x = 25; }
-    if (exitDir === FIND_EXIT_BOTTOM) { y = 48; x = 25; }
-    if (exitDir === FIND_EXIT_LEFT)   { x = 1;  y = 25; }
-    if (exitDir === FIND_EXIT_RIGHT)  { x = 48; y = 25; }
-    var pos = new RoomPosition(x, y, room.name);
-    debugRing(room, pos, color, label);
-  }
-
   /** =========================
    *  Tunables (original)
    *  ========================= */
@@ -4466,56 +4353,12 @@ roleBeeWorker.Claimer = (function () {
   var RESERVE_CONFIG = {
     desired: 2500,
     rotateAt: 1000,
-    scanRoleNames: ['luna', 'remoteMiner','remoteHarvest'],
+    scanRoleNames: ['luna'],
     maxTargets: 8
   };
 
   // ---- Room Locking (prevents 2 claimers from dogpiling one room) ----
   var LOCK = { ttl: 10 };
-
-  /** =========================
-   *  Debug helpers
-   *  ========================= */
-  function debugSay(creep, msg) { if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true); }
-
-  function _posOf(target) {
-    if (!target) return null;
-    if (target.pos) return target.pos;
-    if (target.x != null && target.y != null && target.roomName) return target;
-    return null;
-  }
-  function debugDrawLine(from, to, color, label) {
-    if (!CFG.DEBUG_DRAW || !from || !to) return;
-    var room = from.room || Game.rooms[from.roomName];
-    var tpos = _posOf(to);
-    if (!room || !room.visual || !tpos || (room.name !== tpos.roomName)) return;
-    try {
-      room.visual.line((from.pos||from), tpos, {
-        color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY
-      });
-      if (label) {
-        room.visual.text(label, tpos.x, tpos.y - 0.4, {
-          color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
-        });
-      }
-    } catch (e) {}
-  }
-  function debugRing(room, pos, color, text) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
-    try {
-      room.visual.circle(pos, { radius: 0.55, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-      if (text) room.visual.text(text, pos.x, pos.y - 0.7, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-    } catch (e) {}
-  }
-  function debugLabel(room, pos, text, color) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos || !text) return;
-    try {
-      room.visual.text(text, pos.x, pos.y - 1.1, {
-        color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.9, align: "center", backgroundColor: "#000000", backgroundOpacity: 0.25
-      });
-    } catch (e) {}
-  }
-
   /** =========================
    *  Travel helper (BeeTravel → Traveler → moveTo)
    *  Draws a path hint.
