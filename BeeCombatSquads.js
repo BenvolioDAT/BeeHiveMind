@@ -80,12 +80,146 @@ function updateRoomRecord(mem, flag, room, threatScore, sawThreat) {
   mem.rooms[roomName] = rec;
 }
 
+// BHM Combat Fix: central hostile detection + ally filtering helpers.
+var _cachedMyUsername = null;
+
+function resolveMyUsername() {
+  if (_cachedMyUsername) return _cachedMyUsername;
+  if (global.__beeUsername) {
+    _cachedMyUsername = lowerUsername(global.__beeUsername);
+    return _cachedMyUsername;
+  }
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (!spawn || !spawn.my || !spawn.owner || !spawn.owner.username) continue;
+    _cachedMyUsername = lowerUsername(spawn.owner.username);
+    global.__beeUsername = spawn.owner.username;
+    return _cachedMyUsername;
+  }
+  for (var cname in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, cname)) continue;
+    var creep = Game.creeps[cname];
+    if (!creep || !creep.my || !creep.owner || !creep.owner.username) continue;
+    _cachedMyUsername = lowerUsername(creep.owner.username);
+    global.__beeUsername = creep.owner.username;
+    return _cachedMyUsername;
+  }
+  return null;
+}
+
+function combatSettings() {
+  if (!CoreConfig || !CoreConfig.settings || !CoreConfig.settings.combat) return {};
+  return CoreConfig.settings.combat;
+}
+
+function shouldTargetOwner(owner, avoidMap) {
+  if (!owner || !owner.username) return false;
+  var username = lowerUsername(owner.username);
+  if (avoidMap && avoidMap[username]) return false;
+  var myName = resolveMyUsername();
+  if (myName && username === myName) return false;
+  var settings = combatSettings();
+  if (username === 'invader') {
+    return settings.ALLOW_INVADERS_IN_FOREIGN_ROOMS !== false;
+  }
+  if (username === 'source keeper') {
+    return settings.TREAT_SOURCE_KEEPERS_AS_PVE !== false;
+  }
+  if (settings.ALLOW_PVP === false) return false;
+  return true;
+}
+
+function isHostileCreep(creep, avoidMap) {
+  if (!creep || !creep.owner) return false;
+  return shouldTargetOwner(creep.owner, avoidMap);
+}
+
+function isHostilePowerCreep(powerCreep, avoidMap) {
+  if (!powerCreep || !powerCreep.owner) return false;
+  return shouldTargetOwner(powerCreep.owner, avoidMap);
+}
+
+function isHostileStructure(structure, avoidMap) {
+  if (!structure || structure.my) return false;
+  if (structure.structureType === STRUCTURE_INVADER_CORE) return true;
+  if (!structure.owner) return false;
+  return shouldTargetOwner(structure.owner, avoidMap);
+}
+
+function gatherHostileCandidates(room, avoidMap) {
+  var candidates = { creeps: [], power: [], structures: [] };
+  if (!room || typeof room.find !== 'function') return candidates;
+  candidates.creeps = room.find(FIND_HOSTILE_CREEPS, {
+    filter: function (creep) { return isHostileCreep(creep, avoidMap); }
+  });
+  if (typeof FIND_HOSTILE_POWER_CREEPS !== 'undefined') {
+    candidates.power = room.find(FIND_HOSTILE_POWER_CREEPS, {
+      filter: function (p) { return isHostilePowerCreep(p, avoidMap); }
+    });
+  }
+  candidates.structures = room.find(FIND_HOSTILE_STRUCTURES, {
+    filter: function (s) { return isHostileStructure(s, avoidMap); }
+  });
+  return candidates;
+}
+
+function computeThreatScore(candidates) {
+  if (!candidates) return 0;
+  var creepScore = (candidates.creeps ? candidates.creeps.length : 0) * 5;
+  var structScore = (candidates.structures ? candidates.structures.length : 0) * 3;
+  var powerScore = (candidates.power ? candidates.power.length : 0) * 7;
+  return creepScore + structScore + powerScore;
+}
+
+function pickBestTarget(candidates, anchorPos) {
+  if (!candidates) return null;
+  var best = null;
+  var bestScore = -1000000;
+  var i;
+  if (candidates.creeps) {
+    for (i = 0; i < candidates.creeps.length; i++) {
+      var creep = candidates.creeps[i];
+      var score = scoreCreep(creep, anchorPos);
+      if (score > bestScore) {
+        bestScore = score;
+        best = creep;
+      }
+    }
+  }
+  if (candidates.power) {
+    for (i = 0; i < candidates.power.length; i++) {
+      var powerCreep = candidates.power[i];
+      var scoreP = scorePowerCreep(powerCreep, anchorPos);
+      if (scoreP > bestScore) {
+        bestScore = scoreP;
+        best = powerCreep;
+      }
+    }
+  }
+  if (candidates.structures) {
+    for (i = 0; i < candidates.structures.length; i++) {
+      var structure = candidates.structures[i];
+      var scoreS = scoreStructure(structure, anchorPos);
+      if (scoreS > bestScore) {
+        bestScore = scoreS;
+        best = structure;
+      }
+    }
+  }
+  return best;
+}
+
 function countHostiles(room) {
   if (!room) return { score: 0, hasThreat: false };
-  var hostiles = room.find(FIND_HOSTILE_CREEPS);
-  var hostileStructs = room.find(FIND_HOSTILE_STRUCTURES);
-  var score = hostiles.length * 5 + hostileStructs.length * 3;
-  return { score: score, hasThreat: (hostiles.length + hostileStructs.length) > 0 };
+  var avoid = buildAvoidMap();
+  var candidates = gatherHostileCandidates(room, avoid);
+  var score = computeThreatScore(candidates);
+  var total = 0;
+  if (candidates.creeps) total += candidates.creeps.length;
+  if (candidates.power) total += candidates.power.length;
+  if (candidates.structures) total += candidates.structures.length;
+  return { score: score, hasThreat: total > 0 };
 }
 
 function sanitizeSlug(flagName) {
@@ -307,6 +441,12 @@ function resolveSquadTarget(identifier) {
     targetRoom = flag.pos.roomName;
     if (!resolvedName) resolvedName = flag.name;
   }
+  if (!targetRoom && resolvedName && Memory.squads && Memory.squads[resolvedName]) {
+    var bucket = Memory.squads[resolvedName];
+    if (bucket && bucket.targetRoom) {
+      targetRoom = bucket.targetRoom;
+    }
+  }
   var plan = resolvedName ? resolvePlan(resolvedName) : null;
   return {
     flag: flag,
@@ -332,6 +472,7 @@ function threatScoreForRoom(roomName) {
 }
 
 function ensureSquadFlags() {
+  refreshAutoDefensePlans();
   var mem = ensureSquadFlagMemory();
   var seen = {};
 
@@ -429,6 +570,114 @@ function deserializePos(data) {
   return new RoomPosition(data.x, data.y, data.roomName);
 }
 
+function squadHasLiveMembers(flagName) {
+  if (!flagName || !Memory.squads || !Memory.squads[flagName]) return false;
+  var members = Memory.squads[flagName].members || {};
+  if (members.leader && Game.getObjectById(members.leader)) return true;
+  if (members.buddy && Game.getObjectById(members.buddy)) return true;
+  if (members.medic && Game.getObjectById(members.medic)) return true;
+  return false;
+}
+
+function pickRallyPoint(room) {
+  if (!room) return null;
+  var spawns = room.find ? room.find(FIND_MY_SPAWNS) : null;
+  if (spawns && spawns.length) return serializePos(spawns[0].pos);
+  if (room.controller) return serializePos(room.controller.pos);
+  return serializePos(new RoomPosition(25, 25, room.name));
+}
+
+function cleanupAutoDefense(flagName) {
+  if (!flagName || !Memory.squads || !Memory.squads[flagName]) return;
+  var bucket = Memory.squads[flagName];
+  if (!bucket.autoDefense) return;
+  var targetRoom = bucket.targetRoom;
+  if (Game.flags && Game.flags[flagName] && typeof Game.flags[flagName].remove === 'function') {
+    Game.flags[flagName].remove();
+  }
+  var intel = Memory.squadFlags;
+  if (intel) {
+    if (intel.bindings && intel.bindings[flagName]) delete intel.bindings[flagName];
+    if (targetRoom && intel.rooms && intel.rooms[targetRoom]) delete intel.rooms[targetRoom];
+  }
+  delete Memory.squads[flagName];
+}
+
+// BHM Combat Fix: automatically maintain one defensive squad per owned room.
+function ensureAutoDefenseForRoom(room) {
+  if (!room || !room.controller || !room.controller.my) return;
+  var flagName = 'Squad' + room.name;
+  var avoid = buildAvoidMap();
+  var candidates = gatherHostileCandidates(room, avoid);
+  var score = computeThreatScore(candidates);
+  var total = 0;
+  if (candidates.creeps) total += candidates.creeps.length;
+  if (candidates.power) total += candidates.power.length;
+  if (candidates.structures) total += candidates.structures.length;
+  var bucket = Memory.squads ? Memory.squads[flagName] : null;
+  if (total <= 0) {
+    if (bucket && bucket.autoDefense) {
+      bucket.lastKnownScore = 0;
+      bucket.targetId = null;
+      bucket.focusTarget = null;
+      bucket.targetPos = null;
+      bucket.focusTargetPos = null;
+      if (!squadHasLiveMembers(flagName)) {
+        cleanupAutoDefense(flagName);
+      }
+    }
+    return;
+  }
+
+  var mem = ensureSquadMemory(flagName);
+  mem.autoDefense = true;
+  mem.planType = 'AUTO_DEFENSE';
+  mem.targetRoom = room.name;
+  mem.lastKnownScore = score;
+  mem.lastDefenseTick = Game.time;
+  mem.lastSeenTick = Game.time;
+
+  if (!mem.rally) {
+    mem.rally = pickRallyPoint(room);
+  }
+  var rallyPos = mem.rally ? deserializePos(mem.rally) : null;
+  if (!rallyPos) {
+    mem.rally = pickRallyPoint(room);
+    rallyPos = mem.rally ? deserializePos(mem.rally) : null;
+  }
+
+  var anchor = rallyPos || (room.controller ? room.controller.pos : null);
+  var best = pickBestTarget(candidates, anchor);
+  var attackPos = null;
+  if (best && best.pos) attackPos = best.pos;
+  else if (candidates.creeps && candidates.creeps[0] && candidates.creeps[0].pos) attackPos = candidates.creeps[0].pos;
+  else if (room.controller) attackPos = room.controller.pos;
+  else attackPos = new RoomPosition(25, 25, room.name);
+
+  if (best && best.id) {
+    mem.targetId = best.id;
+    mem.focusTarget = best.id;
+  }
+  if (attackPos) {
+    var serialized = serializePos(attackPos);
+    mem.targetPos = serialized;
+    mem.focusTargetPos = serialized;
+    mem.target = serialized;
+  }
+
+  var intel = ensureSquadFlagMemory();
+  updateRoomRecord(intel, { pos: attackPos }, room, score, true);
+}
+
+function refreshAutoDefensePlans() {
+  for (var roomName in Game.rooms) {
+    if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
+    var room = Game.rooms[roomName];
+    if (!room || !room.controller || !room.controller.my) continue;
+    ensureAutoDefenseForRoom(room);
+  }
+}
+
 function buildAvoidMap(extra) {
   // Defensive copy: we build a brand-new lookup each tick so we never mutate
   // caller-owned data.
@@ -437,6 +686,8 @@ function buildAvoidMap(extra) {
   for (var i = 0; i < allies.length; i++) {
     avoid[lowerUsername(allies[i])] = true;
   }
+  var myName = resolveMyUsername();
+  if (myName) avoid[myName] = true;
   if (extra) {
     for (var k in extra) {
       if (Object.prototype.hasOwnProperty.call(extra, k)) {
@@ -490,6 +741,20 @@ function scoreCreep(target, anchorPos) {
   score -= tough * 25;
   score += (target.hitsMax || 0) - (target.hits || 0);
   if (anchorPos) score -= anchorPos.getRangeTo(target) * 5;
+  return score;
+}
+
+function scorePowerCreep(powerCreep, anchorPos) {
+  if (!powerCreep) return -1000000;
+  var score = 600;
+  if (powerCreep.powers) {
+    var abilityCount = Object.keys(powerCreep.powers).length;
+    score += abilityCount * 75;
+  }
+  if (powerCreep.hitsMax && powerCreep.hits != null) {
+    score += (powerCreep.hitsMax - powerCreep.hits);
+  }
+  if (anchorPos) score -= anchorPos.getRangeTo(powerCreep) * 5;
   return score;
 }
 
@@ -636,42 +901,8 @@ function getAttackTarget(room, avoidAlliesSet) {
   if (!anchorPos && room.controller) anchorPos = room.controller.pos;
   if (!anchorPos) anchorPos = new RoomPosition(25, 25, room.name);
 
-  var best = null;
-  var bestScore = -1000000;
-
-  var hostiles = room.find(FIND_HOSTILE_CREEPS, {
-    filter: function (creep) {
-      if (!creep || !creep.owner) return false;
-      return !isAlly(creep.owner, avoid);
-    }
-  });
-
-  for (var i = 0; i < hostiles.length; i++) {
-    var c = hostiles[i];
-    var score = scoreCreep(c, anchorPos);
-    if (score > bestScore) {
-      bestScore = score;
-      best = c;
-    }
-  }
-
-  var hostileStructs = room.find(FIND_HOSTILE_STRUCTURES, {
-    filter: function (s) {
-      if (!s) return false;
-      if (!s.owner || !s.owner.username) return true;
-      return !isAlly(s.owner, avoid);
-    }
-  });
-
-  for (var j = 0; j < hostileStructs.length; j++) {
-    var s = hostileStructs[j];
-    var score2 = scoreStructure(s, anchorPos);
-    if (score2 > bestScore) {
-      bestScore = score2;
-      best = s;
-    }
-  }
-
+  var candidates = gatherHostileCandidates(room, avoid);
+  var best = pickBestTarget(candidates, anchorPos);
   return best ? best.id : null;
 }
 
@@ -869,6 +1100,36 @@ function getAnchor(creep) {
   return ctx.info.rallyPos || null;
 }
 
+function listSquadFlags() {
+  if (!Memory.squads) return [];
+  var names = [];
+  for (var flagName in Memory.squads) {
+    if (!Object.prototype.hasOwnProperty.call(Memory.squads, flagName)) continue;
+    if (flagName.indexOf('Squad') !== 0) continue;
+    names.push(flagName);
+  }
+  return names;
+}
+
+function getLiveThreatForRoom(roomName) {
+  if (!roomName) return { score: 0, hasThreat: false, bestId: null };
+  var room = (typeof roomName === 'string') ? Game.rooms[roomName] : roomName;
+  if (!room) {
+    var cachedScore = threatScoreForRoom(roomName);
+    return { score: cachedScore, hasThreat: cachedScore > 0, bestId: null };
+  }
+  var avoid = buildAvoidMap();
+  var candidates = gatherHostileCandidates(room, avoid);
+  var score = computeThreatScore(candidates);
+  var anchor = room.controller ? room.controller.pos : null;
+  var best = pickBestTarget(candidates, anchor);
+  var total = 0;
+  if (candidates.creeps) total += candidates.creeps.length;
+  if (candidates.power) total += candidates.power.length;
+  if (candidates.structures) total += candidates.structures.length;
+  return { score: score, hasThreat: total > 0, bestId: best ? best.id : null };
+}
+
 var SquadFlagIntel = {
   ensureMemory: ensureSquadFlagMemory,
   resolvePlan: resolvePlan,
@@ -883,7 +1144,10 @@ var BeeCombatSquads = {
   sharedTarget: sharedTarget,
   getAnchor: getAnchor,
   ensureSquadFlags: ensureSquadFlags,
+  refreshAutoDefensePlans: refreshAutoDefensePlans,
   SquadFlagIntel: SquadFlagIntel,
+  listSquadFlags: listSquadFlags,
+  getLiveThreatForRoom: getLiveThreatForRoom,
   getSquadState: function (flagName) { return CombatAPI.getSquadState(flagName); }
 };
 
@@ -891,3 +1155,6 @@ module.exports = BeeCombatSquads;
 module.exports.CombatAPI = CombatAPI;
 module.exports.ensureSquadFlags = ensureSquadFlags;
 module.exports.SquadFlagIntel = SquadFlagIntel;
+module.exports.refreshAutoDefensePlans = refreshAutoDefensePlans;
+module.exports.listSquadFlags = listSquadFlags;
+module.exports.getLiveThreatForRoom = getLiveThreatForRoom;

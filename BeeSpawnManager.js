@@ -465,21 +465,72 @@ function prepareRoomQueues(C) {
 }
 
 // Squad spawns are intentionally serialized so they do not starve workers.
+// BHM Combat Fix: dynamically rank every squad flag so defenders spawn where
+// the biggest threat is instead of hard-coding "Alpha" only.
+function normalizedSquadName(name) {
+  if (!name) return 'SquadAlpha';
+  if (typeof name === 'string' && name.indexOf('Squad') === 0) return name;
+  return 'Squad' + name;
+}
+
+function squadThreatScore(flagName) {
+  var key = normalizedSquadName(flagName);
+  if (!Memory.squads || !Memory.squads[key]) return 0;
+  var bucket = Memory.squads[key];
+  var score = bucket.lastKnownScore || 0;
+  var roomName = bucket.targetRoom || (bucket.rally && bucket.rally.roomName) || null;
+  if (roomName && SquadFlagIntel && typeof SquadFlagIntel.threatScoreForRoom === 'function') {
+    var intelScore = SquadFlagIntel.threatScoreForRoom(roomName) || 0;
+    if (intelScore > score) score = intelScore;
+  }
+  return score;
+}
+
+function gatherSpawnableSquads() {
+  var names = [];
+  if (BeeCombatSquads && typeof BeeCombatSquads.listSquadFlags === 'function') {
+    var listed = BeeCombatSquads.listSquadFlags();
+    if (listed && listed.length) {
+      for (var i = 0; i < listed.length; i++) {
+        names.push(listed[i]);
+      }
+    }
+  }
+  if (!names.length && Game.flags) {
+    for (var flagName in Game.flags) {
+      if (!Object.prototype.hasOwnProperty.call(Game.flags, flagName)) continue;
+      if (flagName.indexOf('Squad') !== 0) continue;
+      names.push(flagName);
+    }
+  }
+  if (!names.length) names.push('Alpha');
+  names.sort(function (a, b) {
+    return squadThreatScore(b) - squadThreatScore(a);
+  });
+  return names;
+}
+
 function trySpawnSquad(spawner, squadState) {
   if (!spawnLogic || typeof spawnLogic.Spawn_Squad !== 'function') return false;
   if (squadState.handled) return false;
-  var squadIntel = SquadFlagIntel && typeof SquadFlagIntel.resolveSquadTarget === 'function'
-    ? SquadFlagIntel.resolveSquadTarget('Alpha')
-    : null;
-  if (!squadIntel || (!squadIntel.flag && !squadIntel.targetRoom)) {
-    dlog('🛡️ [Squad]', spawner.room.name, 'Skipping Alpha spawn – no flag intel detected.');
-    return false;
+  var squads = gatherSpawnableSquads();
+  for (var i = 0; i < squads.length; i++) {
+    var name = squads[i];
+    var squadIntel = SquadFlagIntel && typeof SquadFlagIntel.resolveSquadTarget === 'function'
+      ? SquadFlagIntel.resolveSquadTarget(name)
+      : null;
+    if (!squadIntel || (!squadIntel.flag && !squadIntel.targetRoom)) {
+      continue;
+    }
+    var ok = spawnLogic.Spawn_Squad(spawner, name);
+    if (!ok) {
+      continue;
+    }
+    squadState.handled = true;
+    dlog('🛡️ [Squad]', spawner.room.name, name, 'maintained at', spawner.name);
+    return true;
   }
-  var ok = spawnLogic.Spawn_Squad(spawner, 'Alpha');
-  if (!ok) return false;
-  squadState.handled = true;
-  dlog('🛡️ [Squad]', spawner.room.name, 'Alpha maintained at', spawner.name);
-  return true;
+  return false;
 }
 
 function runSpawnPass(C) {
@@ -499,6 +550,10 @@ function runSpawnPass(C) {
 var BeeSpawnManager = {
   manageSpawns: function manageSpawns(C) {
     if (!C || !Array.isArray(C.spawns) || !Array.isArray(C.roomsOwned)) return;
+    if (BeeCombatSquads && typeof BeeCombatSquads.refreshAutoDefensePlans === 'function') {
+      // BHM Combat Fix: keep squad plans in sync before evaluating spawn needs.
+      BeeCombatSquads.refreshAutoDefensePlans();
+    }
     prepareRoomQueues(C);
     runSpawnPass(C);
   }
