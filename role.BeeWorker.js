@@ -3748,26 +3748,28 @@ roleBeeWorker.Scout = (function () {
       return cache.blocked;
     }
 
-    var edge = room.find(exitDir);
+    var edge = room.find(exitDir) || [];
     var blocked = true;
-    if (edge && edge.length) {
-      // If there are ANY walkable edge tiles without solid structures, it's not blocked
-      var samples = edge.length > 6 ? [ edge[1], edge[(edge.length/3)|0], edge[(2*edge.length/3)|0], edge[edge.length-2] ] : edge;
-      for (var i = 0; i < samples.length; i++) {
-        var p = samples[i];
+    if (edge.length) {
+      for (var i = 0; i < edge.length; i++) {
+        var p = edge[i];
         var look = p.look();
-        var pass = true;
+        var passable = true;
         for (var j = 0; j < look.length; j++) {
           var o = look[j];
-          if (o.type === LOOK_TERRAIN && o.terrain === 'wall') { pass = false; break; }
+          if (o.type === LOOK_TERRAIN && o.terrain === 'wall') { passable = false; break; }
           if (o.type === LOOK_STRUCTURES) {
             var st = o.structure.structureType;
-            if (st === STRUCTURE_WALL || (st === STRUCTURE_RAMPART && !o.structure.isPublic && !o.structure.my)) { pass = false; break; }
+            if (st === STRUCTURE_WALL) { passable = false; break; }
+            if (st === STRUCTURE_RAMPART && !o.structure.my && !o.structure.isPublic) { passable = false; break; }
           }
         }
-        if (pass) { blocked = false; break; }
+        if (passable) { blocked = false; break; }
       }
+    } else {
+      blocked = false;
     }
+
     global.__SCOUT.exitBlock[key] = { blocked: blocked, expire: Game.time + EXIT_BLOCK_TTL };
 
     if (CFG.DEBUG_DRAW) drawExitMarker(room, exitDir, blocked ? "X" : "→", blocked ? CFG.DRAW.EXIT_BAD : CFG.DRAW.EXIT_OK);
@@ -3910,7 +3912,7 @@ roleBeeWorker.Scout = (function () {
 
   // ---------- Next-hop routing ----------
   function computeNextHop(fromRoom, toRoom) {
-    if (fromRoom === toRoom) return null;
+    if (!fromRoom || !toRoom || fromRoom === toRoom) return null;
     var route = Game.map.findRoute(fromRoom, toRoom, {
       routeCallback: function (roomName) {
         if (!okRoomName(roomName) || isBlockedRecently(roomName)) return Infinity;
@@ -3918,10 +3920,10 @@ roleBeeWorker.Scout = (function () {
       }
     });
     if (route === ERR_NO_PATH || !route || !route.length) return null;
-    // first step tells us the next neighbor room name
-    var dir = route[0].exit; // FIND_EXIT_*
+    var step = route[0];
+    if (step && step.room) return step.room;
     var desc = Game.map.describeExits(fromRoom) || {};
-    return desc[dir] || null;
+    return step && desc[step.exit] ? desc[step.exit] : null;
   }
 
   // ---------- Run helpers (teaching oriented) ----------
@@ -3988,18 +3990,19 @@ roleBeeWorker.Scout = (function () {
     }
 
     var dir = creep.room.findExitTo(hop);
-    if (dir < 0) {
+    if (dir === ERR_NO_PATH || dir === ERR_INVALID_ARGS) {
       markBlocked(hop);
       creep.memory.nextHop = null;
       return true;
     }
-    if (isExitBlockedCached(creep.room, dir)) {
+    if (typeof dir === 'number' && dir >= 0 && isExitBlockedCached(creep.room, dir)) {
       markBlocked(hop);
-      drawExitMarker(creep.room, dir, "X", CFG.DRAW.EXIT_BAD);
       creep.memory.nextHop = null;
       return true;
     }
-    drawExitMarker(creep.room, dir, "→", CFG.DRAW.EXIT_OK);
+    if (CFG.DEBUG_DRAW && typeof dir === 'number' && dir >= 0) {
+      drawExitMarker(creep.room, dir, "→", CFG.DRAW.EXIT_OK);
+    }
     debugSay(creep, '➡');
     go(creep, new RoomPosition(25, 25, hop), { range: 20, reusePath: PATH_REUSE, ignoreCreeps: true });
     return true;
