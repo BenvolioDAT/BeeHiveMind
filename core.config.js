@@ -34,6 +34,8 @@ CoreConfig.settings = Object.freeze({
     ALLOW_INVADERS_IN_FOREIGN_ROOMS: CoreConfig.ALLOW_INVADERS_IN_FOREIGN_ROOMS,
     /** Treat Source Keeper NPCs as PvE targets. */
     TREAT_SOURCE_KEEPERS_AS_PVE: CoreConfig.TREAT_SOURCE_KEEPERS_AS_PVE,
+    /** Toggle verbose combat logging across BeeCombatSquads + spawning. */
+    DEBUG_LOGS: false,
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */

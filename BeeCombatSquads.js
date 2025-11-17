@@ -48,6 +48,10 @@ function ensureSquadFlagMemory() {
   return Memory.squadFlags;
 }
 
+/**
+ * ensureSquadMemoryFromFlag seeds Memory.squads with rally + member slots so
+ * the rest of the CombatAPI always finds a bucket, even for new flags.
+ */
 function ensureSquadMemoryFromFlag(flag) {
   if (!flag || !flag.name || !flag.pos) return;
   if (!Memory.squads) Memory.squads = {};
@@ -66,6 +70,11 @@ function ensureSquadMemoryFromFlag(flag) {
   bucket.lastSeenTick = Game.time;
 }
 
+/**
+ * updateRoomRecord keeps SquadFlagIntel fresh so spawning + UI can see
+ * last-known threat scores even without vision. The helper also applies a
+ * soft decay when no threat is present so stale rooms naturally drop to 0.
+ */
 function updateRoomRecord(mem, flag, room, threatScore, sawThreat) {
   if (!flag || !flag.pos) return;
   var roomName = flag.pos.roomName;
@@ -76,7 +85,14 @@ function updateRoomRecord(mem, flag, room, threatScore, sawThreat) {
   rec.lastSeen = Game.time;
   rec.lastPos = { x: flag.pos.x, y: flag.pos.y, roomName: roomName };
   if (typeof threatScore === 'number') rec.lastScore = threatScore;
-  if (sawThreat) rec.lastThreatAt = Game.time;
+  if (sawThreat) {
+    rec.lastThreatAt = Game.time;
+  } else if (rec.lastScore > 0) {
+    var sinceLastThreat = Game.time - (rec.lastThreatAt || rec.lastSeen || 0);
+    if (sinceLastThreat > THREAT_DECAY_TICKS) {
+      rec.lastScore = 0;
+    }
+  }
   mem.rooms[roomName] = rec;
 }
 
@@ -108,11 +124,31 @@ function resolveMyUsername() {
   return null;
 }
 
+/**
+ * combatSettings centralizes all combat toggles so detection + spawn + roles
+ * stay perfectly in sync with CoreConfig.
+ */
 function combatSettings() {
   if (!CoreConfig || !CoreConfig.settings || !CoreConfig.settings.combat) return {};
   return CoreConfig.settings.combat;
 }
 
+function combatDebugEnabled() {
+  var settings = combatSettings();
+  return settings && settings.DEBUG_LOGS === true;
+}
+
+function combatDebugLog() {
+  if (!combatDebugEnabled() || !console || !console.log) return;
+  var args = Array.prototype.slice.call(arguments);
+  args.unshift('[CombatDBG]');
+  console.log.apply(console, args);
+}
+
+/**
+ * Owner filtering is centralized so every detection helper respects
+ * CoreConfig (PVP toggle + ally list + PvE allowances).
+ */
 function shouldTargetOwner(owner, avoidMap) {
   if (!owner || !owner.username) return false;
   var username = lowerUsername(owner.username);
@@ -147,6 +183,12 @@ function isHostileStructure(structure, avoidMap) {
   return shouldTargetOwner(structure.owner, avoidMap);
 }
 
+/**
+ * gatherHostileCandidates is the shared ingress for hostile detection.
+ * Every downstream scoring/state helper consumes this bundle so we only
+ * pay for expensive FIND calls once per tick and they all respect the same
+ * ally avoidance map + config gates.
+ */
 function gatherHostileCandidates(room, avoidMap) {
   var candidates = { creeps: [], power: [], structures: [] };
   if (!room || typeof room.find !== 'function') return candidates;
@@ -172,6 +214,10 @@ function computeThreatScore(candidates) {
   return creepScore + structScore + powerScore;
 }
 
+/**
+ * pickBestTarget scores creeps/power/structures relative to the squad anchor
+ * and returns the highest priority object for focusFire.
+ */
 function pickBestTarget(candidates, anchorPos) {
   if (!candidates) return null;
   var best = null;
@@ -210,6 +256,10 @@ function pickBestTarget(candidates, anchorPos) {
   return best;
 }
 
+/**
+ * countHostiles collapses gatherHostileCandidates() into a cheap summary
+ * so auto-defense + spawn logic can reason about aggregate threat over time.
+ */
 function countHostiles(room) {
   if (!room) return { score: 0, hasThreat: false };
   var avoid = buildAvoidMap();
@@ -457,6 +507,10 @@ function resolveSquadTarget(identifier) {
   };
 }
 
+/**
+ * threatScoreForRoom exposes the decayed intel view so spawners can react
+ * even while vision is missing. Scores fall to zero after THREAT_DECAY_TICKS.
+ */
 function threatScoreForRoom(roomName) {
   if (!roomName) return 0;
   var intel = ensureSquadFlagMemory();
@@ -471,6 +525,11 @@ function threatScoreForRoom(roomName) {
   return score;
 }
 
+/**
+ * ensureSquadFlags is the top-level heartbeat for the combat pipeline. It
+ * refreshes auto-defense plans, syncs flag memory, resolves a shared focus
+ * target per squad, and finally pushes the derived state back into memory.
+ */
 function ensureSquadFlags() {
   refreshAutoDefensePlans();
   var mem = ensureSquadFlagMemory();
@@ -487,15 +546,12 @@ function ensureSquadFlags() {
 
     var room = flag.room || null;
     var threat = countHostiles(room);
+    var targetId = CombatAPI.focusFireTarget(name);
     var currentState = CombatAPI.getSquadState(name);
     var nextState = currentState;
     if (currentState !== 'RETREAT') {
-      nextState = threat.hasThreat ? 'ENGAGE' : 'FORM';
-      if (room) {
-        var targetId = CombatAPI.getAttackTarget(room, {});
-        if (!targetId && !threat.hasThreat) nextState = 'FORM';
-        if (targetId) nextState = 'ENGAGE';
-      }
+      var hostilePresent = threat.hasThreat || Boolean(targetId);
+      nextState = hostilePresent ? 'ENGAGE' : 'FORM';
     }
     CombatAPI.setSquadState(name, nextState);
     updateRoomRecord(mem, flag, room, threat.score, threat.hasThreat);
@@ -604,18 +660,23 @@ function cleanupAutoDefense(flagName) {
 }
 
 // BHM Combat Fix: automatically maintain one defensive squad per owned room.
+/**
+ * ensureAutoDefenseForRoom wires each owned room to a defensive squad entry
+ * and only persists that plan while mobile hostiles exist. Static PvE
+ * structures (e.g. Invader cores) are tracked via intel but do not keep
+ * respawning new defenders forever.
+ */
 function ensureAutoDefenseForRoom(room) {
   if (!room || !room.controller || !room.controller.my) return;
   var flagName = 'Squad' + room.name;
   var avoid = buildAvoidMap();
   var candidates = gatherHostileCandidates(room, avoid);
   var score = computeThreatScore(candidates);
-  var total = 0;
-  if (candidates.creeps) total += candidates.creeps.length;
-  if (candidates.power) total += candidates.power.length;
-  if (candidates.structures) total += candidates.structures.length;
+  var mobile = 0;
+  if (candidates.creeps) mobile += candidates.creeps.length;
+  if (candidates.power) mobile += candidates.power.length;
   var bucket = Memory.squads ? Memory.squads[flagName] : null;
-  if (total <= 0) {
+  if (mobile <= 0) {
     if (bucket && bucket.autoDefense) {
       bucket.lastKnownScore = 0;
       bucket.targetId = null;
@@ -669,6 +730,11 @@ function ensureAutoDefenseForRoom(room) {
   updateRoomRecord(intel, { pos: attackPos }, room, score, true);
 }
 
+/**
+ * refreshAutoDefensePlans walks all owned rooms and wires them into
+ * ensureAutoDefenseForRoom so defender squads automatically form/dissolve
+ * as local intel changes.
+ */
 function refreshAutoDefensePlans() {
   for (var roomName in Game.rooms) {
     if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
@@ -678,6 +744,10 @@ function refreshAutoDefensePlans() {
   }
 }
 
+/**
+ * buildAvoidMap merges CoreConfig allies + squad formation owners into a
+ * lookup so no detection routine accidentally targets a friendly user.
+ */
 function buildAvoidMap(extra) {
   // Defensive copy: we build a brand-new lookup each tick so we never mutate
   // caller-owned data.
@@ -772,6 +842,11 @@ function scoreStructure(structure, anchorPos) {
   return score;
 }
 
+/**
+ * buildAvoidanceFromSquadMembers prevents a squad from targeting itself or
+ * allied creeps by treating every member's owner as "friendly" for the
+ * duration of the focusFire scan.
+ */
 function buildAvoidanceFromSquadMembers(formation) {
   // We skip friendly owners so the squad never targets itself or friends.
   var avoid = {};
@@ -785,11 +860,19 @@ function buildAvoidanceFromSquadMembers(formation) {
   return avoid;
 }
 
+/**
+ * resolveRoomForSquad tries every cheap source (flag → members → memory) so
+ * focusFireTarget can continue scanning even when only one squad member has
+ * vision of the hostile room.
+ */
 function resolveRoomForSquad(flagName, formation, currentObj, bucket) {
   // Always try the cheapest data source first (flag cache) before falling
   // back to heavier Game lookups.
   var flag = Game.flags && Game.flags[flagName] ? Game.flags[flagName] : null;
   if (flag && flag.room) return flag.room;
+  if (flag && flag.pos && Game.rooms && Game.rooms[flag.pos.roomName]) {
+    return Game.rooms[flag.pos.roomName];
+  }
   var leader = formation && formation.leader ? Game.getObjectById(formation.leader) : null;
   if (leader && leader.room) return leader.room;
   var buddy = formation && formation.buddy ? Game.getObjectById(formation.buddy) : null;
@@ -814,6 +897,10 @@ function resolveRoomForSquad(flagName, formation, currentObj, bucket) {
 // --- CombatAPI ------------------------------------------------------------
 // Keeping the API object as a simple literal removes the IIFE and makes each
 // helper function easier to trace and document.
+/**
+ * getSquadState exposes the shared squad FSM state so every creep reports
+ * the same FORM/ENGAGE/RETREAT answer for a given flag.
+ */
 function getSquadState(flagName) {
   var bucket = ensureSquadMemory(flagName);
   return bucket ? bucket.state : 'INIT';
@@ -824,12 +911,9 @@ function setSquadState(flagName, state) {
   var bucket = ensureSquadMemory(flagName);
   if (!bucket) return;
   var previous = bucket.state;
-  if (previous !== state && console && console.log) {
-    try {
-      console.log('[Squad]', flagName, 'state', previous || 'INIT', '→', state);
-    } catch (e) {
-      // ignore logging errors in production
-    }
+  if (previous !== state && combatDebugEnabled()) {
+    combatDebugLog('[SquadState]', flagName, previous || 'INIT', '→', state,
+      'hpCheckAt', Game.time);
   }
   bucket.state = state;
 }
@@ -890,6 +974,10 @@ function assignFormation(flagName, creepIdsArray) {
   };
 }
 
+/**
+ * getAttackTarget converts a live Room + avoid map into a concrete hostile id
+ * by pulling fresh candidates, scoring them, and returning the highest value.
+ */
 function getAttackTarget(room, avoidAlliesSet) {
   // Finding a target involves a few steps; we annotate each to highlight the
   // "gather inputs → score options → pick winner" pattern.
@@ -906,6 +994,11 @@ function getAttackTarget(room, avoidAlliesSet) {
   return best ? best.id : null;
 }
 
+/**
+ * focusFireTarget is the one true targeting oracle. It caches per-flag focus
+ * results (target id + timestamp) so every role + orchestrator sees the exact
+ * same hostile id when deciding movement or state transitions.
+ */
 function focusFireTarget(flagName) {
   // Focus fire is called from many roles, so we aggressively cache the result
   // per flag to keep CPU usage predictable.
@@ -938,6 +1031,12 @@ function focusFireTarget(flagName) {
 
   bucket.targetId = nextId || null;
   cache.focus[flagName] = nextId || null;
+
+  if (combatDebugEnabled() && currentId !== nextId) {
+    combatDebugLog('[Focus]', flagName, 'room', room ? room.name : (bucket ? bucket.targetRoom : null),
+      'target', currentId || 'none', '→', nextId || 'none');
+  }
+
   return nextId || null;
 }
 
@@ -986,14 +1085,27 @@ function collectCreepsByFlag() {
   return byFlag;
 }
 
+/**
+ * decideState watches squad HP and focusFire results to toggle between
+ * FORM → ENGAGE → RETREAT with a bit of hysteresis so squads can re-enter
+ * combat after their medics top everyone off.
+ */
 function decideState(flagName, creepIds, targetId) {
-  // This tiny state machine is intentionally conservative. Retreat as soon as
-  // anyone dips below 35% health so squads survive to fight another day.
   if (!creepIds || !creepIds.length) return 'INIT';
+  var injured = false;
+  var fullyHealed = true;
   for (var i = 0; i < creepIds.length; i++) {
     var c = Game.getObjectById(creepIds[i]);
     if (!c) continue;
-    if (c.hits < (c.hitsMax || 1) * 0.35) return 'RETREAT';
+    var maxHits = c.hitsMax || 1;
+    var ratio = (c.hits || 0) / maxHits;
+    if (ratio < 0.35) injured = true;
+    if (ratio < 0.75) fullyHealed = false;
+  }
+  if (injured) return 'RETREAT';
+  var previous = CombatAPI.getSquadState(flagName);
+  if (previous === 'RETREAT' && !fullyHealed) {
+    return 'RETREAT';
   }
   if (targetId) return 'ENGAGE';
   return 'FORM';
@@ -1100,6 +1212,10 @@ function getAnchor(creep) {
   return ctx.info.rallyPos || null;
 }
 
+/**
+ * listSquadFlags exposes every tracked squad flag so BeeSpawnManager can
+ * rank threats without guessing flag names.
+ */
 function listSquadFlags() {
   if (!Memory.squads) return [];
   var names = [];
@@ -1111,6 +1227,11 @@ function listSquadFlags() {
   return names;
 }
 
+/**
+ * getLiveThreatForRoom bridges the auto-defense intel cache with live
+ * visibility. When we have vision we return a fresh score + best target id;
+ * otherwise we fall back to threatScoreForRoom so spawning can still react.
+ */
 function getLiveThreatForRoom(roomName) {
   if (!roomName) return { score: 0, hasThreat: false, bestId: null };
   var room = (typeof roomName === 'string') ? Game.rooms[roomName] : roomName;
