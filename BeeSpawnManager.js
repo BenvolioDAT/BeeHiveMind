@@ -340,10 +340,6 @@ function computeRoomQuotas(C, room) {
     scout:        1,
     luna:         2,
     repair:       0,
-    CombatArcher: 0,
-    CombatMelee:  0,
-    CombatMedic:  0,
-    Dismantler:   0,
     Trucker:      0,
     Claimer:      1,
   };
