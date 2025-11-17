@@ -1,5 +1,4 @@
 'use strict';
-
 var Traveler = require('Traveler');
 var BeeCombatSquads = require('BeeCombatSquads');
 var CombatAPI = BeeCombatSquads.CombatAPI;
@@ -126,7 +125,7 @@ function _kiteOrClose(creep, target) {
   if (creep.pos.inRangeTo(target, 3)) {
     creep.rangedAttack(target);
   } else {
-    Traveler.travelTo(creep, target, { range: 3, ignoreCreeps: false });
+    creep.travelTo(creep, target, { range: 3, ignoreCreeps: false });
   }
   return true;
 }
@@ -134,11 +133,11 @@ function _kiteOrClose(creep, target) {
 function _followLeaderOrRally(creep, context) {
   if (!context) return;
   if (context.leader) {
-    Traveler.travelTo(creep, context.leader, { range: 1, ignoreCreeps: false });
+    creep.travelTo(creep, context.leader, { range: 1, ignoreCreeps: false });
     return;
   }
   if (context.rallyPos) {
-    Traveler.travelTo(creep, context.rallyPos, { range: 1, ignoreCreeps: false });
+    creep.travelTo(creep, context.rallyPos, { range: 1, ignoreCreeps: false });
   }
 }
 
@@ -158,14 +157,14 @@ function _swingOrAdvance(creep, target) {
     if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
     if (creep.getActiveBodyparts(RANGED_ATTACK) > 0) creep.rangedAttack(target);
   } else {
-    Traveler.travelTo(creep, target, { range: 1, ignoreCreeps: false });
+    creep.travelTo(creep, target, { range: 1, ignoreCreeps: false });
   }
   return true;
 }
 
 function _fallbackToRally(creep, context) {
   if (context && context.rallyPos) {
-    Traveler.travelTo(creep, context.rallyPos, { range: 1, ignoreCreeps: false });
+    creep.travelTo(creep, context.rallyPos, { range: 1, ignoreCreeps: false });
   }
 }
 
@@ -298,7 +297,7 @@ var roleBeeArmy = {
       if (context.attackPos) {
         // BHM Combat Fix: march archers toward the squad's attack position
         // even if the specific hostile object is not currently visible.
-        Traveler.travelTo(creep, context.attackPos, { range: 3, ignoreCreeps: false });
+        creep.travelTo(creep, context.attackPos, { range: 3, ignoreCreeps: false });
         return;
       }
     }
@@ -343,7 +342,7 @@ var roleBeeArmy = {
         if (context.attackPos) {
           // BHM Combat Fix: melee creeps advance on the stored attack
           // position so they keep pressure on the hostile area.
-          Traveler.travelTo(creep, context.attackPos, { range: 1, ignoreCreeps: false });
+          creep.travelTo(creep, context.attackPos, { range: 1, ignoreCreeps: false });
         } else {
           _fallbackToRally(creep, context);
         }
@@ -369,7 +368,7 @@ var roleBeeArmy = {
     // Medics choose between rally/escort/attack positions based on squad state.
     var moveTarget = _pickMoveTarget(creep, context, healTarget);
     if (moveTarget) {
-      Traveler.travelTo(creep, moveTarget, { range: 1, ignoreCreeps: false });
+      creep.travelTo(creep, moveTarget, { range: 1, ignoreCreeps: false });
     }
   },
 
