@@ -5,6 +5,10 @@ var BeeCombatSquads = require('BeeCombatSquads');
 var CombatAPI = BeeCombatSquads.CombatAPI;
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var BeeSelectors = require('BeeSelectors');
+var CoreLogger = require('core.logger');
+var LOG_LEVEL = CoreLogger.LOG_LEVEL;
+
+var combatLog = CoreLogger.createLogger('BeeArmy', LOG_LEVEL.DEBUG);
 
 function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
@@ -260,6 +264,15 @@ var roleBeeArmy = {
     var context = _buildArcherContext(creep);
     if (!context) return;
 
+    try {
+      combatLog.debug(
+        'Archer', creep.name,
+        'state=', context.state,
+        'flag=', context.flagName,
+        'room=', creep.room ? creep.room.name : '(no room)'
+      );
+    } catch (e) {}
+
     // FORM → follow the leader/rally. ENGAGE → focusFire target via CombatAPI.
     if (context.state === 'RETREAT') {
       _followLeaderOrRally(creep, context);
@@ -268,6 +281,19 @@ var roleBeeArmy = {
 
     if (context.state === 'ENGAGE') {
       var target = _resolveFocusTarget(context);
+      if (!target) {
+        try {
+          combatLog.debug('Archer', creep.name, 'ENGAGE but no target', 'flag=', context.flagName);
+        } catch (e) {}
+      } else {
+        try {
+          combatLog.debug(
+            'Archer', creep.name, 'attacking',
+            'targetId=', target.id,
+            'targetRoom=', target.pos.roomName
+          );
+        } catch (e) {}
+      }
       if (_kiteOrClose(creep, target)) return;
       if (context.attackPos) {
         // BHM Combat Fix: march archers toward the squad's attack position
@@ -286,11 +312,33 @@ var roleBeeArmy = {
     var context = _buildMeleeContext(creep);
     if (!context) return;
 
+    try {
+      combatLog.debug(
+        'Melee', creep.name,
+        'state=', context.state,
+        'flag=', context.flagName,
+        'room=', creep.room ? creep.room.name : '(no room)'
+      );
+    } catch (e) {}
+
     // Melee rally until ENGAGE, then advance + attack the shared focus target.
     if (context.state === 'RETREAT') {
       _fallbackToRally(creep, context);
     } else if (context.state === 'ENGAGE') {
       var target = _resolveFocusTarget(context);
+      if (!target) {
+        try {
+          combatLog.debug('Melee', creep.name, 'ENGAGE but no target', 'flag=', context.flagName);
+        } catch (e) {}
+      } else {
+        try {
+          combatLog.debug(
+            'Melee', creep.name, 'attacking',
+            'targetId=', target.id,
+            'targetRoom=', target.pos.roomName
+          );
+        } catch (e) {}
+      }
       if (!_swingOrAdvance(creep, target)) {
         if (context.attackPos) {
           // BHM Combat Fix: melee creeps advance on the stored attack
@@ -327,6 +375,17 @@ var roleBeeArmy = {
 
   run: function (creep) {
     if (!creep || !creep.memory) return;
+
+    try {
+      combatLog.debug(
+        '[tick', Game.time, '] BeeArmy.run',
+        'creep=', creep.name,
+        'role=', creep.memory.role,
+        'room=', creep.room ? creep.room.name : '(no room)',
+        'squadId=', creep.memory.squadId,
+        'squadFlag=', _resolveFlagName ? _resolveFlagName(creep) : '(no resolver)'
+      );
+    } catch (e) {}
     switch (creep.memory.role) {
       case 'CombatArcher':
         return roleBeeArmy.runArcher(creep);
