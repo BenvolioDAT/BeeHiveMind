@@ -5,8 +5,7 @@ const Logger = require('core.logger');
 const BeeMaintenance = require('BeeMaintenance');
 const BeeVisuals = require('BeeVisuals');
 const BeeHiveMind = require('BeeHiveMind');
-const towerLogic = require('tower.logic');
-const roleLinkManager = require('role.LinkManager');
+var BeeStructureLogic = require('BeeStructureLogic');
 const BeeToolbox = require('BeeToolbox');
 const BeeCombatSquads = require('BeeCombatSquads');
 require('Traveler');
@@ -91,8 +90,8 @@ module.exports.loop = function () {
     refreshSourceIntel();
     BeeMaintenance.cleanUpMemory();
     BeeHiveMind.run();
-    towerLogic.run();
-    roleLinkManager.run();
+    BeeStructureLogic.runTowerLogic();
+    BeeStructureLogic.runLinkManager();
 
     BeeVisuals.drawVisuals();
     BeeVisuals.drawEnergyBar();
