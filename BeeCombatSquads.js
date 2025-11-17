@@ -71,7 +71,9 @@ function ensureSquadMemoryFromFlag(flag) {
   }
   var bucket = Memory.squads[flag.name];
   if (!bucket.members) bucket.members = { leader: null, buddy: null, medic: null };
-  bucket.rally = serializePos(flag.pos);
+  if (!bucket.rally) {
+    bucket.rally = serializePos(flag.pos);
+  }
   bucket.lastSeenTick = Game.time;
 }
 
@@ -277,16 +279,6 @@ function countHostiles(room) {
   return { score: score, hasThreat: total > 0 };
 }
 
-function sanitizeSlug(flagName) {
-  if (!flagName) return 'SQUAD';
-  var slug = flagName;
-  if (slug.indexOf('Squad') === 0) slug = slug.substring(5);
-  slug = slug.replace(/[^0-9A-Za-z]/g, '');
-  if (!slug) slug = flagName.replace(/[^0-9A-Za-z]/g, '');
-  if (!slug) slug = 'SQUAD';
-  return slug.toUpperCase();
-}
-
 function samePos(a, b) {
   return Boolean(a && b && a.x === b.x && a.y === b.y && a.roomName === b.roomName);
 }
@@ -306,13 +298,24 @@ function resolvePlan(flagName) {
     var obj = Game.getObjectById(bucket.focusTarget);
     if (obj && obj.pos) attack = obj.pos;
   }
+  var attackPos = posFrom(attack);
+  var rallyPos = posFrom(bucket.rally || bucket.rallyPos || bucket.anchor || bucket.squadRally);
+  var targetRoomName = bucket.targetRoom || (attackPos ? attackPos.roomName : null);
+  var displayPos = null;
+  if (attackPos && attackPos.roomName) {
+    displayPos = roomCenter(attackPos.roomName);
+  } else if (targetRoomName) {
+    displayPos = roomCenter(targetRoomName);
+  }
   return {
     name: flagName,
     state: extractState(flagName, bucket),
-    rally: posFrom(bucket.rally || bucket.rallyPos || bucket.anchor || bucket.squadRally),
-    attack: posFrom(attack),
+    rally: rallyPos,
+    attack: attackPos,
     retreat: posFrom(bucket.retreat || bucket.retreatPos || bucket.fallback || bucket.fallbackPos),
-    waypoints: normalizeWaypoints(bucket.waypoints || bucket.route || bucket.path || bucket.waypointList)
+    waypoints: normalizeWaypoints(bucket.waypoints || bucket.route || bucket.path || bucket.waypointList),
+    targetRoom: targetRoomName,
+    displayPos: displayPos
   };
 }
 
@@ -395,54 +398,39 @@ var FlagIO = {
   }
 };
 
+function roomCenter(roomName) {
+  if (!roomName) return null;
+  return { x: 25, y: 25, roomName: roomName };
+}
+
+function resolveDisplayPosition(plan) {
+  if (!plan) return null;
+  if (plan.displayPos) return plan.displayPos;
+  if (plan.attack && plan.attack.roomName) return roomCenter(plan.attack.roomName);
+  if (plan.targetRoom) return roomCenter(plan.targetRoom);
+  if (plan.rally) return plan.rally;
+  var intel = Memory.squadFlags;
+  if (intel && intel.bindings && intel.bindings[plan.name]) {
+    return roomCenter(intel.bindings[plan.name]);
+  }
+  if (Game.flags && Game.flags[plan.name] && Game.flags[plan.name].pos) {
+    return serializePos(Game.flags[plan.name].pos);
+  }
+  return null;
+}
+
 function ensurePrimaryFlag(plan) {
-  if (!plan || !plan.rally) return null;
-  if (Game.flags[plan.name]) return Game.flags[plan.name];
+  if (!plan || !plan.name) return null;
+  var displayPos = resolveDisplayPosition(plan);
+  if (!displayPos) return null;
   var colors = FLAG_CFG.TYPES.RALLY;
-  return FlagIO.ensureFlag(plan.name, plan.rally, colors.color, colors.secondary, false);
+  return FlagIO.ensureFlag(plan.name, displayPos, colors.color, colors.secondary, false);
 }
 
-function buildSupportName(plan, type, index) {
-  var slug = sanitizeSlug(plan.name);
-  var suffix = type;
-  if (index != null) suffix += '_' + index;
-  return FLAG_CFG.SUPPORT_PREFIX + slug + '_' + suffix;
-}
-
-function registerFlag(flag, expected) {
-  if (!flag || !flag.name || !expected) return;
-  expected[flag.name] = true;
-}
-
-function ensureSupportFlag(plan, type, pos, expected, order) {
-  if (!plan || !pos || !expected) return null;
-  var colors = FLAG_CFG.TYPES[type];
-  if (!colors) {
-    if (FLAG_CFG.DEBUG) flagLogDebug('Missing color mapping for', type);
-    return null;
-  }
-  var name = buildSupportName(plan, type, order);
-  var flag = FlagIO.ensureFlag(name, pos, colors.color, colors.secondary, true);
-  registerFlag(flag, expected);
-  return flag;
-}
-
-function ensureSupportFlags(plan, expected) {
-  if (!plan) return;
-  if (plan.rally) ensureSupportFlag(plan, 'RALLY', plan.rally, expected, null);
-  if (plan.attack) ensureSupportFlag(plan, 'ATTACK', plan.attack, expected, null);
-  if (plan.retreat) ensureSupportFlag(plan, 'RETREAT', plan.retreat, expected, null);
-  var waypoints = plan.waypoints || [];
-  for (var i = 0; i < waypoints.length; i++) {
-    ensureSupportFlag(plan, 'WAYPOINT', waypoints[i], expected, i + 1);
-  }
-}
-
-function cleanupSupportFlags(expected) {
+function cleanupSupportFlags() {
   for (var name in Game.flags) {
     if (!Object.prototype.hasOwnProperty.call(Game.flags, name)) continue;
     if (!isSupportFlag(name)) continue;
-    if (expected && expected[name]) continue;
     var flag = Game.flags[name];
     if (flag && typeof flag.remove === 'function') flag.remove();
   }
@@ -450,17 +438,14 @@ function cleanupSupportFlags(expected) {
 
 function syncPlannedFlags() {
   if (!Memory.squads) return;
-  var expected = {};
   for (var flagName in Memory.squads) {
     if (!Object.prototype.hasOwnProperty.call(Memory.squads, flagName)) continue;
     if (flagName.indexOf('Squad') !== 0) continue;
     var plan = resolvePlan(flagName);
     if (!plan) continue;
-    if (!plan.rally && FLAG_CFG.DEBUG) flagLogDebug('No rally defined for', flagName);
     ensurePrimaryFlag(plan);
-    ensureSupportFlags(plan, expected);
   }
-  cleanupSupportFlags(expected);
+  cleanupSupportFlags();
 }
 
 function resolveSquadTarget(identifier) {
@@ -574,6 +559,7 @@ function ensureSquadFlags() {
     if ((Game.time - (rec.lastSeen || 0)) > 20000) delete mem.rooms[roomName];
   }
 
+  cleanupFinishedSquads();
   syncPlannedFlags();
 }
 
@@ -646,6 +632,48 @@ function pickRallyPoint(room) {
   if (spawns && spawns.length) return serializePos(spawns[0].pos);
   if (room.controller) return serializePos(room.controller.pos);
   return serializePos(new RoomPosition(25, 25, room.name));
+}
+
+function resolveTargetRoomForSquad(flagName, bucket, intel) {
+  if (bucket) {
+    if (bucket.targetRoom) return bucket.targetRoom;
+    var attackSource = bucket.targetPos || bucket.target || bucket.attack || bucket.focusTargetPos;
+    var attackPos = posFrom(attackSource);
+    if (attackPos && attackPos.roomName) return attackPos.roomName;
+    var rallyPos = posFrom(bucket.rally);
+    if (rallyPos && rallyPos.roomName) return rallyPos.roomName;
+  }
+  var mem = intel || ensureSquadFlagMemory();
+  if (mem && mem.bindings && mem.bindings[flagName]) return mem.bindings[flagName];
+  return null;
+}
+
+function shouldCleanupSquad(flagName, bucket, intel) {
+  if (!flagName || !bucket) return false;
+  if (bucket.autoDefense) return false;
+  if (squadHasLiveMembers(flagName)) return false;
+  var targetRoom = resolveTargetRoomForSquad(flagName, bucket, intel);
+  if (targetRoom && threatScoreForRoom(targetRoom) > 0) return false;
+  return true;
+}
+
+function cleanupFinishedSquads() {
+  if (!Memory.squads) return;
+  var intel = ensureSquadFlagMemory();
+  var pending = [];
+  for (var flagName in Memory.squads) {
+    if (!Object.prototype.hasOwnProperty.call(Memory.squads, flagName)) continue;
+    var bucket = Memory.squads[flagName];
+    if (!shouldCleanupSquad(flagName, bucket, intel)) continue;
+    pending.push(flagName);
+  }
+  for (var i = 0; i < pending.length; i++) {
+    var name = pending[i];
+    var flag = Game.flags && Game.flags[name] ? Game.flags[name] : null;
+    if (flag && typeof flag.remove === 'function') flag.remove();
+    delete Memory.squads[name];
+    if (intel && intel.bindings && intel.bindings[name]) delete intel.bindings[name];
+  }
 }
 
 function cleanupAutoDefense(flagName) {
