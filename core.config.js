@@ -25,7 +25,7 @@ var CoreConfig = {
 CoreConfig.settings = Object.freeze({
   logging: Object.freeze({
     /** Default log level applied on boot. */
-    defaultLevel: LOG_LEVEL.DEBUG,
+    defaultLevel: LOG_LEVEL.NONE,
   }),
   combat: Object.freeze({
     /** Allow combat creeps to engage non-ally players. */

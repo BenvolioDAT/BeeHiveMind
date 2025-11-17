@@ -345,7 +345,7 @@ function computeRoomQuotas(C, room) {
     CombatMedic:  0,
     Dismantler:   0,
     Trucker:      0,
-    Claimer:      0
+    Claimer:      1,
   };
   if (tickEvery(DBG_EVERY)) {
     dlog('🎯 [Quotas]', fmt(room), JSON.stringify(quotas));
