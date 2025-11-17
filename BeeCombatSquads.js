@@ -1,5 +1,10 @@
 'use strict';
 
+var CoreLogger = require('core.logger');
+var LOG_LEVEL = CoreLogger.LOG_LEVEL;
+
+var combatLog = CoreLogger.createLogger('CombatSquads', LOG_LEVEL.DEBUG);
+
 /**
  * BeeCombatSquads owns the combat squad state machine and exports a CombatAPI
  * helper bundle (INIT → FORM → ENGAGE → RETREAT). Roles consume
@@ -1009,7 +1014,8 @@ function focusFireTarget(flagName) {
   }
 
   var bucket = ensureSquadMemory(flagName);
-  var currentId = bucket && bucket.targetId ? bucket.targetId : null;
+  var prevId = bucket && bucket.targetId ? bucket.targetId : null;
+  var currentId = prevId;
   var currentObj = currentId ? Game.getObjectById(currentId) : null;
 
   var formation = bucket && bucket.members ? bucket.members : null;
@@ -1031,6 +1037,18 @@ function focusFireTarget(flagName) {
 
   bucket.targetId = nextId || null;
   cache.focus[flagName] = nextId || null;
+
+  if (prevId !== bucket.targetId) {
+    try {
+      combatLog.debug(
+        '[tick', Game.time, '] focusFireTarget',
+        'flag=', flagName,
+        'room=', room ? room.name : '(no room)',
+        'prevTarget=', prevId,
+        'nextTarget=', bucket.targetId
+      );
+    } catch (e) {}
+  }
 
   if (combatDebugEnabled() && currentId !== nextId) {
     combatDebugLog('[Focus]', flagName, 'room', room ? room.name : (bucket ? bucket.targetRoom : null),
@@ -1248,7 +1266,19 @@ function getLiveThreatForRoom(roomName) {
   if (candidates.creeps) total += candidates.creeps.length;
   if (candidates.power) total += candidates.power.length;
   if (candidates.structures) total += candidates.structures.length;
-  return { score: score, hasThreat: total > 0, bestId: best ? best.id : null };
+  var bestId = best ? best.id : null;
+
+  try {
+    combatLog.debug(
+      '[tick', Game.time, '] getLiveThreatForRoom',
+      'room=', room ? room.name : String(roomName),
+      'score=', score,
+      'count=', total,
+      'bestId=', bestId
+    );
+  } catch (e) {}
+
+  return { score: score, hasThreat: total > 0, bestId: bestId };
 }
 
 var SquadFlagIntel = {
