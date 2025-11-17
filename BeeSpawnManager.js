@@ -473,6 +473,10 @@ function normalizedSquadName(name) {
   return 'Squad' + name;
 }
 
+/**
+ * squadThreatScore blends Memory.squads + SquadFlagIntel so BeeSpawnManager
+ * can rank every squad flag (auto-defense + manual) by most urgent threat.
+ */
 function squadThreatScore(flagName) {
   var key = normalizedSquadName(flagName);
   if (!Memory.squads || !Memory.squads[key]) return 0;
@@ -486,6 +490,11 @@ function squadThreatScore(flagName) {
   return score;
 }
 
+/**
+ * gatherSpawnableSquads lists every Squad flag, applies squadThreatScore,
+ * then sorts descending so trySpawnSquad always attempts the hottest room
+ * first.
+ */
 function gatherSpawnableSquads() {
   var names = [];
   if (BeeCombatSquads && typeof BeeCombatSquads.listSquadFlags === 'function') {
@@ -510,6 +519,10 @@ function gatherSpawnableSquads() {
   return names;
 }
 
+/**
+ * trySpawnSquad serializes squad spawning to one per tick per spawn while
+ * iterating flags in priority order (via gatherSpawnableSquads).
+ */
 function trySpawnSquad(spawner, squadState) {
   if (!spawnLogic || typeof spawnLogic.Spawn_Squad !== 'function') return false;
   if (squadState.handled) return false;

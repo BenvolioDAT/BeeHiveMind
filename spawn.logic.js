@@ -10,6 +10,21 @@ var LOG_LEVEL = Logger.LOG_LEVEL;
 var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
+var CoreConfig = require('core.config');
+
+function combatDebugEnabled() {
+  return Boolean(CoreConfig && CoreConfig.settings && CoreConfig.settings.combat &&
+    CoreConfig.settings.combat.DEBUG_LOGS);
+}
+
+function combatSpawnLog() {
+  if (!combatDebugEnabled()) return;
+  try {
+    spawnLog.info.apply(spawnLog, arguments);
+  } catch (e) {
+    // swallow logging errors
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Body builders (ES5-only helpers to construct Screeps body arrays)
@@ -432,6 +447,11 @@ function ensureSquadMemory(id) {
 
 // Teaching habit: keep combat math in one helper so adjusting threat levels
 // never requires scrolling through spawn orchestration code.
+/**
+ * desiredSquadLayout translates a numeric threat score into a blend of melee,
+ * ranged, and medic creeps. Spawn_Squad + BeeSpawnManager rely on this so the
+ * formation stays consistent with intel scoring.
+ */
 function desiredSquadLayout(score) {
   var threat = score | 0;
   if (threat <= 0) return [];
@@ -502,7 +522,12 @@ function stampSquadPlanMemory(S, layout, targetRoom, threatScore, flag) {
 }
 
 // Keep spawning side-effects in one loop so it's obvious when we early return.
-function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S) {
+/**
+ * spawnMissingSquadRole consumes desiredSquadLayout() output and asks
+ * spawnRole() to create whichever role is currently missing, injecting
+ * squadId/flag/target data via _initSquadMemory.
+ */
+function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S, squadFlag) {
   for (var i = 0; i < layout.length; i++) {
     var plan = layout[i];
     if ((plan.need | 0) <= 0) continue;
@@ -512,14 +537,19 @@ function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S) {
         squadId: id,
         role: plan.role,
         targetRoom: targetRoom,
+        squadFlag: squadFlag,
         skipTaskMemory: true
       };
       var ok = spawnRole(spawn, plan.role, avail, extraMemory);
       if (ok) {
         S.lastSpawnAt = Game.time;
         S.lastSpawnRole = plan.role;
+        combatSpawnLog('[SpawnSquad]', id, 'role', plan.role, 'room', targetRoom,
+          'flag', squadFlag || 'n/a', 'via', spawn.name);
         return true;
       }
+      combatSpawnLog('[SpawnSquadFail]', id, 'role', plan.role, 'room', targetRoom,
+        'flag', squadFlag || 'n/a', 'via', spawn.name);
       return false;
     }
   }
@@ -528,6 +558,11 @@ function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S) {
 
 // The exported entry point becomes a tidy checklist: resolve target ->
 // evaluate plan -> spawn missing roles.
+/**
+ * Spawn_Squad ties SquadFlagIntel → desiredSquadLayout → spawnMissingSquadRole
+ * together. It is the only exported entry for squad spawning so every caller
+ * benefits from consistent threat gating + logging.
+ */
 function Spawn_Squad(spawn, squadId) {
   var id = squadId || 'Alpha';
   if (!spawn || spawn.spawning) return false;
@@ -543,13 +578,17 @@ function Spawn_Squad(spawn, squadId) {
   var threatScore = SquadFlagIntel && typeof SquadFlagIntel.threatScoreForRoom === 'function'
     ? SquadFlagIntel.threatScoreForRoom(targetRoom)
     : 0;
-  if ((threatScore | 0) <= 0 && BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
-    // BHM Combat Fix: fall back to live room scans so defenders spawn the tick
-    // a threat appears instead of waiting for intel decay updates.
-    var live = BeeCombatSquads.getLiveThreatForRoom(targetRoom);
-    if (live && live.score > 0) {
+  var live = null;
+  if (BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
+    live = BeeCombatSquads.getLiveThreatForRoom(targetRoom);
+    if (live && live.score > threatScore) {
       threatScore = live.score;
     }
+  }
+  if ((threatScore | 0) <= 0 && (!live || !live.hasThreat)) {
+    combatSpawnLog('[SpawnSkip]', id, 'room', targetRoom, 'score', threatScore,
+      'liveScore', live ? live.score : 0);
+    return false;
   }
   var layout = desiredSquadLayout(threatScore);
   if (!layout.length) return false;
@@ -561,7 +600,10 @@ function Spawn_Squad(spawn, squadId) {
   }
 
   var avail = Calculate_Spawn_Resource(spawn);
-  return spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S);
+  combatSpawnLog('[SpawnEval]', id, 'room', targetRoom, 'score', threatScore,
+    'layout', JSON.stringify(layout));
+  return spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S,
+    flagData.flag ? flagData.flag.name : null);
 }
 
 // -----------------------------------------------------------------------------

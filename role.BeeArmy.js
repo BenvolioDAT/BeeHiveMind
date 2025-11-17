@@ -51,6 +51,11 @@ function _resolveAttackPos(plan, squad) {
   return null;
 }
 
+/**
+ * _buildBaseContext stitches BeeCombatSquads + SquadFlagIntel together so
+ * every combat creep sees a shared view of (flag, plan, rally/attack points,
+ * squad memory, and FSM state).
+ */
 function _buildBaseContext(creep) {
   var flagName = _resolveFlagName(creep);
   if (!flagName) return null;
@@ -77,6 +82,11 @@ function _buildBaseContext(creep) {
   };
 }
 
+/**
+ * _resolveFocusTarget defers to CombatAPI.focusFireTarget so all three combat
+ * roles pursue the same hostile id. When the squad is retreating we ignore
+ * that id so creeps focus on survival movement instead of re-engaging.
+ */
 function _resolveFocusTarget(context) {
   if (!context) return null;
   var targetId = CombatAPI.focusFireTarget(context.flagName);
@@ -86,6 +96,10 @@ function _resolveFocusTarget(context) {
 
 // ---------------------------- Archer helpers -----------------------------
 
+/**
+ * _buildArcherContext extends the base bundle with a reference to the squad
+ * leader (usually melee) so archers can kite around their escort/rally point.
+ */
 function _buildArcherContext(creep) {
   var base = _buildBaseContext(creep);
   if (!base) return null;
@@ -126,6 +140,10 @@ function _followLeaderOrRally(creep, context) {
 
 // ----------------------------- Melee helpers -----------------------------
 
+/**
+ * _buildMeleeContext is identical to _buildBaseContext but split out to
+ * mirror the archer/medic builders for symmetry + readability.
+ */
 function _buildMeleeContext(creep) {
   return _buildBaseContext(creep);
 }
@@ -169,6 +187,10 @@ function _nearestWounded(creep, flagName) {
   return BeeSelectors.findClosestByRange(creep.pos, wounded);
 }
 
+/**
+ * _buildMedicContext gives medics the same shared state plus direct pointers
+ * to the leader + buddy so heal movement stays glued to the front line.
+ */
 function _buildMedicContext(creep) {
   var base = _buildBaseContext(creep);
   if (!base) return null;
@@ -238,6 +260,7 @@ var roleBeeArmy = {
     var context = _buildArcherContext(creep);
     if (!context) return;
 
+    // FORM → follow the leader/rally. ENGAGE → focusFire target via CombatAPI.
     if (context.state === 'RETREAT') {
       _followLeaderOrRally(creep, context);
       return;
@@ -263,6 +286,7 @@ var roleBeeArmy = {
     var context = _buildMeleeContext(creep);
     if (!context) return;
 
+    // Melee rally until ENGAGE, then advance + attack the shared focus target.
     if (context.state === 'RETREAT') {
       _fallbackToRally(creep, context);
     } else if (context.state === 'ENGAGE') {
@@ -294,6 +318,7 @@ var roleBeeArmy = {
     var healTarget = _selectHealTarget(creep, context);
     _applyHealing(creep, healTarget);
 
+    // Medics choose between rally/escort/attack positions based on squad state.
     var moveTarget = _pickMoveTarget(creep, context, healTarget);
     if (moveTarget) {
       Traveler.travelTo(creep, moveTarget, { range: 1, ignoreCreeps: false });
