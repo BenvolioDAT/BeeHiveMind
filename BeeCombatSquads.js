@@ -803,7 +803,8 @@ function buildAvoidMap(extra) {
 
 function currentFocusCache() {
   // The global cache lets every creep share the same expensive computations
-  // for a tick. Always stamp the tick number so the cache expires naturally.
+  // for a tick.
+  // Always stamp the tick number so the cache expires naturally.
   if (!global.__combatApiCache || global.__combatApiCache.tick !== Game.time) {
     global.__combatApiCache = { tick: Game.time, focus: {} };
   }

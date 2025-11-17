@@ -296,7 +296,10 @@ var roleBeeArmy = {
       if (_kiteOrClose(creep, target)) return;
       if (context.attackPos) {
         // march archers toward the squad's attack position even if no target is visible
-        creep.travelTo(context.attackPos, { range: 3, ignoreCreeps: false });
+        creep.travelTo(
+          context.attackPos,
+          { range: 3, ignoreCreeps: false }
+        );
         return;
       }
     }
@@ -340,7 +343,10 @@ var roleBeeArmy = {
       if (!_swingOrAdvance(creep, target)) {
         if (context.attackPos) {
           // melee creeps advance on the stored attack position so they keep pressure on the hostile area
-          creep.travelTo(context.attackPos, { range: 1, ignoreCreeps: false });
+          creep.travelTo(
+            context.attackPos,
+            { range: 1, ignoreCreeps: false }
+          );
         } else {
           _fallbackToRally(creep, context);
         }
