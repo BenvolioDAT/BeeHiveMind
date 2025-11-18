@@ -911,7 +911,7 @@ roleBeeWorker.Builder = (function () {
   // ==============================
   // Tunables
   // ==============================
-  var ALLOW_HARVEST_FALLBACK = false; // flip true if you really want last-resort mining
+  var ALLOW_HARVEST_FALLBACK = true; // flip true if you really want last-resort mining
   var PICKUP_MIN = 50;                // ignore tiny crumbs
   var SRC_CONTAINER_MIN = 100;        // minimum energy to bother at source containers
 
