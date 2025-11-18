@@ -1,5 +1,15 @@
 'use strict';
 //* role.BeeWorker – consolidated creep roles that do working task.
+// =====================================================
+// Beginner Guide
+// -----------------------------------------------------
+// All economic worker roles live in this single file. Each role section below
+// starts with a summary block listing the purpose and major states so new
+// contributors can skim to the behaviour they need. The dispatcher near the end
+// exposes roleBeeWorker.handlers plus helper functions like
+// roleBeeWorker.runBuilder(creep); callers simply forward a creep and the state
+// machine for that role does the rest.
+// =====================================================
 const BeeToolbox = require('BeeToolbox');
 // External selectors module; see BeeSelectors.js for source/sink scans.
 const BeeSelectors = require('BeeSelectors');
@@ -81,7 +91,8 @@ function debugSay(creep, msg) {
   if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
 }
 
-function _posOf(target) {
+// Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
+function getTargetPosition(target) {
   if (!target) return null;
   if (target.pos) return target.pos;
   if (target.x != null && target.y != null && target.roomName) return target;
@@ -91,7 +102,7 @@ function _posOf(target) {
 function debugDrawLine(creep, target, color, label) {
   if (!CFG.DEBUG_DRAW || !creep || !target) return;
   var room = creep.room; if (!room || !room.visual) return;
-  var tpos = _posOf(target); if (!tpos || tpos.roomName !== room.name) return;
+  var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
   try {
     room.visual.line(creep.pos, tpos, {
       color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
@@ -340,11 +351,15 @@ function softenRemoteDefensePlan(roomName) {
   bucket.lastKnownScore = 0;
 }
 
+// =====================================================
+// Role: BaseHarvest
+// Purpose: Stationary miners that sit on seats by sources
+// States: HARVEST (mine), OFFLOAD (drop/deliver), IDLE (waiting)
+// =====================================================
 roleBeeWorker.BaseHarvest = (function () {
-  // --------------------------------------------
-  // BaseHarvest – stationaries that mine sources
-  // States: HARVEST (travel + mine) vs OFFLOAD (dump) vs IDLE (waiting empty)
-  // --------------------------------------------
+  // -----------------------------
+  // A) Config + seat helpers
+  // -----------------------------
   /** =========================
    *  Config knobs
    *  ========================= */
@@ -667,11 +682,10 @@ roleBeeWorker.BaseHarvest = (function () {
     return null;
   }
 
-  /** =========================
-   *  Main role
-   *  ========================= */
-
-  function ensureRoleIdentity(creep) {
+  // -----------------------------
+  // B) Identity + state helpers
+  // -----------------------------
+  function ensureBaseHarvestIdentity(creep) {
     if (!creep || !creep.memory) return;
     if (!creep.memory.role || String(creep.memory.role).toLowerCase() === 'baseharvest') {
       creep.memory.role = 'BaseHarvest';
@@ -679,8 +693,13 @@ roleBeeWorker.BaseHarvest = (function () {
     if (!creep.memory.task) creep.memory.task = 'baseharvest';
   }
 
-  function determineState(creep) {
-    ensureRoleIdentity(creep);
+  // Memory keys:
+  // - assignedSource: source id we are mining
+  // - seatX/seatY/seatRoom: coordinates of the reserved mining seat
+  // - waitingForSeat: true when queued because seat is occupied
+
+  function determineBaseHarvestState(creep) {
+    ensureBaseHarvestIdentity(creep);
     if (!creep) return 'IDLE';
     var empty = creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0;
     var full  = creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0;
@@ -691,11 +710,16 @@ roleBeeWorker.BaseHarvest = (function () {
       creep.memory.harvesting = false;
       debugSay(creep, '⤴️DROP');
     }
-    if (creep.memory.harvesting) return 'HARVEST';
-    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) return 'OFFLOAD';
-    return 'IDLE';
+    var nextState = 'IDLE';
+    if (creep.memory.harvesting) nextState = 'HARVEST';
+    else if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) nextState = 'OFFLOAD';
+    creep.memory.state = nextState;
+    return nextState;
   }
 
+  // -----------------------------
+  // C) Harvest phase
+  // -----------------------------
   function runHarvestPhase(creep) {
     var sid = assignSource(creep);
     if (!sid) { debugSay(creep, '❓'); return; }
@@ -788,6 +812,9 @@ roleBeeWorker.BaseHarvest = (function () {
     creep.harvest(source);
   }
 
+  // -----------------------------
+  // D) Offload phase
+  // -----------------------------
   function runOffloadPhase(creep) {
     var courierCount2 = countCreepsWithRole('Courier', 'courier');
     var queenCount2   = countCreepsWithRole('Queen', 'queen');
@@ -841,6 +868,9 @@ roleBeeWorker.BaseHarvest = (function () {
     creep.drop(RESOURCE_ENERGY);
   }
 
+  // -----------------------------
+  // E) Idle handling
+  // -----------------------------
   function idleWhenEmpty(creep) {
     if (!creep || creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) return;
     debugSay(creep, '🧘');
@@ -850,7 +880,7 @@ roleBeeWorker.BaseHarvest = (function () {
   var roleBaseHarvest = {
     role: 'BaseHarvest',
     run: function(creep) {
-      var state = determineState(creep);
+      var state = determineBaseHarvestState(creep);
 
       if (state === 'HARVEST') {
         runHarvestPhase(creep);
@@ -869,11 +899,15 @@ roleBeeWorker.BaseHarvest = (function () {
   return roleBaseHarvest;
 })();
 
+// =====================================================
+// Role: Builder
+// Purpose: Grab energy around the room and complete construction sites
+// States: COLLECT (refuel) and BUILD (spend energy)
+// =====================================================
 roleBeeWorker.Builder = (function () {
-  // --------------------------------------------
-  // Builder – refuel vs build state machine
-  // States: COLLECT (restock) vs BUILD (spend energy) with simple sticky target
-  // --------------------------------------------
+  // -----------------------------
+  // A) Config + state helpers
+  // -----------------------------
   // ==============================
   // Tunables
   // ==============================
@@ -887,6 +921,31 @@ roleBeeWorker.Builder = (function () {
   // ==============================
   // Energy intake (prefer floor snacks)
   // ==============================
+  function ensureBuilderIdentity(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.role = 'Builder';
+    if (!creep.memory.task) creep.memory.task = 'builder';
+  }
+
+  // Memory keys:
+  // - siteId: sticky construction target we are working on
+
+  function determineBuilderState(creep) {
+    ensureBuilderIdentity(creep);
+    if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
+      creep.memory.building = false;
+      debugSay(creep, '⤵️REFUEL');
+    } else if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
+      creep.memory.building = true;
+      debugSay(creep, '⤴️BUILD');
+    }
+    creep.memory.state = creep.memory.building ? 'BUILD' : 'COLLECT';
+    return creep.memory.state;
+  }
+
+  // -----------------------------
+  // B) Energy collection helpers
+  // -----------------------------
   function collectEnergy(creep) {
     // 1) Tombstones / Ruins
     var tomb = creep.pos.findClosestByRange(FIND_TOMBSTONES, { filter: function (t) { return (t.store[RESOURCE_ENERGY] | 0) > 0; } });
@@ -984,18 +1043,6 @@ roleBeeWorker.Builder = (function () {
     return false;
   }
 
-  function determineBuilderState(creep) {
-    if (!creep.memory) creep.memory = {};
-    if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
-      creep.memory.building = false;
-      debugSay(creep, '⤵️REFUEL');
-    } else if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
-      creep.memory.building = true;
-      debugSay(creep, '⤴️BUILD');
-    }
-    return creep.memory.building ? 'BUILD' : 'COLLECT';
-  }
-
   function idleNearAnchor(creep) {
     var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
     if (anchor && anchor.pos) {
@@ -1029,6 +1076,9 @@ roleBeeWorker.Builder = (function () {
     return true;
   }
 
+  // -----------------------------
+  // C) Build phase helpers
+  // -----------------------------
   function runBuildPhase(creep) {
     var site = pickBuildSite(creep);
     if (site) {
@@ -1127,12 +1177,12 @@ roleBeeWorker.Builder = (function () {
   return roleBuilder;
 })();
 
+// =====================================================
+// Role: Courier
+// Purpose: Shuttle energy from source containers/drops to spawn/tower sinks
+// States: COLLECT (withdraw/pickup) and DELIVER (fill structures)
+// =====================================================
 roleBeeWorker.Courier = (function () {
-  // --------------------------------------------
-  // Courier – two-state hauler (COLLECT vs DELIVER)
-  // Collect priority: source containers → drops → graves → storage
-  // Deliver priority: spawn/extensions → towers → storage/terminal
-  // --------------------------------------------
   // Shares PIB + same-tick reservation scheme with Queen to avoid target dogpiles.
 
 
@@ -1141,7 +1191,8 @@ roleBeeWorker.Courier = (function () {
   // ============================
   if (!global.__COURIER) global.__COURIER = { tick: -1, rooms: {} };
 
-  function _roomCache(room) {
+  // Returns the per-tick cache of source containers and graves for this room.
+  function getCourierRoomCache(room) {
     var G = global.__COURIER;
     if (G.tick !== Game.time) {
       G.tick = Game.time;
@@ -1187,7 +1238,8 @@ roleBeeWorker.Courier = (function () {
     return R;
   }
 
-  function _idsToObjects(ids) {
+  // Resolves an array of ids into live game objects, skipping null entries.
+  function getCourierObjectsFromIds(ids) {
     var out = [];
     for (var i = 0; i < ids.length; i++) {
       var o = Game.getObjectById(ids[i]);
@@ -1208,7 +1260,8 @@ roleBeeWorker.Courier = (function () {
            c.store && ((c.store[RESOURCE_ENERGY] | 0) >= CFG.CONTAINER_MIN);
   }
 
-  function _closestByRange(pos, arr) {
+  // Basic distance helper that picks the closest object in arr to a position.
+  function findClosestByRange(pos, arr) {
     var best = null, bestD = 1e9;
     for (var i = 0; i < arr.length; i++) {
       var o = arr[i];
@@ -1218,32 +1271,37 @@ roleBeeWorker.Courier = (function () {
     return best;
   }
 
-  function _energyOf(c) {
+  // Returns the stored energy for a given structure or 0 if unknown.
+  function getStructureEnergy(c) {
     return (c && c.store && c.store[RESOURCE_ENERGY]) | 0;
   }
 
-  function _clearlyBetter(a, b) {
-    var ae = _energyOf(a);
-    var be = _energyOf(b);
+  // Checks if container A holds significantly more energy than container B.
+  function isContainerClearlyBetter(a, b) {
+    var ae = getStructureEnergy(a);
+    var be = getStructureEnergy(b);
     return ae > (be + CFG.BETTER_CONTAINER_DELTA);
   }
 
   // ============================
   // PIB + same-tick reservations (shared with Queen)
   // ============================
-  function _qrMap() {
+  // Returns the per-tick reservation map used to avoid double-filling sinks.
+  function getQueenReservationMap() {
     if (!Memory._queenRes || Memory._queenRes.tick !== Game.time) {
       Memory._queenRes = { tick: Game.time, map: {} };
     }
     return Memory._queenRes.map;
   }
 
-  function _reservedFor(structId) {
-    var map = _qrMap();
+  // Reads how much energy has been reserved for the given structure this tick.
+  function getReservedEnergyForStructure(structId) {
+    var map = getQueenReservationMap();
     return map[structId] || 0;
   }
 
-  function _pibSumReserved(roomName, targetId, resourceType) {
+  // Totals up PIB reservations for a target so we respect in-flight deliveries.
+  function sumPibReservedEnergy(roomName, targetId, resourceType) {
     resourceType = resourceType || RESOURCE_ENERGY;
     var root = Memory._PIB;
     if (!root || root.tick == null || !root.rooms) return 0;
@@ -1260,7 +1318,8 @@ roleBeeWorker.Courier = (function () {
     return total;
   }
 
-  function _pibRoom(roomName) {
+  // Returns (and creates) the PIB reservation bucket for a room for this tick.
+  function getPibRoomBucket(roomName) {
     var root = Memory._PIB;
     if (!root || root.tick !== Game.time) {
       Memory._PIB = { tick: Game.time, rooms: root && root.rooms ? root.rooms : {} };
@@ -1270,13 +1329,14 @@ roleBeeWorker.Courier = (function () {
     return root.rooms[roomName];
   }
 
-  function _pibReserveFill(creep, target, amount, resourceType) {
+  // Tracks a creep's in-flight fill so others do not overbook the target.
+  function reservePibFill(creep, target, amount, resourceType) {
     if (!creep || !target || !amount) return 0;
     resourceType = resourceType || RESOURCE_ENERGY;
     var roomName = (target.pos && target.pos.roomName) || (creep.room && creep.room.name);
     if (!roomName) return 0;
 
-    var R = _pibRoom(roomName);
+    var R = getPibRoomBucket(roomName);
     if (!R.fills[target.id]) R.fills[target.id] = {};
 
     var dist = 0;
@@ -1291,7 +1351,8 @@ roleBeeWorker.Courier = (function () {
     return amount | 0;
   }
 
-  function _pibReleaseFill(creep, target, resourceType) {
+  // Removes a previously registered PIB fill reservation when done or failed.
+  function releasePibFill(creep, target, resourceType) {
     if (!creep || !target) return;
     resourceType = resourceType || RESOURCE_ENERGY;
     var roomName = (target.pos && target.pos.roomName) || (creep.room && creep.room.name);
@@ -1307,25 +1368,26 @@ roleBeeWorker.Courier = (function () {
   }
 
   // Effective free capacity that respects reservations
-  function _effectiveFree(struct, resourceType) {
+  // Returns a structure's free capacity minus reservations (same tick + PIB).
+  function getEffectiveFreeCapacity(struct, resourceType) {
     resourceType = resourceType || RESOURCE_ENERGY;
     var freeNow = (struct.store && struct.store.getFreeCapacity(resourceType)) || 0;
-    var sameTick = _reservedFor(struct.id) | 0;
+    var sameTick = getReservedEnergyForStructure(struct.id) | 0;
     var roomName = (struct.pos && struct.pos.roomName) || (struct.room && struct.room.name);
-    var pib = roomName ? (_pibSumReserved(roomName, struct.id, resourceType) | 0) : 0;
+    var pib = roomName ? (sumPibReservedEnergy(roomName, struct.id, resourceType) | 0) : 0;
     return Math.max(0, freeNow - sameTick - pib);
   }
 
   // Reserve up to `amount` for this creep (same-tick + PIB)
   function reserveFill(creep, target, amount, resourceType) {
     resourceType = resourceType || RESOURCE_ENERGY;
-    var map = _qrMap();
-    var free = _effectiveFree(target, resourceType);
+    var map = getQueenReservationMap();
+    var free = getEffectiveFreeCapacity(target, resourceType);
     var want = Math.max(0, Math.min(amount | 0, free | 0));
     if (want > 0) {
       map[target.id] = (map[target.id] || 0) + want;
       creep.memory.dropoffId = target.id;
-      _pibReserveFill(creep, target, want, resourceType);
+      reservePibFill(creep, target, want, resourceType);
     }
     return want;
   }
@@ -1341,12 +1403,12 @@ roleBeeWorker.Courier = (function () {
     }
 
     if (rc === OK) {
-      _pibReleaseFill(creep, target, res);
+      releasePibFill(creep, target, res);
     } else if (rc === ERR_FULL) {
-      _pibReleaseFill(creep, target, res);
+      releasePibFill(creep, target, res);
       creep.memory.dropoffId = null;
     } else if (rc !== OK && rc !== ERR_TIRED && rc !== ERR_BUSY) {
-      _pibReleaseFill(creep, target, res);
+      releasePibFill(creep, target, res);
       creep.memory.dropoffId = null;
     }
     return rc;
@@ -1355,19 +1417,21 @@ roleBeeWorker.Courier = (function () {
   // ============================
   // Targeting helpers for DELIVERY
   // ============================
-  function _pickSpawnExt(creep) {
+  // Finds the closest spawn/extension that still needs energy.
+  function pickSpawnOrExtension(creep) {
     var list = creep.room.find(FIND_STRUCTURES, {
       filter: function (s) {
         if (!s.store) return false;
         var t = s.structureType;
         if (t !== STRUCTURE_SPAWN && t !== STRUCTURE_EXTENSION) return false;
-        return _effectiveFree(s, RESOURCE_ENERGY) > 0;
+        return getEffectiveFreeCapacity(s, RESOURCE_ENERGY) > 0;
       }
     });
-    return list.length ? _closestByRange(creep.pos, list) : null;
+    return list.length ? findClosestByRange(creep.pos, list) : null;
   }
 
-  function _pickTower(creep) {
+  // Chooses a tower below the refill threshold with remaining free capacity.
+  function pickLowTower(creep) {
     var list = creep.room.find(FIND_STRUCTURES, {
       filter: function (s) {
         if (s.structureType !== STRUCTURE_TOWER || !s.store) return false;
@@ -1376,23 +1440,36 @@ roleBeeWorker.Courier = (function () {
         if (cap <= 0) return false;
         var pct = used / cap;
         if (pct > CFG.TOWER_REFILL_AT_OR_BELOW) return false; // only if low enough
-        return _effectiveFree(s, RESOURCE_ENERGY) > 0;
+        return getEffectiveFreeCapacity(s, RESOURCE_ENERGY) > 0;
       }
     });
-    return list.length ? _closestByRange(creep.pos, list) : null;
+    return list.length ? findClosestByRange(creep.pos, list) : null;
   }
 
-  function _pickStorage(creep) {
+  // Returns storage if it can still accept energy.
+  function pickStorageSink(creep) {
     var st = creep.room.storage;
     if (!st || !st.store) return null;
-    if (_effectiveFree(st, RESOURCE_ENERGY) <= 0) return null;
+    if (getEffectiveFreeCapacity(st, RESOURCE_ENERGY) <= 0) return null;
     return st;
   }
 
-  // ============================
-  // Memory / state helpers
-  // ============================
+  // -----------------------------
+  // A) Identity + state helpers
+  // -----------------------------
+  function ensureCourierIdentity(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.role = 'Courier';
+    if (!creep.memory.task) creep.memory.task = 'courier';
+  }
+
+  // Memory keys:
+  // - pickupContainerId: current source container we are using
+  // - dropoffId: structure id we plan to fill next
+  // - transferring: boolean flipped by determineCourierState
+
   function determineCourierState(creep) {
+    ensureCourierIdentity(creep);
     // Newer coders sometimes forget to guard both edges of the state machine.
     // We check the "cargo empty" and "cargo full" edges separately to keep it obvious
     // which condition flips us into delivery mode.
@@ -1407,7 +1484,8 @@ roleBeeWorker.Courier = (function () {
     if (creep.memory.pickupContainerId === undefined) creep.memory.pickupContainerId = null;
     if (creep.memory.retargetAt === undefined) creep.memory.retargetAt = 0;
     if (creep.memory.dropoffId === undefined) creep.memory.dropoffId = null;
-    return creep.memory.transferring ? 'DELIVER' : 'COLLECT';
+    creep.memory.state = creep.memory.transferring ? 'DELIVER' : 'COLLECT';
+    return creep.memory.state;
   }
 
   // Break collection targets into small helpers so novice contributors can trace the flow
@@ -1419,7 +1497,7 @@ roleBeeWorker.Courier = (function () {
 
     var best = Game.getObjectById(cache.bestSrcId);
     if (!isGoodContainer(best)) {
-      var srcObjs = _idsToObjects(cache.srcIds);
+      var srcObjs = getCourierObjectsFromIds(cache.srcIds);
       var bestEnergy = -1;
       for (var i = 0; i < srcObjs.length; i++) {
         var c = srcObjs[i];
@@ -1432,7 +1510,7 @@ roleBeeWorker.Courier = (function () {
     }
 
     // Only switch when the new candidate is clearly better so we do not thrash between seats.
-    if (!current || (best && current.id !== best.id && _clearlyBetter(best, current))) {
+    if (!current || (best && current.id !== best.id && isContainerClearlyBetter(best, current))) {
       creep.memory.pickupContainerId = best ? best.id : null;
       creep.memory.retargetAt = now + CFG.RETARGET_COOLDOWN;
       return best;
@@ -1446,7 +1524,7 @@ roleBeeWorker.Courier = (function () {
     });
     if (!nearby || !nearby.length) return false;
 
-    var pile = _closestByRange(creep.pos, nearby);
+    var pile = findClosestByRange(creep.pos, nearby);
     debugSay(creep, '↘️Drop');
     debugDrawLine(creep, pile, CFG.DRAW.DROP_COLOR, "DROP*");
     if (creep.pickup(pile) === ERR_NOT_IN_RANGE) {
@@ -1463,7 +1541,7 @@ roleBeeWorker.Courier = (function () {
       filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) > 0; }
     });
     if (drops.length) {
-      var bestDrop = _closestByRange(creep.pos, drops);
+      var bestDrop = findClosestByRange(creep.pos, drops);
       debugSay(creep, '↘️Drop');
       debugDrawLine(creep, bestDrop, CFG.DRAW.DROP_COLOR, "DROP");
       var pr = creep.pickup(bestDrop);
@@ -1509,7 +1587,7 @@ roleBeeWorker.Courier = (function () {
 
   function tryGraves(creep, roomCache) {
     if (!roomCache.graves || !roomCache.graves.length) return false;
-    var grave = _closestByRange(creep.pos, roomCache.graves);
+    var grave = findClosestByRange(creep.pos, roomCache.graves);
     if (!grave) return false;
 
     debugSay(creep, '↘️Grv');
@@ -1560,11 +1638,11 @@ roleBeeWorker.Courier = (function () {
 
   function ensureDropoffTarget(creep) {
     var target = Game.getObjectById(creep.memory.dropoffId);
-    if (target && _effectiveFree(target, RESOURCE_ENERGY) > 0) return target;
+    if (target && getEffectiveFreeCapacity(target, RESOURCE_ENERGY) > 0) return target;
 
-    target = _pickSpawnExt(creep);
-    if (!target) target = _pickTower(creep);
-    if (!target) target = _pickStorage(creep);
+    target = pickSpawnOrExtension(creep);
+    if (!target) target = pickLowTower(creep);
+    if (!target) target = pickStorageSink(creep);
 
     if (!target) return null;
     creep.memory.dropoffId = target.id;
@@ -1601,7 +1679,7 @@ roleBeeWorker.Courier = (function () {
     // -----------------------------
     collectEnergy: function (creep) {
       var now = Game.time | 0;
-      var rc = _roomCache(creep.room);
+      var rc = getCourierRoomCache(creep.room);
       var container = pickBestSourceContainer(creep, rc, now);
 
       if (tryPickupEnRoute(creep)) return;
@@ -1639,6 +1717,11 @@ roleBeeWorker.Courier = (function () {
   return roleCourier;
 })();
 
+// =====================================================
+// Role: Queen
+// Purpose: Centralised hauler that constantly ferries energy
+// States: WITHDRAW, PICKUP, DELIVER, IDLE (stored in creep.memory._task.type)
+// =====================================================
 roleBeeWorker.Queen = (function () {
   // -----------------------------------------------------------------------------
   // role.Queen.js – economy hauler role
@@ -1704,6 +1787,18 @@ roleBeeWorker.Queen = (function () {
     } catch (e) {}
   }
 
+  // -----------------------------
+  // A) Identity + task/state helpers
+  // -----------------------------
+  function ensureQueenIdentity(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.role = 'Queen';
+    if (!creep.memory.task) creep.memory.task = 'queen';
+  }
+
+  // Memory keys:
+  // - _task: current action envelope (type/targetId/data)
+
   // Function header: ensureTaskSlot(creep)
   // Inputs: creep whose memory we initialise.
   // Output: none
@@ -1734,6 +1829,14 @@ roleBeeWorker.Queen = (function () {
   function clearTask(creep) {
     if (!creep || !creep.memory) return;
     creep.memory._task = null;
+  }
+
+  function determineQueenState(creep) {
+    ensureQueenIdentity(creep);
+    var task = ensureActiveTask(creep);
+    var type = (task && task.type) ? String(task.type).toUpperCase() : 'IDLE';
+    creep.memory.state = type;
+    return type;
   }
 
   // Function header: getReservationBucket()
@@ -2086,72 +2189,70 @@ roleBeeWorker.Queen = (function () {
     return creep.memory._task;
   }
 
-  // Function header: executeTask(creep, task)
-  // Inputs: creep, task envelope currently stored in memory
-  // Output: none; issues actions via BeeActions.* wrappers and MovementManager.
-  // Side-effects: may clearTask (memory mutation), may reserve move intents, may
-  //               draw visuals. Branch per task.type ensures accurate action.
-  // Failure modes: handles missing targets by clearing and returning.
-  function executeTask(creep, task) {
-    if (!task) return;
-    var target = task.targetId ? Game.getObjectById(task.targetId) : null;
-    var priority = CFG.MOVE_PRIORITIES[task.type] || 0;
+  function getQueenTaskPriority(task) {
+    if (!task) return 0;
+    return CFG.MOVE_PRIORITIES[task.type] || 0;
+  }
 
-    if (task.type === 'withdraw') {
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.WITHDRAW, 'WD');
-      debugSay(creep, '📥');
-      // Calls BeeActions.safeWithdraw (BeeActions.js) which queues move intents
-      // via Movement.Manager if not in range.
-      var rc = BeeActions.safeWithdraw(creep, target, RESOURCE_ENERGY, { priority: priority, reusePath: 20 });
-      if (rc === OK) {
-        // When cargo full, release the task to select a delivery target next tick.
-        if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) clearTask(creep);
-      } else if (rc === ERR_NOT_ENOUGH_RESOURCES || rc === ERR_INVALID_TARGET) {
-        // Source dried up or object vanished: clear so we re-scan.
-        clearTask(creep);
-      }
-      return;
-    }
+  function getQueenTaskTarget(task) {
+    if (!task || !task.targetId) return null;
+    return Game.getObjectById(task.targetId);
+  }
 
-    if (task.type === 'pickup') {
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.PICKUP, 'P');
-      debugSay(creep, '🍪');
-      var pc = BeeActions.safePickup(creep, target, { priority: priority, reusePath: 10 });
-      if (pc === OK) {
-        if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) clearTask(creep);
-      } else if (pc === ERR_INVALID_TARGET) {
-        clearTask(creep);
-      }
-      return;
+  function runQueenWithdrawState(creep) {
+    var task = creep.memory._task;
+    var target = getQueenTaskTarget(task);
+    var priority = getQueenTaskPriority(task);
+    if (!task || !target) { clearTask(creep); return; }
+    drawLine(creep, target, CFG.DRAW.WITHDRAW, 'WD');
+    debugSay(creep, '📥');
+    var rc = BeeActions.safeWithdraw(creep, target, RESOURCE_ENERGY, { priority: priority, reusePath: 20 });
+    if (rc === OK) {
+      if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) clearTask(creep);
+    } else if (rc === ERR_NOT_ENOUGH_RESOURCES || rc === ERR_INVALID_TARGET) {
+      clearTask(creep);
     }
+  }
 
-    if (task.type === 'deliver') {
-      if (!target) { clearTask(creep); return; }
-      drawLine(creep, target, CFG.DRAW.DELIVER, 'DL');
-      debugSay(creep, '🚚');
-      // safeTransfer returns OK when energy actually transferred; ERR_FULL when
-      // sink already filled by another hauler.
-      var tr = BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, null, { priority: priority, reusePath: 20 });
-      if (tr === OK) {
-        if ((creep.store[RESOURCE_ENERGY] || 0) === 0) clearTask(creep);
-      } else if (tr === ERR_FULL || tr === ERR_INVALID_TARGET) {
-        clearTask(creep);
-      }
-      return;
+  function runQueenPickupState(creep) {
+    var task = creep.memory._task;
+    var target = getQueenTaskTarget(task);
+    var priority = getQueenTaskPriority(task);
+    if (!task || !target) { clearTask(creep); return; }
+    drawLine(creep, target, CFG.DRAW.PICKUP, 'P');
+    debugSay(creep, '🍪');
+    var pc = BeeActions.safePickup(creep, target, { priority: priority, reusePath: 10 });
+    if (pc === OK) {
+      if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) clearTask(creep);
+    } else if (pc === ERR_INVALID_TARGET) {
+      clearTask(creep);
     }
+  }
 
-    if (task.type === 'idle') {
-      var pos = task.data && task.data.pos;
-      if (!pos) return;
-      var anchor = new RoomPosition(pos.x, pos.y, pos.roomName);
-      drawLine(creep, anchor, CFG.DRAW.IDLE, 'ID');
-      // Idle behaviour simply holds position near anchor, giving way when
-      // movement manager reuses path = 30 for stable parking.
-      MovementManager.request(creep, anchor, priority, { range: task.data.range || 1, reusePath: 30 });
-      return;
+  function runQueenDeliverState(creep) {
+    var task = creep.memory._task;
+    var target = getQueenTaskTarget(task);
+    var priority = getQueenTaskPriority(task);
+    if (!task || !target) { clearTask(creep); return; }
+    drawLine(creep, target, CFG.DRAW.DELIVER, 'DL');
+    debugSay(creep, '🚚');
+    var tr = BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, null, { priority: priority, reusePath: 20 });
+    if (tr === OK) {
+      if ((creep.store[RESOURCE_ENERGY] || 0) === 0) clearTask(creep);
+    } else if (tr === ERR_FULL || tr === ERR_INVALID_TARGET) {
+      clearTask(creep);
     }
+  }
+
+  function runQueenIdleState(creep) {
+    var task = creep.memory._task;
+    if (!task || task.type !== 'idle') return;
+    var pos = task.data && task.data.pos;
+    if (!pos) return;
+    var anchor = new RoomPosition(pos.x, pos.y, pos.roomName);
+    var priority = getQueenTaskPriority(task);
+    drawLine(creep, anchor, CFG.DRAW.IDLE, 'ID');
+    MovementManager.request(creep, anchor, priority, { range: task.data.range || 1, reusePath: 30 });
   }
 
   var roleQueen = {
@@ -2165,22 +2266,32 @@ roleBeeWorker.Queen = (function () {
     // Failure modes: gracefully exits if creep is spawning or invalid.
     run: function (creep) {
       if (!creep || creep.spawning) return;
-      var task = ensureActiveTask(creep);
-      executeTask(creep, task);
+      var state = determineQueenState(creep);
+
+      if (state === 'WITHDRAW') { runQueenWithdrawState(creep); return; }
+      if (state === 'PICKUP')   { runQueenPickupState(creep);   return; }
+      if (state === 'DELIVER')  { runQueenDeliverState(creep);  return; }
+      runQueenIdleState(creep);
     }
   };
 
   return roleQueen;
 })();
 
+// =====================================================
+// Role: Upgrader
+// Purpose: Keep the controller upgraded while signing it and refuelling nearby
+// States: REFUEL (gather energy) and UPGRADE (spend on controller)
+// =====================================================
 roleBeeWorker.Upgrader = (function () {
-  // --------------------------------------------
-  // Upgrader – controller worker with REFUEL vs UPGRADE states
-  // --------------------------------------------
+  // -----------------------------
+  // A) Tiny helpers (room lookups, signing)
+  // -----------------------------
   /** =========================
    *  Tiny debug helpers
    *  ========================= */
-  function _roomOf(pos) { return pos && Game.rooms[pos.roomName]; }
+  // Returns the room object for a given position if visible.
+  function getRoomOfPos(pos) { return pos && Game.rooms[pos.roomName]; }
 
   /** =========================
    *  Travel wrapper (with path line)
@@ -2199,7 +2310,7 @@ roleBeeWorker.Upgrader = (function () {
       var res = creep.signController(controller, msg);
       if (res === OK) {
         debugSay(creep, "🖊️");
-        debugRing(_roomOf(controller.pos), controller.pos, CFG.DRAW.CTRL, "signed");
+        debugRing(getRoomOfPos(controller.pos), controller.pos, CFG.DRAW.CTRL, "signed");
         console.log("Upgrader " + creep.name + " updated the controller sign.");
       } else {
         console.log("Upgrader " + creep.name + " failed to update the controller sign. Error: " + res);
@@ -2225,7 +2336,7 @@ roleBeeWorker.Upgrader = (function () {
       }
     }
     if (droppedResource) {
-      var dropRoom = _roomOf(droppedResource.pos);
+      var dropRoom = getRoomOfPos(droppedResource.pos);
       debugRing(dropRoom, droppedResource.pos, CFG.DRAW.DROP, 'drop');
       debugDrawLine(creep, droppedResource, CFG.DRAW.DROP, 'DROP');
       var pr = creep.pickup(droppedResource);
@@ -2249,7 +2360,7 @@ roleBeeWorker.Upgrader = (function () {
 
     run: function (creep) {
       if (!creep) return;
-      ensureRoleIdentity(creep);
+      ensureUpgraderIdentity(creep);
       var state = determineUpgraderState(creep);
 
       if (state === 'UPGRADE') {
@@ -2260,9 +2371,15 @@ roleBeeWorker.Upgrader = (function () {
     }
   };
 
-  function ensureRoleIdentity(creep) {
-    if (creep.memory && !creep.memory.role) creep.memory.role = 'Upgrader';
+  function ensureUpgraderIdentity(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.role = 'Upgrader';
+    if (!creep.memory.task) creep.memory.task = 'upgrader';
   }
+
+  // Memory keys:
+  // - targetDroppedEnergyId: id of dropped energy we are heading toward
+  // - upgrading: boolean indicating REFUEL vs UPGRADE mode
 
   function determineUpgraderState(creep) {
     if (creep.memory.upgrading && creep.store[RESOURCE_ENERGY] === 0) {
@@ -2273,9 +2390,13 @@ roleBeeWorker.Upgrader = (function () {
       creep.memory.upgrading = true;
       debugSay(creep, "⚡ upgrade");
     }
-    return creep.memory.upgrading ? 'UPGRADE' : 'REFUEL';
+    creep.memory.state = creep.memory.upgrading ? 'UPGRADE' : 'REFUEL';
+    return creep.memory.state;
   }
 
+  // -----------------------------
+  // B) Upgrade phase
+  // -----------------------------
   function runUpgradePhase(creep) {
     var controller = creep.room.controller;
     if (!controller) return;
@@ -2283,7 +2404,7 @@ roleBeeWorker.Upgrader = (function () {
     if (shouldPauseAtSafeRCL8(controller)) {
       checkAndUpdateControllerSign(creep, controller);
       debugSay(creep, "⏸");
-      debugRing(_roomOf(controller.pos), controller.pos, CFG.DRAW.CTRL, "safe");
+      debugRing(getRoomOfPos(controller.pos), controller.pos, CFG.DRAW.CTRL, "safe");
       return;
     }
 
@@ -2292,7 +2413,7 @@ roleBeeWorker.Upgrader = (function () {
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "CTRL");
       creep.travelTo(controller, { range: 3, reusePath: CFG.PATH_REUSE });
     } else if (ur === OK) {
-      debugRing(_roomOf(controller.pos), controller.pos, CFG.DRAW.CTRL, "UP");
+      debugRing(getRoomOfPos(controller.pos), controller.pos, CFG.DRAW.CTRL, "UP");
     }
     checkAndUpdateControllerSign(creep, controller);
   }
@@ -2303,6 +2424,9 @@ roleBeeWorker.Upgrader = (function () {
     return (controller.ticksToDowngrade | 0) > CFG.RCL8_SAFE_TTL;
   }
 
+  // -----------------------------
+  // C) Refuel phase
+  // -----------------------------
   function runRefuelPhase(creep) {
     if (tryLinkPull(creep)) return;
     tryToolboxSweep(creep);
@@ -2324,7 +2448,7 @@ roleBeeWorker.Upgrader = (function () {
     });
     if (!linkNearController) return false;
     var lr = creep.withdraw(linkNearController, RESOURCE_ENERGY);
-    var linkRoom = _roomOf(linkNearController.pos);
+    var linkRoom = getRoomOfPos(linkNearController.pos);
     debugRing(linkRoom, linkNearController.pos, CFG.DRAW.LINK, "LINK");
     debugDrawLine(creep, linkNearController, CFG.DRAW.LINK, "LINK");
     if (lr === ERR_NOT_IN_RANGE) {
@@ -2344,7 +2468,7 @@ roleBeeWorker.Upgrader = (function () {
   function tryWithdrawStorage(creep) {
     var stor = creep.room.storage;
     if (!stor || !stor.store || (stor.store[RESOURCE_ENERGY] | 0) <= 0) return false;
-    debugRing(_roomOf(stor.pos), stor.pos, CFG.DRAW.STORE, "STO");
+    debugRing(getRoomOfPos(stor.pos), stor.pos, CFG.DRAW.STORE, "STO");
     debugDrawLine(creep, stor, CFG.DRAW.STORE, "STO");
     var sr = creep.withdraw(stor, RESOURCE_ENERGY);
     if (sr === ERR_NOT_IN_RANGE) {
@@ -2361,7 +2485,7 @@ roleBeeWorker.Upgrader = (function () {
       }
     });
     if (!containerWithEnergy) return false;
-    debugRing(_roomOf(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT");
+    debugRing(getRoomOfPos(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT");
     debugDrawLine(creep, containerWithEnergy, CFG.DRAW.CONT, "CONT");
     var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY);
     if (cr === ERR_NOT_IN_RANGE) {
@@ -2372,13 +2496,12 @@ roleBeeWorker.Upgrader = (function () {
 })();
 
 
-// -----------------------------------------------------------------------------
-// Inline legacy role.Luna (auto-generated bundle)
-// -----------------------------------------------------------------------------
+// =====================================================
+// Role: Luna
+// Purpose: Remote forager that claims a distant source, harvests, then returns
+// States: UNASSIGNED, TRAVEL, HARVEST, RETURN
+// =====================================================
 roleBeeWorker.Luna = (function () {
-  // --------------------------------------------
-  // Luna – remote forager states: RETURN → ASSIGN/TRAVEL → HARVEST
-  // --------------------------------------------
   var module = { exports: {} };
   var exports = module.exports;
   // ============================
@@ -2416,12 +2539,14 @@ roleBeeWorker.Luna = (function () {
     var n = id.length; return id.substr(n - 6);
   }
 
-  function _roomMem(roomName){
+  // Returns the Memory.rooms[roomName] bucket, creating it if missing.
+  function getRoomMemoryBucket(roomName){
     Memory.rooms = Memory.rooms || {};
     return (Memory.rooms[roomName] = (Memory.rooms[roomName] || {}));
   }
-  function _sourceMem(roomName, sid) {
-    var rm = _roomMem(roomName);
+  // Returns the per-source memory bucket for a given room and source id.
+  function getSourceMemory(roomName, sid) {
+    var rm = getRoomMemoryBucket(roomName);
     rm.sources = rm.sources || {};
     return (rm.sources[sid] = (rm.sources[sid] || {}));
   }
@@ -2429,7 +2554,7 @@ roleBeeWorker.Luna = (function () {
   // mark activity each time we touch/own/harvest a source
   function touchSourceActive(roomName, sid) {
     if (!roomName || !sid) return;
-    var srec = _sourceMem(roomName, sid);
+    var srec = getSourceMemory(roomName, sid);
     srec.lastActive = Game.time;
   }
 
@@ -2438,7 +2563,7 @@ roleBeeWorker.Luna = (function () {
     if (!source || !source.pos || !source.room) return;
 
     var roomName = source.pos.roomName;
-    var srec = _sourceMem(roomName, source.id);
+    var srec = getSourceMemory(roomName, source.id);
 
     // reuse previous flag if it still matches this tile
     if (srec.flagName) {
@@ -2484,7 +2609,7 @@ roleBeeWorker.Luna = (function () {
   function ensureControllerFlag(ctrl){
     if (!ctrl) return;
     var roomName = ctrl.pos.roomName;
-    var rm = _roomMem(roomName);
+    var rm = getRoomMemoryBucket(roomName);
 
     var expect = 'Reserve:' + roomName;
 
@@ -2511,7 +2636,7 @@ roleBeeWorker.Luna = (function () {
   }
 
   function pruneControllerFlagIfNoForagers(roomName, roomCountMap){
-    var rm = _roomMem(roomName);
+    var rm = getRoomMemoryBucket(roomName);
     var fname = rm.controllerFlagName;
     if (!fname) return;
 
@@ -2528,17 +2653,26 @@ roleBeeWorker.Luna = (function () {
   // ============================
   // Avoid-list (per creep)
   // ============================
-  function _ensureAvoid(creep){ if (!creep.memory._avoid) creep.memory._avoid = {}; return creep.memory._avoid; }
-  function shouldAvoid(creep, sid){ var a=_ensureAvoid(creep); var t=a[sid]; return (typeof t==='number' && Game.time<t); }
-  function markAvoid(creep, sid, ttl){ var a=_ensureAvoid(creep); a[sid] = Game.time + (ttl!=null?ttl:AVOID_TTL); }
-  function avoidRemaining(creep, sid){ var a=_ensureAvoid(creep); var t=a[sid]; if (typeof t!=='number') return 0; var left=t-Game.time; return left>0?left:0; }
+  // Ensures we have a creep.memory._avoid bucket to track stuck tiles.
+  function ensureAvoidanceMemory(creep){
+    if (!creep.memory._avoid) creep.memory._avoid = {};
+    return creep.memory._avoid;
+  }
+  function shouldAvoid(creep, sid){ var a=ensureAvoidanceMemory(creep); var t=a[sid]; return (typeof t==='number' && Game.time<t); }
+  function markAvoid(creep, sid, ttl){ var a=ensureAvoidanceMemory(creep); a[sid] = Game.time + (ttl!=null?ttl:AVOID_TTL); }
+  function avoidRemaining(creep, sid){ var a=ensureAvoidanceMemory(creep); var t=a[sid]; if (typeof t!=='number') return 0; var left=t-Game.time; return left>0?left:0; }
 
   // ============================
   // Per-tick *claim* (same-tick contention guard)
   // ============================
-  function _claimTable(){ var sc=Memory._sourceClaim; if(!sc||sc.t!==Game.time){ Memory._sourceClaim={t:Game.time,m:{}}; } return Memory._sourceClaim.m; }
+  // Shared reservation table for remote mining seat claims (cleared each tick).
+  function getClaimTable(){
+    var sc=Memory._sourceClaim;
+    if(!sc||sc.t!==Game.time){ Memory._sourceClaim={t:Game.time,m:{}}; }
+    return Memory._sourceClaim.m;
+  }
   function tryClaimSourceForTick(creep, sid){
-    var m=_claimTable(), cur=m[sid];
+    var m=getClaimTable(), cur=m[sid];
     if (!cur){ m[sid]=creep.name; return true; }
     if (creep.name < cur){ m[sid]=creep.name; return true; }
     return cur===creep.name;
@@ -2548,7 +2682,8 @@ roleBeeWorker.Luna = (function () {
   // remoteAssignments model
   // ============================
   function ensureAssignmentsMem(){ if(!Memory.remoteAssignments) Memory.remoteAssignments={}; return Memory.remoteAssignments; }
-  function _maEnsure(entry, roomName){
+  // Normalises a mining assignment entry so later logic can rely on keys existing.
+  function ensureMiningAssignment(entry, roomName){
     if (!entry || typeof entry !== 'object') entry = { count: 0, owner: null, roomName: roomName||null, since: null };
     if (typeof entry.count !== 'number') entry.count = (entry.count|0);
     if (!('owner' in entry)) entry.owner = null;
@@ -2568,21 +2703,21 @@ roleBeeWorker.Luna = (function () {
     return e.owner || null;
   }
   function maSetOwner(memAssign, sid, owner, roomName){
-    var e = _maEnsure(memAssign[sid], roomName);
+    var e = ensureMiningAssignment(memAssign[sid], roomName);
     e.owner = owner; e.roomName = roomName || e.roomName; e.since = Game.time;
     memAssign[sid] = e;
     if (e.roomName) touchSourceActive(e.roomName, sid);
   }
   function maClearOwner(memAssign, sid){
-    var e = _maEnsure(memAssign[sid], null);
+    var e = ensureMiningAssignment(memAssign[sid], null);
     e.owner = null; e.since = null;
     memAssign[sid] = e;
   }
   function maInc(memAssign, sid, roomName){
-    var e = _maEnsure(memAssign[sid], roomName); e.count = (e.count|0) + 1; memAssign[sid]=e;
+    var e = ensureMiningAssignment(memAssign[sid], roomName); e.count = (e.count|0) + 1; memAssign[sid]=e;
   }
   function maDec(memAssign, sid){
-    var e = _maEnsure(memAssign[sid], null); e.count = Math.max(0,(e.count|0)-1); memAssign[sid]=e;
+    var e = ensureMiningAssignment(memAssign[sid], null); e.count = Math.max(0,(e.count|0)-1); memAssign[sid]=e;
   }
 
   // ============================
@@ -2590,7 +2725,7 @@ roleBeeWorker.Luna = (function () {
   // ============================
   function resolveOwnershipForSid(sid){
     var memAssign = ensureAssignmentsMem();
-    var e = _maEnsure(memAssign[sid], null);
+    var e = ensureMiningAssignment(memAssign[sid], null);
 
     var contenders = [];
     for (var name in Game.creeps){
@@ -2630,7 +2765,7 @@ roleBeeWorker.Luna = (function () {
     var memAssign = ensureAssignmentsMem();
 
     for (var sid in memAssign){
-      memAssign[sid] = _maEnsure(memAssign[sid], memAssign[sid].roomName||null);
+      memAssign[sid] = ensureMiningAssignment(memAssign[sid], memAssign[sid].roomName||null);
       memAssign[sid].count = 0;
     }
 
@@ -2641,7 +2776,7 @@ roleBeeWorker.Luna = (function () {
       if (c.memory.task === 'luna') {
         if (c.memory.sourceId){
           var sid2 = c.memory.sourceId;
-          var e2 = _maEnsure(memAssign[sid2], c.memory.targetRoom||null);
+          var e2 = ensureMiningAssignment(memAssign[sid2], c.memory.targetRoom||null);
           e2.count = (e2.count|0) + 1;
           memAssign[sid2] = e2;
         }
@@ -2706,7 +2841,7 @@ roleBeeWorker.Luna = (function () {
         var flagName = srec.flagName;
         if (!flagName) continue;
 
-        var e = _maEnsure(memAssign[sid], rm.sources[sid].roomName || roomName);
+        var e = ensureMiningAssignment(memAssign[sid], rm.sources[sid].roomName || roomName);
         var count  = e.count|0;
         var owner  = e.owner || null;
         var last   = srec.lastActive|0;
@@ -2820,7 +2955,7 @@ roleBeeWorker.Luna = (function () {
 
     for (var i=0;i<rooms.length;i++){
       var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
-      var rm = _roomMem(rn);
+      var rm = getRoomMemoryBucket(rn);
       if (rm.hostile) continue;
       if (isRoomLockedByInvaderCore(rn)) continue;
 
@@ -2830,11 +2965,11 @@ roleBeeWorker.Luna = (function () {
       var sources = room.find(FIND_SOURCES);
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
-        var e=_maEnsure(memAssign[s.id], rn);
+        var e=ensureMiningAssignment(memAssign[s.id], rn);
         if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
         var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
         ensureSourceFlag(s);
-        var srec = _sourceMem(rn, s.id); srec.x = s.pos.x; srec.y = s.pos.y;
+        var srec = getSourceMemory(rn, s.id); srec.x = s.pos.x; srec.y = s.pos.y;
         memAssign[s.id] = e;
       }
     }
@@ -2845,7 +2980,7 @@ roleBeeWorker.Luna = (function () {
   // ============================
   function isRoomLockedByInvaderCore(roomName){
     if (!roomName) return false;
-    var rm = _roomMem(roomName);
+    var rm = getRoomMemoryBucket(roomName);
     var now = Game.time, room = Game.rooms[roomName];
 
     if (room){
@@ -2906,7 +3041,7 @@ roleBeeWorker.Luna = (function () {
     if (!candidates.length){
       for (i=0;i<neighborRooms.length;i++){
         rn=neighborRooms[i]; if (isRoomLockedByInvaderCore(rn)) continue;
-        var rm = _roomMem(rn); if (!rm || !rm.sources) continue;
+        var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
         for (var sid in rm.sources){
           if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
           var ownerNow2 = maOwner(memAssign, sid);
@@ -3059,7 +3194,11 @@ roleBeeWorker.Luna = (function () {
   // Teaching helpers for the run loop
   // ============================
   function ensureLunaIdentity(creep) {
-    if (creep && creep.memory && creep.memory.task === 'remoteharvest') {
+    if (!creep || !creep.memory) return;
+    creep.memory.role = 'Luna';
+    if (creep.memory.task === 'remoteharvest') {
+      creep.memory.task = 'luna';
+    } else if (!creep.memory.task) {
       creep.memory.task = 'luna';
     }
   }
@@ -3139,11 +3278,18 @@ roleBeeWorker.Luna = (function () {
     trackMovementBreadcrumb(creep);
   }
 
+  // Memory keys:
+  // - sourceId: remote source assigned this tick
+  // - targetRoom: room name for the assignment
+  // - returning: boolean toggled when full to head home
+
   function determineLunaState(creep) {
-    if (creep.memory.returning) return 'RETURN';
-    if (!creep.memory.targetRoom || !creep.memory.sourceId) return 'UNASSIGNED';
-    if (creep.pos.roomName !== creep.memory.targetRoom) return 'TRAVEL';
-    return 'HARVEST';
+    var state = 'HARVEST';
+    if (creep.memory.returning) state = 'RETURN';
+    else if (!creep.memory.targetRoom || !creep.memory.sourceId) state = 'UNASSIGNED';
+    else if (creep.pos.roomName !== creep.memory.targetRoom) state = 'TRAVEL';
+    creep.memory.state = state;
+    return state;
   }
 
   // ============================
@@ -3209,7 +3355,7 @@ roleBeeWorker.Luna = (function () {
         }
       }
 
-      var tmem = _roomMem(creep.memory.targetRoom);
+      var tmem = getRoomMemoryBucket(creep.memory.targetRoom);
       if (tmem && tmem.hostile){
         console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
         debugSay(creep, '⚠️HOST');
@@ -3221,7 +3367,16 @@ roleBeeWorker.Luna = (function () {
       var ctl = targetRoomObj && targetRoomObj.controller;
       if (ctl) { ensureControllerFlag(ctl); debugRing(targetRoomObj, ctl.pos, CFG.DRAW.TRAVEL_COLOR, "CTRL"); }
 
-      roleLuna.harvestSource(creep);
+      state = determineLunaState(creep);
+      if (state === 'HARVEST') {
+        roleLuna.harvestSource(creep);
+        return;
+      }
+      if (state === 'TRAVEL') {
+        travelToAssignedRoom(creep);
+        return;
+      }
+      idleAtAnchor(creep, 'IDLE');
     },
 
     // ---- Legacy fallback (no vision) — now radius-bounded ----
@@ -3260,7 +3415,7 @@ roleBeeWorker.Luna = (function () {
         if (!inRadius[rn]) continue;
         if (isRoomLockedByInvaderCore(rn)) continue;
 
-        var rm=_roomMem(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
+        var rm=getRoomMemoryBucket(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
 
         var count=0;
         for (var name in Game.creeps){
@@ -3280,7 +3435,7 @@ roleBeeWorker.Luna = (function () {
         if (!least){ if (Game.time%25===0) console.log('🚫 Forager '+creep.name+' found no suitable room with unclaimed sources.'); return; }
         creep.memory.targetRoom = least;
 
-        var roomMemory = _roomMem(creep.memory.targetRoom);
+        var roomMemory = getRoomMemoryBucket(creep.memory.targetRoom);
         var sid = roleLuna.assignSource(creep, roomMemory);
         if (sid){
           creep.memory.sourceId = sid;
@@ -3439,11 +3594,11 @@ roleBeeWorker.Luna = (function () {
       if (!src){ if (Game.time%25===0) console.log('Source not found for '+creep.name); releaseAssignment(creep); return; }
 
       ensureSourceFlag(src);
-      var srec = _sourceMem(creep.room.name, sid); srec.x = src.pos.x; srec.y = src.pos.y;
+      var srec = getSourceMemory(creep.room.name, sid); srec.x = src.pos.x; srec.y = src.pos.y;
 
       if (creep.room.controller) ensureControllerFlag(creep.room.controller);
 
-      var rm = _roomMem(creep.memory.targetRoom);
+      var rm = getRoomMemoryBucket(creep.memory.targetRoom);
       rm.sources = rm.sources || {};
       if (rm.sources[sid] && rm.sources[sid].entrySteps == null){
         var res = PathFinder.search(creep.pos, { pos: src.pos, range: 1 }, { plainCost: PLAIN_COST, swampCost: SWAMP_COST, maxOps: MAX_PF_OPS });
@@ -3477,10 +3632,12 @@ roleBeeWorker.Luna = (function () {
 // -----------------------------------------------------------------------------
 // Inline legacy role.Scout (auto-generated bundle)
 // -----------------------------------------------------------------------------
+// =====================================================
+// Role: Scout
+// Purpose: Explore rooms around home and gather intel
+// States: ARRIVAL, TRAVEL, ASSIGN, IDLE
+// =====================================================
 roleBeeWorker.Scout = (function () {
-  // --------------------------------------------
-  // Scout – cycles through ARRIVAL, TRAVEL, ASSIGN, IDLE states
-  // --------------------------------------------
   var module = { exports: {} };
   var exports = module.exports;
   /** =========================
@@ -3619,7 +3776,8 @@ roleBeeWorker.Scout = (function () {
     var lastScan = (r && r.intel && r.intel.lastScanAt) ? r.intel.lastScanAt : -Infinity;
     return (Game.time - lastScan) >= INTEL_INTERVAL;
   }
-  function _getMyUsername(creep) {
+  // Determines our username via owner fields on creeps/spawns/rooms.
+  function getMyUsername(creep) {
     if (creep && creep.owner && creep.owner.username) return creep.owner.username;
     for (var name in Game.spawns) {
       var sp = Game.spawns[name];
@@ -3633,15 +3791,17 @@ roleBeeWorker.Scout = (function () {
     }
     return null;
   }
-  function _intelFor(roomName) {
+  // Fetches cached intel for a room if it exists in Memory.
+  function getRoomIntel(roomName) {
     if (!Memory.rooms) return null;
     var mr = Memory.rooms[roomName];
     return (mr && mr.intel) ? mr.intel : null;
   }
-  function _shouldSkipPlayerRoom(roomName, creep) {
-    var intel = _intelFor(roomName);
+  // True if the room is owned/reserved by another non-Invader player.
+  function shouldScoutSkipPlayerRoom(roomName, creep) {
+    var intel = getRoomIntel(roomName);
     if (!intel) return false;
-    var myName = _getMyUsername(creep);
+    var myName = getMyUsername(creep);
     if (intel.owner && intel.owner !== 'Invader' && intel.owner !== myName) return true;
     if (intel.reservation && intel.reservation !== 'Invader' && intel.reservation !== myName) return true;
     return false;
@@ -3767,7 +3927,14 @@ roleBeeWorker.Scout = (function () {
   }
 
   // ---------- Scout memory ----------
+  function ensureScoutIdentity(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.role = 'Scout';
+    if (!creep.memory.task) creep.memory.task = 'scout';
+  }
+
   function ensureScoutMem(creep) {
+    ensureScoutIdentity(creep);
     if (!creep.memory.scout) creep.memory.scout = {};
     var m = creep.memory.scout;
 
@@ -3848,13 +4015,14 @@ roleBeeWorker.Scout = (function () {
     for (var i = 0; i < cohort.length; i++) if (cohort[i].name === creep.name) return { idx: i, n: cohort.length };
     return { idx: (creep.name.charCodeAt(0) + creep.name.length) % 3, n: 3 };
   }
-  function _scoutClaimTable() {
+  // Shared tick-local map to avoid multiple scouts targeting same room.
+  function getScoutClaimTable() {
     var sc = Memory._scoutClaim;
     if (!sc || sc.t !== Game.time) Memory._scoutClaim = { t: Game.time, m: {} };
     return Memory._scoutClaim.m;
   }
   function tryClaimRoomThisTick(creep, roomName) {
-    var m = _scoutClaimTable();
+    var m = getScoutClaimTable();
     var cur = m[roomName];
     if (!cur) { m[roomName] = creep.name; return true; }
     if (creep.name < cur) { m[roomName] = creep.name; return true; }
@@ -3873,7 +4041,7 @@ roleBeeWorker.Scout = (function () {
       var layer = getRingCached(home, r);
       for (var i = 0; i < layer.length; i++) {
         var rn = layer[i];
-        if (Game.map.getRoomLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn) && !_shouldSkipPlayerRoom(rn, creep)) {
+        if (Game.map.getRoomLinearDistance(home, rn) <= EXPLORE_RADIUS && !isBlockedRecently(rn) && !shouldScoutSkipPlayerRoom(rn, creep)) {
           all.push(rn);
         }
       }
@@ -3929,7 +4097,7 @@ roleBeeWorker.Scout = (function () {
         if (okRoomName(rn2) &&
             Game.map.getRoomLinearDistance(home, rn2) <= EXPLORE_RADIUS &&
             !isBlockedRecently(rn2) &&
-            !_shouldSkipPlayerRoom(rn2, creep)) filt.push(rn2);
+            !shouldScoutSkipPlayerRoom(rn2, creep)) filt.push(rn2);
       }
       queue = filt;
     }
@@ -4093,11 +4261,18 @@ roleBeeWorker.Scout = (function () {
     creep.travelTo(new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE, ignoreCreeps: true });
   }
 
+  // Memory keys:
+  // - scout.home: room we expand around
+  // - targetRoom: current destination
+  // - nextHop: cached hop toward target
+
   function determineScoutState(creep, mem) {
-    if (creep.memory.targetRoom && creep.room && creep.room.name === creep.memory.targetRoom) return 'ARRIVAL';
-    if (creep.memory.targetRoom) return 'TRAVEL';
-    if (mem.queue && mem.queue.length) return 'ASSIGN';
-    return 'IDLE';
+    var state = 'IDLE';
+    if (creep.memory.targetRoom && creep.room && creep.room.name === creep.memory.targetRoom) state = 'ARRIVAL';
+    else if (creep.memory.targetRoom) state = 'TRAVEL';
+    else if (mem.queue && mem.queue.length) state = 'ASSIGN';
+    creep.memory.state = state;
+    return state;
   }
 
   // ---------- API ----------
@@ -4133,30 +4308,29 @@ roleBeeWorker.Scout = (function () {
   return module.exports;
 })();
 
-// -----------------------------------------------------------------------------
-// Inline legacy role.Trucker (auto-generated bundle)
-// -----------------------------------------------------------------------------
+// =====================================================
+// Role: Trucker
+// Purpose: Scoop dropped resources at a pickup flag and haul them home
+// States: COLLECT (at flag) and RETURN (deliver to storage)
+// =====================================================
 roleBeeWorker.Trucker = (function () {
-  // --------------------------------------------
-  // Trucker – COLLECT at pickup flag vs RETURN to storage
-  // --------------------------------------------
   var module = { exports: {} };
   var exports = module.exports;
   // ============================
   // Tiny debug helpers
   // ============================
-  function _say(creep, msg) {
+  function truckerSay(creep, msg) {
     if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
   }
-  function _line(room, a, b, color) {
+  function truckerDrawLine(room, a, b, color) {
     if (!CFG.DEBUG_DRAW || !room || !a || !b) return;
     room.visual.line((a.pos || a), (b.pos || b), { color: color || "#fff", opacity: 0.6, width: 0.08 });
   }
-  function _ring(room, pos, color) {
+  function truckerDrawRing(room, pos, color) {
     if (!CFG.DEBUG_DRAW || !room || !pos) return;
     room.visual.circle((pos.pos || pos), { radius: 0.45, stroke: color || "#fff", fill: "transparent", opacity: 0.5 });
   }
-  function _label(room, pos, text, color) {
+  function truckerDrawLabel(room, pos, text, color) {
     if (!CFG.DEBUG_DRAW || !room || !pos || !text) return;
     room.visual.text(text, (pos.pos || pos).x, (pos.pos || pos).y - 0.6, { color: color || "#ddd", font: 0.8, align: "center" });
   }
@@ -4164,21 +4338,13 @@ roleBeeWorker.Trucker = (function () {
   // ============================
   // Small utilities
   // ============================
-  function _beeTravel(creep, dest, range) {
-    // Normalize to BeeToolbox.BeeTravel(creep, target, {range, reusePath})
-    try {
-      BeeToolbox.BeeTravel(creep, (dest.pos || dest), { range: (range != null ? range : 1), reusePath: CFG.PATH_REUSE });
-    } catch (e) {
-      // absolute fallback
-      creep.moveTo((dest.pos || dest), { reusePath: CFG.PATH_REUSE });
-    }
-  }
-
-  function _firstSpawnRoomFallback(creep) {
+  // Returns a fallback room name (first spawn or neutral park) if home missing.
+  function getFirstSpawnRoomFallback(creep) {
     return Memory.firstSpawnRoom || (creep && creep.room && creep.room.name) || CFG.PARK_POS.roomName;
   }
 
-  function _primaryStoreType(creep) {
+  // Picks the resource type we carry the most of so deposits stay tidy.
+  function getPrimaryStoreType(creep) {
     // choose the resource we carry the most of (for deposit order)
     if (!creep || !creep.store) return null;
     var best = null, amt = 0, k;
@@ -4189,7 +4355,8 @@ roleBeeWorker.Trucker = (function () {
     return best;
   }
 
-  function _findDroppedNear(pos, radius) {
+  // Finds dropped resources near a position, prioritising energy piles.
+  function findDroppedResourcesNear(pos, radius) {
     if (!pos) return [];
     // If ALLOW_NON_ENERGY: include all resources >= MIN_DROPPED
     // else: energy only
@@ -4213,7 +4380,8 @@ roleBeeWorker.Trucker = (function () {
     return arr;
   }
 
-  function _depositTargets(creep, resType) {
+  // Lists viable deposit structures for the requested resource type.
+  function getDepositTargets(creep, resType) {
     // Return best deposit structures for resType (ordered)
     // ENERGY: storage > link (optional) > spawns/extensions > terminal > container
     // NON-ENERGY: storage > terminal
@@ -4274,7 +4442,9 @@ roleBeeWorker.Trucker = (function () {
   function determineTruckerState(creep) {
     ensureRoleDefaults(creep);
     updateReturnState(creep);
-    return creep.memory.returning ? 'RETURN' : 'COLLECT';
+    var state = creep.memory.returning ? 'RETURN' : 'COLLECT';
+    creep.memory.state = state;
+    return state;
   }
 
   // ============================
@@ -4285,42 +4455,42 @@ roleBeeWorker.Trucker = (function () {
 
     var state = determineTruckerState(creep);
     if (state === 'RETURN') {
-      _returnToStorage(creep);
+      returnTruckerToStorage(creep);
       return;
     }
-    _collectFromFlagRoom(creep);
+    collectFromFlagRoom(creep);
   }
 
   // ----------------------------
   // A) Collect phase
   // ----------------------------
-  function _collectFromFlagRoom(creep) {
+  function collectFromFlagRoom(creep) {
     var flag = Game.flags[creep.memory.pickupFlag];
 
     if (!flag) {
       // No flag present → go park at home
-      var home = creep.memory.homeRoom || _firstSpawnRoomFallback(creep);
+      var home = creep.memory.homeRoom || getFirstSpawnRoomFallback(creep);
       var park = new RoomPosition(25, 25, home);
-      _say(creep, "❓Flag");
-      _label(creep.room, creep.pos, "No flag", CFG.DRAW.IDLE);
+      truckerSay(creep, "❓Flag");
+      truckerDrawLabel(creep.room, creep.pos, "No flag", CFG.DRAW.IDLE);
       if (!creep.pos.inRangeTo(park, 2)) {
-        _line(creep.room, creep.pos, park, CFG.DRAW.TRAVEL);
-        _beeTravel(creep, park, 2);
+        truckerDrawLine(creep.room, creep.pos, park, CFG.DRAW.TRAVEL);
+        creep.travelTo(park, { range: 2, reusePath: CFG.PATH_REUSE });
       }
       return;
     }
 
     // Cross-room travel to flag
     if (creep.room.name !== flag.pos.roomName) {
-      _say(creep, "🚛➡️📍");
-      _line(creep.room, creep.pos, flag.pos, CFG.DRAW.TRAVEL);
-      _beeTravel(creep, flag.pos, 1);
+      truckerSay(creep, "🚛➡️📍");
+      truckerDrawLine(creep.room, creep.pos, flag.pos, CFG.DRAW.TRAVEL);
+      creep.travelTo(flag.pos, { range: 1, reusePath: CFG.PATH_REUSE });
       return;
     }
 
     // Visual anchor for the flag
-    _ring(creep.room, flag.pos, CFG.DRAW.FLAG);
-    _label(creep.room, flag.pos, "Pickup", CFG.DRAW.FLAG);
+    truckerDrawRing(creep.room, flag.pos, CFG.DRAW.FLAG);
+    truckerDrawLabel(creep.room, flag.pos, "Pickup", CFG.DRAW.FLAG);
 
     // Opportunistic: if standing on or next to any dropped resource, scoop it
     var underfoot = creep.pos.findInRange(FIND_DROPPED_RESOURCES, 1, {
@@ -4331,23 +4501,23 @@ roleBeeWorker.Trucker = (function () {
       }
     });
     if (underfoot && underfoot.length) {
-      _say(creep, "⬇️");
-      _label(creep.room, creep.pos, "Pickup underfoot", CFG.DRAW.LOOT);
+      truckerSay(creep, "⬇️");
+      truckerDrawLabel(creep.room, creep.pos, "Pickup underfoot", CFG.DRAW.LOOT);
       creep.pickup(underfoot[0]);
       return;
     }
 
     // Look for piles near the flag (energy prioritized)
-    var piles = _findDroppedNear(flag.pos, CFG.SEARCH_RADIUS);
+    var piles = findDroppedResourcesNear(flag.pos, CFG.SEARCH_RADIUS);
     if (!piles || !piles.length) {
       // Nothing visible — poke around the flag a bit
       if (!creep.pos.inRangeTo(flag.pos, 2)) {
-        _say(creep, "🧭");
-        _line(creep.room, creep.pos, flag.pos, CFG.DRAW.TRAVEL);
-        _beeTravel(creep, flag.pos, 1);
+        truckerSay(creep, "🧭");
+        truckerDrawLine(creep.room, creep.pos, flag.pos, CFG.DRAW.TRAVEL);
+        creep.travelTo(flag.pos, { range: 1, reusePath: CFG.PATH_REUSE });
       } else {
-        _say(creep, "🧐");
-        _label(creep.room, creep.pos, "No loot here", CFG.DRAW.IDLE);
+        truckerSay(creep, "🧐");
+        truckerDrawLabel(creep.room, creep.pos, "No loot here", CFG.DRAW.IDLE);
       }
       return;
     }
@@ -4357,68 +4527,68 @@ roleBeeWorker.Trucker = (function () {
     if (!target) return;
 
     if (creep.pickup(target) === ERR_NOT_IN_RANGE) {
-      _say(creep, "📦");
-      _line(creep.room, creep.pos, target.pos, CFG.DRAW.LOOT);
-      _beeTravel(creep, target, 1);
+      truckerSay(creep, "📦");
+      truckerDrawLine(creep.room, creep.pos, target.pos, CFG.DRAW.LOOT);
+      creep.travelTo(target, { range: 1, reusePath: CFG.PATH_REUSE });
     } else {
-      _label(creep.room, target.pos, "Pickup", CFG.DRAW.LOOT);
+      truckerDrawLabel(creep.room, target.pos, "Pickup", CFG.DRAW.LOOT);
     }
   }
 
   // ----------------------------
   // B) Return phase
   // ----------------------------
-  function _returnToStorage(creep) {
-    var home = creep.memory.homeRoom || _firstSpawnRoomFallback(creep);
+  function returnTruckerToStorage(creep) {
+    var home = creep.memory.homeRoom || getFirstSpawnRoomFallback(creep);
 
     // Head to home room first
     if (creep.room.name !== home) {
-      _say(creep, "🏠↩️");
+      truckerSay(creep, "🏠↩️");
       var mid = new RoomPosition(25, 25, home);
-      _line(creep.room, creep.pos, mid, CFG.DRAW.RETURN);
-      _beeTravel(creep, mid, 1);
+      truckerDrawLine(creep.room, creep.pos, mid, CFG.DRAW.RETURN);
+      creep.travelTo(mid, { range: 1, reusePath: CFG.PATH_REUSE });
       return;
     }
 
     // Pick a resource type to deposit (largest first)
-    var resType = _primaryStoreType(creep);
+    var resType = getPrimaryStoreType(creep);
     if (!resType) {
       // Nothing to drop off → idle near storage/spawn
       var idle = creep.room.storage || _.first(creep.room.find(FIND_MY_SPAWNS));
       if (idle) {
-        _say(creep, "🅿️");
-        _ring(creep.room, idle.pos, CFG.DRAW.IDLE);
-        _beeTravel(creep, idle.pos, 2);
+        truckerSay(creep, "🅿️");
+        truckerDrawRing(creep.room, idle.pos, CFG.DRAW.IDLE);
+        creep.travelTo(idle.pos, { range: 2, reusePath: CFG.PATH_REUSE });
       }
       return;
     }
 
     // Choose a good deposit target for this specific resource
-    var targets = _depositTargets(creep, resType);
+    var targets = getDepositTargets(creep, resType);
     if (targets && targets.length) {
       var t = targets[0];
       var rc = creep.transfer(t, resType);
       if (rc === ERR_NOT_IN_RANGE) {
-        _say(creep, "📦➡️🏦");
-        _line(creep.room, creep.pos, t.pos, CFG.DRAW.DEPOSIT);
-        _beeTravel(creep, t, 1);
+        truckerSay(creep, "📦➡️🏦");
+        truckerDrawLine(creep.room, creep.pos, t.pos, CFG.DRAW.DEPOSIT);
+        creep.travelTo(t, { range: 1, reusePath: CFG.PATH_REUSE });
       } else if (rc === OK) {
-        _label(creep.room, t.pos, "Deposit " + resType, CFG.DRAW.DEPOSIT);
+        truckerDrawLabel(creep.room, t.pos, "Deposit " + resType, CFG.DRAW.DEPOSIT);
       } else {
         // Could be full now; try next, or shuffle toward storage for safety
         var next = targets[1] || creep.room.storage || _.first(creep.room.find(FIND_MY_SPAWNS));
         if (next) {
-          _line(creep.room, creep.pos, (next.pos || next), CFG.DRAW.DEPOSIT);
-          _beeTravel(creep, (next.pos || next), 1);
+          truckerDrawLine(creep.room, creep.pos, (next.pos || next), CFG.DRAW.DEPOSIT);
+          creep.travelTo((next.pos || next), { range: 1, reusePath: CFG.PATH_REUSE });
         }
       }
     } else {
       // Nowhere to deposit this type → park near storage
       var s = creep.room.storage || _.first(creep.room.find(FIND_MY_SPAWNS));
-      _say(creep, "🤷 full");
+      truckerSay(creep, "🤷 full");
       if (s) {
-        _ring(creep.room, s.pos, CFG.DRAW.IDLE);
-        _beeTravel(creep, s.pos, 2);
+        truckerDrawRing(creep.room, s.pos, CFG.DRAW.IDLE);
+        creep.travelTo(s.pos, { range: 2, reusePath: CFG.PATH_REUSE });
       }
     }
   }
@@ -4436,9 +4606,15 @@ roleBeeWorker.Trucker = (function () {
       creep.memory.pickupFlag = CFG.PICKUP_FLAG_DEFAULT;
     }
     if (!creep.memory.homeRoom) {
-      creep.memory.homeRoom = _firstSpawnRoomFallback(creep);
+      creep.memory.homeRoom = getFirstSpawnRoomFallback(creep);
     }
+    if (creep.memory.returning === undefined) creep.memory.returning = false;
   }
+
+  // Memory keys:
+  // - pickupFlag: flag name defining the harvest area
+  // - homeRoom: drop-off room
+  // - returning: boolean toggled when cargo is full
 
   function updateReturnState(creep) {
     if (BeeToolbox && typeof BeeToolbox.updateReturnState === 'function') {
@@ -4459,10 +4635,12 @@ roleBeeWorker.Trucker = (function () {
 // -----------------------------------------------------------------------------
 // Inline legacy role.Claimer (auto-generated bundle)
 // -----------------------------------------------------------------------------
+// =====================================================
+// Role: Claimer
+// Purpose: Travel to a target room to claim/reserve/attack controllers
+// States: TRAVEL (moving to target), WORK (interacting with controller), IDLE
+// =====================================================
 roleBeeWorker.Claimer = (function () {
-  // --------------------------------------------
-  // Claimer – TRAVEL to target vs WORK on the controller
-  // --------------------------------------------
   var module = { exports: {} };
   var exports = module.exports;
   /** =========================
@@ -4473,6 +4651,12 @@ roleBeeWorker.Claimer = (function () {
     placeSpawnOnClaim: false,
     reusePath: 15
   };
+
+  function ensureClaimerIdentity(creep) {
+    if (!creep || !creep.memory) return;
+    creep.memory.role = 'Claimer';
+    if (!creep.memory.task) creep.memory.task = 'claimer';
+  }
 
   // ---- Randomized signing pool ----
   var SIGN_TEXTS = [
@@ -4683,6 +4867,10 @@ roleBeeWorker.Claimer = (function () {
   /** =========================
    *  Orchestration helpers so new contributors can follow the run() pipeline.
    *  ========================= */
+  // Memory keys:
+  // - claimerMode: desired action ('claim', 'reserve', 'attack')
+  // - targetRoom: controller room currently assigned
+
   function claimerMode(creep) {
     return (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
   }
@@ -4785,8 +4973,12 @@ roleBeeWorker.Claimer = (function () {
   }
 
   function determineClaimerState(creep, targetRoom) {
-    if (!targetRoom) return 'IDLE';
-    return creep.pos.roomName === targetRoom ? 'WORK' : 'TRAVEL';
+    var state = 'IDLE';
+    if (targetRoom) {
+      state = creep.pos.roomName === targetRoom ? 'WORK' : 'TRAVEL';
+    }
+    creep.memory.state = state;
+    return state;
   }
 
   /** =========================
@@ -4928,6 +5120,7 @@ roleBeeWorker.Claimer = (function () {
   var roleClaimer = {
     role: 'Claimer',
     run: function(creep) {
+      ensureClaimerIdentity(creep);
       rememberReservationIntel(creep.room);
       ensureReserveRoleScan();
 
