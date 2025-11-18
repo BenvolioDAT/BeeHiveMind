@@ -399,6 +399,10 @@ function softenRemoteDefensePlan(roomName) {
 }
 
 roleBeeWorker.BaseHarvest = (function () {
+  // --------------------------------------------
+  // BaseHarvest – stationaries that mine sources
+  // States: HARVEST (travel + mine) vs OFFLOAD (dump) vs IDLE (waiting empty)
+  // --------------------------------------------
   /** =========================
    *  Config knobs
    *  ========================= */
@@ -725,7 +729,6 @@ roleBeeWorker.BaseHarvest = (function () {
    *  Main role
    *  ========================= */
 
-  // Teaching helper: novice readers can follow the role flow by calling these in order.
   function ensureRoleIdentity(creep) {
     if (!creep || !creep.memory) return;
     if (!creep.memory.role || String(creep.memory.role).toLowerCase() === 'baseharvest') {
@@ -734,13 +737,21 @@ roleBeeWorker.BaseHarvest = (function () {
     if (!creep.memory.task) creep.memory.task = 'baseharvest';
   }
 
-  function updateHarvestingFlag(creep) {
-    if (!creep) return false;
+  function determineState(creep) {
+    ensureRoleIdentity(creep);
+    if (!creep) return 'IDLE';
     var empty = creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0;
     var full  = creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0;
-    if (empty && !creep.memory.harvesting) { creep.memory.harvesting = true; debugSay(creep, '⤵️MINE'); }
-    else if (full && creep.memory.harvesting) { creep.memory.harvesting = false; debugSay(creep, '⤴️DROP'); }
-    return creep.memory.harvesting;
+    if (empty) {
+      creep.memory.harvesting = true;
+      debugSay(creep, '⤵️MINE');
+    } else if (full) {
+      creep.memory.harvesting = false;
+      debugSay(creep, '⤴️DROP');
+    }
+    if (creep.memory.harvesting) return 'HARVEST';
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) return 'OFFLOAD';
+    return 'IDLE';
   }
 
   function runHarvestPhase(creep) {
@@ -885,17 +896,14 @@ roleBeeWorker.BaseHarvest = (function () {
   var roleBaseHarvest = {
     role: 'BaseHarvest',
     run: function(creep) {
-      ensureRoleIdentity(creep);
+      var state = determineState(creep);
 
-      // Habit: update our state once and branch from it instead of sprinkling conditions everywhere.
-      var harvesting = updateHarvestingFlag(creep);
-
-      if (harvesting) {
+      if (state === 'HARVEST') {
         runHarvestPhase(creep);
         return;
       }
 
-      if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      if (state === 'OFFLOAD') {
         runOffloadPhase(creep);
         return;
       }
@@ -908,6 +916,10 @@ roleBeeWorker.BaseHarvest = (function () {
 })();
 
 roleBeeWorker.Builder = (function () {
+  // --------------------------------------------
+  // Builder – refuel vs build state machine
+  // States: COLLECT (restock) vs BUILD (spend energy) with simple sticky target
+  // --------------------------------------------
   // ==============================
   // Tunables
   // ==============================
@@ -1006,15 +1018,16 @@ roleBeeWorker.Builder = (function () {
     return false;
   }
 
-  function toggleBuilderState(creep) {
+  function determineBuilderState(creep) {
+    if (!creep.memory) creep.memory = {};
     if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
       creep.memory.building = false;
       debugSay(creep, '⤵️REFUEL');
-    }
-    if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
+    } else if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
       creep.memory.building = true;
       debugSay(creep, '⤴️BUILD');
     }
+    return creep.memory.building ? 'BUILD' : 'COLLECT';
   }
 
   function idleNearAnchor(creep) {
@@ -1132,14 +1145,13 @@ roleBeeWorker.Builder = (function () {
   var roleBuilder = {
     role: 'Builder',
     run: function (creep) {
-      toggleBuilderState(creep);
+      var state = determineBuilderState(creep);
 
-      if (creep.memory.building) {
+      if (state === 'BUILD') {
         runBuildPhase(creep);
         return;
       }
 
-      // Refuel phase (no mining unless allowed)
       collectEnergy(creep);
     }
   };
@@ -1148,10 +1160,11 @@ roleBeeWorker.Builder = (function () {
 })();
 
 roleBeeWorker.Courier = (function () {
-  // role.Courier – Energy hauler (ES5-safe) with SAY + DRAW breadcrumbs
-  // Collect priority: Source CONTAINER -> big DROPS (en route) -> drops NEAR container -> GRAVES/RUINS -> misc DROPS -> STORAGE/TERMINAL
-  // Deliver priority: SPAWNS/EXTENSIONS -> TOWERS (<= pct) -> STORAGE
-  //
+  // --------------------------------------------
+  // Courier – two-state hauler (COLLECT vs DELIVER)
+  // Collect priority: source containers → drops → graves → storage
+  // Deliver priority: spawn/extensions → towers → storage/terminal
+  // --------------------------------------------
   // Shares PIB + same-tick reservation scheme with Queen to avoid target dogpiles.
 
 
@@ -1408,7 +1421,7 @@ roleBeeWorker.Courier = (function () {
   // ============================
   // Memory / state helpers
   // ============================
-  function ensureCourierState(creep) {
+  function determineCourierState(creep) {
     // Newer coders sometimes forget to guard both edges of the state machine.
     // We check the "cargo empty" and "cargo full" edges separately to keep it obvious
     // which condition flips us into delivery mode.
@@ -1423,6 +1436,7 @@ roleBeeWorker.Courier = (function () {
     if (creep.memory.pickupContainerId === undefined) creep.memory.pickupContainerId = null;
     if (creep.memory.retargetAt === undefined) creep.memory.retargetAt = 0;
     if (creep.memory.dropoffId === undefined) creep.memory.dropoffId = null;
+    return creep.memory.transferring ? 'DELIVER' : 'COLLECT';
   }
 
   // Break collection targets into small helpers so novice contributors can trace the flow
@@ -1585,13 +1599,14 @@ roleBeeWorker.Courier = (function () {
   var roleCourier = {
     role: 'Courier',
     run: function (creep) {
-      ensureCourierState(creep);
+      var state = determineCourierState(creep);
 
-      if (creep.memory.transferring) {
+      if (state === 'DELIVER') {
         roleCourier.deliverEnergy(creep);
-      } else {
-        roleCourier.collectEnergy(creep);
+        return;
       }
+
+      roleCourier.collectEnergy(creep);
     },
 
     // -----------------------------
@@ -1649,6 +1664,7 @@ roleBeeWorker.Queen = (function () {
   // * Stores its finite-state machine in creep.memory._task (shape:
   //   {type, targetId, since, data}) and clears/refreshes it when targets change
   //   or run out of capacity.
+  //   States: 'withdraw', 'pickup', 'deliver', 'idle'
   // * Uses global.__BHM.queenReservations to avoid multiple Queens double-booking
   //   the same sink in the same tick.
   // Called from: BeeHiveMind.runCreeps dispatcher -> roleQueen.run.
@@ -2068,6 +2084,21 @@ roleBeeWorker.Queen = (function () {
     return createIdleTask(creep);
   }
 
+  function ensureActiveTask(creep) {
+    ensureTaskSlot(creep);
+    var task = creep.memory._task;
+    if (needsNewTask(creep, task)) {
+      task = chooseNextTask(creep);
+      setTask(creep, task);
+    }
+    task = creep.memory._task;
+    if (!task) {
+      task = createIdleTask(creep);
+      setTask(creep, task);
+    }
+    return creep.memory._task;
+  }
+
   // Function header: executeTask(creep, task)
   // Inputs: creep, task envelope currently stored in memory
   // Output: none; issues actions via BeeActions.* wrappers and MovementManager.
@@ -2147,23 +2178,7 @@ roleBeeWorker.Queen = (function () {
     // Failure modes: gracefully exits if creep is spawning or invalid.
     run: function (creep) {
       if (!creep || creep.spawning) return;
-      ensureTaskSlot(creep);
-
-      var task = creep.memory._task;
-      if (needsNewTask(creep, task)) {
-        // When stale/invalid, choose a fresh job. chooseNextTask encodes gather →
-        // deliver → idle lifecycle.
-        task = chooseNextTask(creep);
-        setTask(creep, task);
-      }
-
-      task = creep.memory._task;
-      if (!task) {
-        // Last-resort idle ensures memory slot never empty (prevents null checks).
-        setTask(creep, createIdleTask(creep));
-        task = creep.memory._task;
-      }
-
+      var task = ensureActiveTask(creep);
       executeTask(creep, task);
     }
   };
@@ -2172,6 +2187,9 @@ roleBeeWorker.Queen = (function () {
 })();
 
 roleBeeWorker.Upgrader = (function () {
+  // --------------------------------------------
+  // Upgrader – controller worker with REFUEL vs UPGRADE states
+  // --------------------------------------------
   /** =========================
    *  Tiny debug helpers
    *  ========================= */
@@ -2245,9 +2263,9 @@ roleBeeWorker.Upgrader = (function () {
     run: function (creep) {
       if (!creep) return;
       ensureRoleIdentity(creep);
-      toggleUpgradingState(creep);
+      var state = determineUpgraderState(creep);
 
-      if (creep.memory.upgrading) {
+      if (state === 'UPGRADE') {
         runUpgradePhase(creep);
         return;
       }
@@ -2259,7 +2277,7 @@ roleBeeWorker.Upgrader = (function () {
     if (creep.memory && !creep.memory.role) creep.memory.role = 'Upgrader';
   }
 
-  function toggleUpgradingState(creep) {
+  function determineUpgraderState(creep) {
     if (creep.memory.upgrading && creep.store[RESOURCE_ENERGY] === 0) {
       creep.memory.upgrading = false;
       creep.memory.targetDroppedEnergyId = null;
@@ -2268,6 +2286,7 @@ roleBeeWorker.Upgrader = (function () {
       creep.memory.upgrading = true;
       debugSay(creep, "⚡ upgrade");
     }
+    return creep.memory.upgrading ? 'UPGRADE' : 'REFUEL';
   }
 
   function runUpgradePhase(creep) {
@@ -2364,6 +2383,9 @@ roleBeeWorker.Upgrader = (function () {
 // Inline legacy role.Luna (auto-generated bundle)
 // -----------------------------------------------------------------------------
 roleBeeWorker.Luna = (function () {
+  // --------------------------------------------
+  // Luna – remote forager states: RETURN → ASSIGN/TRAVEL → HARVEST
+  // --------------------------------------------
   var module = { exports: {} };
   var exports = module.exports;
   // ============================
@@ -3113,21 +3135,34 @@ roleBeeWorker.Luna = (function () {
     return true;
   }
 
+  function prepareLuna(creep) {
+    ensureLunaIdentity(creep);
+    auditOncePerTick();
+    if (!creep.memory.home) getHomeName(creep);
+    trackMovementBreadcrumb(creep);
+  }
+
+  function determineLunaState(creep) {
+    if (creep.memory.returning) return 'RETURN';
+    if (!creep.memory.targetRoom || !creep.memory.sourceId) return 'UNASSIGNED';
+    if (creep.pos.roomName !== creep.memory.targetRoom) return 'TRAVEL';
+    return 'HARVEST';
+  }
+
   // ============================
   // Main role
   // ============================
   var roleLuna = {
     role: 'Luna',
     run: function(creep){
-      ensureLunaIdentity(creep);
-      auditOncePerTick();
-      if (!creep.memory.home) getHomeName(creep);
+      prepareLuna(creep);
 
-      trackMovementBreadcrumb(creep);
-
-      // Carry state lives in one place; from here on we trust the boolean.
       roleLuna.updateReturnState(creep);
-      if (creep.memory.returning){ roleLuna.returnToStorage(creep); return; }
+      var state = determineLunaState(creep);
+      if (state === 'RETURN') {
+        roleLuna.returnToStorage(creep);
+        return;
+      }
 
       if (shouldReleaseForEndOfLife(creep)) return;
       if (respectCooldown(creep)) return;
@@ -3135,7 +3170,12 @@ roleBeeWorker.Luna = (function () {
 
       if (!ensureActiveAssignment(creep)) return;
 
-      // If room got locked by invader activity, drop and repick
+      state = determineLunaState(creep);
+      if (state === 'UNASSIGNED') {
+        roleLuna.initializeAndAssign(creep);
+        return;
+      }
+
       if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)){
         debugSay(creep, '⛔LOCK');
         var center = new RoomPosition(25,25,creep.memory.targetRoom);
@@ -3146,10 +3186,13 @@ roleBeeWorker.Luna = (function () {
       }
 
       if (!validateExclusiveSource(creep)) return;
-      if (travelToAssignedRoom(creep)) return;
 
-      // Defensive: memory wipe mid-run
-      if (!creep.memory.targetRoom || !creep.memory.sourceId){
+      if (state === 'TRAVEL') {
+        if (travelToAssignedRoom(creep)) return;
+        state = determineLunaState(creep);
+      }
+
+      if (state === 'UNASSIGNED') {
         roleLuna.initializeAndAssign(creep);
         if (!creep.memory.targetRoom || !creep.memory.sourceId){
           if (Game.time % 25 === 0) console.log('🚫 Forager '+creep.name+' could not be assigned a room/source.');
@@ -3426,6 +3469,9 @@ roleBeeWorker.Luna = (function () {
 // Inline legacy role.Scout (auto-generated bundle)
 // -----------------------------------------------------------------------------
 roleBeeWorker.Scout = (function () {
+  // --------------------------------------------
+  // Scout – cycles through ARRIVAL, TRAVEL, ASSIGN, IDLE states
+  // --------------------------------------------
   var module = { exports: {} };
   var exports = module.exports;
   /** =========================
@@ -4038,6 +4084,13 @@ roleBeeWorker.Scout = (function () {
     go(creep, new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE, ignoreCreeps: true });
   }
 
+  function determineScoutState(creep, mem) {
+    if (creep.memory.targetRoom && creep.room && creep.room.name === creep.memory.targetRoom) return 'ARRIVAL';
+    if (creep.memory.targetRoom) return 'TRAVEL';
+    if (mem.queue && mem.queue.length) return 'ASSIGN';
+    return 'IDLE';
+  }
+
   // ---------- API ----------
   var roleScout = {
     role: 'Scout',
@@ -4047,17 +4100,22 @@ roleBeeWorker.Scout = (function () {
       var M = ensureScoutMem(creep); // {home, queue, prevRoom?}
 
       enforceScoutLeash(creep, M);
-      if (handleRoomArrival(creep, M)) return; // arrival clears target + logs intel
+      var state = determineScoutState(creep, M);
 
-      if (moveTowardTarget(creep)) return; // existing waypoint already active
-
-      ensureQueueReady(M, creep);
-      if (!chooseNextTarget(creep, M)) { idleScout(creep); return; }
-
-      if (!moveTowardTarget(creep)) {
-        // Could happen if we spawned inside the target room this tick.
-        idleScout(creep);
+      if (state === 'ARRIVAL') {
+        handleRoomArrival(creep, M);
+        return;
       }
+
+      if (state === 'TRAVEL' && moveTowardTarget(creep)) return;
+
+      if (state === 'ASSIGN') {
+        ensureQueueReady(M, creep);
+        if (!chooseNextTarget(creep, M)) { idleScout(creep); return; }
+        if (moveTowardTarget(creep)) return;
+      }
+
+      idleScout(creep);
     }
   };
 
@@ -4070,6 +4128,9 @@ roleBeeWorker.Scout = (function () {
 // Inline legacy role.Trucker (auto-generated bundle)
 // -----------------------------------------------------------------------------
 roleBeeWorker.Trucker = (function () {
+  // --------------------------------------------
+  // Trucker – COLLECT at pickup flag vs RETURN to storage
+  // --------------------------------------------
   var module = { exports: {} };
   var exports = module.exports;
   // ============================
@@ -4201,19 +4262,24 @@ roleBeeWorker.Trucker = (function () {
     return list;
   }
 
+  function determineTruckerState(creep) {
+    ensureRoleDefaults(creep);
+    updateReturnState(creep);
+    return creep.memory.returning ? 'RETURN' : 'COLLECT';
+  }
+
   // ============================
   // Main role
   // ============================
   function run(creep) {
     if (creep.spawning) return;
 
-    ensureRoleDefaults(creep);
-    updateReturnState(creep);
-
-    if (creep.memory.returning) {
-      return _returnToStorage(creep);
+    var state = determineTruckerState(creep);
+    if (state === 'RETURN') {
+      _returnToStorage(creep);
+      return;
     }
-    return _collectFromFlagRoom(creep);
+    _collectFromFlagRoom(creep);
   }
 
   // ----------------------------
@@ -4385,6 +4451,9 @@ roleBeeWorker.Trucker = (function () {
 // Inline legacy role.Claimer (auto-generated bundle)
 // -----------------------------------------------------------------------------
 roleBeeWorker.Claimer = (function () {
+  // --------------------------------------------
+  // Claimer – TRAVEL to target vs WORK on the controller
+  // --------------------------------------------
   var module = { exports: {} };
   var exports = module.exports;
   /** =========================
@@ -4706,6 +4775,11 @@ roleBeeWorker.Claimer = (function () {
     return true;
   }
 
+  function determineClaimerState(creep, targetRoom) {
+    if (!targetRoom) return 'IDLE';
+    return creep.pos.roomName === targetRoom ? 'WORK' : 'TRAVEL';
+  }
+
   /** =========================
    *  Controller actions
    *  ========================= */
@@ -4846,8 +4920,11 @@ roleBeeWorker.Claimer = (function () {
 
       drawLockVisual(targetRoom);
 
-      if (!moveToRoom(creep, targetRoom)) {
-        refreshRoomLock(targetRoom, creep);
+      var state = determineClaimerState(creep, targetRoom);
+      if (state === 'TRAVEL') {
+        if (!moveToRoom(creep, targetRoom)) {
+          refreshRoomLock(targetRoom, creep);
+        }
         return;
       }
 
