@@ -136,64 +136,6 @@ function drawExitMarker(room, exitDir, label, color) {
 // Role Upgrader debug helper not moved here due to circular dependency issues.
 
 //====================================================
-//        Shared travel helper
-//====================================================
-function go(creep, dest, rangeOrOpts, reuse) {
-  if (!creep || !dest) return ERR_INVALID_TARGET;
-
-  var opts = {};
-  if (typeof rangeOrOpts === 'object' && rangeOrOpts !== null) {
-    for (var k in rangeOrOpts) {
-      if (rangeOrOpts.hasOwnProperty(k)) opts[k] = rangeOrOpts[k];
-    }
-  } else {
-    if (rangeOrOpts != null) opts.range = rangeOrOpts;
-    if (reuse != null) opts.reusePath = reuse;
-  }
-
-  if (opts.range == null) opts.range = 1;
-  if (opts.reusePath == null) opts.reusePath = CFG.PATH_REUSE;
-  if (opts.ignoreCreeps == null) opts.ignoreCreeps = false;
-  if (opts.maxOps == null) opts.maxOps = opts.ignoreCreeps ? CFG.TRAVEL_MAX_OPS : CFG.MAX_OPS_MOVE;
-  if (opts.stuckValue == null) opts.stuckValue = 2;
-  if (opts.repath == null) opts.repath = 0.05;
-
-  var targetPos = _posOf(dest) || dest;
-  if (!targetPos) return ERR_INVALID_TARGET;
-
-  var lineColor = opts.lineColor || CFG.DRAW.TRAVEL_COLOR || CFG.DRAW.TRAVEL;
-  var lineLabel = opts.lineLabel || 'GO';
-  if (opts.draw !== false) debugDrawLine(creep, targetPos, lineColor, lineLabel);
-
-  if (creep.pos.roomName === targetPos.roomName && creep.pos.getRangeTo(targetPos) <= opts.range) return OK;
-
-  var travelerOpts = {
-    range: opts.range,
-    reusePath: opts.reusePath,
-    ignoreCreeps: !!opts.ignoreCreeps,
-    stuckValue: opts.stuckValue,
-    repath: opts.repath,
-    maxOps: opts.maxOps
-  };
-  if (opts.returnData) travelerOpts.returnData = opts.returnData;
-  if (opts.roomCallback) travelerOpts.roomCallback = opts.roomCallback;
-  else if (BeeToolbox && BeeToolbox.roomCallback) travelerOpts.roomCallback = BeeToolbox.roomCallback;
-
-  try {
-    if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function' && !opts.forceTraveler) {
-      var rc = BeeToolbox.BeeTravel(creep, targetPos, { range: opts.range, reusePath: opts.reusePath });
-      if (rc === OK || rc === ERR_TIRED || rc === ERR_BUSY || rc === ERR_NO_PATH) return rc;
-    }
-  } catch (e) {}
-
-  if (typeof creep.travelTo === 'function') {
-    return creep.travelTo(targetPos, travelerOpts);
-  }
-
-  return creep.moveTo(targetPos, { reusePath: opts.reusePath, maxOps: opts.maxOps, ignoreCreeps: !!opts.ignoreCreeps });
-}
-
-//====================================================
 //        END Debug helpers
 //====================================================
 
@@ -798,7 +740,10 @@ roleBeeWorker.BaseHarvest = (function () {
 
       debugSay(creep, '⏳');
       debugRing(creep.room, queueSpot, CFG.DRAW.QUEUE, "QUEUE");
-      if (!creep.pos.isEqualTo(queueSpot)) { go(creep, queueSpot, 0, CONFIG.travelReuse); return; }
+      if (!creep.pos.isEqualTo(queueSpot)) {
+        creep.travelTo(queueSpot, { range: 0, reusePath: CONFIG.travelReuse });
+        return;
+      }
 
       if (creep.pos.getRangeTo(source) <= 1) {
         debugDrawLine(creep, source, CFG.DRAW.SOURCE, "HARV");
@@ -806,7 +751,7 @@ roleBeeWorker.BaseHarvest = (function () {
       }
 
       if (!isTileOccupiedByAnyCreep(seatPos, creep.name) || countAssignedHarvesters(creep.room.name, source.id) < seats) {
-        go(creep, seatPos, 0, CONFIG.travelReuse);
+        creep.travelTo(seatPos, { range: 0, reusePath: CONFIG.travelReuse });
         creep.memory.waitingForSeat = false;
       }
       return;
@@ -815,7 +760,7 @@ roleBeeWorker.BaseHarvest = (function () {
     // NO QUEUE: seat free or capacity available → go sit or harvest
     if (seatPos && !creep.pos.isEqualTo(seatPos)) {
       debugSay(creep, '🪑');
-      go(creep, seatPos, 0, CONFIG.travelReuse);
+      creep.travelTo(seatPos, { range: 0, reusePath: CONFIG.travelReuse });
       return;
     }
     creep.memory.waitingForSeat = false;
@@ -830,7 +775,10 @@ roleBeeWorker.BaseHarvest = (function () {
       if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
         var tr = creep.transfer(contHere, RESOURCE_ENERGY);
         if (tr === ERR_FULL) { debugSay(creep, '⬇️'); creep.drop(RESOURCE_ENERGY); }
-        else if (tr === ERR_NOT_IN_RANGE) { go(creep, contHere.pos, 0, CONFIG.travelReuse); return; }
+        else if (tr === ERR_NOT_IN_RANGE) {
+          creep.travelTo(contHere.pos, { range: 0, reusePath: CONFIG.travelReuse });
+          return;
+        }
       }
     }
 
@@ -852,7 +800,10 @@ roleBeeWorker.BaseHarvest = (function () {
         debugSay(creep, '🏠');
         debugDrawLine(creep, sink, CFG.DRAW.OFFLOAD, "RETURN");
         var rs = creep.transfer(sink, RESOURCE_ENERGY);
-        if (rs === ERR_NOT_IN_RANGE) { go(creep, sink, 1, CONFIG.travelReuse); return; }
+        if (rs === ERR_NOT_IN_RANGE) {
+          creep.travelTo(sink, { range: 1, reusePath: CONFIG.travelReuse });
+          return;
+        }
         if (rs === OK) return;
       }
       debugSay(creep, '⬇️'); // absolute last resort
@@ -866,14 +817,17 @@ roleBeeWorker.BaseHarvest = (function () {
       if (!creep.pos.isEqualTo(cont.pos)) {
         debugSay(creep, '📦→');
         debugDrawLine(creep, cont, CFG.DRAW.OFFLOAD, "SEAT");
-        go(creep, cont.pos, 0, CONFIG.travelReuse);
+        creep.travelTo(cont.pos, { range: 0, reusePath: CONFIG.travelReuse });
         return;
       }
 
       debugSay(creep, '📦');
       var tr2 = creep.transfer(cont, RESOURCE_ENERGY);
       if (tr2 === OK) return;
-      if (tr2 === ERR_NOT_IN_RANGE) { go(creep, cont.pos, 0, CONFIG.travelReuse); return; }
+      if (tr2 === ERR_NOT_IN_RANGE) {
+        creep.travelTo(cont.pos, { range: 0, reusePath: CONFIG.travelReuse });
+        return;
+      }
 
       // Container rejected (likely full). Drop to keep miner unblocked.
       debugSay(creep, '⬇️');
@@ -940,7 +894,9 @@ roleBeeWorker.Builder = (function () {
       debugSay(creep, '🪦');
       debugDrawLine(creep, tomb, CFG.DRAW.TOMBSTONE_COLOR, "TOMB");
       var tr = creep.withdraw(tomb, RESOURCE_ENERGY);
-      if (tr === ERR_NOT_IN_RANGE) go(creep, tomb, 1, 20);
+      if (tr === ERR_NOT_IN_RANGE) {
+        creep.travelTo(tomb, { range: 1, reusePath: 20 });
+      }
       return true;
     }
     var ruin = creep.pos.findClosestByRange(FIND_RUINS, { filter: function (r) { return (r.store[RESOURCE_ENERGY] | 0) > 0; } });
@@ -948,7 +904,9 @@ roleBeeWorker.Builder = (function () {
       debugSay(creep, '🏚️');
       debugDrawLine(creep, ruin, CFG.DRAW.RUIN_COLOR, "RUIN");
       var rr = creep.withdraw(ruin, RESOURCE_ENERGY);
-      if (rr === ERR_NOT_IN_RANGE) go(creep, ruin, 1, 20);
+      if (rr === ERR_NOT_IN_RANGE) {
+        creep.travelTo(ruin, { range: 1, reusePath: 20 });
+      }
       return true;
     }
 
@@ -959,7 +917,9 @@ roleBeeWorker.Builder = (function () {
     if (dropped) {
       debugSay(creep, '🍪');
       debugDrawLine(creep, dropped, CFG.DRAW.PICKUP_COLOR, "DROP");
-      if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) go(creep, dropped, 1, 15);
+      if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
+        creep.travelTo(dropped, { range: 1, reusePath: 15 });
+      }
       return true;
     }
 
@@ -975,7 +935,9 @@ roleBeeWorker.Builder = (function () {
       debugSay(creep, '📦');
       debugDrawLine(creep, srcCont, CFG.DRAW.SRC_CONT_COLOR, "SRC•CONT");
       var cr = creep.withdraw(srcCont, RESOURCE_ENERGY);
-      if (cr === ERR_NOT_IN_RANGE) go(creep, srcCont, 1, 25);
+      if (cr === ERR_NOT_IN_RANGE) {
+        creep.travelTo(srcCont, { range: 1, reusePath: 25 });
+      }
       return true;
     }
 
@@ -992,7 +954,9 @@ roleBeeWorker.Builder = (function () {
       debugSay(creep, '🏦');
       debugDrawLine(creep, storeLike, CFG.DRAW.STORELIKE_COLOR, "WITHDRAW");
       var sr = creep.withdraw(storeLike, RESOURCE_ENERGY);
-      if (sr === ERR_NOT_IN_RANGE) go(creep, storeLike, 1, 25);
+      if (sr === ERR_NOT_IN_RANGE) {
+        creep.travelTo(storeLike, { range: 1, reusePath: 25 });
+      }
       return true;
     }
 
@@ -1003,7 +967,9 @@ roleBeeWorker.Builder = (function () {
         debugSay(creep, '⛏️');
         debugDrawLine(creep, src, CFG.DRAW.SRC_CONT_COLOR, "MINE");
         var hr = creep.harvest(src);
-        if (hr === ERR_NOT_IN_RANGE) go(creep, src, 1, 20);
+        if (hr === ERR_NOT_IN_RANGE) {
+          creep.travelTo(src, { range: 1, reusePath: 20 });
+        }
         return true;
       }
     }
@@ -1013,7 +979,7 @@ roleBeeWorker.Builder = (function () {
     if (anchor && anchor.pos) {
       debugSay(creep, '🧘');
       debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      go(creep, anchor, 2, 20);
+      creep.travelTo(anchor, { range: 2, reusePath: 20 });
     }
     return false;
   }
@@ -1035,7 +1001,7 @@ roleBeeWorker.Builder = (function () {
     if (anchor && anchor.pos) {
       debugSay(creep, '🧘');
       debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      go(creep, anchor, 2, 20);
+      creep.travelTo(anchor, { range: 2, reusePath: 20 });
     }
   }
 
@@ -1057,7 +1023,9 @@ roleBeeWorker.Builder = (function () {
     if (!sink) return false;
     debugSay(creep, '➡️SINK');
     debugDrawLine(creep, sink, CFG.DRAW.SINK_COLOR, "SINK");
-    if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) go(creep, sink, 1, 20);
+    if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+      creep.travelTo(sink, { range: 1, reusePath: 20 });
+    }
     return true;
   }
 
@@ -1135,7 +1103,7 @@ roleBeeWorker.Builder = (function () {
     }
 
     debugDrawLine(creep, site, CFG.DRAW.TRAVEL_COLOR, "TO•SITE");
-    go(creep, site, 3, 15);
+    creep.travelTo(site, { range: 3, reusePath: 15 });
     return true;
   }
 
@@ -1367,7 +1335,10 @@ roleBeeWorker.Courier = (function () {
     res = res || RESOURCE_ENERGY;
     var rc = creep.transfer(target, res);
 
-    if (rc === ERR_NOT_IN_RANGE) { go(creep, target, 1, CFG.PATH_REUSE); return rc; }
+    if (rc === ERR_NOT_IN_RANGE) {
+      creep.travelTo(target, { range: 1, reusePath: CFG.PATH_REUSE });
+      return rc;
+    }
 
     if (rc === OK) {
       _pibReleaseFill(creep, target, res);
@@ -1478,7 +1449,9 @@ roleBeeWorker.Courier = (function () {
     var pile = _closestByRange(creep.pos, nearby);
     debugSay(creep, '↘️Drop');
     debugDrawLine(creep, pile, CFG.DRAW.DROP_COLOR, "DROP*");
-    if (creep.pickup(pile) === ERR_NOT_IN_RANGE) go(creep, pile, 1, 20);
+    if (creep.pickup(pile) === ERR_NOT_IN_RANGE) {
+      creep.travelTo(pile, { range: 1, reusePath: 20 });
+    }
     return true;
   }
 
@@ -1494,7 +1467,10 @@ roleBeeWorker.Courier = (function () {
       debugSay(creep, '↘️Drop');
       debugDrawLine(creep, bestDrop, CFG.DRAW.DROP_COLOR, "DROP");
       var pr = creep.pickup(bestDrop);
-      if (pr === ERR_NOT_IN_RANGE) { go(creep, bestDrop, 1, 20); return true; }
+      if (pr === ERR_NOT_IN_RANGE) {
+        creep.travelTo(bestDrop, { range: 1, reusePath: 20 });
+        return true;
+      }
       if (pr === OK && creep.store.getFreeCapacity() === 0) { creep.memory.transferring = true; return true; }
     }
 
@@ -1507,7 +1483,10 @@ roleBeeWorker.Courier = (function () {
     debugSay(creep, '↘️Con');
     debugDrawLine(creep, container, CFG.DRAW.WD_COLOR, "CON");
     var wr = creep.withdraw(container, RESOURCE_ENERGY);
-    if (wr === ERR_NOT_IN_RANGE) { go(creep, container, 1, CFG.PATH_REUSE); return true; }
+    if (wr === ERR_NOT_IN_RANGE) {
+      creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE });
+      return true;
+    }
     if (wr === OK) {
       if (creep.store.getFreeCapacity() === 0) creep.memory.transferring = true;
       return true;
@@ -1536,7 +1515,9 @@ roleBeeWorker.Courier = (function () {
     debugSay(creep, '↘️Grv');
     debugDrawLine(creep, grave, CFG.DRAW.GRAVE_COLOR, "GRAVE");
     var gw = creep.withdraw(grave, RESOURCE_ENERGY);
-    if (gw === ERR_NOT_IN_RANGE) { go(creep, grave, 1, 20); }
+    if (gw === ERR_NOT_IN_RANGE) {
+      creep.travelTo(grave, { range: 1, reusePath: 20 });
+    }
     return true;
   }
 
@@ -1547,7 +1528,9 @@ roleBeeWorker.Courier = (function () {
     if (!dropped) return false;
     debugSay(creep, '↘️Drop');
     debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP");
-    if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) go(creep, dropped, 1, 20);
+    if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
+      creep.travelTo(dropped, { range: 1, reusePath: 20 });
+    }
     return true;
   }
 
@@ -1560,7 +1543,9 @@ roleBeeWorker.Courier = (function () {
     debugSay(creep, storeLike.structureType === STRUCTURE_STORAGE ? '↘️Sto' : '↘️Term');
     debugDrawLine(creep, storeLike, CFG.DRAW.WD_COLOR, storeLike.structureType === STRUCTURE_STORAGE ? "STO" : "TERM");
     var sr = creep.withdraw(storeLike, RESOURCE_ENERGY);
-    if (sr === ERR_NOT_IN_RANGE) { go(creep, storeLike, 1, CFG.PATH_REUSE); }
+    if (sr === ERR_NOT_IN_RANGE) {
+      creep.travelTo(storeLike, { range: 1, reusePath: CFG.PATH_REUSE });
+    }
     return true;
   }
 
@@ -1568,7 +1553,9 @@ roleBeeWorker.Courier = (function () {
     var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
     debugSay(creep, 'IDLE');
     debugDrawLine(creep, (anchor.pos || anchor), CFG.DRAW.IDLE_COLOR, "IDLE");
-    if (!creep.pos.inRangeTo(anchor, 3)) go(creep, anchor, 3, CFG.PATH_REUSE);
+    if (!creep.pos.inRangeTo(anchor, 3)) {
+      creep.travelTo(anchor, { range: 3, reusePath: CFG.PATH_REUSE });
+    }
   }
 
   function ensureDropoffTarget(creep) {
@@ -2220,7 +2207,7 @@ roleBeeWorker.Upgrader = (function () {
     } else {
       debugSay(creep, "📝");
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "CTRL");
-      go(creep, controller, 1);
+      creep.travelTo(controller, { range: 1, reusePath: CFG.PATH_REUSE });
     }
   }
 
@@ -2243,7 +2230,7 @@ roleBeeWorker.Upgrader = (function () {
       debugDrawLine(creep, droppedResource, CFG.DRAW.DROP, 'DROP');
       var pr = creep.pickup(droppedResource);
       if (pr === ERR_NOT_IN_RANGE) {
-        go(creep, droppedResource, 1);
+        creep.travelTo(droppedResource, { range: 1, reusePath: CFG.PATH_REUSE });
       } else if (pr === OK) {
         debugSay(creep, "📦");
         creep.memory.targetDroppedEnergyId = null;
@@ -2303,7 +2290,7 @@ roleBeeWorker.Upgrader = (function () {
     var ur = creep.upgradeController(controller);
     if (ur === ERR_NOT_IN_RANGE) {
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "CTRL");
-      go(creep, controller, 3);
+      creep.travelTo(controller, { range: 3, reusePath: CFG.PATH_REUSE });
     } else if (ur === OK) {
       debugRing(_roomOf(controller.pos), controller.pos, CFG.DRAW.CTRL, "UP");
     }
@@ -2340,7 +2327,9 @@ roleBeeWorker.Upgrader = (function () {
     var linkRoom = _roomOf(linkNearController.pos);
     debugRing(linkRoom, linkNearController.pos, CFG.DRAW.LINK, "LINK");
     debugDrawLine(creep, linkNearController, CFG.DRAW.LINK, "LINK");
-    if (lr === ERR_NOT_IN_RANGE) go(creep, linkNearController, 1);
+    if (lr === ERR_NOT_IN_RANGE) {
+      creep.travelTo(linkNearController, { range: 1, reusePath: CFG.PATH_REUSE });
+    }
     return true;
   }
 
@@ -2358,7 +2347,9 @@ roleBeeWorker.Upgrader = (function () {
     debugRing(_roomOf(stor.pos), stor.pos, CFG.DRAW.STORE, "STO");
     debugDrawLine(creep, stor, CFG.DRAW.STORE, "STO");
     var sr = creep.withdraw(stor, RESOURCE_ENERGY);
-    if (sr === ERR_NOT_IN_RANGE) go(creep, stor, 1);
+    if (sr === ERR_NOT_IN_RANGE) {
+      creep.travelTo(stor, { range: 1, reusePath: CFG.PATH_REUSE });
+    }
     return true;
   }
 
@@ -2373,7 +2364,9 @@ roleBeeWorker.Upgrader = (function () {
     debugRing(_roomOf(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT");
     debugDrawLine(creep, containerWithEnergy, CFG.DRAW.CONT, "CONT");
     var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY);
-    if (cr === ERR_NOT_IN_RANGE) go(creep, containerWithEnergy, 1);
+    if (cr === ERR_NOT_IN_RANGE) {
+      creep.travelTo(containerWithEnergy, { range: 1, reusePath: CFG.PATH_REUSE });
+    }
     return true;
   }
 })();
@@ -3042,7 +3035,9 @@ roleBeeWorker.Luna = (function () {
       debugSay(creep, '🔨');
       debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
       var br = creep.build(site);
-      if (br === ERR_NOT_IN_RANGE) go(creep, site, { range: 3, reusePath: 15, ignoreCreeps: true });
+      if (br === ERR_NOT_IN_RANGE) {
+        creep.travelTo(site, { range: 3, reusePath: 15, ignoreCreeps: true });
+      }
       return true;
     }
 
@@ -3051,7 +3046,9 @@ roleBeeWorker.Luna = (function () {
       debugSay(creep, '⬆️');
       debugDrawLine(creep, ctrl, CFG.DRAW.UPG_COLOR, "UPG");
       var ur = creep.upgradeController(ctrl);
-      if (ur === ERR_NOT_IN_RANGE) go(creep, ctrl, { range: 3, reusePath: 15, ignoreCreeps: true });
+      if (ur === ERR_NOT_IN_RANGE) {
+        creep.travelTo(ctrl, { range: 3, reusePath: 15, ignoreCreeps: true });
+      }
       return true;
     }
 
@@ -3079,7 +3076,7 @@ roleBeeWorker.Luna = (function () {
     var anchor = getAnchorPos(getHomeName(creep));
     debugSay(creep, label || 'IDLE');
     debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, label || 'IDLE');
-    go(creep, anchor, { range: 2, ignoreCreeps: true });
+    creep.travelTo(anchor, { range: 2, ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
   }
 
   function shouldReleaseForEndOfLife(creep) {
@@ -3131,7 +3128,7 @@ roleBeeWorker.Luna = (function () {
     var dest = new RoomPosition(25,25,creep.memory.targetRoom);
     debugSay(creep, '➡️'+creep.memory.targetRoom);
     debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-    go(creep, dest, { range:20, reusePath:20, ignoreCreeps: true });
+    creep.travelTo(dest, { range: 20, reusePath: 20, ignoreCreeps: true });
     return true;
   }
 
@@ -3349,7 +3346,7 @@ roleBeeWorker.Luna = (function () {
         var destHome = new RoomPosition(25, 25, homeName);
         debugSay(creep, '🏠');
         debugDrawLine(creep, destHome, CFG.DRAW.TRAVEL_COLOR, "HOME");
-        go(creep, destHome, { range: 20, reusePath: 20, ignoreCreeps: true });
+        creep.travelTo(destHome, { range: 20, reusePath: 20, ignoreCreeps: true });
         return;
       }
 
@@ -3369,7 +3366,9 @@ roleBeeWorker.Luna = (function () {
           debugSay(creep, '→ '+lbl);
           debugDrawLine(creep, a, CFG.DRAW.DELIVER_COLOR, lbl);
           var rc = creep.transfer(a, RESOURCE_ENERGY);
-          if (rc === ERR_NOT_IN_RANGE) go(creep, a, { ignoreCreeps: true });
+          if (rc === ERR_NOT_IN_RANGE) {
+            creep.travelTo(a, { ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
+          }
           return;
         }
       }
@@ -3380,7 +3379,9 @@ roleBeeWorker.Luna = (function () {
         debugSay(creep, '→ STO');
         debugDrawLine(creep, stor, CFG.DRAW.DELIVER_COLOR, "STO");
         var rc2 = creep.transfer(stor, RESOURCE_ENERGY);
-        if (rc2 === ERR_NOT_IN_RANGE) go(creep, stor, { ignoreCreeps: true });
+        if (rc2 === ERR_NOT_IN_RANGE) {
+          creep.travelTo(stor, { ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
+        }
         return;
       }
 
@@ -3397,7 +3398,9 @@ roleBeeWorker.Luna = (function () {
           debugSay(creep, '→ CON');
           debugDrawLine(creep, b, CFG.DRAW.DELIVER_COLOR, "CON");
           var rc3 = creep.transfer(b, RESOURCE_ENERGY);
-          if (rc3 === ERR_NOT_IN_RANGE) go(creep, b, { ignoreCreeps: true });
+          if (rc3 === ERR_NOT_IN_RANGE) {
+            creep.travelTo(b, { ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
+          }
           return;
         }
       }
@@ -3409,7 +3412,7 @@ roleBeeWorker.Luna = (function () {
       var anchor = getAnchorPos(homeName);
       debugSay(creep, 'IDLE');
       debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      go(creep, anchor, { range: 2, ignoreCreeps: true });
+      creep.travelTo(anchor, { range: 2, ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
     },
 
     harvestSource: function(creep){
@@ -3421,7 +3424,8 @@ roleBeeWorker.Luna = (function () {
         var dest = new RoomPosition(25,25,creep.memory.targetRoom);
         debugSay(creep, '➡️'+creep.memory.targetRoom);
         debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-        go(creep, dest, { range:20,reusePath:20, ignoreCreeps: true }); return;
+        creep.travelTo(dest, { range: 20, reusePath: 20, ignoreCreeps: true });
+        return;
       }
 
       if (isRoomLockedByInvaderCore(creep.room.name)){
@@ -3446,12 +3450,17 @@ roleBeeWorker.Luna = (function () {
         if (!res.incomplete) rm.sources[sid].entrySteps = res.path.length;
       }
 
-      if ((creep.memory._stuck|0) >= STUCK_WINDOW){ go(creep, src, { range:1, reusePath:3, ignoreCreeps: true }); debugSay(creep, '🚧'); }
+      if ((creep.memory._stuck|0) >= STUCK_WINDOW){
+        creep.travelTo(src, { range: 1, reusePath: 3, ignoreCreeps: true });
+        debugSay(creep, '🚧');
+      }
 
       debugSay(creep, '⛏️SRC');
       debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
       var rc = creep.harvest(src);
-      if (rc===ERR_NOT_IN_RANGE) go(creep, src, { range:1, reusePath:15, ignoreCreeps: true });
+      if (rc===ERR_NOT_IN_RANGE) {
+        creep.travelTo(src, { range: 1, reusePath: 15, ignoreCreeps: true });
+      }
       else if (rc===OK){
         touchSourceActive(creep.room.name, sid);
       }
@@ -4050,7 +4059,7 @@ roleBeeWorker.Scout = (function () {
       drawExitMarker(creep.room, dir, "→", CFG.DRAW.EXIT_OK);
     }
     debugSay(creep, '➡');
-    go(creep, new RoomPosition(25, 25, hop), { range: 20, reusePath: PATH_REUSE, ignoreCreeps: true });
+    creep.travelTo(new RoomPosition(25, 25, hop), { range: 20, reusePath: PATH_REUSE, ignoreCreeps: true });
     return true;
   }
 
@@ -4081,7 +4090,7 @@ roleBeeWorker.Scout = (function () {
 
   function idleScout(creep) {
     debugSay(creep, '🕊');
-    go(creep, new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE, ignoreCreeps: true });
+    creep.travelTo(new RoomPosition(25, 25, creep.room.name), { range: 10, reusePath: PATH_REUSE, ignoreCreeps: true });
   }
 
   function determineScoutState(creep, mem) {
@@ -4769,7 +4778,7 @@ roleBeeWorker.Claimer = (function () {
     if (creep.pos.roomName !== roomName) {
       var dest = new RoomPosition(25, 25, roomName);
       debugSay(creep, '➡️' + roomName);
-      go(creep, dest, 20, CONFIG.reusePath);
+      creep.travelTo(dest, { range: 20, reusePath: CONFIG.reusePath });
       return false;
     }
     return true;
@@ -4804,7 +4813,7 @@ roleBeeWorker.Claimer = (function () {
       if (res === ERR_NOT_IN_RANGE) {
         debugSay(creep, '✍️');
         debugDrawLine(creep, controller, CFG.DRAW.SIGN, "SIGN");
-        go(creep, controller, 1, CONFIG.reusePath);
+        creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
       } else if (res === OK) {
         debugSay(creep, '✅');
         debugRing(creep.room, controller.pos, CFG.DRAW.SIGN, "SIGNED");
@@ -4846,7 +4855,12 @@ roleBeeWorker.Claimer = (function () {
     }
     if (controller.owner && !controller.my) {
       var r = creep.attackController(controller);
-      if (r === ERR_NOT_IN_RANGE) { debugSay(creep, '⚔'); debugDrawLine(creep, controller, CFG.DRAW.CTRL, "ATK"); go(creep, controller, 1, CONFIG.reusePath); return; }
+      if (r === ERR_NOT_IN_RANGE) {
+        debugSay(creep, '⚔');
+        debugDrawLine(creep, controller, CFG.DRAW.CTRL, "ATK");
+        creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
+        return;
+      }
       debugSay(creep, '⚔');
       return;
     }
@@ -4854,7 +4868,7 @@ roleBeeWorker.Claimer = (function () {
     if (res === ERR_NOT_IN_RANGE) {
       debugSay(creep, '👑');
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "CLAIM");
-      go(creep, controller, 1, CONFIG.reusePath);
+      creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
     } else if (res === OK) {
       debugSay(creep, '👑');
       signIfWanted(creep, controller);
@@ -4872,7 +4886,12 @@ roleBeeWorker.Claimer = (function () {
     debugRing(creep.room, controller.pos, CFG.DRAW.CTRL, "CTL");
     if (controller.reservation && controller.reservation.username !== creep.owner.username) {
       var r = creep.attackController(controller);
-      if (r === ERR_NOT_IN_RANGE) { debugSay(creep, '🪓'); debugDrawLine(creep, controller, CFG.DRAW.CTRL, "DERES"); go(creep, controller, 1, CONFIG.reusePath); return; }
+      if (r === ERR_NOT_IN_RANGE) {
+        debugSay(creep, '🪓');
+        debugDrawLine(creep, controller, CFG.DRAW.CTRL, "DERES");
+        creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
+        return;
+      }
       debugSay(creep, '🪓');
       return;
     }
@@ -4880,7 +4899,7 @@ roleBeeWorker.Claimer = (function () {
     if (res === ERR_NOT_IN_RANGE) {
       debugSay(creep, '📌');
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "+RES");
-      go(creep, controller, 1, CONFIG.reusePath);
+      creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
     } else if (res === OK) {
       debugSay(creep, '📌');
     } else {
@@ -4895,7 +4914,7 @@ roleBeeWorker.Claimer = (function () {
     if (r === ERR_NOT_IN_RANGE) {
       debugSay(creep, '🪓');
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "ATK");
-      go(creep, controller, 1, CONFIG.reusePath);
+      creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
     } else if (r === OK) {
       debugSay(creep, '🪓');
     } else {
