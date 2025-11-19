@@ -10,13 +10,14 @@
 // -----------------------------------------------------------------------------
 
 var CoreLogger  = require('core.logger');
+var CoreConfig  = require('core.config');
 var LOG_LEVEL   = CoreLogger.LOG_LEVEL;
 var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
 var spawnLogic  = require('spawn.logic');
-var roleBeeWorker = require('role.BeeWorker');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
+var WorkerConfig = CoreConfig.workerConfig || {};
 
 // --------------------------- Tunables & Constants ------------------------
 var QUEUE_RETRY_COOLDOWN  = 5;
@@ -271,7 +272,7 @@ function determineLunaQuota(C, room) {
   }
 
   var roomsMem = Memory.rooms || {};
-  var perSource = (roleBeeWorker && roleBeeWorker.Luna && roleBeeWorker.Luna.MAX_LUNA_PER_SOURCE) || 1;
+  var perSource = WorkerConfig.MAX_LUNA_PER_SOURCE || 1;
 
   var totalSources = 0;
   for (var j = 0; j < remotes.length; j++) {
