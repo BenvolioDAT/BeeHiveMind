@@ -2,7 +2,7 @@
 // BeeSelectors.js – shared room/remote scanning helpers
 // Responsibilities:
 // * Builds cached per-room snapshots (structures, drops, repair targets) so
-//   role modules (role.BaseHarvest, role.Repair, etc.) query once/tick.
+//   role modules (role.BeeWorker, role.Repair, etc.) query once/tick.
 // * Manages repair target reservations via global.__BHM to prevent double work
 //   between creeps and towers.
 // * Exposes selectors for remote mining (seat positions, container state) used
@@ -279,7 +279,7 @@ function chooseBestSeatForSource(pos) {
 // Inputs: Source object
 // Output: {container, site, seatPos, containerEnergy, source}
 // Side-effects: checks immediate surroundings for containers/sites; used by
-//               worker role modules (BaseHarvest/Luna runners) and BeeSelectors API wrappers.
+//               role.BeeWorker (BaseHarvest/Luna runners) and BeeSelectors API wrappers.
 function getSourceContainerOrSiteImpl(source) {
   if (!source || !source.pos) return { container: null, site: null, seatPos: null, containerEnergy: 0, source: source };
   var pos = source.pos;

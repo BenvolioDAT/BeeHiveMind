@@ -30,15 +30,7 @@ var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
-var roleBaseHarvest      = require('role.BaseHarvest');
-var roleBuilder          = require('role.Builder');
-var roleCourier          = require('role.Courier');
-var roleQueen            = require('role.Queen');
-var roleUpgrader         = require('role.Upgrader');
-var roleLuna             = require('role.Luna');
-var roleScout            = require('role.Scout');
-var roleTrucker          = require('role.Trucker');
-var roleClaimer          = require('role.Claimer');
+var roleBeeWorker        = require('role.BeeWorker');
 var roleRepair           = require('role.Repair');
 var roleDismantler       = require('role.Dismantler');
 var roleBeeArmy          = require('role.BeeArmy');
@@ -50,17 +42,17 @@ var TradeEnergy          = require('Trade.Energy');
 // Default role map; specific roles (queen, courier etc.) may be registered
 // elsewhere by mutating this object.
 var creepRoles = {
-  BaseHarvest: function (creep) { return roleBaseHarvest.run(creep); },
-  Builder: function (creep) { return roleBuilder.run(creep); },
-  Courier: function (creep) { return roleCourier.run(creep); },
+  BaseHarvest: roleBeeWorker.runBaseHarvest,
+  Builder: roleBeeWorker.runBuilder,
+  Courier: roleBeeWorker.runCourier,
   Repair: roleRepair.run,
-  Upgrader: function (creep) { return roleUpgrader.run(creep); },
+  Upgrader: roleBeeWorker.runUpgrader,
   Dismantler: roleDismantler.run,
-  Luna: function (creep) { return roleLuna.run(creep); },
-  Scout: function (creep) { return roleScout.run(creep); },
-  Queen: function (creep) { return roleQueen.run(creep); },
-  Trucker: function (creep) { return roleTrucker.run(creep); },
-  Claimer: function (creep) { return roleClaimer.run(creep); },
+  Luna: roleBeeWorker.runLuna,
+  Scout: roleBeeWorker.runScout,
+  Queen: roleBeeWorker.runQueen,
+  Trucker: roleBeeWorker.runTrucker,
+  Claimer: roleBeeWorker.runClaimer,
   CombatArcher: roleBeeArmy.runArcher,
   CombatMedic: roleBeeArmy.runMedic,
   CombatMelee: roleBeeArmy.runMelee
