@@ -1141,12 +1141,38 @@ roleBeeWorker.Builder = (function () {
   function doBuild(creep, site) {
     if (!site) return false;
 
+    // If the site is in another room, always move toward it instead of
+    //pretending we're in build range.
+    if (site.pos.roomName !== creep.pos.roomName) {
+      debugDrawLine(creep, site, CFG.DRAW.TRAVEL_COLOR, "X-ROOM");
+      creep.travelTo(site, { range: 3, reusePath: 15 });
+      return true;
+    }
+
     if (creep.pos.inRangeTo(site.pos, 3)) {
       debugSay(creep, '🔨');
       debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
       var r = creep.build(site);
-      if (r === ERR_NOT_ENOUGH_RESOURCES) return false;
-      if (r === ERR_INVALID_TARGET) { creep.memory.siteId = null; return false; }
+
+      if (r === ERR_NOT_ENOUGH_RESOURCES) {
+        // out of energy → let state machine flip us back to COLLECT
+        return false;
+      }
+
+      if (r === ERR_INVALID_TARGET) {
+        // site finsihed / gone 
+        creep.memory.siteId = null; 
+        return false; 
+      }
+
+      if (r === ERR_NOT_IN_RANGE) {
+        // shouldn't happen due to range check above, but just in case
+        // this can still happen e.g. if terrain/pathing shifted.
+        creep.travelTo(site, { range: 3, reusePath: 15 });
+        return true;
+      }
+      
+      // OK or minor errors we don't care about → we did something useful
       return true;
     }
 
@@ -3169,7 +3195,7 @@ roleBeeWorker.Luna = (function () {
       debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
       var br = creep.build(site);
       if (br === ERR_NOT_IN_RANGE) {
-        creep.travelTo(site, { range: 3, reusePath: 15, ignoreCreeps: true });
+        creep.travelTo(site, { range: 3, reusePath: 15, });
       }
       return true;
     }
@@ -3180,7 +3206,7 @@ roleBeeWorker.Luna = (function () {
       debugDrawLine(creep, ctrl, CFG.DRAW.UPG_COLOR, "UPG");
       var ur = creep.upgradeController(ctrl);
       if (ur === ERR_NOT_IN_RANGE) {
-        creep.travelTo(ctrl, { range: 3, reusePath: 15, ignoreCreeps: true });
+        creep.travelTo(ctrl, { range: 3, reusePath: 15, });
       }
       return true;
     }
@@ -3213,7 +3239,7 @@ roleBeeWorker.Luna = (function () {
     var anchor = getAnchorPos(getHomeName(creep));
     debugSay(creep, label || 'IDLE');
     debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, label || 'IDLE');
-    creep.travelTo(anchor, { range: 2, ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
+    creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
   }
 
   function shouldReleaseForEndOfLife(creep) {
@@ -3262,10 +3288,16 @@ roleBeeWorker.Luna = (function () {
 
   function travelToAssignedRoom(creep) {
     if (!creep.memory.targetRoom || creep.pos.roomName === creep.memory.targetRoom) return false;
+
     var dest = new RoomPosition(25,25,creep.memory.targetRoom);
     debugSay(creep, '➡️'+creep.memory.targetRoom);
     debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-    creep.travelTo(dest, { range: 20, reusePath: 20, ignoreCreeps: true });
+
+    creep.travelTo(dest, {
+       range: 20,
+        reusePath: 20,
+        });
+
     return true;
   }
 
@@ -3499,7 +3531,7 @@ roleBeeWorker.Luna = (function () {
         var destHome = new RoomPosition(25, 25, homeName);
         debugSay(creep, '🏠');
         debugDrawLine(creep, destHome, CFG.DRAW.TRAVEL_COLOR, "HOME");
-        creep.travelTo(destHome, { range: 20, reusePath: 20, ignoreCreeps: true });
+        creep.travelTo(destHome, { range: 20, reusePath: 20 });
         return;
       }
 
@@ -3520,7 +3552,7 @@ roleBeeWorker.Luna = (function () {
           debugDrawLine(creep, a, CFG.DRAW.DELIVER_COLOR, lbl);
           var rc = creep.transfer(a, RESOURCE_ENERGY);
           if (rc === ERR_NOT_IN_RANGE) {
-            creep.travelTo(a, { ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
+            creep.travelTo(a, { reusePath: CFG.PATH_REUSE });
           }
           return;
         }
@@ -3533,7 +3565,7 @@ roleBeeWorker.Luna = (function () {
         debugDrawLine(creep, stor, CFG.DRAW.DELIVER_COLOR, "STO");
         var rc2 = creep.transfer(stor, RESOURCE_ENERGY);
         if (rc2 === ERR_NOT_IN_RANGE) {
-          creep.travelTo(stor, { ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
+          creep.travelTo(stor, { reusePath: CFG.PATH_REUSE });
         }
         return;
       }
@@ -3552,7 +3584,7 @@ roleBeeWorker.Luna = (function () {
           debugDrawLine(creep, b, CFG.DRAW.DELIVER_COLOR, "CON");
           var rc3 = creep.transfer(b, RESOURCE_ENERGY);
           if (rc3 === ERR_NOT_IN_RANGE) {
-            creep.travelTo(b, { ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
+            creep.travelTo(b, { reusePath: CFG.PATH_REUSE });
           }
           return;
         }
@@ -3565,7 +3597,7 @@ roleBeeWorker.Luna = (function () {
       var anchor = getAnchorPos(homeName);
       debugSay(creep, 'IDLE');
       debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      creep.travelTo(anchor, { range: 2, ignoreCreeps: true, reusePath: CFG.PATH_REUSE });
+      creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
     },
 
     harvestSource: function(creep){
@@ -3577,7 +3609,7 @@ roleBeeWorker.Luna = (function () {
         var dest = new RoomPosition(25,25,creep.memory.targetRoom);
         debugSay(creep, '➡️'+creep.memory.targetRoom);
         debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-        creep.travelTo(dest, { range: 20, reusePath: 20, ignoreCreeps: true });
+        creep.travelTo(dest, { range: 20, reusePath: 20});
         return;
       }
 
@@ -3604,7 +3636,7 @@ roleBeeWorker.Luna = (function () {
       }
 
       if ((creep.memory._stuck|0) >= STUCK_WINDOW){
-        creep.travelTo(src, { range: 1, reusePath: 3, ignoreCreeps: true });
+        creep.travelTo(src, { range: 1, reusePath: 3,  });
         debugSay(creep, '🚧');
       }
 
@@ -3612,7 +3644,7 @@ roleBeeWorker.Luna = (function () {
       debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
       var rc = creep.harvest(src);
       if (rc===ERR_NOT_IN_RANGE) {
-        creep.travelTo(src, { range: 1, reusePath: 15, ignoreCreeps: true });
+        creep.travelTo(src, { range: 1, reusePath: 15, });
       }
       else if (rc===OK){
         touchSourceActive(creep.room.name, sid);
