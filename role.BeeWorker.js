@@ -2506,7 +2506,7 @@ roleBeeWorker.Luna = (function () {
   // Tunables (existing behaviour)
   // ============================
   // NOTE: REMOTE_RADIUS is measured in "room hops" from the home room.
-  var REMOTE_RADIUS = 1;
+  var REMOTE_RADIUS = 3;
 
   var MAX_PF_OPS    = 3000;
   var PLAIN_COST    = 2;
