@@ -359,7 +359,6 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   }
   var mem = copyMemory(memory);
   if (!mem.role) mem.role = canonicalRole;
-  if (!mem.bornRole) mem.bornRole = canonicalRole;
   if (mem.skipTaskMemory) {
     delete mem.skipTaskMemory;
   }
@@ -482,8 +481,6 @@ function matchesSquadRole(mem, taskName) {
   var target = String(taskName).toLowerCase();
   var role = mem.role ? String(mem.role).toLowerCase() : null;
   if (role === target) return true;
-  var bornRole = mem.bornRole ? String(mem.bornRole).toLowerCase() : null;
-  if (bornRole === target) return true;
   var task = mem.task ? String(mem.task).toLowerCase() : null;
   if (task === target) return true;
   var bornTask = mem.bornTask ? String(mem.bornTask).toLowerCase() : null;

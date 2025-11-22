@@ -452,8 +452,6 @@ roleBeeWorker.BaseHarvest = (function () {
     if (!creep || !creep.memory) return false;
     var role = creep.memory.role;
     if (role && roleName && String(role).toLowerCase() === String(roleName).toLowerCase()) return true;
-    var bornRole = creep.memory.bornRole;
-    if (bornRole && roleName && String(bornRole).toLowerCase() === String(roleName).toLowerCase()) return true;
     var task = creep.memory.task;
     var legacy = legacyTask || roleName;
     if (task && legacy && String(task).toLowerCase() === String(legacy).toLowerCase()) return true;

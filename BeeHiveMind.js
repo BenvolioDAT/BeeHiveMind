@@ -133,6 +133,7 @@ function ensureCreepRole(creep) {
   }
 
   mem.role = canonical;
+  if (mem.bornRole) delete mem.bornRole;
   return canonical;
 }
 
