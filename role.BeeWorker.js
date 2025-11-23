@@ -946,20 +946,25 @@ roleBeeWorker.Builder = (function () {
   // -----------------------------
   function collectEnergy(creep) {
     // 1) Tombstones / Ruins
-    var tomb = creep.pos.findClosestByRange(FIND_TOMBSTONES, { filter: function (t) { return (t.store[RESOURCE_ENERGY] | 0) > 0; } });
+    var tomb = creep.pos.findClosestByRange(FIND_TOMBSTONES, {
+      filter: function (t) { return (t.store[RESOURCE_ENERGY] | 0) > 0; }
+    });
     if (tomb) {
       debugSay(creep, '🪦');
-      debugDrawLine(creep, tomb, CFG.DRAW.TOMBSTONE_COLOR, "TOMB");
+      debugDrawLine(creep, tomb, CFG.DRAW.GRAVE_COLOR, "TOMB");
       var tr = creep.withdraw(tomb, RESOURCE_ENERGY);
       if (tr === ERR_NOT_IN_RANGE) {
         creep.travelTo(tomb, { range: 1, reusePath: 20 });
       }
       return true;
     }
-    var ruin = creep.pos.findClosestByRange(FIND_RUINS, { filter: function (r) { return (r.store[RESOURCE_ENERGY] | 0) > 0; } });
+
+    var ruin = creep.pos.findClosestByRange(FIND_RUINS, {
+      filter: function (r) { return (r.store[RESOURCE_ENERGY] | 0) > 0; }
+    });
     if (ruin) {
       debugSay(creep, '🏚️');
-      debugDrawLine(creep, ruin, CFG.DRAW.RUIN_COLOR, "RUIN");
+      debugDrawLine(creep, ruin, CFG.DRAW.GRAVE_COLOR, "RUIN");
       var rr = creep.withdraw(ruin, RESOURCE_ENERGY);
       if (rr === ERR_NOT_IN_RANGE) {
         creep.travelTo(ruin, { range: 1, reusePath: 20 });
@@ -969,11 +974,13 @@ roleBeeWorker.Builder = (function () {
 
     // 2) Dropped
     var dropped = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
-      filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) >= PICKUP_MIN; }
+      filter: function (r) {
+        return r.resourceType === RESOURCE_ENERGY && (r.amount | 0) >= PICKUP_MIN;
+      }
     });
     if (dropped) {
       debugSay(creep, '🍪');
-      debugDrawLine(creep, dropped, CFG.DRAW.PICKUP_COLOR, "DROP");
+      debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP");
       if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
         creep.travelTo(dropped, { range: 1, reusePath: 15 });
       }
@@ -990,7 +997,7 @@ roleBeeWorker.Builder = (function () {
     });
     if (srcCont) {
       debugSay(creep, '📦');
-      debugDrawLine(creep, srcCont, CFG.DRAW.SRC_CONT_COLOR, "SRC•CONT");
+      debugDrawLine(creep, srcCont, CFG.DRAW.FILL_COLOR, "SRC•CONT");
       var cr = creep.withdraw(srcCont, RESOURCE_ENERGY);
       if (cr === ERR_NOT_IN_RANGE) {
         creep.travelTo(srcCont, { range: 1, reusePath: 25 });
@@ -998,18 +1005,21 @@ roleBeeWorker.Builder = (function () {
       return true;
     }
 
-    // 4) Any store (container/link/storage/terminal)
+    // 4) Any store (container/link/storage/terminal) in THIS room
     var storeLike = creep.pos.findClosestByRange(FIND_STRUCTURES, {
       filter: function (s) {
         if (!s.store) return false;
         var t = s.structureType;
-        if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_LINK && t !== STRUCTURE_STORAGE && t !== STRUCTURE_TERMINAL) return false;
+        if (t !== STRUCTURE_CONTAINER &&
+            t !== STRUCTURE_LINK &&
+            t !== STRUCTURE_STORAGE &&
+            t !== STRUCTURE_TERMINAL) return false;
         return (s.store[RESOURCE_ENERGY] | 0) > 0;
       }
     });
     if (storeLike) {
       debugSay(creep, '🏦');
-      debugDrawLine(creep, storeLike, CFG.DRAW.STORELIKE_COLOR, "WITHDRAW");
+      debugDrawLine(creep, storeLike, CFG.DRAW.FILL_COLOR, "WITHDRAW");
       var sr = creep.withdraw(storeLike, RESOURCE_ENERGY);
       if (sr === ERR_NOT_IN_RANGE) {
         creep.travelTo(storeLike, { range: 1, reusePath: 25 });
@@ -1017,12 +1027,12 @@ roleBeeWorker.Builder = (function () {
       return true;
     }
 
-    // 5) Optional last resort: harvest
+    // 5) Optional last resort: harvest locally
     if (ALLOW_HARVEST_FALLBACK) {
       var src = creep.pos.findClosestByRange(FIND_SOURCES_ACTIVE);
       if (src) {
         debugSay(creep, '⛏️');
-        debugDrawLine(creep, src, CFG.DRAW.SRC_CONT_COLOR, "MINE");
+        debugDrawLine(creep, src, CFG.DRAW.SOURCE, "MINE");
         var hr = creep.harvest(src);
         if (hr === ERR_NOT_IN_RANGE) {
           creep.travelTo(src, { range: 1, reusePath: 20 });
@@ -1031,15 +1041,25 @@ roleBeeWorker.Builder = (function () {
       }
     }
 
-    // Idle near something useful
-    var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
-    if (anchor && anchor.pos) {
-      debugSay(creep, '🧘');
-      debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      creep.travelTo(anchor, { range: 2, reusePath: 20 });
+    // 6) No local energy and harvest fallback is OFF → walk toward home room
+    if (typeof getHomeName === 'function' && typeof getAnchorPos === 'function') {
+      var homeName = getHomeName(creep);
+      if (homeName && creep.pos.roomName !== homeName) {
+        var anchorPos = getAnchorPos(homeName);
+        if (anchorPos) {
+          debugSay(creep, '🏠');
+          debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME");
+          creep.travelTo(anchorPos, { range: 2, reusePath: 25 });
+          return true; // we are actively walking home to refuel
+        }
+      }
     }
+
+    // 7) Already in home room (or no home info) → idle near local anchor
+    idleNearAnchor(creep);
     return false;
   }
+
 
   function idleNearAnchor(creep) {
     var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos;
@@ -1138,48 +1158,56 @@ roleBeeWorker.Builder = (function () {
   // ==============================
   // Build work
   // ==============================
-  function doBuild(creep, site) {
-    if (!site) return false;
+function doBuild(creep, site) {
+  if (!site) return false;
 
-    // If the site is in another room, always move toward it instead of
-    //pretending we're in build range.
-    if (site.pos.roomName !== creep.pos.roomName) {
-      debugDrawLine(creep, site, CFG.DRAW.TRAVEL_COLOR, "X-ROOM");
+  // If the site is in another room, handle border crossing explicitly.
+  if (site.pos.roomName !== creep.pos.roomName) {
+    // If we are standing on a room edge, give a direct "step across" command.
+    var atBorder =
+      creep.pos.x === 0 || creep.pos.x === 49 ||
+      creep.pos.y === 0 || creep.pos.y === 49;
+
+    if (atBorder) {
+      // Step toward the target room center; this will push us through the exit.
+      var crossPos = new RoomPosition(25, 25, site.pos.roomName);
+      var dir = creep.pos.getDirectionTo(crossPos);
+      creep.move(dir);
+      debugDrawLine(creep, crossPos, CFG.DRAW.TRAVEL_COLOR, "STEP-X");
+    } else {
+      // Not at the border yet – let Traveler handle normal pathing.
+      var mid = new RoomPosition(25, 25, site.pos.roomName);
+      debugDrawLine(creep, mid, CFG.DRAW.TRAVEL_COLOR, "X-ROOM");
+      creep.travelTo(mid, { range: 20, reusePath: 15 });
+    }
+    return true;
+  }
+
+  // === same-room logic stays the same ===
+  if (creep.pos.inRangeTo(site.pos, 3)) {
+    debugSay(creep, '🔨');
+    debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
+    var r = creep.build(site);
+
+    if (r === ERR_NOT_ENOUGH_RESOURCES) {
+      return false;
+    }
+    if (r === ERR_INVALID_TARGET) {
+      creep.memory.siteId = null;
+      return false;
+    }
+    if (r === ERR_NOT_IN_RANGE) {
       creep.travelTo(site, { range: 3, reusePath: 15 });
       return true;
     }
-
-    if (creep.pos.inRangeTo(site.pos, 3)) {
-      debugSay(creep, '🔨');
-      debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
-      var r = creep.build(site);
-
-      if (r === ERR_NOT_ENOUGH_RESOURCES) {
-        // out of energy → let state machine flip us back to COLLECT
-        return false;
-      }
-
-      if (r === ERR_INVALID_TARGET) {
-        // site finsihed / gone 
-        creep.memory.siteId = null; 
-        return false; 
-      }
-
-      if (r === ERR_NOT_IN_RANGE) {
-        // shouldn't happen due to range check above, but just in case
-        // this can still happen e.g. if terrain/pathing shifted.
-        creep.travelTo(site, { range: 3, reusePath: 15 });
-        return true;
-      }
-      
-      // OK or minor errors we don't care about → we did something useful
-      return true;
-    }
-
-    debugDrawLine(creep, site, CFG.DRAW.TRAVEL_COLOR, "TO•SITE");
-    creep.travelTo(site, { range: 3, reusePath: 15 });
     return true;
   }
+
+  debugDrawLine(creep, site, CFG.DRAW.TRAVEL_COLOR, "TO•SITE");
+  creep.travelTo(site, { range: 3, reusePath: 15 });
+  return true;
+}
+
 
   // ==============================
   // Public API
