@@ -3982,7 +3982,11 @@ roleBeeWorker.Scout = (function () {
     stampVisit(room.name);
     if (shouldLogIntel(room)) logRoomIntel(room);
     seedSourcesFromVision(room);
-    return evaluateRoomThreat(room, 'Scout');
+    var threatInfo = evaluateRoomThreat(room, 'Scout');
+    if (threatInfo && threatInfo.threat && threatInfo.threat.hasThreat && threatInfo.canEscalate) {
+      ensureRemoteDefensePlan(room, threatInfo.threat, threatInfo.distance);
+    }
+    return threatInfo;
   }
 
   function shouldRetreat(creep, threatInfo) {
