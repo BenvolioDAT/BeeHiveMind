@@ -22,7 +22,7 @@ var BeeCombatSquads = require('BeeCombatSquads');
 // Shared debug + tuning config
 var CFG = Object.freeze({
   // --- Debug toggles (shared) ---
-  DEBUG_SAY: false,
+  DEBUG_SAY: true,
   DEBUG_DRAW: true,
 
   // --- Visual styles (shared) ---
@@ -1159,65 +1159,62 @@ roleBeeWorker.Builder = (function () {
   // Build work
   // ==============================
 function doBuild(creep, site) {
-  if (!site) return false;
+    if (!site) return false;
 
-  // If the site is in another room, handle border crossing explicitly.
-  if (site.pos.roomName !== creep.pos.roomName) {
-    // Prefer an explicit exit step so we don't bounce between borders.
-    var exitDir = Game.map.findExit(creep.pos.roomName, site.pos.roomName);
-    if (exitDir >= 0) {
-      var exit = creep.pos.findClosestByRange(exitDir);
-      if (exit) {
-        debugDrawLine(creep, exit, CFG.DRAW.TRAVEL, "EXIT");
-        creep.travelTo(exit, { range: 0, reusePath: 5 });
+    // ==============================
+    // Cross-room handling (simple)
+    // ==============================
+    if (site.pos.roomName !== creep.pos.roomName) {
+        // Just aim for the center of the target room and let Traveler do the work.
+        var targetCenter = new RoomPosition(25, 25, site.pos.roomName);
+
+        debugDrawLine(creep, targetCenter, CFG.DRAW.TRAVEL, "X-ROOM");
+        creep.travelTo(targetCenter, {
+            range: 20,        // loose range, we just want to get inside the room
+            reusePath: 20
+        });
+        creep.say('🚚', true);
+
+        // We *are* doing work (moving toward the site), so return true.
         return true;
-      }
     }
 
-    // Fallback: if we are standing on a room edge, give a direct "step across" command.
-    var atBorder =
-      creep.pos.x === 0 || creep.pos.x === 49 ||
-      creep.pos.y === 0 || creep.pos.y === 49;
+    // ==============================
+    // Same-room build logic
+    // ==============================
 
-    if (atBorder) {
-      // Step toward the target room center; this will push us through the exit.
-      var crossPos = new RoomPosition(25, 25, site.pos.roomName);
-      var dir = creep.pos.getDirectionTo(crossPos);
-      creep.move(dir);
-      debugDrawLine(creep, crossPos, CFG.DRAW.TRAVEL, "STEP-X");
-    } else {
-      // Not at the border yet – let Traveler handle normal pathing.
-      var mid = new RoomPosition(25, 25, site.pos.roomName);
-      debugDrawLine(creep, mid, CFG.DRAW.TRAVEL, "X-ROOM");
-      creep.travelTo(mid, { range: 20, reusePath: 15 });
+    // Close enough to try building?
+    if (creep.pos.inRangeTo(site.pos, 3)) {
+        debugSay(creep, '🔨');
+        debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
+
+        var r = creep.build(site);
+
+        if (r === ERR_NOT_ENOUGH_RESOURCES) {
+            // Caller can pick a new task / refill.
+            return false;
+        }
+        if (r === ERR_INVALID_TARGET) {
+            // Site is gone or invalid; clear memory so a new one can be picked.
+            creep.memory.siteId = null;
+            return false;
+        }
+        if (r === ERR_NOT_IN_RANGE) {
+            // Paranoia: if for some reason we're still not in range, step closer.
+            creep.travelTo(site, { range: 3, reusePath: 15 });
+            return true;
+        }
+
+        // Built successfully or tired, but we did our job this tick.
+        return true;
     }
+
+    // Not in range yet – travel inside this room toward the site.
+    debugDrawLine(creep, site, CFG.DRAW.TRAVEL, "TO•SITE");
+    creep.travelTo(site, { range: 3, reusePath: 15 });
     return true;
-  }
-
-  // === same-room logic stays the same ===
-  if (creep.pos.inRangeTo(site.pos, 3)) {
-    debugSay(creep, '🔨');
-    debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
-    var r = creep.build(site);
-
-    if (r === ERR_NOT_ENOUGH_RESOURCES) {
-      return false;
-    }
-    if (r === ERR_INVALID_TARGET) {
-      creep.memory.siteId = null;
-      return false;
-    }
-    if (r === ERR_NOT_IN_RANGE) {
-      creep.travelTo(site, { range: 3, reusePath: 15 });
-      return true;
-    }
-    return true;
-  }
-
-  debugDrawLine(creep, site, CFG.DRAW.TRAVEL_COLOR, "TO•SITE");
-  creep.travelTo(site, { range: 3, reusePath: 15 });
-  return true;
 }
+
 
 
   // ==============================
