@@ -1215,8 +1215,6 @@ function doBuild(creep, site) {
     return true;
 }
 
-
-
   // ==============================
   // Public API
   // ==============================
