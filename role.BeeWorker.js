@@ -1163,7 +1163,25 @@ function doBuild(creep, site) {
 
   // If the site is in another room, handle border crossing explicitly.
   if (site.pos.roomName !== creep.pos.roomName) {
-    // If we are standing on a room edge, give a direct "step across" command.
+    // Prefer an explicit exit step so we don't bounce between borders.
+    var exitDir = Game.map.findExit(creep.pos.roomName, site.pos.roomName);
+    if (exitDir >= 0) {
+      var exit = creep.pos.findClosestByRange(exitDir);
+      if (exit) {
+        // If we're already standing on the exit tile, step into the target room.
+        if (creep.pos.isEqualTo(exit)) {
+          var stepDir = creep.pos.getDirectionTo(new RoomPosition(25, 25, site.pos.roomName));
+          creep.move(stepDir);
+          debugDrawLine(creep, exit, CFG.DRAW.TRAVEL, "EXIT-CROSS");
+        } else {
+          debugDrawLine(creep, exit, CFG.DRAW.TRAVEL, "EXIT");
+          creep.travelTo(exit, { range: 0, reusePath: 5 });
+        }
+        return true;
+      }
+    }
+
+    // Fallback: if we are standing on a room edge, give a direct "step across" command.
     var atBorder =
       creep.pos.x === 0 || creep.pos.x === 49 ||
       creep.pos.y === 0 || creep.pos.y === 49;
@@ -1173,11 +1191,11 @@ function doBuild(creep, site) {
       var crossPos = new RoomPosition(25, 25, site.pos.roomName);
       var dir = creep.pos.getDirectionTo(crossPos);
       creep.move(dir);
-      debugDrawLine(creep, crossPos, CFG.DRAW.TRAVEL_COLOR, "STEP-X");
+      debugDrawLine(creep, crossPos, CFG.DRAW.TRAVEL, "STEP-X");
     } else {
       // Not at the border yet – let Traveler handle normal pathing.
       var mid = new RoomPosition(25, 25, site.pos.roomName);
-      debugDrawLine(creep, mid, CFG.DRAW.TRAVEL_COLOR, "X-ROOM");
+      debugDrawLine(creep, mid, CFG.DRAW.TRAVEL, "X-ROOM");
       creep.travelTo(mid, { range: 20, reusePath: 15 });
     }
     return true;
