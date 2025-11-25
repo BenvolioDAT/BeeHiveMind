@@ -22,7 +22,7 @@ var BeeCombatSquads = require('BeeCombatSquads');
 // Shared debug + tuning config
 var CFG = Object.freeze({
   // --- Debug toggles (shared) ---
-  DEBUG_SAY: true,
+  DEBUG_SAY: false,
   DEBUG_DRAW: true,
 
   // --- Visual styles (shared) ---
