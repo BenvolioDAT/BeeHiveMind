@@ -900,7 +900,7 @@ roleBeeWorker.BaseHarvest = (function () {
 // =====================================================
 // Role: Builder
 // Purpose: Grab energy around the room and complete construction sites
-// States: HARVEST (refuel), TRAVEL (cross-room moves), BUILD/REPAIR (spend energy), IDLE (fallback)
+// States: HARVEST (refuel), TRAVEL (cross-room moves), BUILD (spend energy), IDLE (fallback)
 // =====================================================
 roleBeeWorker.Builder = (function () {
   // -----------------------------
@@ -914,12 +914,11 @@ roleBeeWorker.Builder = (function () {
   var SRC_CONTAINER_MIN = 100;        // minimum energy to bother at source containers
 
   // Simple and explicit builder state machine so new players can trace behaviour.
-  // HARVEST → refill; TRAVEL → cross rooms safely; BUILD/REPAIR → spend energy; IDLE → wait + retarget.
+  // HARVEST → refill; TRAVEL → cross rooms safely; BUILD → spend energy; IDLE → wait + retarget.
   var BUILDER_STATES = {
     HARVEST: 'HARVEST',
     TRAVEL: 'TRAVEL',
     BUILD: 'BUILD',
-    REPAIR: 'REPAIR',
     IDLE: 'IDLE'
   };
 
@@ -933,8 +932,8 @@ roleBeeWorker.Builder = (function () {
   }
 
   // Memory keys:
-  // - builderTargetId: sticky id for a construction site or repair target
-  // - builderTargetType: 'construction' or 'repair'
+  // - builderTargetId: sticky id for a construction site
+  // - builderTargetType: 'construction'
   // - builderState: current state from BUILDER_STATES
 
   function needsEnergy(creep) {
@@ -1106,16 +1105,20 @@ roleBeeWorker.Builder = (function () {
   }
 
   // -----------------------------
-  // C) Target helpers (build + repair)
+  // C) Target helpers (build only)
   // -----------------------------
   function loadStoredBuilderTarget(creep) {
     var id = creep.memory.builderTargetId;
     var type = creep.memory.builderTargetType;
     if (!id || !type) return null;
+    if (type !== 'construction') {
+      creep.memory.builderTargetId = null;
+      creep.memory.builderTargetType = null;
+      return null;
+    }
 
     var obj = null;
-    if (type === 'construction') obj = Game.constructionSites[id];
-    else obj = Game.getObjectById(id);
+    obj = Game.constructionSites[id];
 
     if (!obj) {
       creep.memory.builderTargetId = null;
@@ -1123,7 +1126,7 @@ roleBeeWorker.Builder = (function () {
       return null;
     }
 
-    return { target: obj, type: type === 'construction' ? 'build' : 'repair' };
+    return { target: obj, type: 'build' };
   }
 
   function pickLocalConstruction(creep) {
@@ -1151,30 +1154,8 @@ roleBeeWorker.Builder = (function () {
     return any;
   }
 
-  function pickRepairTarget(creep) {
-    // Keep this small so builders do light maintenance when no sites exist.
-    var targets = creep.room.find(FIND_STRUCTURES, {
-      filter: function (s) {
-        if (!s.hits || !s.hitsMax) return false;
-        if (s.structureType === STRUCTURE_WALL) return false; // skip heavy walls here
-        if (s.structureType === STRUCTURE_RAMPART && s.hits > 50000) return false;
-        return s.hits < (s.hitsMax * 0.6);
-      }
-    });
-
-    if (!targets || targets.length === 0) return null;
-
-    var best = null, bestRatio = 1;
-    for (var i = 0; i < targets.length; i++) {
-      var t = targets[i];
-      var ratio = t.hits / (t.hitsMax || 1);
-      if (ratio < bestRatio) { bestRatio = ratio; best = t; }
-    }
-    return best;
-  }
-
   // Target selection priority:
-  // 1) Sticky target from memory; 2) construction in current room; 3) light repairs; 4) nearest other room site.
+  // 1) Sticky target from memory; 2) construction in current room; 3) nearest other room site.
   function getBuilderTarget(creep) {
     var sticky = loadStoredBuilderTarget(creep);
     if (sticky) return sticky;
@@ -1185,14 +1166,6 @@ roleBeeWorker.Builder = (function () {
       creep.memory.builderTargetType = 'construction';
       debugRing(creep.room, local.pos, CFG.DRAW.BUILD_COLOR, 'BUILD');
       return { target: local, type: 'build' };
-    }
-
-    var repair = pickRepairTarget(creep);
-    if (repair) {
-      creep.memory.builderTargetId = repair.id;
-      creep.memory.builderTargetType = 'repair';
-      debugRing(creep.room, repair.pos, CFG.DRAW.BUILD_COLOR, 'REPAIR');
-      return { target: repair, type: 'repair' };
     }
 
     var any = pickAnyConstruction(creep);
@@ -1272,33 +1245,6 @@ roleBeeWorker.Builder = (function () {
     return true;
   }
 
-  function handleRepair(creep, target) {
-    if (!target) return false;
-    if (target.pos.roomName !== creep.pos.roomName) {
-      setBuilderState(creep, BUILDER_STATES.TRAVEL);
-      return true;
-    }
-
-    if (nudgeOffBorder(creep)) return true;
-
-    if (!creep.pos.inRangeTo(target.pos, 3)) {
-      debugDrawLine(creep, target, CFG.DRAW.TRAVEL, 'TO•FIX');
-      creep.moveTo(target, { range: 3, reusePath: 10 });
-      return true;
-    }
-
-    debugSay(creep, '🛠️');
-    debugDrawLine(creep, target, CFG.DRAW.BUILD_COLOR, 'REPAIR');
-    var r = creep.repair(target);
-    if (r === ERR_NOT_ENOUGH_RESOURCES) return false;
-    if (r === ERR_INVALID_TARGET || target.hits === target.hitsMax) {
-      creep.memory.builderTargetId = null;
-      creep.memory.builderTargetType = null;
-      setBuilderState(creep, BUILDER_STATES.IDLE);
-    }
-    return true;
-  }
-
   function handleTravel(creep, targetInfo) {
     if (!targetInfo || !targetInfo.target) return false;
     var target = targetInfo.target;
@@ -1308,8 +1254,7 @@ roleBeeWorker.Builder = (function () {
       nudgeOffBorder(creep);
       return true;
     }
-    var desired = targetInfo.type === 'repair' ? BUILDER_STATES.REPAIR : BUILDER_STATES.BUILD;
-    setBuilderState(creep, desired);
+    setBuilderState(creep, BUILDER_STATES.BUILD);
     return false;
   }
 
@@ -1357,11 +1302,6 @@ roleBeeWorker.Builder = (function () {
 
       if (state === BUILDER_STATES.BUILD) {
         if (handleBuild(creep, targetInfo.target)) return;
-        return;
-      }
-
-      if (state === BUILDER_STATES.REPAIR) {
-        if (handleRepair(creep, targetInfo.target)) return;
         return;
       }
 
