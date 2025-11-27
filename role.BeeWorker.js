@@ -900,7 +900,7 @@ roleBeeWorker.BaseHarvest = (function () {
 // =====================================================
 // Role: Builder
 // Purpose: Grab energy around the room and complete construction sites
-// States: COLLECT (refuel) and BUILD (spend energy)
+// States: HARVEST (refuel), TRAVEL (cross-room moves), BUILD/REPAIR (spend energy), IDLE (fallback)
 // =====================================================
 roleBeeWorker.Builder = (function () {
   // -----------------------------
@@ -913,11 +913,18 @@ roleBeeWorker.Builder = (function () {
   var PICKUP_MIN = 50;                // ignore tiny crumbs
   var SRC_CONTAINER_MIN = 100;        // minimum energy to bother at source containers
 
+  // Simple and explicit builder state machine so new players can trace behaviour.
+  // HARVEST → refill; TRAVEL → cross rooms safely; BUILD/REPAIR → spend energy; IDLE → wait + retarget.
+  var BUILDER_STATES = {
+    HARVEST: 'HARVEST',
+    TRAVEL: 'TRAVEL',
+    BUILD: 'BUILD',
+    REPAIR: 'REPAIR',
+    IDLE: 'IDLE'
+  };
+
   // ==============================
-  // Tiny movement helper
-  // ==============================
-  // ==============================
-  // Energy intake (prefer floor snacks)
+  // Tiny helpers
   // ==============================
   function ensureBuilderIdentity(creep) {
     if (!creep || !creep.memory) return;
@@ -926,19 +933,23 @@ roleBeeWorker.Builder = (function () {
   }
 
   // Memory keys:
-  // - siteId: sticky construction target we are working on
+  // - builderTargetId: sticky id for a construction site or repair target
+  // - builderTargetType: 'construction' or 'repair'
+  // - builderState: current state from BUILDER_STATES
 
-  function determineBuilderState(creep) {
-    ensureBuilderIdentity(creep);
-    if (creep.memory.building && creep.store[RESOURCE_ENERGY] === 0) {
-      creep.memory.building = false;
-      debugSay(creep, '⤵️REFUEL');
-    } else if (!creep.memory.building && creep.store.getFreeCapacity() === 0) {
-      creep.memory.building = true;
-      debugSay(creep, '⤴️BUILD');
+  function needsEnergy(creep) {
+    return (creep.store[RESOURCE_ENERGY] | 0) === 0;
+  }
+
+  function setBuilderState(creep, state) {
+    creep.memory.builderState = state;
+  }
+
+  function getBuilderState(creep) {
+    if (!creep.memory.builderState) {
+      setBuilderState(creep, BUILDER_STATES.HARVEST);
     }
-    creep.memory.state = creep.memory.building ? 'BUILD' : 'COLLECT';
-    return creep.memory.state;
+    return creep.memory.builderState;
   }
 
   // -----------------------------
@@ -1095,54 +1106,41 @@ roleBeeWorker.Builder = (function () {
   }
 
   // -----------------------------
-  // C) Build phase helpers
+  // C) Target helpers (build + repair)
   // -----------------------------
-  function runBuildPhase(creep) {
-    var site = pickBuildSite(creep);
-    if (site) {
-      if (doBuild(creep, site)) return;
-      if ((creep.store[RESOURCE_ENERGY] | 0) === 0) creep.memory.building = false;
-      else creep.memory.siteId = null;
-      return;
+  function loadStoredBuilderTarget(creep) {
+    var id = creep.memory.builderTargetId;
+    var type = creep.memory.builderTargetType;
+    if (!id || !type) return null;
+
+    var obj = null;
+    if (type === 'construction') obj = Game.constructionSites[id];
+    else obj = Game.getObjectById(id);
+
+    if (!obj) {
+      creep.memory.builderTargetId = null;
+      creep.memory.builderTargetType = null;
+      return null;
     }
 
-    if (dumpEnergyToSink(creep)) return;
-    idleNearAnchor(creep);
+    return { target: obj, type: type === 'construction' ? 'build' : 'repair' };
   }
 
-  // ==============================
-  // Pick a build target (simple + sticky)
-  // ==============================
-  function pickBuildSite(creep) {
-    // sticky
-    var id = creep.memory.siteId;
-    if (id) {
-      var stick = Game.constructionSites[id];
-      if (stick) {
-        debugRing(creep.room, stick.pos, CFG.DRAW.BUILD_COLOR, "STICK");
-        return stick;
-      }
-      creep.memory.siteId = null;
-    }
-
-    // prefer current room
+  function pickLocalConstruction(creep) {
     var local = creep.room.find(FIND_CONSTRUCTION_SITES);
-    if (local.length) {
-      // light priority: spawn/ext/tower first, else nearest
-      var prio = { 'spawn': 5, 'extension': 4, 'tower': 3, 'container': 2, 'road': 1 };
-      var best = null, bestScore = -1, bestD = 1e9;
-      for (var i = 0; i < local.length; i++) {
-        var s = local[i], sc = (prio[s.structureType] | 0), d = creep.pos.getRangeTo(s.pos);
-        if (sc > bestScore || (sc === bestScore && d < bestD)) { best = s; bestScore = sc; bestD = d; }
-      }
-      if (best) {
-        creep.memory.siteId = best.id;
-        debugRing(creep.room, best.pos, CFG.DRAW.BUILD_COLOR, best.structureType.toUpperCase());
-        return best;
-      }
-    }
+    if (!local || local.length === 0) return null;
 
-    // otherwise, nearest room with a site (visible or not)
+    // lightweight priority so builders do useful work first
+    var prio = { 'spawn': 5, 'extension': 4, 'tower': 3, 'container': 2, 'road': 1 };
+    var best = null, bestScore = -1, bestD = 1e9;
+    for (var i = 0; i < local.length; i++) {
+      var s = local[i], sc = (prio[s.structureType] | 0), d = creep.pos.getRangeTo(s.pos);
+      if (sc > bestScore || (sc === bestScore && d < bestD)) { best = s; bestScore = sc; bestD = d; }
+    }
+    return best;
+  }
+
+  function pickAnyConstruction(creep) {
     var any = null, bestDist = 1e9;
     for (var sid in Game.constructionSites) {
       if (!Game.constructionSites.hasOwnProperty(sid)) continue;
@@ -1150,70 +1148,170 @@ roleBeeWorker.Builder = (function () {
       var d2 = Game.map.getRoomLinearDistance(creep.pos.roomName, s2.pos.roomName);
       if (d2 < bestDist) { bestDist = d2; any = s2; }
     }
-    if (any) { creep.memory.siteId = any.id; debugRing(creep.room, any.pos, CFG.DRAW.BUILD_COLOR, "NEAR"); return any; }
+    return any;
+  }
+
+  function pickRepairTarget(creep) {
+    // Keep this small so builders do light maintenance when no sites exist.
+    var targets = creep.room.find(FIND_STRUCTURES, {
+      filter: function (s) {
+        if (!s.hits || !s.hitsMax) return false;
+        if (s.structureType === STRUCTURE_WALL) return false; // skip heavy walls here
+        if (s.structureType === STRUCTURE_RAMPART && s.hits > 50000) return false;
+        return s.hits < (s.hitsMax * 0.6);
+      }
+    });
+
+    if (!targets || targets.length === 0) return null;
+
+    var best = null, bestRatio = 1;
+    for (var i = 0; i < targets.length; i++) {
+      var t = targets[i];
+      var ratio = t.hits / (t.hitsMax || 1);
+      if (ratio < bestRatio) { bestRatio = ratio; best = t; }
+    }
+    return best;
+  }
+
+  // Target selection priority:
+  // 1) Sticky target from memory; 2) construction in current room; 3) light repairs; 4) nearest other room site.
+  function getBuilderTarget(creep) {
+    var sticky = loadStoredBuilderTarget(creep);
+    if (sticky) return sticky;
+
+    var local = pickLocalConstruction(creep);
+    if (local) {
+      creep.memory.builderTargetId = local.id;
+      creep.memory.builderTargetType = 'construction';
+      debugRing(creep.room, local.pos, CFG.DRAW.BUILD_COLOR, 'BUILD');
+      return { target: local, type: 'build' };
+    }
+
+    var repair = pickRepairTarget(creep);
+    if (repair) {
+      creep.memory.builderTargetId = repair.id;
+      creep.memory.builderTargetType = 'repair';
+      debugRing(creep.room, repair.pos, CFG.DRAW.BUILD_COLOR, 'REPAIR');
+      return { target: repair, type: 'repair' };
+    }
+
+    var any = pickAnyConstruction(creep);
+    if (any) {
+      creep.memory.builderTargetId = any.id;
+      creep.memory.builderTargetType = 'construction';
+      debugRing(creep.room, any.pos, CFG.DRAW.BUILD_COLOR, 'REMOTE');
+      return { target: any, type: 'build' };
+    }
 
     return null;
   }
 
-  // ==============================
-  // Build work
-  // ==============================
-function doBuild(creep, site) {
-    if (!site) return false;
+  // -----------------------------
+  // D) Movement helpers
+  // -----------------------------
+  function isOnBorder(pos) {
+    return pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49;
+  }
 
-    // ==============================
-    // Cross-room handling (simple)
-    // ==============================
-    if (site.pos.roomName !== creep.pos.roomName) {
-        // Just aim for the center of the target room and let Traveler do the work.
-        var targetCenter = new RoomPosition(25, 25, site.pos.roomName);
+  // Step off the exit tiles so we do not bounce between rooms.
+  function nudgeOffBorder(creep) {
+    if (!isOnBorder(creep.pos)) return false;
+    if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
+    if (creep.pos.x === 49) return creep.move(LEFT) === OK;
+    if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
+    if (creep.pos.y === 49) return creep.move(TOP) === OK;
+    return false;
+  }
 
-        debugDrawLine(creep, targetCenter, CFG.DRAW.TRAVEL, "X-ROOM");
-        creep.travelTo(targetCenter, {
-            range: 20,        // loose range, we just want to get inside the room
-            reusePath: 20
-        });
-        creep.say('🚚', true);
+  // Explicit cross-room navigation: walk to the nearest exit leading to the target room.
+  // Using exits + nudges keeps creeps from bouncing on borders when the site is in another room.
+  function moveToRoom(creep, targetRoomName) {
+    if (!targetRoomName || creep.pos.roomName === targetRoomName) return false;
 
-        // We *are* doing work (moving toward the site), so return true.
-        return true;
+    if (nudgeOffBorder(creep)) return true;
+
+    var exitDir = Game.map.findExit(creep.room, targetRoomName);
+    if (exitDir < 0) return false;
+
+    var exit = creep.pos.findClosestByRange(exitDir);
+    if (exit) {
+      debugDrawLine(creep, exit, CFG.DRAW.TRAVEL, 'EXIT');
+      creep.moveTo(exit, { reusePath: 10, maxRooms: 1 });
+      return true;
+    }
+    return false;
+  }
+
+  // -----------------------------
+  // E) Work handlers
+  // -----------------------------
+  function handleBuild(creep, target) {
+    if (!target) return false;
+    if (target.pos.roomName !== creep.pos.roomName) {
+      setBuilderState(creep, BUILDER_STATES.TRAVEL);
+      return true;
     }
 
-    // ==============================
-    // Same-room build logic
-    // ==============================
+    if (nudgeOffBorder(creep)) return true;
 
-    // Close enough to try building?
-    if (creep.pos.inRangeTo(site.pos, 3)) {
-        debugSay(creep, '🔨');
-        debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
-
-        var r = creep.build(site);
-
-        if (r === ERR_NOT_ENOUGH_RESOURCES) {
-            // Caller can pick a new task / refill.
-            return false;
-        }
-        if (r === ERR_INVALID_TARGET) {
-            // Site is gone or invalid; clear memory so a new one can be picked.
-            creep.memory.siteId = null;
-            return false;
-        }
-        if (r === ERR_NOT_IN_RANGE) {
-            // Paranoia: if for some reason we're still not in range, step closer.
-            creep.travelTo(site, { range: 3, reusePath: 15 });
-            return true;
-        }
-
-        // Built successfully or tired, but we did our job this tick.
-        return true;
+    if (!creep.pos.inRangeTo(target.pos, 3)) {
+      debugDrawLine(creep, target, CFG.DRAW.TRAVEL, 'TO•SITE');
+      creep.moveTo(target, { range: 3, reusePath: 10 });
+      return true;
     }
 
-    // Not in range yet – travel inside this room toward the site.
-    debugDrawLine(creep, site, CFG.DRAW.TRAVEL, "TO•SITE");
-    creep.travelTo(site, { range: 3, reusePath: 15 });
+    debugSay(creep, '🔨');
+    debugDrawLine(creep, target, CFG.DRAW.BUILD_COLOR, 'BUILD');
+    var r = creep.build(target);
+    if (r === ERR_NOT_ENOUGH_RESOURCES) return false;
+    if (r === ERR_INVALID_TARGET) {
+      creep.memory.builderTargetId = null;
+      creep.memory.builderTargetType = null;
+      setBuilderState(creep, BUILDER_STATES.IDLE);
+    }
     return true;
-}
+  }
+
+  function handleRepair(creep, target) {
+    if (!target) return false;
+    if (target.pos.roomName !== creep.pos.roomName) {
+      setBuilderState(creep, BUILDER_STATES.TRAVEL);
+      return true;
+    }
+
+    if (nudgeOffBorder(creep)) return true;
+
+    if (!creep.pos.inRangeTo(target.pos, 3)) {
+      debugDrawLine(creep, target, CFG.DRAW.TRAVEL, 'TO•FIX');
+      creep.moveTo(target, { range: 3, reusePath: 10 });
+      return true;
+    }
+
+    debugSay(creep, '🛠️');
+    debugDrawLine(creep, target, CFG.DRAW.BUILD_COLOR, 'REPAIR');
+    var r = creep.repair(target);
+    if (r === ERR_NOT_ENOUGH_RESOURCES) return false;
+    if (r === ERR_INVALID_TARGET || target.hits === target.hitsMax) {
+      creep.memory.builderTargetId = null;
+      creep.memory.builderTargetType = null;
+      setBuilderState(creep, BUILDER_STATES.IDLE);
+    }
+    return true;
+  }
+
+  function handleTravel(creep, targetInfo) {
+    if (!targetInfo || !targetInfo.target) return false;
+    var target = targetInfo.target;
+    var targetRoom = target.pos.roomName;
+    if (moveToRoom(creep, targetRoom)) return true;
+    if (isOnBorder(creep.pos)) {
+      nudgeOffBorder(creep);
+      return true;
+    }
+    var desired = targetInfo.type === 'repair' ? BUILDER_STATES.REPAIR : BUILDER_STATES.BUILD;
+    setBuilderState(creep, desired);
+    return false;
+  }
 
   // ==============================
   // Public API
@@ -1221,14 +1319,55 @@ function doBuild(creep, site) {
   var roleBuilder = {
     role: 'Builder',
     run: function (creep) {
-      var state = determineBuilderState(creep);
+      ensureBuilderIdentity(creep);
 
-      if (state === 'BUILD') {
-        runBuildPhase(creep);
+      var state = getBuilderState(creep);
+      if (needsEnergy(creep)) {
+        setBuilderState(creep, BUILDER_STATES.HARVEST);
+        state = BUILDER_STATES.HARVEST;
+        creep.memory.builderTargetId = null;
+        creep.memory.builderTargetType = null;
+      }
+
+      if (state === BUILDER_STATES.HARVEST) {
+        if (collectEnergy(creep) && creep.store.getFreeCapacity() > 0) return;
+        if (creep.store.getFreeCapacity() === 0) {
+          setBuilderState(creep, BUILDER_STATES.IDLE);
+        }
         return;
       }
 
-      collectEnergy(creep);
+      var targetInfo = getBuilderTarget(creep);
+      if (!targetInfo) {
+        if (dumpEnergyToSink(creep)) return;
+        setBuilderState(creep, BUILDER_STATES.IDLE);
+        idleNearAnchor(creep);
+        return;
+      }
+
+      if (state === BUILDER_STATES.IDLE) {
+        setBuilderState(creep, BUILDER_STATES.TRAVEL);
+        state = BUILDER_STATES.TRAVEL;
+      }
+
+      if (state === BUILDER_STATES.TRAVEL) {
+        if (handleTravel(creep, targetInfo)) return;
+        state = getBuilderState(creep);
+      }
+
+      if (state === BUILDER_STATES.BUILD) {
+        if (handleBuild(creep, targetInfo.target)) return;
+        return;
+      }
+
+      if (state === BUILDER_STATES.REPAIR) {
+        if (handleRepair(creep, targetInfo.target)) return;
+        return;
+      }
+
+      // Safety fallback
+      setBuilderState(creep, BUILDER_STATES.IDLE);
+      idleNearAnchor(creep);
     }
   };
 
