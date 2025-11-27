@@ -334,8 +334,8 @@ function computeRoomQuotas(C, room) {
   var quotas = {
     baseharvest:  2,
     courier:      1,
-    queen:        2,
-    upgrader:     2,
+    queen:        1,
+    upgrader:     1,
     builder:      getBuilderNeed(C, room),
     scout:        1,
     luna:         2,
