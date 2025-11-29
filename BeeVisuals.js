@@ -82,7 +82,9 @@ function shouldDrawForRoom(mod, roomName) {
   for (var i = 0; i < roomName.length; i++) {
     h = h * 31 + roomName.charCodeAt(i);
   }
-  return ((Game.time + (h & 3)) % mod) === 0;
+  // Spread the draw load using a small hash offset instead of bitwise masking.
+  var offset = Math.abs(h % 4);
+  return ((Game.time + offset) % mod) === 0;
 }
 
 /** Cheap check: is there already a road or road site at (x,y)? */

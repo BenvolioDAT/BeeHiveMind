@@ -34,17 +34,19 @@ function shouldDrawSpawnPanels() {
 /** Snapshot all spawns by room name so we can draw once per room. */
 function groupSpawnsByRoom() {
   var byRoom = {};
-  for (var sName in Game.spawns) {
-    if (!Object.prototype.hasOwnProperty.call(Game.spawns, sName)) continue;
-    var spawn = Game.spawns[sName];
+  var spawnNames = Object.keys(Game.spawns);
+
+  for (var i = 0; i < spawnNames.length; i++) {
+    var spawn = Game.spawns[spawnNames[i]];
     if (!spawn || !spawn.room) continue;
-    var rn = spawn.room.name;
-    if (!byRoom[rn]) byRoom[rn] = [];
-    byRoom[rn].push(spawn);
+    var roomName = spawn.room.name;
+    if (!byRoom[roomName]) byRoom[roomName] = [];
+    byRoom[roomName].push(spawn);
   }
 
-  for (var rn in byRoom) {
-    if (!Object.prototype.hasOwnProperty.call(byRoom, rn)) continue;
+  var roomNames = Object.keys(byRoom);
+  for (var r = 0; r < roomNames.length; r++) {
+    var rn = roomNames[r];
     byRoom[rn].sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
   }
   return byRoom;
@@ -185,8 +187,9 @@ BeeVisualsSpawnPanel.drawSpawnPanels = function () {
   if (!shouldDrawSpawnPanels()) return;
 
   var groups = groupSpawnsByRoom();
-  for (var rn in groups) {
-    if (!Object.prototype.hasOwnProperty.call(groups, rn)) continue;
+  var roomNames = Object.keys(groups);
+  for (var r = 0; r < roomNames.length; r++) {
+    var rn = roomNames[r];
     var visual = new RoomVisual(rn);
     var cursor = CFG.anchorY;
 
