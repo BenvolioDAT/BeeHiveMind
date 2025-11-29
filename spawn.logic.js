@@ -1,13 +1,8 @@
 'use strict';
 
-// Compatibility module: BeeSpawnManager still requires `spawn.logic` directly.
-// Keeping this file in place ensures legacy require paths keep working after
-// the refactor that split spawn management into BeeSpawnManager.
-
-// CHANGELOG:
-// - Removed CONFIGS; use ROLE_CONFIGS for canonical role definitions.
-// - Removed directRoleForTask/TASK_ALIAS helpers; use normalizeRole() instead.
-// - Removed deprecated Generate_* and Spawn_Worker_Bee shims; call spawnRole()/getBodyForRole().
+// Spawn logic lives here so older require('spawn.logic') calls keep working.
+// BeeSpawnManager delegates body selection and squad spawning to this module,
+// so we keep the APIs intact and favor clear, linear helpers for novices.
 
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
@@ -257,13 +252,13 @@ var ROLE_NORMALIZE_MAP = (function () {
 })();
 
 function normalizeRole(role) {
-  if (!role && role !== 0) return null;
+  if (role === undefined || role === null) return null;
   var key = String(role);
   if (!key) return null;
-  if (ROLE_NORMALIZE_MAP[key]) return ROLE_NORMALIZE_MAP[key];
-  var lower = key.toLowerCase();
-  if (ROLE_NORMALIZE_MAP[lower]) return ROLE_NORMALIZE_MAP[lower];
-  return null;
+
+  // Try exact match first, then lowercase alias (e.g. "baseharvest" → BaseHarvest).
+  var canonical = ROLE_NORMALIZE_MAP[key] || ROLE_NORMALIZE_MAP[key.toLowerCase()];
+  return canonical || null;
 }
 
 function calculateBodyCost(body) {
@@ -284,8 +279,9 @@ function cloneBody(body) {
 }
 
 function getBodyForRole(roleName, energyAvailable) {
-  var energy = typeof energyAvailable === 'number' ? energyAvailable : 0;
   if (!roleName) return [];
+
+  var energy = typeof energyAvailable === 'number' ? energyAvailable : 0;
   var list = ROLE_CONFIGS[roleName];
   if (!list) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
@@ -293,6 +289,8 @@ function getBodyForRole(roleName, energyAvailable) {
     }
     return [];
   }
+
+  // Config arrays are ordered largest→smallest; pick the first body we can afford.
   for (var i = 0; i < list.length; i++) {
     var body = list[i];
     var cost = calculateBodyCost(body);
@@ -303,6 +301,7 @@ function getBodyForRole(roleName, energyAvailable) {
       return cloneBody(body);
     }
   }
+
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     var cheapest = list[list.length - 1];
     var minCost = cheapest ? calculateBodyCost(cheapest) : 0;
@@ -332,6 +331,8 @@ function copyMemory(source) {
 
 function spawnRole(spawn, roleName, availableEnergy, memory) {
   if (!spawn) return false;
+
+  // Resolve the requested role into our canonical spelling before continuing.
   var canonicalRole = normalizeRole(roleName);
   if (!canonicalRole) {
     if (Logger.shouldLog(LOG_LEVEL.WARN)) {
@@ -339,25 +340,26 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     }
     return false;
   }
+
   var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
   var body = getBodyForRole(canonicalRole, energy);
-  if (!body || !body.length) {
-    return false;
-  }
+  if (!body || !body.length) return false;
+
   var creepName = Generate_Creep_Name(canonicalRole);
-  if (!creepName) {
-    return false;
-  }
+  if (!creepName) return false;
+
+  // Copy over provided memory so we never mutate the caller's object.
   var mem = copyMemory(memory);
   if (!mem.role) mem.role = canonicalRole;
   if (mem.skipTaskMemory) {
     delete mem.skipTaskMemory;
   }
+
+  // Keep combat squad data beside the spawn call so new creeps hit the ground
+  // with their rally room and wait timer already set.
   if (canonicalRole === 'CombatMelee' ||
       canonicalRole === 'CombatMedic' ||
       canonicalRole === 'CombatArcher') {
-    // Keep squad fields together so a newly spawned unit always knows its
-    // assignment, rally state, and initial wait timer without another helper.
     var sid = mem.squadId || (memory && memory.squadId);
     var targetRoom = mem.targetRoom || (memory && memory.targetRoom);
     var squadFlag = mem.squadFlag || (memory && memory.squadFlag);
@@ -369,6 +371,7 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     if (!mem.waitUntil) mem.waitUntil = Game.time + 25;
     // buddyId / stickTargetId handled by roles post-spawn
   }
+
   var result = spawn.spawnCreep(body, creepName, { memory: mem });
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('spawnRole', canonicalRole, 'body [' + body + ']', 'cost', calculateBodyCost(body), 'avail', energy, 'result', result);
@@ -387,8 +390,7 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
 // -----------------------------------------------------------------------------
 function Calculate_Spawn_Resource(spawnOrRoom) {
   if (spawnOrRoom) {
-    // Let callers pass either a spawn, a Room, or a room name string. Once we
-    // resolve it to a Room, the available energy read is a single, clear step.
+    // Allow spawns, room objects, or room names.
     var room = spawnOrRoom.room || (typeof spawnOrRoom === 'string'
       ? Game.rooms[spawnOrRoom]
       : spawnOrRoom);
