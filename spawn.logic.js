@@ -1,5 +1,9 @@
 'use strict';
 
+// Compatibility module: BeeSpawnManager still requires `spawn.logic` directly.
+// Keeping this file in place ensures legacy require paths keep working after
+// the refactor that split spawn management into BeeSpawnManager.
+
 // CHANGELOG:
 // - Removed CONFIGS; use ROLE_CONFIGS for canonical role definitions.
 // - Removed directRoleForTask/TASK_ALIAS helpers; use normalizeRole() instead.
