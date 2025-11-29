@@ -621,11 +621,20 @@ var BeeToolbox = {
     if (carry <= 0) return ERR_NOT_ENOUGH_RESOURCES;
 
     // Normalize the target list so callers can pass a single type or an array.
+    // If nothing is provided, default to the common fill targets.
     var types = [];
     if (Array.isArray(structureTypes)) {
       types = structureTypes;
     } else if (structureTypes) {
       types = [structureTypes];
+    } else {
+      types = [
+        STRUCTURE_STORAGE,
+        STRUCTURE_EXTENSION,
+        STRUCTURE_SPAWN,
+        STRUCTURE_TOWER,
+        STRUCTURE_CONTAINER
+      ];
     }
 
     // Build a quick lookup so the single-pass scan below stays readable.
