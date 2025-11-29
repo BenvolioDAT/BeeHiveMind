@@ -30,33 +30,66 @@ var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
-var roleBeeWorker        = require('role.BeeWorker');
+var BaseHarvest          = require('role.BaseHarvest');
+var Builder              = require('role.Builder');
+var Courier              = require('role.Courier');
+var Queen                = require('role.Queen');
+var Upgrader             = require('role.Upgrader');
+var Luna                 = require('role.Luna');
+var Scout                = require('role.Scout');
+var Trucker              = require('role.Trucker');
+var Claimer              = require('role.Claimer');
+var CombatArcher         = require('role.CombatArcher');
+var CombatMedic          = require('role.CombatMedic');
+var CombatMelee          = require('role.CombatMelee');
 var roleRepair           = require('role.Repair');
 var roleDismantler       = require('role.Dismantler');
-var roleBeeArmy          = require('role.BeeArmy');
 var RoomPlanner          = require('Planner.Room');
 var RoadPlanner          = require('Planner.Road');
 var TradeEnergy          = require('Trade.Energy');
+
+// Keep references to the role modules so validation can check the intended
+// mapping (e.g. a swapped import would surface as a role name mismatch).
+var roleModules = {
+  BaseHarvest: BaseHarvest,
+  Builder: Builder,
+  Courier: Courier,
+  Repair: roleRepair,
+  Upgrader: Upgrader,
+  Dismantler: roleDismantler,
+  Luna: Luna,
+  Scout: Scout,
+  Queen: Queen,
+  Trucker: Trucker,
+  Claimer: Claimer,
+  CombatArcher: CombatArcher,
+  CombatMedic: CombatMedic,
+  CombatMelee: CombatMelee
+};
 
 // Map role -> run fn (extend as you add roles)
 // Default role map; specific roles (queen, courier etc.) may be registered
 // elsewhere by mutating this object.
 var creepRoles = {
-  BaseHarvest: roleBeeWorker.runBaseHarvest,
-  Builder: roleBeeWorker.runBuilder,
-  Courier: roleBeeWorker.runCourier,
-  Repair: roleRepair.run,
-  Upgrader: roleBeeWorker.runUpgrader,
-  Dismantler: roleDismantler.run,
-  Luna: roleBeeWorker.runLuna,
-  Scout: roleBeeWorker.runScout,
-  Queen: roleBeeWorker.runQueen,
-  Trucker: roleBeeWorker.runTrucker,
-  Claimer: roleBeeWorker.runClaimer,
-  CombatArcher: roleBeeArmy.runArcher,
-  CombatMedic: roleBeeArmy.runMedic,
-  CombatMelee: roleBeeArmy.runMelee
+  BaseHarvest: roleModules.BaseHarvest && roleModules.BaseHarvest.run,
+  Builder: roleModules.Builder && roleModules.Builder.run,
+  Courier: roleModules.Courier && roleModules.Courier.run,
+  Repair: roleModules.Repair && roleModules.Repair.run,
+  Upgrader: roleModules.Upgrader && roleModules.Upgrader.run,
+  Dismantler: roleModules.Dismantler && roleModules.Dismantler.run,
+  Luna: roleModules.Luna && roleModules.Luna.run,
+  Scout: roleModules.Scout && roleModules.Scout.run,
+  Queen: roleModules.Queen && roleModules.Queen.run,
+  Trucker: roleModules.Trucker && roleModules.Trucker.run,
+  Claimer: roleModules.Claimer && roleModules.Claimer.run,
+  CombatArcher: roleModules.CombatArcher && roleModules.CombatArcher.run,
+  CombatMedic: roleModules.CombatMedic && roleModules.CombatMedic.run,
+  CombatMelee: roleModules.CombatMelee && roleModules.CombatMelee.run
 };
+
+// Capture missing bindings once so we can quickly spot miswired role imports.
+var warnedMissingRoles = Object.create(null);
+var warnedMismatchedRoleNames = Object.create(null);
 
 /**
  * Helper factory that builds our alias lookup object.
@@ -116,6 +149,33 @@ function canonicalRoleName(name) {
   var lower = key.toLowerCase();
   if (ROLE_ALIAS_MAP[lower]) return ROLE_ALIAS_MAP[lower];
   return null;
+}
+
+function validateRoleBindings() {
+  var roles = Object.keys(creepRoles);
+  for (var i = 0; i < roles.length; i++) {
+    var name = roles[i];
+    var fn = creepRoles[name];
+    if (typeof fn === 'function') continue;
+    if (warnedMissingRoles[name]) continue;
+    warnedMissingRoles[name] = true;
+    hiveLog.debug('⚠️ Missing run() for role', name, '- verify role.' + name + '.js exports run');
+  }
+
+  for (var j = 0; j < roles.length; j++) {
+    var checkName = roles[j];
+    var checkModule = roleModules[checkName];
+    if (!checkModule || !checkModule.role) continue;
+    if (checkModule.role === checkName) continue;
+    if (warnedMismatchedRoleNames[checkName]) continue;
+    warnedMismatchedRoleNames[checkName] = true;
+    hiveLog.debug(
+      '⚠️ Role name mismatch:',
+      'expected', checkName,
+      'but module exports role=', checkModule.role,
+      '- verify role.' + checkName + '.js wiring'
+    );
+  }
 }
 
 function ensureCreepRole(creep) {
@@ -296,6 +356,9 @@ var BeeHiveMind = {
     // later in the tick can immediately access the helpers.
     if (BeeActions) global.BeeActions = BeeActions;
     if (BeeSelectors) global.BeeSelectors = BeeSelectors;
+
+    // Verify role bindings once per tick so missing modules are visible in logs.
+    validateRoleBindings();
 
     if (MovementManager && typeof MovementManager.startTick === 'function') {
       // Reset movement queue before any role enqueues requests.
