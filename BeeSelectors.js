@@ -128,7 +128,7 @@ function buildSnapshot(room) {
       var s = structures[i];
       if (!s || !s.structureType) continue;
       if (s.structureType === STRUCTURE_CONTAINER && s.store) {
-        var stored = s.store[RESOURCE_ENERGY] | 0;
+        var stored = s.store[RESOURCE_ENERGY] || 0;
         if (stored > 0) {
           var nearSource = false;
           for (var sc = 0; sc < sources.length; sc++) {
@@ -139,10 +139,10 @@ function buildSnapshot(room) {
         }
       }
       if (s.structureType === STRUCTURE_EXTENSION || s.structureType === STRUCTURE_SPAWN) {
-        if ((s.energy | 0) < (s.energyCapacity | 0)) snapshot.spawnLikeNeedy.push(s);
+        if ((s.energy || 0) < (s.energyCapacity || 0)) snapshot.spawnLikeNeedy.push(s);
       }
       if (s.structureType === STRUCTURE_TOWER) {
-        var used = (s.store[RESOURCE_ENERGY] | 0);
+        var used = (s.store[RESOURCE_ENERGY] || 0);
         var cap = s.store.getCapacity(RESOURCE_ENERGY) || 1;
         if ((used / cap) <= TOWER_REFILL_AT) snapshot.towerNeedy.push(s);
       }
@@ -150,9 +150,8 @@ function buildSnapshot(room) {
         if (controller && controller.pos && s.pos.inRangeTo(controller.pos, 3)) {
           snapshot.controllerLink = s;
         }
-        if ((s.store && (s.store[RESOURCE_ENERGY] | 0) > 0) || s.energy > 0) {
-          snapshot.linksWithEnergy.push(s);
-        }
+        var linkEnergy = (s.store && s.store[RESOURCE_ENERGY]) || s.energy || 0;
+        if (linkEnergy > 0) snapshot.linksWithEnergy.push(s);
       }
       var goal = computeRepairGoal(s);
       if (goal && s.hits < goal) {
@@ -165,11 +164,11 @@ function buildSnapshot(room) {
     });
     for (var d = 0; d < drops.length; d++) snapshot.dropped.push(drops[d]);
     var tombs = room.find(FIND_TOMBSTONES, {
-      filter: function (t) { return t.store && (t.store[RESOURCE_ENERGY] | 0) > 0; }
+      filter: function (t) { return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; }
     });
     for (var t = 0; t < tombs.length; t++) snapshot.tombstones.push(tombs[t]);
     var ruins = room.find(FIND_RUINS, {
-      filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] | 0) > 0; }
+      filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] || 0) > 0; }
     });
     for (var r = 0; r < ruins.length; r++) snapshot.ruins.push(ruins[r]);
     var sites = room.find(FIND_CONSTRUCTION_SITES);
@@ -328,99 +327,93 @@ function collectSourceFlags() {
   return map;
 }
 
-// ---------------------------------------------------------------------------
-// Remote snapshot helpers (novice friendly mental model)
-// - We gather data from three sources (live room, Memory intel, SRC flags).
-// - Each helper below handles exactly one source so call sites stay flat.
-// - mergeRemoteEntry deduplicates by sourceId so downstream callers never see
-//   the same source twice even if both live intel + flag exist.
-// ---------------------------------------------------------------------------
-// Function header: mergeRemoteEntry(list, byId, data)
-// Inputs: aggregation arrays/maps used during remote snapshot build
-// Output: none (mutates list/byId); keeps remote source rows unique by id.
-// Side-effects: reuses existing entry when both Memory + visible intel overlap.
-function mergeRemoteEntry(list, byId, data) {
-  if (!data || !data.sourceId) return;
-  var existing = byId[data.sourceId];
-  if (existing) {
-    if (data.flag && !existing.flag) existing.flag = data.flag;
-    if (data.container && !existing.container) {
-      existing.container = data.container;
-      existing.containerEnergy = data.containerEnergy;
+// Function header: buildRemoteSourcesSnapshot(homeRoomName)
+// Inputs: homeRoomName string (owned room key)
+// Output: array of remote source entries {sourceId, roomName, container, ...}
+// Side-effects: reads Memory.__BHM.remotesByHome[home], scans visible remote
+//               rooms, merges intel from Memory.rooms when fogged.
+// Consumers: role.Luna (remote miners), role.Courier/Trucker.
+function buildRemoteSourcesSnapshot(homeRoomName) {
+  ensureRemoteMemory();
+  var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
+  var flagsByPos = collectSourceFlags();
+  var byId = {};
+  var list = [];
+
+  // Keep merge rules beside the loops so it is obvious how new intel fills
+  // missing pieces from previous ticks.
+  function recordRemoteEntry(data) {
+    if (!data || !data.sourceId) return;
+    var existing = byId[data.sourceId];
+    if (existing) {
+      if (!existing.roomName && data.roomName) existing.roomName = data.roomName;
+      if (!existing.flag && data.flag) existing.flag = data.flag;
+      if (!existing.container && data.container) {
+        existing.container = data.container;
+        existing.containerEnergy = data.containerEnergy;
+      }
+      if (!existing.site && data.site) existing.site = data.site;
+      if (!existing.seatPos && data.seatPos) existing.seatPos = data.seatPos;
+      if (!existing.source && data.source) existing.source = data.source;
+      return;
     }
-    if (!existing.seatPos && data.seatPos) existing.seatPos = data.seatPos;
-    if (!existing.source && data.source) existing.source = data.source;
-    return;
+    byId[data.sourceId] = data;
+    list.push(data);
   }
-  byId[data.sourceId] = data;
-  list.push(data);
-}
 
-// Function header: addVisibleRemoteSources(roomName, room, flagsByPos, list, byId)
-// Inputs: visible Room object from Game.rooms
-// Output: none; calls mergeRemoteEntry for each live source discovered
-// Side-effects: none beyond list/byId
-function addVisibleRemoteSources(roomName, room, flagsByPos, list, byId) {
-  if (!room) return;
-  var sources = room.find(FIND_SOURCES);
-  for (var j = 0; j < sources.length; j++) {
-    var src = sources[j];
-    var seatInfo = getSourceContainerOrSiteImpl(src);
-    var key = roomName + ':' + src.pos.x + ':' + src.pos.y;
-    mergeRemoteEntry(list, byId, {
-      sourceId: src.id,
-      roomName: roomName,
-      source: src,
-      container: seatInfo.container,
-      containerEnergy: seatInfo.containerEnergy,
-      site: seatInfo.site,
-      seatPos: seatInfo.seatPos,
-      flag: flagsByPos[key] || null
-    });
-  }
-}
+  for (var i = 0; i < remotes.length; i++) {
+    var roomName = remotes[i];
+    var room = Game.rooms[roomName];
+    if (room) {
+      // Live vision: gather exact container/site/flag data around each source.
+      var sources = room.find(FIND_SOURCES);
+      for (var j = 0; j < sources.length; j++) {
+        var src = sources[j];
+        var seatInfo = getSourceContainerOrSiteImpl(src);
+        var flagKey = roomName + ':' + src.pos.x + ':' + src.pos.y;
+        recordRemoteEntry({
+          sourceId: src.id,
+          roomName: roomName,
+          source: src,
+          container: seatInfo.container,
+          containerEnergy: seatInfo.containerEnergy,
+          site: seatInfo.site,
+          seatPos: seatInfo.seatPos,
+          flag: flagsByPos[flagKey] || null
+        });
+      }
+      continue;
+    }
 
-// Function header: buildSeatFromIntel(entry, roomName)
-// Inputs: Memory.rooms entry describing a source
-// Output: serialized seat {x,y,roomName} best guess for miner standing tile
-function buildSeatFromIntel(entry, roomName) {
-  if (!entry) return null;
-  if (entry.seat) {
-    return { x: entry.seat.x, y: entry.seat.y, roomName: entry.seat.roomName || roomName };
+    var memoryBlock = (Memory.rooms && Memory.rooms[roomName] && Memory.rooms[roomName].sources) || null;
+    if (!memoryBlock) continue;
+    // Fogged room: fall back to stored intel plus optional seat guess.
+    for (var sid in memoryBlock) {
+      if (!Object.prototype.hasOwnProperty.call(memoryBlock, sid)) continue;
+      var entry = memoryBlock[sid] || {};
+      var seatPos = null;
+      if (entry.seat) {
+        seatPos = { x: entry.seat.x, y: entry.seat.y, roomName: entry.seat.roomName || roomName };
+      } else if (entry.x != null && entry.y != null) {
+        seatPos = chooseBestSeatForSource(new RoomPosition(entry.x, entry.y, roomName));
+      }
+      var keyX = entry.x != null ? entry.x : (entry.seat ? entry.seat.x : '');
+      var keyY = entry.y != null ? entry.y : (entry.seat ? entry.seat.y : '');
+      var keyMem = roomName + ':' + keyX + ':' + keyY;
+      recordRemoteEntry({
+        sourceId: sid,
+        roomName: roomName,
+        source: null,
+        container: null,
+        containerEnergy: 0,
+        site: null,
+        seatPos: seatPos,
+        flag: flagsByPos[keyMem] || null
+      });
+    }
   }
-  if (entry.x != null && entry.y != null) {
-    return chooseBestSeatForSource(new RoomPosition(entry.x, entry.y, roomName));
-  }
-  return null;
-}
 
-// Function header: addMemoryRemoteSources(roomName, sourcesIntel, flagsByPos, list, byId)
-// Inputs: sources intel block stored under Memory.rooms[roomName].sources
-// Output: none; extends snapshot with fogged-room guesses
-function addMemoryRemoteSources(roomName, sourcesIntel, flagsByPos, list, byId) {
-  if (!sourcesIntel) return;
-  for (var sid in sourcesIntel) {
-    if (!Object.prototype.hasOwnProperty.call(sourcesIntel, sid)) continue;
-    var entry = sourcesIntel[sid] || {};
-    var seatPos = buildSeatFromIntel(entry, roomName);
-    var keyMem = roomName + ':' + (entry.x != null ? entry.x : (entry.seat ? entry.seat.x : '')) + ':' + (entry.y != null ? entry.y : (entry.seat ? entry.seat.y : ''));
-    mergeRemoteEntry(list, byId, {
-      sourceId: sid,
-      roomName: roomName,
-      source: null,
-      container: null,
-      containerEnergy: 0,
-      site: null,
-      seatPos: seatPos,
-      flag: flagsByPos[keyMem] || null
-    });
-  }
-}
-
-// Function header: addFlagOnlyRemotes(flagsByPos, remotes, list, byId)
-// Inputs: map of SRC flags, array of remote room names
-// Output: none; ensures flag-labelled nodes join snapshot even if not in intel
-function addFlagOnlyRemotes(flagsByPos, remotes, list, byId) {
+  // SRC flags sometimes mark remotes before intel exists; add them last.
   for (var key in flagsByPos) {
     if (!Object.prototype.hasOwnProperty.call(flagsByPos, key)) continue;
     var parts = key.split(':');
@@ -436,7 +429,7 @@ function addFlagOnlyRemotes(flagsByPos, remotes, list, byId) {
     var srcObj = look[0];
     if (!srcObj || !srcObj.id || byId[srcObj.id]) continue;
     var seatInfo2 = getSourceContainerOrSiteImpl(srcObj);
-    mergeRemoteEntry(list, byId, {
+    recordRemoteEntry({
       sourceId: srcObj.id,
       roomName: fRoom,
       source: srcObj,
@@ -447,30 +440,7 @@ function addFlagOnlyRemotes(flagsByPos, remotes, list, byId) {
       flag: flagsByPos[key]
     });
   }
-}
 
-// Function header: buildRemoteSourcesSnapshot(homeRoomName)
-// Inputs: homeRoomName string (owned room key)
-// Output: array of remote source entries {sourceId, roomName, container, ...}
-// Side-effects: reads Memory.__BHM.remotesByHome[home], scans visible remote
-//               rooms, merges intel from Memory.rooms when fogged.
-// Consumers: role.Luna (remote miners), role.Courier/Trucker.
-function buildRemoteSourcesSnapshot(homeRoomName) {
-  ensureRemoteMemory();
-  var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
-  var flagsByPos = collectSourceFlags();
-  var byId = {};
-  var list = [];
-  for (var i = 0; i < remotes.length; i++) {
-    var roomName = remotes[i];
-    var room = Game.rooms[roomName];
-    if (room) addVisibleRemoteSources(roomName, room, flagsByPos, list, byId);
-    else {
-      var intel = (Memory.rooms && Memory.rooms[roomName] && Memory.rooms[roomName].sources) || null;
-      addMemoryRemoteSources(roomName, intel, flagsByPos, list, byId);
-    }
-  }
-  addFlagOnlyRemotes(flagsByPos, remotes, list, byId);
   return list;
 }
 
@@ -624,8 +594,8 @@ var BeeSelectors = {
     for (i = 0; i < snap.ruins.length; i++) list.push({ kind: 'ruin', target: snap.ruins[i] });
     for (i = 0; i < snap.dropped.length; i++) list.push({ kind: 'drop', target: snap.dropped[i] });
     for (i = 0; i < snap.sourceContainers.length; i++) list.push({ kind: 'container', target: snap.sourceContainers[i] });
-    if (snap.storage && (snap.storage.store[RESOURCE_ENERGY] | 0) > 0) list.push({ kind: 'storage', target: snap.storage });
-    if (snap.terminal && (snap.terminal.store[RESOURCE_ENERGY] | 0) > 0) list.push({ kind: 'terminal', target: snap.terminal });
+    if (snap.storage && (snap.storage.store[RESOURCE_ENERGY] || 0) > 0) list.push({ kind: 'storage', target: snap.storage });
+    if (snap.terminal && (snap.terminal.store[RESOURCE_ENERGY] || 0) > 0) list.push({ kind: 'terminal', target: snap.terminal });
     for (i = 0; i < snap.otherContainers.length; i++) list.push({ kind: 'container', target: snap.otherContainers[i] });
     for (i = 0; i < snap.linksWithEnergy.length; i++) list.push({ kind: 'link', target: snap.linksWithEnergy[i] });
     for (i = 0; i < snap.sources.length; i++) list.push({ kind: 'source', target: snap.sources[i] });

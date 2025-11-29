@@ -25,18 +25,20 @@ class Traveler {
         destination = this.normalizePos(destination);
         // manage case where creep is nearby destination
         let rangeToDestination = creep.pos.getRangeTo(destination);
-        if (options.range && rangeToDestination <= options.range) {
+        let hasCustomRange = options.range !== undefined;
+        if (hasCustomRange && rangeToDestination <= options.range) {
             return OK;
         }
-        else if (rangeToDestination <= 1) {
-            if (rangeToDestination === 1 && !options.range) {
-                let direction = creep.pos.getDirectionTo(destination);
-                if (options.returnData) {
-                    options.returnData.nextPos = destination;
-                    options.returnData.path = direction.toString();
-                }
-                return creep.move(direction);
+        if ((!hasCustomRange || options.range === 0) && rangeToDestination === 1) {
+            // no custom range or exact-tile target: step onto the destination if adjacent
+            let direction = creep.pos.getDirectionTo(destination);
+            if (options.returnData) {
+                options.returnData.nextPos = destination;
+                options.returnData.path = direction.toString();
             }
+            return creep.move(direction);
+        }
+        if (rangeToDestination <= 1) {
             return OK;
         }
         // initialize data object
@@ -46,6 +48,12 @@ class Traveler {
         }
         let travelData = creep.memory._trav;
         let state = this.deserializeState(travelData, destination);
+
+        // If some other logic moved this creep far off the recorded path, drop the
+        // cached directions so we do not keep walking a stale route.
+        if (travelData.path && state.lastCoord && !this.sameCoord(creep.pos, state.lastCoord) && !creep.pos.isNearTo(state.lastCoord)) {
+            delete travelData.path;
+        }
         // uncomment to visualize destination
         // this.circle(destination, "orange");
         // check if creep is stuck
@@ -57,7 +65,7 @@ class Traveler {
             state.stuckCount = 0;
         }
         // handle case where creep is stuck
-        if (!options.stuckValue) {
+        if (options.stuckValue === undefined) {
             options.stuckValue = DEFAULT_STUCK_VALUE;
         }
         if (state.stuckCount >= options.stuckValue && Math.random() > .5) {
@@ -65,7 +73,13 @@ class Traveler {
             options.freshMatrix = true;
             delete travelData.path;
         }
-        // TODO:handle case where creep moved by some other function, but destination is still the same
+        // If another system moved the creep but kept the same destination, wipe the
+        // path so we recalc from the new position instead of following a stale
+        // route from the previous coord.
+        if (travelData.path && state.destination && this.samePos(state.destination, destination) && state.lastCoord && !this.sameCoord(creep.pos, state.lastCoord)) {
+            delete travelData.path;
+            state.stuckCount = 0;
+        }
         // delete path cache if destination is different
         if (!this.samePos(state.destination, destination)) {
             if (options.movingTarget && state.destination.isNearTo(destination)) {
@@ -233,12 +247,10 @@ class Traveler {
         }
         let roomsSearched = 0;
         let callback = (roomName) => {
-            if (allowedRooms) {
-                if (!allowedRooms[roomName]) {
-                    return false;
-                }
+            if (allowedRooms && !allowedRooms[roomName]) {
+                return false;
             }
-            else if (!options.allowHostile && Traveler.checkAvoid(roomName)
+            if (!allowedRooms && !options.allowHostile && Traveler.checkAvoid(roomName)
                 && roomName !== destRoomName && roomName !== originRoomName) {
                 return false;
             }
@@ -286,24 +298,20 @@ class Traveler {
             swampCost: options.offRoad ? 1 : options.ignoreRoads ? 5 : 10,
             roomCallback: callback,
         });
-        if (ret.incomplete && options.ensurePath) {
-            if (options.useFindRoute === undefined) {
-                // handle case where pathfinder failed at a short distance due to not using findRoute
-                // can happen for situations where the creep would have to take an uncommonly indirect path
-                // options.allowedRooms and options.routeCallback can also be used to handle this situation
-                if (roomDistance <= 2) {
-                    console.log(`TRAVELER: path failed without findroute, trying with options.useFindRoute = true`);
-                    console.log(`from: ${origin}, destination: ${destination}`);
-                    options.useFindRoute = true;
-                    ret = this.findTravelPath(origin, destination, options);
-                    console.log(`TRAVELER: second attempt was ${ret.incomplete ? "not " : ""}successful`);
-                    return ret;
-                }
-                // TODO: handle case where a wall or some other obstacle is blocking the exit assumed by findRoute
-            }
-            else {
-            }
+        if (!ret.incomplete || !options.ensurePath) return ret;
+
+        // PathFinder can miss a valid short path if it avoids findRoute; retry once
+        // with findRoute enabled instead of mutating the caller's options.
+        if (options.useFindRoute === undefined && roomDistance <= 2) {
+            console.log(`TRAVELER: path failed without findroute, trying with options.useFindRoute = true`);
+            console.log(`from: ${origin}, destination: ${destination}`);
+            const retryOptions = Object.assign({}, options, { useFindRoute: true });
+            ret = this.findTravelPath(origin, destination, retryOptions);
+            console.log(`TRAVELER: second attempt was ${ret.incomplete ? "not " : ""}successful`);
+            return ret;
         }
+
+        // TODO: handle case where a wall or other obstacle blocks the exit assumed by findRoute
         return ret;
     }
     /**

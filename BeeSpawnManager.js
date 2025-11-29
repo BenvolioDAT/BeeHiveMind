@@ -116,8 +116,8 @@ function fmt(room) {
 }
 
 function energyStatus(room) {
-  var available = room.energyAvailable | 0;
-  var capacity = room.energyCapacityAvailable | 0;
+  var available = room.energyAvailable || 0;
+  var capacity = room.energyCapacityAvailable || 0;
   return available + '/' + capacity;
 }
 
@@ -201,9 +201,9 @@ function pruneOverfilledQueue(roomName, quotas, C) {
     var role = quotaRoles[i];
     var canonical = canonicalRole(role);
     var active = (canonical === 'Luna')
-      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) | 0)
-      : (C.roleCounts[canonical] | 0);
-    remaining[role] = Math.max(0, (quotas[role] | 0) - active);
+      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
+      : (C.roleCounts[canonical] || 0);
+    remaining[role] = Math.max(0, (quotas[role] || 0) - active);
   }
 
   var kept = [];
@@ -211,8 +211,8 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   for (var j = 0; j < q.length; j++) {
     var it = q[j];
     if (!it) continue;
-    var left = remaining[it.role] | 0;
-    var usedSoFar = used[it.role] | 0;
+    var left = remaining[it.role] || 0;
+    var usedSoFar = used[it.role] || 0;
     if (usedSoFar < left) {
       kept.push(it);
       used[it.role] = usedSoFar + 1;
@@ -229,20 +229,6 @@ function pruneOverfilledQueue(roomName, quotas, C) {
 }
 
 // Novice tip: keep state lookups tiny helpers so you can audit each role's math.
-function activeCountForRole(C, role, roomName) {
-  var canonical = canonicalRole(role);
-  if (canonical === 'Luna') {
-    return (C.lunaCountsByHome && C.lunaCountsByHome[roomName]) | 0;
-  }
-  return C.roleCounts[canonical] | 0;
-}
-
-function roleDeficit(C, roomName, role, limit) {
-  var active = activeCountForRole(C, role, roomName);
-  var queued = queuedCount(roomName, role);
-  return Math.max(0, (limit | 0) - active - queued);
-}
-
 // ------------------------------ Signals ---------------------------------
 function getBuilderNeed(C, room) {
   if (!room) return 0;
@@ -299,7 +285,7 @@ function determineLunaQuota(C, room) {
       }
     }
     if (srcCount === 0 && mem.intel && typeof mem.intel.sources === 'number') {
-      srcCount = mem.intel.sources | 0;
+      srcCount = mem.intel.sources || 0;
     }
     totalSources += srcCount;
   }
@@ -360,11 +346,14 @@ function fillQueueForRoom(C, room) {
   var roles = Object.keys(quotas);
   for (var i = 0; i < roles.length; i++) {
     var role = roles[i];
-    var limit = quotas[role] | 0;
-    var deficit = roleDeficit(C, roomName, role, limit);
+    var limit = quotas[role] || 0;
+    var canonical = canonicalRole(role);
+    var active = canonical === 'Luna'
+      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
+      : (C.roleCounts[canonical] || 0);
+    var queued = queuedCount(roomName, role);
+    var deficit = Math.max(0, limit - active - queued);
     if (deficit > 0 && tickEvery(DBG_EVERY)) {
-      var active = activeCountForRole(C, role, roomName);
-      var queued = queuedCount(roomName, role);
       dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit,
         'active=', active, 'queued=', queued, 'deficit=', deficit);
     }
@@ -389,17 +378,6 @@ function dequeueAndSpawn(spawner) {
   q.sort(compareQueueItems);
 
   var headPriority = q[0].priority;
-  var headRole = q[0].role;
-
-  var needed = minEnergyFor(headRole);
-  if ((room.energyAvailable | 0) < needed) {
-    if (tickEvery(DBG_EVERY)) {
-      dlog('⛽ [QueueHold]', roomName, 'prio', headPriority, 'role', headRole,
-        'need', needed, 'have', room.energyAvailable);
-    }
-    return false;
-  }
-
   var pickIndex = -1;
   for (var i = 0; i < q.length; i++) {
     var it = q[i];
@@ -421,6 +399,15 @@ function dequeueAndSpawn(spawner) {
   }
 
   var item = q[pickIndex];
+  var needed = minEnergyFor(item.role);
+  if ((room.energyAvailable || 0) < needed) {
+    if (tickEvery(DBG_EVERY)) {
+      dlog('⛽ [QueueHold]', roomName, 'prio', item.priority, 'role', item.role,
+        'need', needed, 'have', room.energyAvailable);
+    }
+    return false;
+  }
+
   dlog('🎬 [SpawnTry]', roomName, 'role=', item.role, 'prio=', item.priority,
     'age=', (Game.time - item.created), 'energy=', energyStatus(room));
 

@@ -94,25 +94,89 @@ var roleDismantler = {
 
   run: function (creep) {
     if (creep.spawning) return;
-    if (_shouldDelayForDecoy(creep)) return;
-
-    drawVitalsHud(creep);
-
-    var target = _refreshTarget(creep);
-    if (!target) {
-      _rallyOrIdle(creep);
+    if (creep.memory.delay && Game.time < creep.memory.delay) {
+      hud(creep, "⏳ delay");
       return;
     }
 
-    if (_drawCrossRoomAwareness(creep, target)) {
-      // Visual hint already drawn; keep chasing even if not visible yet.
+    // Always show current health so we notice chip damage while dismantling.
+    hud(creep, "🪓 " + creep.hits + "/" + creep.hitsMax);
+
+    // Refresh target first so the rest of the tick knows what to chase.
+    var target = Game.getObjectById(creep.memory.tid);
+    if (!roleDismantler._isValidTarget(target)) {
+      target = roleDismantler._pickNewTarget(creep);
+      if (target) {
+        creep.memory.tid = target.id;
+        debugRing(target, CONFIG.COLORS.TARGET, "lock", 0.8);
+        debugSay(creep, "🎯");
+      } else {
+        delete creep.memory.tid;
+      }
     }
 
-    if (_handleBlockingDoor(creep, target)) return;
+    // Nothing to attack? Rally near the attack flag and wait.
+    if (!target) {
+      var rally = Game.flags.Rally || Game.flags.Attack;
+      if (rally) moveSmart(creep, rally, 1);
+      return;
+    }
 
-    if (_handleInvaderCore(creep, target)) return;
+    // If the target sits in another room, draw the hint but keep marching.
+    if (target.room && target.room.name !== creep.room.name) {
+      debugRing(target, CONFIG.COLORS.TARGET, "target", 0.8);
+    }
 
-    _handleStructure(creep, target);
+    // Clear walls or Invader ramparts blocking the path before swinging at the main target.
+    var door = roleDismantler._firstBlockingDoorOnPath(creep, target);
+    if (door) {
+      debugRing(door, CONFIG.COLORS.DOOR, "door", 0.6);
+      if (creep.pos.isNearTo(door)) {
+        debugSay(creep, "🧱");
+        var rc = creep.dismantle(door);
+        if (rc === ERR_INVALID_TARGET && creep.getActiveBodyparts(ATTACK) > 0) {
+          creep.attack(door);
+        }
+      } else {
+        moveSmart(creep, door, 1);
+      }
+      return;
+    }
+
+    // Invader cores are attacked instead of dismantled when possible.
+    if (_isInvaderCore(target)) {
+      debugRing(target, CONFIG.COLORS.ATTACK, "core", 0.8);
+      var range = creep.pos.getRangeTo(target);
+      var inMelee = range === 1;
+
+      if (range <= 3 && creep.getActiveBodyparts(RANGED_ATTACK) > 0) {
+        debugSay(creep, "🏹");
+        creep.rangedAttack(target);
+      }
+      if (inMelee && creep.getActiveBodyparts(ATTACK) > 0) {
+        debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "⚔");
+        creep.attack(target);
+      }
+      if (!inMelee) moveSmart(creep, target, 1);
+      return;
+    }
+
+    // Normal structure dismantle flow.
+    var inMelee = creep.pos.isNearTo(target);
+    if (!inMelee) {
+      moveSmart(creep, target, 1);
+      return;
+    }
+
+    debugRing(target, CONFIG.COLORS.TARGET, target.structureType || "struct", 0.7);
+    debugSay(creep, "🪓");
+    var res = creep.dismantle(target);
+    if (res === ERR_INVALID_TARGET && creep.getActiveBodyparts(ATTACK) > 0) {
+      creep.attack(target);
+    }
+    if (target.hits && target.hits <= CONFIG.retargetThreshold) {
+      delete creep.memory.tid;
+    }
   },
 
   // ---------------------
@@ -181,101 +245,3 @@ var roleDismantler = {
 };
 
 module.exports = roleDismantler;
-
-// ---------------------
-// Teaching helpers
-// ---------------------
-function _shouldDelayForDecoy(creep) {
-  if (!creep.memory.delay) return false;
-  if (Game.time >= creep.memory.delay) return false;
-  hud(creep, "⏳ delay");
-  return true;
-}
-
-function drawVitalsHud(creep) {
-  hud(creep, "🪓 " + creep.hits + "/" + creep.hitsMax);
-}
-
-function _refreshTarget(creep) {
-  var target = Game.getObjectById(creep.memory.tid);
-  if (roleDismantler._isValidTarget(target)) return target;
-
-  target = roleDismantler._pickNewTarget(creep);
-  if (!target) {
-    delete creep.memory.tid;
-    return null;
-  }
-  creep.memory.tid = target.id;
-  debugRing(target, CONFIG.COLORS.TARGET, "lock", 0.8);
-  debugSay(creep, "🎯");
-  return target;
-}
-
-function _drawCrossRoomAwareness(creep, target) {
-  if (!target || !target.pos) return false;
-  if (!target.room || !target.room.name) return false;
-  if (!creep || !creep.room) return false;
-  if (target.room.name === creep.room.name) return false;
-  debugRing(target, CONFIG.COLORS.TARGET, "target", 0.8);
-  return true;
-}
-
-function _rallyOrIdle(creep) {
-  var rally = Game.flags.Rally || Game.flags.Attack;
-  if (!rally) return;
-  moveSmart(creep, rally, 1);
-}
-
-function _handleBlockingDoor(creep, target) {
-  var door = roleDismantler._firstBlockingDoorOnPath(creep, target);
-  if (!door) return false;
-
-  debugRing(door, CONFIG.COLORS.DOOR, "door", 0.6);
-  if (creep.pos.isNearTo(door)) {
-    debugSay(creep, "🧱");
-    var rc = creep.dismantle(door);
-    if (rc === ERR_INVALID_TARGET && creep.getActiveBodyparts(ATTACK) > 0) {
-      creep.attack(door);
-    }
-  } else {
-    moveSmart(creep, door, 1);
-  }
-  return true;
-}
-
-function _handleInvaderCore(creep, target) {
-  if (!_isInvaderCore(target)) return false;
-
-  debugRing(target, CONFIG.COLORS.ATTACK, "core", 0.8);
-  var inMelee = creep.pos.isNearTo(target);
-  var range = creep.pos.getRangeTo(target);
-
-  if (range <= 3 && creep.getActiveBodyparts(RANGED_ATTACK) > 0) {
-    debugSay(creep, "🏹");
-    creep.rangedAttack(target);
-  }
-  if (inMelee && creep.getActiveBodyparts(ATTACK) > 0) {
-    debugLine(creep.pos, target.pos, CONFIG.COLORS.ATTACK, "⚔");
-    creep.attack(target);
-  }
-  if (!inMelee) moveSmart(creep, target, 1);
-  return true;
-}
-
-function _handleStructure(creep, target) {
-  var inMelee = creep.pos.isNearTo(target);
-  if (!inMelee) {
-    moveSmart(creep, target, 1);
-    return;
-  }
-
-  debugRing(target, CONFIG.COLORS.TARGET, target.structureType || "struct", 0.7);
-  debugSay(creep, "🪓");
-  var res = creep.dismantle(target);
-  if (res === ERR_INVALID_TARGET && creep.getActiveBodyparts(ATTACK) > 0) {
-    creep.attack(target);
-  }
-  if (target.hits && target.hits <= CONFIG.retargetThreshold) {
-    delete creep.memory.tid;
-  }
-}

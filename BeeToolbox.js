@@ -310,37 +310,34 @@ function refreshRoomEnergyCache(room) {
 function getEnergyTargetsFromCache(room, key, validator) {
   var cache = getRoomEnergyCache(room);
   var ids = cache[key] || [];
-  var valid = [];
-  var updatedIds = [];
+  var filtered = filterTargets(ids, validator);
+  cache[key] = filtered.ids;
+
+  // If nothing in cache is usable anymore, refresh the room intel once and try again.
+  if (filtered.objects.length === 0) {
+    cache = refreshRoomEnergyCache(room);
+    ids = cache[key] || [];
+    filtered = filterTargets(ids, validator);
+    cache[key] = filtered.ids;
+  }
+
+  return filtered.objects;
+}
+
+// Light helper shared by initial cache pass and the refresh fallback.
+function filterTargets(ids, validator) {
+  var objects = [];
+  var keptIds = [];
 
   for (var i = 0; i < ids.length; i++) {
     var obj = Game.getObjectById(ids[i]);
-    if (!obj || (validator && !validator(obj))) {
-      continue;
-    }
-    valid.push(obj);
-    updatedIds.push(ids[i]);
+    if (!obj || (validator && !validator(obj))) continue;
+
+    objects.push(obj);
+    keptIds.push(ids[i]);
   }
 
-  cache[key] = updatedIds;
-
-  if (valid.length === 0) {
-    cache = refreshRoomEnergyCache(room);
-    ids = cache[key] || [];
-    valid = [];
-    updatedIds = [];
-    for (var j = 0; j < ids.length; j++) {
-      var refreshedObj = Game.getObjectById(ids[j]);
-      if (!refreshedObj || (validator && !validator(refreshedObj))) {
-        continue;
-      }
-      valid.push(refreshedObj);
-      updatedIds.push(ids[j]);
-    }
-    cache[key] = updatedIds;
-  }
-
-  return valid;
+  return { objects: objects, ids: keptIds };
 }
 
 function withdrawOrPickup(creep, targets, action) {
@@ -369,6 +366,15 @@ function gatherEnergyFromCategory(creep, room, key, validator, action) {
   var targets = getEnergyTargetsFromCache(room, key, validator);
   return withdrawOrPickup(creep, targets, action);
 }
+
+// Lower numbers are tried first when delivering energy; kept in one place so
+// deliverEnergy's scan can stay minimal.
+var DELIVER_PRIORITY = {};
+DELIVER_PRIORITY[STRUCTURE_STORAGE]   = 1;
+DELIVER_PRIORITY[STRUCTURE_EXTENSION] = 2;
+DELIVER_PRIORITY[STRUCTURE_SPAWN]     = 3;
+DELIVER_PRIORITY[STRUCTURE_TOWER]     = 4;
+DELIVER_PRIORITY[STRUCTURE_CONTAINER] = 5;
 
 var BeeToolbox = {
 
@@ -436,8 +442,8 @@ var BeeToolbox = {
     if (!roomMem._toolbox.sourceContainerScan) roomMem._toolbox.sourceContainerScan = {};
 
     var scanState = roomMem._toolbox.sourceContainerScan;
-    var now = Game.time | 0;
-    var nextScan = scanState.nextScan | 0;
+    var now = Game.time;
+    var nextScan = typeof scanState.nextScan === 'number' ? scanState.nextScan : 0;
 
     if (nextScan && now < nextScan) {
       return; // recently scanned; skip heavy find work
@@ -575,7 +581,7 @@ var BeeToolbox = {
   _getRoomEnergyCache: getRoomEnergyCache,
   _refreshRoomEnergyCache: refreshRoomEnergyCache,
   _getEnergyTargetsFromCache: getEnergyTargetsFromCache,
-  
+
   collectEnergy: function (creep) {
     if (!creep) return;
     var room = creep.room;
@@ -611,55 +617,74 @@ var BeeToolbox = {
 
   deliverEnergy: function (creep, structureTypes) {
     if (!creep) return ERR_INVALID_TARGET;
-    structureTypes = structureTypes || [];
+    var carry = creep.store ? creep.store.getUsedCapacity(RESOURCE_ENERGY) : 0;
+    if (carry <= 0) return ERR_NOT_ENOUGH_RESOURCES;
 
-    var STRUCTURE_PRIORITY = {};
-    STRUCTURE_PRIORITY[STRUCTURE_EXTENSION] = 2;
-    STRUCTURE_PRIORITY[STRUCTURE_SPAWN]     = 3;
-    STRUCTURE_PRIORITY[STRUCTURE_TOWER]     = 4;
-    STRUCTURE_PRIORITY[STRUCTURE_STORAGE]   = 1;
-    STRUCTURE_PRIORITY[STRUCTURE_CONTAINER] = 5;
+    // Normalize the target list so callers can pass a single type or an array.
+    // If nothing is provided, default to the common fill targets (spawn/
+    // extensions/towers) so couriers focus on bootstrapping before storage.
+    var types = [];
+    if (Array.isArray(structureTypes)) {
+      types = structureTypes;
+    } else if (structureTypes) {
+      types = [structureTypes];
+    } else {
+      types = [
+        STRUCTURE_EXTENSION,
+        STRUCTURE_SPAWN,
+        STRUCTURE_TOWER
+      ];
+    }
 
-    var sources = creep.room.find(FIND_SOURCES);
+    // Build a quick lookup so the single-pass scan below stays readable.
+    var allowedTypes = {};
+    for (var i = 0; i < types.length; i++) {
+      allowedTypes[types[i]] = true;
+    }
+    if (!Object.keys(allowedTypes).length) return ERR_NOT_FOUND;
 
-    var targets = creep.room.find(FIND_STRUCTURES, {
-      filter: function (s) {
-        // filter by type list
-        var okType = false;
-        for (var i = 0; i < structureTypes.length; i++) {
-          if (s.structureType === structureTypes[i]) { okType = true; break; }
-        }
-        if (!okType) return false;
+    var sources = allowedTypes[STRUCTURE_CONTAINER] ? creep.room.find(FIND_SOURCES) : [];
 
-        // exclude source-adjacent containers
-        if (s.structureType === STRUCTURE_CONTAINER) {
-          for (var j = 0; j < sources.length; j++) {
-            if (s.pos.inRangeTo(sources[j].pos, 1)) return false;
+    // Pick the best target in one pass: highest priority, then closest.
+    var best = null;
+    var bestPriority = Infinity;
+    var bestDist = Infinity;
+
+    var structures = creep.room.find(FIND_STRUCTURES);
+    for (var s = 0; s < structures.length; s++) {
+      var struct = structures[s];
+      if (!allowedTypes[struct.structureType]) continue;
+
+      if (!struct.store || struct.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) continue;
+
+      // Skip drop-off containers that sit right next to a source.
+      if (struct.structureType === STRUCTURE_CONTAINER && sources.length) {
+        var nearSource = false;
+        for (var j = 0; j < sources.length; j++) {
+          if (struct.pos.inRangeTo(sources[j].pos, 1)) {
+            nearSource = true;
+            break;
           }
         }
-        return s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+        if (nearSource) continue;
       }
-    });
 
-    // sort by priority then distance
-    targets.sort(function (a, b) {
-      var pa = STRUCTURE_PRIORITY[a.structureType] || 99;
-      var pb = STRUCTURE_PRIORITY[b.structureType] || 99;
-      if (pa !== pb) return pa - pb;
-      var da = creep.pos.getRangeTo(a);
-      var db = creep.pos.getRangeTo(b);
-      return da - db;
-    });
-
-    if (targets.length) {
-      var t = targets[0];
-      var r = creep.transfer(t, RESOURCE_ENERGY);
-      if (r === ERR_NOT_IN_RANGE) {
-        BeeToolbox.BeeTravel(creep, t, { range: 1 });
+      var priority = DELIVER_PRIORITY[struct.structureType] || 99;
+      var dist = creep.pos.getRangeTo(struct);
+      if (priority < bestPriority || (priority === bestPriority && dist < bestDist)) {
+        bestPriority = priority;
+        bestDist = dist;
+        best = struct;
       }
-      return r;
     }
-    return ERR_NOT_FOUND;
+
+    if (!best) return ERR_NOT_FOUND;
+
+    var r = creep.transfer(best, RESOURCE_ENERGY);
+    if (r === ERR_NOT_IN_RANGE) {
+      BeeToolbox.BeeTravel(creep, best, { range: 1 });
+    }
+    return r;
   },
 
   // Ensure a CONTAINER exists 0–1 tiles from targetSource; place site if missing
