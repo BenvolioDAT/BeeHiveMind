@@ -610,6 +610,13 @@ var BeeToolbox = {
     if (!creep) return ERR_INVALID_TARGET;
     structureTypes = structureTypes || [];
 
+    // Build a quick lookup so the filter below stays readable.
+    var allowedTypes = {};
+    for (var i = 0; i < structureTypes.length; i++) {
+      allowedTypes[structureTypes[i]] = true;
+    }
+    if (!Object.keys(allowedTypes).length) return ERR_NOT_FOUND;
+
     var STRUCTURE_PRIORITY = {};
     STRUCTURE_PRIORITY[STRUCTURE_EXTENSION] = 2;
     STRUCTURE_PRIORITY[STRUCTURE_SPAWN]     = 3;
@@ -621,19 +628,15 @@ var BeeToolbox = {
 
     var targets = creep.room.find(FIND_STRUCTURES, {
       filter: function (s) {
-        // filter by type list
-        var okType = false;
-        for (var i = 0; i < structureTypes.length; i++) {
-          if (s.structureType === structureTypes[i]) { okType = true; break; }
-        }
-        if (!okType) return false;
+        if (!allowedTypes[s.structureType]) return false;
 
-        // exclude source-adjacent containers
+        // Skip drop-off containers that sit right next to a source.
         if (s.structureType === STRUCTURE_CONTAINER) {
           for (var j = 0; j < sources.length; j++) {
             if (s.pos.inRangeTo(sources[j].pos, 1)) return false;
           }
         }
+
         return s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
       }
     });
