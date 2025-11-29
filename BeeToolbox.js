@@ -367,6 +367,15 @@ function gatherEnergyFromCategory(creep, room, key, validator, action) {
   return withdrawOrPickup(creep, targets, action);
 }
 
+// Lower numbers are tried first when delivering energy; kept in one place so
+// deliverEnergy's scan can stay minimal.
+var DELIVER_PRIORITY = {};
+DELIVER_PRIORITY[STRUCTURE_STORAGE]   = 1;
+DELIVER_PRIORITY[STRUCTURE_EXTENSION] = 2;
+DELIVER_PRIORITY[STRUCTURE_SPAWN]     = 3;
+DELIVER_PRIORITY[STRUCTURE_TOWER]     = 4;
+DELIVER_PRIORITY[STRUCTURE_CONTAINER] = 5;
+
 var BeeToolbox = {
 
   isAlly: function (name) { return isAlly(name); },
@@ -572,7 +581,7 @@ var BeeToolbox = {
   _getRoomEnergyCache: getRoomEnergyCache,
   _refreshRoomEnergyCache: refreshRoomEnergyCache,
   _getEnergyTargetsFromCache: getEnergyTargetsFromCache,
-  
+
   collectEnergy: function (creep) {
     if (!creep) return;
     var room = creep.room;
@@ -608,58 +617,60 @@ var BeeToolbox = {
 
   deliverEnergy: function (creep, structureTypes) {
     if (!creep) return ERR_INVALID_TARGET;
+    var carry = creep.store ? creep.store.getUsedCapacity(RESOURCE_ENERGY) : 0;
+    if (carry <= 0) return ERR_NOT_ENOUGH_RESOURCES;
+
     structureTypes = structureTypes || [];
 
-    // Build a quick lookup so the filter below stays readable.
+    // Build a quick lookup so the single-pass scan below stays readable.
     var allowedTypes = {};
     for (var i = 0; i < structureTypes.length; i++) {
       allowedTypes[structureTypes[i]] = true;
     }
     if (!Object.keys(allowedTypes).length) return ERR_NOT_FOUND;
 
-    var STRUCTURE_PRIORITY = {};
-    STRUCTURE_PRIORITY[STRUCTURE_EXTENSION] = 2;
-    STRUCTURE_PRIORITY[STRUCTURE_SPAWN]     = 3;
-    STRUCTURE_PRIORITY[STRUCTURE_TOWER]     = 4;
-    STRUCTURE_PRIORITY[STRUCTURE_STORAGE]   = 1;
-    STRUCTURE_PRIORITY[STRUCTURE_CONTAINER] = 5;
+    var sources = allowedTypes[STRUCTURE_CONTAINER] ? creep.room.find(FIND_SOURCES) : [];
 
-    var sources = creep.room.find(FIND_SOURCES);
+    // Pick the best target in one pass: highest priority, then closest.
+    var best = null;
+    var bestPriority = Infinity;
+    var bestDist = Infinity;
 
-    var targets = creep.room.find(FIND_STRUCTURES, {
-      filter: function (s) {
-        if (!allowedTypes[s.structureType]) return false;
+    var structures = creep.room.find(FIND_STRUCTURES);
+    for (var s = 0; s < structures.length; s++) {
+      var struct = structures[s];
+      if (!allowedTypes[struct.structureType]) continue;
 
-        // Skip drop-off containers that sit right next to a source.
-        if (s.structureType === STRUCTURE_CONTAINER) {
-          for (var j = 0; j < sources.length; j++) {
-            if (s.pos.inRangeTo(sources[j].pos, 1)) return false;
+      if (!struct.store || struct.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) continue;
+
+      // Skip drop-off containers that sit right next to a source.
+      if (struct.structureType === STRUCTURE_CONTAINER && sources.length) {
+        var nearSource = false;
+        for (var j = 0; j < sources.length; j++) {
+          if (struct.pos.inRangeTo(sources[j].pos, 1)) {
+            nearSource = true;
+            break;
           }
         }
-
-        return s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+        if (nearSource) continue;
       }
-    });
 
-    // sort by priority then distance
-    targets.sort(function (a, b) {
-      var pa = STRUCTURE_PRIORITY[a.structureType] || 99;
-      var pb = STRUCTURE_PRIORITY[b.structureType] || 99;
-      if (pa !== pb) return pa - pb;
-      var da = creep.pos.getRangeTo(a);
-      var db = creep.pos.getRangeTo(b);
-      return da - db;
-    });
-
-    if (targets.length) {
-      var t = targets[0];
-      var r = creep.transfer(t, RESOURCE_ENERGY);
-      if (r === ERR_NOT_IN_RANGE) {
-        BeeToolbox.BeeTravel(creep, t, { range: 1 });
+      var priority = DELIVER_PRIORITY[struct.structureType] || 99;
+      var dist = creep.pos.getRangeTo(struct);
+      if (priority < bestPriority || (priority === bestPriority && dist < bestDist)) {
+        bestPriority = priority;
+        bestDist = dist;
+        best = struct;
       }
-      return r;
     }
-    return ERR_NOT_FOUND;
+
+    if (!best) return ERR_NOT_FOUND;
+
+    var r = creep.transfer(best, RESOURCE_ENERGY);
+    if (r === ERR_NOT_IN_RANGE) {
+      BeeToolbox.BeeTravel(creep, best, { range: 1 });
+    }
+    return r;
   },
 
   // Ensure a CONTAINER exists 0–1 tiles from targetSource; place site if missing
