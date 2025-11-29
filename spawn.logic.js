@@ -476,11 +476,35 @@ function desiredSquadLayout(score) {
   return order;
 }
 
-// Guard rails: don't march squads across the whole shard accidentally.
+function normalizeRoomName(roomLike) {
+  if (!roomLike) return null;
+  if (typeof roomLike === 'string') return roomLike;
+  if (typeof roomLike.roomName === 'string') return roomLike.roomName;
+  if (roomLike.pos && typeof roomLike.pos.roomName === 'string') return roomLike.pos.roomName;
+  if (roomLike.room && typeof roomLike.room.name === 'string') return roomLike.room.name;
+  if (typeof roomLike.name === 'string') return roomLike.name;
+  return null;
+}
+
+// Decide whether a remote room is too far from the spawn room based on linear room distance.
+// If the inputs are not valid room names, log the problem and return true so we fail safe.
 function distanceTooFar(spawnRoomName, targetRoom) {
   if (!Game.map || typeof Game.map.getRoomLinearDistance !== 'function') return false;
-  var dist = Game.map.getRoomLinearDistance(spawnRoomName, targetRoom, true);
-  return typeof dist === 'number' && dist > 3;
+
+  var originRoomName = normalizeRoomName(spawnRoomName);
+  var targetRoomName = normalizeRoomName(targetRoom);
+
+  if (!originRoomName || !targetRoomName) {
+    console.log('[Spawn][distanceTooFar] invalid room names', spawnRoomName, targetRoom);
+    return true;
+  }
+
+  var dist = Game.map.getRoomLinearDistance(originRoomName, targetRoomName, true);
+  if (typeof dist !== 'number') {
+    console.log('[Spawn][distanceTooFar] unable to compute distance', originRoomName, targetRoomName, dist);
+    return true;
+  }
+  return dist > 3;
 }
 
 function matchesSquadRole(mem, taskName) {
@@ -577,7 +601,7 @@ function Spawn_Squad(spawn, squadId) {
   var flagData = SquadFlagIntel && typeof SquadFlagIntel.resolveSquadTarget === 'function'
     ? SquadFlagIntel.resolveSquadTarget(id)
     : { flag: null, targetRoom: null };
-  var targetRoom = flagData.targetRoom;
+  var targetRoom = normalizeRoomName(flagData.targetRoom);
   if (!targetRoom) return false;
   if (distanceTooFar(spawn.room.name, targetRoom)) return false;
 
