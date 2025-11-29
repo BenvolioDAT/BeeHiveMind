@@ -94,10 +94,14 @@ function isOwnedRoom(room) {
 
 function shouldSkipTick(room) {
   if (CFG.tickModulo <= 1) return false;
-  let hash = 0;
+  // Spread planner work across rooms by summing the room name characters.
+  let offset = 0;
   const name = room.name;
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
-  return (((Game.time + (hash & 3)) % CFG.tickModulo) !== 0);
+  for (let i = 0; i < name.length; i++) {
+    offset += name.charCodeAt(i);
+  }
+  offset = offset % CFG.tickModulo;
+  return ((Game.time + offset) % CFG.tickModulo) !== 0;
 }
 
 function plannerMemory(room) {
@@ -105,10 +109,6 @@ function plannerMemory(room) {
   if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
   if (!Memory.rooms[room.name].planner) Memory.rooms[room.name].planner = {};
   return Memory.rooms[room.name].planner;
-}
-
-function globalConstructionSiteCount() {
-  return Object.keys(Game.constructionSites).length;
 }
 
 function pickAnchor(room) {
@@ -125,13 +125,13 @@ function scanRoomState(room) {
   const arrStructs = room.find(FIND_STRUCTURES);
   for (let i = 0; i < arrStructs.length; i++) {
     const stype = arrStructs[i].structureType;
-    built[stype] = (built[stype] | 0) + 1;
+    built[stype] = (built[stype] || 0) + 1;
   }
 
   const arrSites = room.find(FIND_CONSTRUCTION_SITES);
   for (let j = 0; j < arrSites.length; j++) {
     const sType = arrSites[j].structureType;
-    sites[sType] = (sites[sType] | 0) + 1;
+    sites[sType] = (sites[sType] || 0) + 1;
   }
 
   return { built, sites, terrain };
@@ -143,21 +143,13 @@ function allowedCount(type, room) {
   if (room.controller && typeof CONTROLLER_STRUCTURES !== 'undefined') {
     const table = CONTROLLER_STRUCTURES[type];
     if (table) {
-      const lvl = room.controller.level | 0;
+      const lvl = room.controller.level || 0;
       controllerLimit = (table[lvl] != null) ? table[lvl] : 0;
     } else {
       controllerLimit = 0;
     }
   }
   return (hard < controllerLimit) ? hard : controllerLimit;
-}
-
-function buildOccupancyChecker(room) {
-  return function hasAnythingAt(x, y) {
-    if (room.lookForAt(LOOK_STRUCTURES, x, y).length) return true;
-    if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return true;
-    return false;
-  };
 }
 
 /**
@@ -177,7 +169,7 @@ function ensureSites(room) {
   const anchor = pickAnchor(room);
   if (!anchor) return;
 
-  const globalCount = globalConstructionSiteCount();
+  const globalCount = Object.keys(Game.constructionSites).length;
   if (globalCount >= CFG.csiteSafetyLimit) {
     mem.nextPlanTick = Game.time + CFG.noPlacementCooldownNone;
     return;
@@ -229,8 +221,6 @@ function ensureSites(room) {
 function ensureBaseLayout(room, anchor, snapshot, allowedFn, slotsLeft, globalCapLeft) {
   if (!anchor) return 0;
   if (slotsLeft <= 0 || globalCapLeft <= 0) return 0;
-
-  const hasAnythingAt = buildOccupancyChecker(room);
   let placed = 0;
 
   for (let i = 0; i < BASE_OFFSETS.length; i++) {
@@ -242,9 +232,10 @@ function ensureBaseLayout(room, anchor, snapshot, allowedFn, slotsLeft, globalCa
 
     if (tx < 1 || tx > 48 || ty < 1 || ty > 48) continue;
     if (snapshot.terrain.get(tx, ty) === TERRAIN_MASK_WALL) continue;
-    if (hasAnythingAt(tx, ty)) continue;
+    if (room.lookForAt(LOOK_STRUCTURES, tx, ty).length) continue;
+    if (room.lookForAt(LOOK_CONSTRUCTION_SITES, tx, ty).length) continue;
 
-    const have = (snapshot.built[plan.type] | 0) + (snapshot.sites[plan.type] | 0);
+    const have = (snapshot.built[plan.type] || 0) + (snapshot.sites[plan.type] || 0);
     const cap = allowedFn(plan.type);
     if (have >= cap) continue;
 
@@ -253,7 +244,7 @@ function ensureBaseLayout(room, anchor, snapshot, allowedFn, slotsLeft, globalCa
       placed++;
       slotsLeft--;
       globalCapLeft--;
-      snapshot.sites[plan.type] = (snapshot.sites[plan.type] | 0) + 1;
+      snapshot.sites[plan.type] = (snapshot.sites[plan.type] || 0) + 1;
     }
   }
 
@@ -277,11 +268,13 @@ function ensureSourceContainers(room, terrain, built, sites, allowedFn, slotsLef
   if (slotsLeft <= 0 || globalCapLeft <= 0) return { placed: 0 };
 
   const capContainers = allowedFn(STRUCTURE_CONTAINER);
-  let haveContainers = (built[STRUCTURE_CONTAINER] | 0) + (sites[STRUCTURE_CONTAINER] | 0);
+  let haveContainers = (built[STRUCTURE_CONTAINER] || 0) + (sites[STRUCTURE_CONTAINER] || 0);
   if (haveContainers >= capContainers) return { placed: 0 };
 
-  const sourcesMem = ensureRoomSourceMemory(room);
-  const passable = buildPassableChecker(room, terrain);
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+  if (!Memory.rooms[room.name].sources) Memory.rooms[room.name].sources = {};
+  const sourcesMem = Memory.rooms[room.name].sources;
   const sources = room.find(FIND_SOURCES);
 
   for (let s = 0; s < sources.length; s++) {
@@ -327,7 +320,22 @@ function ensureSourceContainers(room, terrain, built, sites, allowedFn, slotsLef
         if (dx === 0 && dy === 0) continue;
         const tx = src.pos.x + dx;
         const ty = src.pos.y + dy;
-        if (!passable(tx, ty)) continue;
+        if (tx < 1 || tx > 48 || ty < 1 || ty > 48) continue;
+        if (terrain.get(tx, ty) === TERRAIN_MASK_WALL) continue;
+
+        // Keep the placement check readable: only roads, containers, and our ramparts are allowed on the tile.
+        const structuresAt = room.lookForAt(LOOK_STRUCTURES, tx, ty);
+        let blocked = false;
+        for (let i = 0; i < structuresAt.length; i++) {
+          const st = structuresAt[i].structureType;
+          if (st === STRUCTURE_ROAD) continue;
+          if (st === STRUCTURE_CONTAINER) continue;
+          if (st === STRUCTURE_RAMPART && structuresAt[i].my) continue;
+          blocked = true;
+          break;
+        }
+        if (blocked) continue;
+        if (room.lookForAt(LOOK_CONSTRUCTION_SITES, tx, ty).length) continue;
 
         const rc = room.createConstructionSite(tx, ty, STRUCTURE_CONTAINER);
         if (rc === OK) {
@@ -342,7 +350,7 @@ function ensureSourceContainers(room, terrain, built, sites, allowedFn, slotsLef
           slotsLeft--;
           globalCapLeft--;
           haveContainers++;
-          sites[STRUCTURE_CONTAINER] = (sites[STRUCTURE_CONTAINER] | 0) + 1;
+          sites[STRUCTURE_CONTAINER] = (sites[STRUCTURE_CONTAINER] || 0) + 1;
           placedHere = true;
         }
       }
@@ -350,32 +358,6 @@ function ensureSourceContainers(room, terrain, built, sites, allowedFn, slotsLef
   }
 
   return { placed };
-}
-
-function ensureRoomSourceMemory(room) {
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-  if (!Memory.rooms[room.name].sources) Memory.rooms[room.name].sources = {};
-  return Memory.rooms[room.name].sources;
-}
-
-function buildPassableChecker(room, terrain) {
-  return function isPassable(x, y) {
-    if (x < 1 || x > 48 || y < 1 || y > 48) return false;
-    if (terrain.get(x, y) === TERRAIN_MASK_WALL) return false;
-
-    const ss = room.lookForAt(LOOK_STRUCTURES, x, y);
-    for (let i = 0; i < ss.length; i++) {
-      const st = ss[i].structureType;
-      if (st === STRUCTURE_ROAD) continue;
-      if (st === STRUCTURE_CONTAINER) continue;
-      if (st === STRUCTURE_RAMPART && ss[i].my) continue;
-      return false;
-    }
-
-    if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return false;
-    return true;
-  };
 }
 
 const RoomPlanner = {

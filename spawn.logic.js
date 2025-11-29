@@ -1,9 +1,8 @@
 'use strict';
 
-// CHANGELOG:
-// - Removed CONFIGS; use ROLE_CONFIGS for canonical role definitions.
-// - Removed directRoleForTask/TASK_ALIAS helpers; use normalizeRole() instead.
-// - Removed deprecated Generate_* and Spawn_Worker_Bee shims; call spawnRole()/getBodyForRole().
+// Spawn logic lives here so older require('spawn.logic') calls keep working.
+// BeeSpawnManager delegates body selection and squad spawning to this module,
+// so we keep the APIs intact and favor clear, linear helpers for novices.
 
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
@@ -261,13 +260,13 @@ var ROLE_NORMALIZE_MAP = (function () {
 })();
 
 function normalizeRole(role) {
-  if (!role && role !== 0) return null;
+  if (role === undefined || role === null) return null;
   var key = String(role);
   if (!key) return null;
-  if (ROLE_NORMALIZE_MAP[key]) return ROLE_NORMALIZE_MAP[key];
-  var lower = key.toLowerCase();
-  if (ROLE_NORMALIZE_MAP[lower]) return ROLE_NORMALIZE_MAP[lower];
-  return null;
+
+  // Try exact match first, then lowercase alias (e.g. "baseharvest" → BaseHarvest).
+  var canonical = ROLE_NORMALIZE_MAP[key] || ROLE_NORMALIZE_MAP[key.toLowerCase()];
+  return canonical || null;
 }
 
 function calculateBodyCost(body) {
@@ -288,8 +287,9 @@ function cloneBody(body) {
 }
 
 function getBodyForRole(roleName, energyAvailable) {
-  var energy = energyAvailable | 0;
   if (!roleName) return [];
+
+  var energy = typeof energyAvailable === 'number' ? energyAvailable : 0;
   var list = ROLE_CONFIGS[roleName];
   if (!list) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
@@ -297,6 +297,8 @@ function getBodyForRole(roleName, energyAvailable) {
     }
     return [];
   }
+
+  // Config arrays are ordered largest→smallest; pick the first body we can afford.
   for (var i = 0; i < list.length; i++) {
     var body = list[i];
     var cost = calculateBodyCost(body);
@@ -307,6 +309,7 @@ function getBodyForRole(roleName, energyAvailable) {
       return cloneBody(body);
     }
   }
+
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     var cheapest = list[list.length - 1];
     var minCost = cheapest ? calculateBodyCost(cheapest) : 0;
@@ -334,21 +337,10 @@ function copyMemory(source) {
   return target;
 }
 
-// ES5-safe combat squad memory initializer
-function _initSquadMemory(mem, squadId, targetRoom, squadFlag) {
-  if (!mem) mem = {};
-  if (squadId && !mem.squadId) mem.squadId = squadId;
-  if (targetRoom && !mem.targetRoom) mem.targetRoom = targetRoom;
-  if (squadFlag && !mem.squadFlag) mem.squadFlag = squadFlag;
-  if (!mem.assignedAt) mem.assignedAt = Game.time;
-  if (!mem.state) mem.state = 'rally';
-  if (!mem.waitUntil) mem.waitUntil = Game.time + 25;
-  // buddyId / stickTargetId handled by roles post-spawn
-  return mem;
-}
-
 function spawnRole(spawn, roleName, availableEnergy, memory) {
   if (!spawn) return false;
+
+  // Resolve the requested role into our canonical spelling before continuing.
   var canonicalRole = normalizeRole(roleName);
   if (!canonicalRole) {
     if (Logger.shouldLog(LOG_LEVEL.WARN)) {
@@ -356,28 +348,38 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     }
     return false;
   }
-  var energy = availableEnergy | 0;
+
+  var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
   var body = getBodyForRole(canonicalRole, energy);
-  if (!body || !body.length) {
-    return false;
-  }
+  if (!body || !body.length) return false;
+
   var creepName = Generate_Creep_Name(canonicalRole);
-  if (!creepName) {
-    return false;
-  }
+  if (!creepName) return false;
+
+  // Copy over provided memory so we never mutate the caller's object.
   var mem = copyMemory(memory);
   if (!mem.role) mem.role = canonicalRole;
   if (mem.skipTaskMemory) {
     delete mem.skipTaskMemory;
   }
+
+  // Keep combat squad data beside the spawn call so new creeps hit the ground
+  // with their rally room and wait timer already set.
   if (canonicalRole === 'CombatMelee' ||
       canonicalRole === 'CombatMedic' ||
       canonicalRole === 'CombatArcher') {
     var sid = mem.squadId || (memory && memory.squadId);
     var targetRoom = mem.targetRoom || (memory && memory.targetRoom);
     var squadFlag = mem.squadFlag || (memory && memory.squadFlag);
-    mem = _initSquadMemory(mem, sid, targetRoom, squadFlag);
+    if (sid && !mem.squadId) mem.squadId = sid;
+    if (targetRoom && !mem.targetRoom) mem.targetRoom = targetRoom;
+    if (squadFlag && !mem.squadFlag) mem.squadFlag = squadFlag;
+    if (!mem.assignedAt) mem.assignedAt = Game.time;
+    if (!mem.state) mem.state = 'rally';
+    if (!mem.waitUntil) mem.waitUntil = Game.time + 25;
+    // buddyId / stickTargetId handled by roles post-spawn
   }
+
   var result = spawn.spawnCreep(body, creepName, { memory: mem });
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('spawnRole', canonicalRole, 'body [' + body + ']', 'cost', calculateBodyCost(body), 'avail', energy, 'result', result);
@@ -396,18 +398,15 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
 // -----------------------------------------------------------------------------
 function Calculate_Spawn_Resource(spawnOrRoom) {
   if (spawnOrRoom) {
-    var room = null;
-    if (spawnOrRoom.room) {
-      room = spawnOrRoom.room;
-    } else if (typeof spawnOrRoom === 'string') {
-      room = Game.rooms[spawnOrRoom];
-    } else {
-      room = spawnOrRoom;
-    }
-    if (!room) return 0;
-    return room.energyAvailable;
+    // Allow spawns, room objects, or room names.
+    var room = spawnOrRoom.room || (typeof spawnOrRoom === 'string'
+      ? Game.rooms[spawnOrRoom]
+      : spawnOrRoom);
+    return room ? room.energyAvailable : 0;
   }
 
+  // Fallback path: sum all spawn + extension stores when no room hint is
+  // provided. This mirrors how Screeps counts capacity in the UI.
   var spawnEnergy = 0;
   for (var name in Game.spawns) {
     if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
@@ -460,7 +459,7 @@ function ensureSquadMemory(id) {
  * formation stays consistent with intel scoring.
  */
 function desiredSquadLayout(score) {
-  var threat = score | 0;
+  var threat = typeof score === 'number' ? score : 0;
   if (threat <= 0) return [];
   var melee = 1;
   var medic = 1;
@@ -521,7 +520,8 @@ function stampSquadPlanMemory(S, layout, targetRoom, threatScore, flag) {
   S.desiredCounts = {};
   for (var li = 0; li < layout.length; li++) {
     var plan = layout[li];
-    S.desiredCounts[plan.role] = plan.need | 0;
+    var needed = typeof plan.need === 'number' ? plan.need : 0;
+    S.desiredCounts[plan.role] = needed;
   }
   S.lastEvaluated = Game.time;
 }
@@ -529,15 +529,16 @@ function stampSquadPlanMemory(S, layout, targetRoom, threatScore, flag) {
 // Keep spawning side-effects in one loop so it's obvious when we early return.
 /**
  * spawnMissingSquadRole consumes desiredSquadLayout() output and asks
- * spawnRole() to create whichever role is currently missing, injecting
- * squadId/flag/target data via _initSquadMemory.
- */
+ * spawnRole() to create whichever role is currently missing, carrying
+ * squadId/flag/target data along so combat creeps spawn ready to rally.
+*/
 function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S, squadFlag) {
   for (var i = 0; i < layout.length; i++) {
     var plan = layout[i];
-    if ((plan.need | 0) <= 0) continue;
+    var need = typeof plan.need === 'number' ? plan.need : 0;
+    if (need <= 0) continue;
     var have = haveSquadCount(id, plan.role);
-    if (have < plan.need) {
+    if (have < need) {
       var extraMemory = {
         squadId: id,
         role: plan.role,
@@ -590,15 +591,16 @@ function Spawn_Squad(spawn, squadId) {
       threatScore = live.score;
     }
   }
-  if ((threatScore | 0) <= 0 && (!live || !live.hasThreat)) {
-    combatSpawnLog('[SpawnSkip]', id, 'room', targetRoom, 'score', threatScore,
+  var safeThreatScore = typeof threatScore === 'number' ? threatScore : 0;
+  if (safeThreatScore <= 0 && (!live || !live.hasThreat)) {
+    combatSpawnLog('[SpawnSkip]', id, 'room', targetRoom, 'score', safeThreatScore,
       'liveScore', live ? live.score : 0);
     return false;
   }
-  var layout = desiredSquadLayout(threatScore);
+  var layout = desiredSquadLayout(safeThreatScore);
   if (!layout.length) return false;
 
-  stampSquadPlanMemory(S, layout, targetRoom, threatScore, flagData.flag);
+  stampSquadPlanMemory(S, layout, targetRoom, safeThreatScore, flagData.flag);
 
   if (S.lastSpawnAt && Game.time - S.lastSpawnAt < SQUAD_COOLDOWN_TICKS) {
     return false;

@@ -29,6 +29,10 @@ const CFG = Object.freeze({
   maxRemoteRadius: 1
 });
 
+// Road planner keeps all “how do we lay roads?” choices here so the main Screeps
+// loop can simply call ensureRemoteRoads each tick. The helpers below focus on
+// being readable and showing why each step runs, not on clever abstractions.
+
 /** =========================
  *  One-tick caches (zero cost across module calls the same tick)
  *  ========================= */
@@ -97,20 +101,26 @@ function isOwnedRoom(room) {
  */
 function shouldSkipTick(homeRoom) {
   if (CFG.plannerTickModulo <= 1) return false;
+  // Simple deterministic hash to stagger work; summing character codes keeps it obvious.
   let hash = 0;
   const name = homeRoom.name;
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
-  return (((_tick() + (hash & 3)) % CFG.plannerTickModulo) !== 0);
+  for (let i = 0; i < name.length; i++) {
+    hash += name.charCodeAt(i);
+  }
+  const stagger = Math.abs(hash % CFG.plannerTickModulo);
+  return (((_tick() + stagger) % CFG.plannerTickModulo) !== 0);
 }
 
 function ensureRemoteRoads(homeRoom) {
   if (!isOwnedRoom(homeRoom)) return;
   if (shouldSkipTick(homeRoom)) return;
 
+  // Keep memory fresh and clean before doing any heavier work.
   const mem = memoryFor(homeRoom);
   pruneOutOfRadiusPaths(homeRoom, mem);
 
-  if (!hasAnchorReady(homeRoom)) return; // still waiting for spawn/storage
+  // We need at least a spawn or storage anchor to lay meaningful roads.
+  if (!hasAnchorReady(homeRoom)) return;
 
   const anchor = getAnchorPos(homeRoom);
   ensureStagedHomeNetwork(homeRoom, anchor);
@@ -266,63 +276,68 @@ function auditAndRelaunch(homeRoom, key, maxFixes = 1) {
 // ---------- Cost matrix (per-tick cache) ----------
 
 function roomCostMatrix(roomName) {
-    const room = Game.rooms[roomName];
-    if (!room) return;
+  const room = Game.rooms[roomName];
+  if (!room) return;
 
-    if (__RPM.cmTick !== _tick()) {
-      __RPM.cmTick = _tick();
-      __RPM.cm = Object.create(null);
-    }
-    const cached = __RPM.cm[roomName];
-    if (cached) return cached;
+  if (__RPM.cmTick !== _tick()) {
+    __RPM.cmTick = _tick();
+    __RPM.cm = Object.create(null);
+  }
 
-    const costs = new PathFinder.CostMatrix();
+  const cached = __RPM.cm[roomName];
+  if (cached) return cached;
 
-    const structs = room.find(FIND_STRUCTURES);
-    for (let i = 0; i < structs.length; i++) {
-      const s = structs[i];
-      if (s.structureType === STRUCTURE_ROAD) {
-        costs.set(s.pos.x, s.pos.y, CFG.roadCost);
-      } else if (
-        s.structureType !== STRUCTURE_CONTAINER &&
-        (s.structureType !== STRUCTURE_RAMPART || !s.my)
-      ) {
-        costs.set(s.pos.x, s.pos.y, 0xff);
-      }
-    }
+  const costs = new PathFinder.CostMatrix();
 
-    const sites = room.find(FIND_CONSTRUCTION_SITES);
-    for (let i = 0; i < sites.length; i++) {
-      const cs = sites[i];
-      if (cs.structureType !== STRUCTURE_ROAD) {
-        costs.set(cs.pos.x, cs.pos.y, 0xff);
-      }
-    }
-
-    const sources = room.find(FIND_SOURCES);
-    for (let i = 0; i < sources.length; i++) {
-      const s = sources[i];
+  // Roads cheaper, all other impassable structures fully blocked.
+  const structs = room.find(FIND_STRUCTURES);
+  for (let i = 0; i < structs.length; i++) {
+    const s = structs[i];
+    if (s.structureType === STRUCTURE_ROAD) {
+      costs.set(s.pos.x, s.pos.y, CFG.roadCost);
+    } else if (
+      s.structureType !== STRUCTURE_CONTAINER &&
+      (s.structureType !== STRUCTURE_RAMPART || !s.my)
+    ) {
       costs.set(s.pos.x, s.pos.y, 0xff);
     }
-    const minerals = room.find(FIND_MINERALS);
-    for (let i = 0; i < minerals.length; i++) {
-      const m = minerals[i];
-      costs.set(m.pos.x, m.pos.y, 0xff);
-    }
+  }
 
-    __RPM.cm[roomName] = costs;
-    return costs;
+  // Avoid construction sites that would block travel when finished.
+  const sites = room.find(FIND_CONSTRUCTION_SITES);
+  for (let i = 0; i < sites.length; i++) {
+    const cs = sites[i];
+    if (cs.structureType !== STRUCTURE_ROAD) {
+      costs.set(cs.pos.x, cs.pos.y, 0xff);
+    }
+  }
+
+  // Keep harvest targets out of the matrix so we do not path through them.
+  const sources = room.find(FIND_SOURCES);
+  for (let i = 0; i < sources.length; i++) {
+    const s = sources[i];
+    costs.set(s.pos.x, s.pos.y, 0xff);
+  }
+  const minerals = room.find(FIND_MINERALS);
+  for (let i = 0; i < minerals.length; i++) {
+    const m = minerals[i];
+    costs.set(m.pos.x, m.pos.y, 0xff);
+  }
+
+  __RPM.cm[roomName] = costs;
+  return costs;
 }
 
   // ---------- Memory + info ----------
 
 function memoryFor(homeRoom) {
-    if (!Memory.rooms) Memory.rooms = {};
-    if (!Memory.rooms[homeRoom.name]) Memory.rooms[homeRoom.name] = {};
-    const r = Memory.rooms[homeRoom.name];
-    if (!r.roadPlanner) r.roadPlanner = { paths: {} };
-    if (!r.roadPlanner.paths) r.roadPlanner.paths = {};
-    return r.roadPlanner;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[homeRoom.name]) Memory.rooms[homeRoom.name] = {};
+
+  const r = Memory.rooms[homeRoom.name];
+  if (!r.roadPlanner) r.roadPlanner = { paths: {} };
+  if (!r.roadPlanner.paths) r.roadPlanner.paths = {};
+  return r.roadPlanner;
 }
  
 function getActiveRemoteRooms(homeRoom) {

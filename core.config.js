@@ -1,12 +1,13 @@
-
-var LOG_LEVEL = Object.freeze({
+// Central configuration flags for the bot. Adjust these to tune global behavior.
+const LOG_LEVEL = Object.freeze({
   NONE: 0,
   BASIC: 1,
   DEBUG: 2,
 });
 
-var CoreConfig = {
-  LOG_LEVEL: LOG_LEVEL,
+// Top-level toggles and shared lists referenced by multiple systems.
+const CoreConfig = {
+  LOG_LEVEL,
   ALLY_USERNAMES: [
     'walter_bell',
     'sleek',
@@ -15,13 +16,13 @@ var CoreConfig = {
     'chris1',
     'MoonArtyre',
     'HerrKai',
-    
   ],
   ALLOW_PVP: true,
   ALLOW_INVADERS_IN_FOREIGN_ROOMS: true,
   TREAT_SOURCE_KEEPERS_AS_PVE: true,
 };
 
+// Secondary settings split by system to make intent clear for new players.
 CoreConfig.settings = Object.freeze({
   logging: Object.freeze({
     /** Default log level applied on boot. */

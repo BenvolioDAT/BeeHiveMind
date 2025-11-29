@@ -1,7 +1,9 @@
 
+// Core utilities and shared config
 const CoreConfig = require('core.config');
 const Logger = require('core.logger');
 
+// Core game logic modules
 const BeeMaintenance = require('BeeMaintenance');
 const BeeVisuals = require('BeeVisuals');
 const BeeHiveMind = require('BeeHiveMind');
@@ -27,13 +29,14 @@ Object.defineProperty(global, 'currentLogLevel', {
 const mainLog = Logger.createLogger('Main', LOG_LEVEL.BASIC);
 
 function ensureFirstSpawnMemory() {
+    // Track the room of our first spawn so other modules can reference it.
     if (Memory.GameTickCounter === undefined) Memory.GameTickCounter = 0;
     Memory.GameTickCounter++;
     if (Memory.GameTickCounter < 10) return;
 
     Memory.GameTickCounter = 0;
     const spawns = Object.values(Game.spawns);
-    if (!spawns.length) {
+    if (spawns.length === 0) {
         if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
             mainLog.debug('No owned spawns detected.');
         }
@@ -50,6 +53,7 @@ function ensureFirstSpawnMemory() {
 }
 
 function maintainRepairTargets() {
+    // Periodically refresh which structures need repairs in each visible room.
     if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
     Memory.GameTickRepairCounter++;
     if (Memory.GameTickRepairCounter < CoreConfig.settings.maintenance.repairScanInterval) return;
@@ -57,24 +61,23 @@ function maintainRepairTargets() {
     Memory.GameTickRepairCounter = 0;
     if (!Memory.rooms) Memory.rooms = {};
 
-    for (const roomName in Game.rooms) {
-        if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
-        const room = Game.rooms[roomName];
-        if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-        Memory.rooms[roomName].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
+    for (const room of Object.values(Game.rooms)) {
+        if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+        Memory.rooms[room.name].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
     }
 }
 
 function refreshSourceIntel() {
+    // Keep an eye on source containers so harvesters stay supplied.
     if (Game.time % 3 !== 0) return;
-    for (const roomName in Game.rooms) {
-        if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
-        const room = Game.rooms[roomName];
+
+    for (const room of Object.values(Game.rooms)) {
         BeeToolbox.logSourceContainersInRoom(room);
     }
 }
 
 function maybeGeneratePixel() {
+    // Optional cosmetic pixel generation when CPU bucket is healthy.
     const pixelCfg = CoreConfig.settings.pixels;
     if (!pixelCfg.enabled) return;
     if (Game.cpu.bucket < pixelCfg.bucketThreshold) return;
@@ -87,20 +90,24 @@ function maybeGeneratePixel() {
 }
 
 module.exports.loop = function () {
+    // --- Intel and housekeeping ---
     refreshSourceIntel();
     BeeMaintenance.cleanUpMemory();
+    maintainRepairTargets();
+    ensureFirstSpawnMemory();
+
+    // --- Primary AI behaviors ---
     BeeHiveMind.run();
     BeeStructureLogic.runTowerLogic();
     BeeStructureLogic.runLinkManager();
+    BeeCombatSquads.ensureSquadFlags();
 
+    // --- Visual aids for quick debugging ---
     BeeVisuals.drawVisuals();
     BeeVisuals.drawEnergyBar();
     BeeVisuals.drawWorkerBeeTaskTable();
 
-    maintainRepairTargets();
-    ensureFirstSpawnMemory();
-    BeeCombatSquads.ensureSquadFlags();
-
+    // --- Less frequent maintenance ---
     if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {
         BeeMaintenance.cleanStaleRooms();
     }
