@@ -1,6 +1,6 @@
 
-var CoreConfig = require('core.config');
-var LOG_LEVEL = CoreConfig.LOG_LEVEL;
+const CoreConfig = require('core.config');
+const LOG_LEVEL = CoreConfig.LOG_LEVEL;
 
 // Persisted in the global scope to survive across ticks without touching Memory.
 if (!global.__beeLoggerLevel) {
@@ -8,6 +8,7 @@ if (!global.__beeLoggerLevel) {
 }
 
 function sanitizeLevel(level) {
+  // Clamp any provided value into the known range so callers cannot set junk levels.
   if (typeof level !== 'number') return LOG_LEVEL.NONE;
   if (level < LOG_LEVEL.NONE) return LOG_LEVEL.NONE;
   if (level > LOG_LEVEL.DEBUG) return LOG_LEVEL.DEBUG;
@@ -36,12 +37,13 @@ function formatNamespace(ns) {
 }
 
 function createLogger(namespace, defaultLevel) {
-  var nsPrefix = formatNamespace(namespace);
-  var minLevel = sanitizeLevel(defaultLevel == null ? LOG_LEVEL.BASIC : defaultLevel);
+  const nsPrefix = formatNamespace(namespace);
+  const minLevel = sanitizeLevel(defaultLevel == null ? LOG_LEVEL.BASIC : defaultLevel);
+  // Every emitted message must clear both the global and per-logger thresholds.
 
   function emit(level, args) {
     if (!shouldLog(level) || level < minLevel) return;
-    var text = Array.prototype.join.call(args, ' ');
+    const text = Array.prototype.join.call(args, ' ');
     console.log(nsPrefix + text);
   }
 

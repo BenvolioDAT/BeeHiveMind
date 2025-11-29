@@ -457,36 +457,44 @@ function resolveSquadTarget(identifier) {
     if (identifier.indexOf('Squad') !== 0) names.push('Squad' + identifier);
     if (identifier.indexOf('Squad_') !== 0) names.push('Squad_' + identifier);
   }
-  var seen = {};
+
+  // Walk the candidate names once, collecting the first flag, binding, and
+  // canonical flag name we can find. Keeping the loop linear makes it obvious
+  // how a caller-provided identifier maps to a Squad flag + target room.
   var flag = null;
   var targetRoom = null;
   var resolvedName = null;
+  var seen = {};
   for (var i = 0; i < names.length; i++) {
     var candidate = names[i];
     if (!candidate || seen[candidate]) continue;
     seen[candidate] = true;
+
     if (!flag && Game.flags && Game.flags[candidate]) {
       flag = Game.flags[candidate];
-      if (!resolvedName) resolvedName = candidate;
+      resolvedName = resolvedName || candidate;
     }
     if (!targetRoom && bindings[candidate]) {
       targetRoom = bindings[candidate];
-      if (!resolvedName) resolvedName = candidate;
+      resolvedName = resolvedName || candidate;
     }
   }
+
+  // Fill in missing pieces from the resolved flag, even if only bindings
+  // existed for the provided name variations.
   if (!flag && resolvedName && Game.flags && Game.flags[resolvedName]) {
     flag = Game.flags[resolvedName];
   }
   if (!targetRoom && flag && flag.pos) {
     targetRoom = flag.pos.roomName;
-    if (!resolvedName) resolvedName = flag.name;
+    resolvedName = resolvedName || flag.name;
   }
+
   if (!targetRoom && resolvedName && Memory.squads && Memory.squads[resolvedName]) {
     var bucket = Memory.squads[resolvedName];
-    if (bucket && bucket.targetRoom) {
-      targetRoom = bucket.targetRoom;
-    }
+    if (bucket && bucket.targetRoom) targetRoom = bucket.targetRoom;
   }
+
   var plan = resolvedName ? resolvePlan(resolvedName) : null;
   return {
     flag: flag,
@@ -507,7 +515,8 @@ function threatScoreForRoom(roomName) {
   var rooms = intel.rooms || {};
   var rec = rooms[roomName];
   if (!rec || typeof rec.lastScore !== 'number') return 0;
-  var score = rec.lastScore | 0;
+  var score = rec.lastScore;
+  if (!Number.isFinite(score)) return 0;
   if (score <= 0) return 0;
   var lastThreatTick = rec.lastThreatAt || rec.lastSeen || 0;
   if (!lastThreatTick) return 0;
@@ -702,12 +711,18 @@ function cleanupAutoDefense(flagName) {
 function ensureAutoDefenseForRoom(room) {
   if (!room || !room.controller || !room.controller.my) return;
   var flagName = 'Squad' + room.name;
+
+  // Gather hostiles up front so the rest of the logic can make decisions in
+  // a straight line without bouncing between helpers.
   var avoid = buildAvoidMap();
   var candidates = gatherHostileCandidates(room, avoid);
   var score = computeThreatScore(candidates);
   var mobile = 0;
   if (candidates.creeps) mobile += candidates.creeps.length;
   if (candidates.power) mobile += candidates.power.length;
+
+  // If no mobile threats remain, reset the auto-defense bookkeeping and let
+  // the squad memory clean itself up once the last defenders expire.
   var bucket = Memory.squads ? Memory.squads[flagName] : null;
   if (mobile <= 0) {
     if (bucket && bucket.autoDefense) {
@@ -723,6 +738,8 @@ function ensureAutoDefenseForRoom(room) {
     return;
   }
 
+  // Persist the defense plan while hostiles are present so spawns and UI can
+  // react on future ticks.
   var mem = ensureSquadMemory(flagName);
   mem.autoDefense = true;
   mem.planType = 'AUTO_DEFENSE';
@@ -731,22 +748,28 @@ function ensureAutoDefenseForRoom(room) {
   mem.lastDefenseTick = Game.time;
   mem.lastSeenTick = Game.time;
 
-  if (!mem.rally) {
-    mem.rally = pickRallyPoint(room);
-  }
+  // Ensure we always have a usable rally anchor before picking targets.
   var rallyPos = mem.rally ? deserializePos(mem.rally) : null;
-  if (!rallyPos) {
+  if (!mem.rally || !rallyPos) {
     mem.rally = pickRallyPoint(room);
     rallyPos = mem.rally ? deserializePos(mem.rally) : null;
   }
 
   var anchor = rallyPos || (room.controller ? room.controller.pos : null);
   var best = pickBestTarget(candidates, anchor);
+
+  // Choose the position the squad should march toward: first a scored target,
+  // then any visible hostile, finally the controller or room center.
   var attackPos = null;
-  if (best && best.pos) attackPos = best.pos;
-  else if (candidates.creeps && candidates.creeps[0] && candidates.creeps[0].pos) attackPos = candidates.creeps[0].pos;
-  else if (room.controller) attackPos = room.controller.pos;
-  else attackPos = new RoomPosition(25, 25, room.name);
+  if (best && best.pos) {
+    attackPos = best.pos;
+  } else if (candidates.creeps && candidates.creeps[0] && candidates.creeps[0].pos) {
+    attackPos = candidates.creeps[0].pos;
+  } else if (room.controller) {
+    attackPos = room.controller.pos;
+  } else {
+    attackPos = new RoomPosition(25, 25, room.name);
+  }
 
   if (best && best.id) {
     mem.targetId = best.id;
@@ -876,58 +899,6 @@ function scoreStructure(structure, anchorPos) {
   return score;
 }
 
-/**
- * buildAvoidanceFromSquadMembers prevents a squad from targeting itself or
- * allied creeps by treating every member's owner as "friendly" for the
- * duration of the focusFire scan.
- */
-function buildAvoidanceFromSquadMembers(formation) {
-  // We skip friendly owners so the squad never targets itself or friends.
-  var avoid = {};
-  if (!formation) return avoid;
-  var leader = formation.leader ? Game.getObjectById(formation.leader) : null;
-  var buddy = formation.buddy ? Game.getObjectById(formation.buddy) : null;
-  var medic = formation.medic ? Game.getObjectById(formation.medic) : null;
-  if (leader && leader.owner && leader.owner.username) avoid[leader.owner.username] = true;
-  if (buddy && buddy.owner && buddy.owner.username) avoid[buddy.owner.username] = true;
-  if (medic && medic.owner && medic.owner.username) avoid[medic.owner.username] = true;
-  return avoid;
-}
-
-/**
- * resolveRoomForSquad tries every cheap source (flag → members → memory) so
- * focusFireTarget can continue scanning even when only one squad member has
- * vision of the hostile room.
- */
-function resolveRoomForSquad(flagName, formation, currentObj, bucket) {
-  // Always try the cheapest data source first (flag cache) before falling
-  // back to heavier Game lookups.
-  var flag = Game.flags && Game.flags[flagName] ? Game.flags[flagName] : null;
-  if (flag && flag.room) return flag.room;
-  if (flag && flag.pos && Game.rooms && Game.rooms[flag.pos.roomName]) {
-    return Game.rooms[flag.pos.roomName];
-  }
-  var leader = formation && formation.leader ? Game.getObjectById(formation.leader) : null;
-  if (leader && leader.room) return leader.room;
-  var buddy = formation && formation.buddy ? Game.getObjectById(formation.buddy) : null;
-  if (buddy && buddy.room) return buddy.room;
-  var medic = formation && formation.medic ? Game.getObjectById(formation.medic) : null;
-  if (medic && medic.room) return medic.room;
-  if (currentObj && currentObj.room) return currentObj.room;
-  if (bucket) {
-    if (bucket.targetRoom && Game.rooms && Game.rooms[bucket.targetRoom]) {
-      return Game.rooms[bucket.targetRoom];
-    }
-    if (bucket.rally) {
-      var rallyPos = deserializePos(bucket.rally);
-      if (rallyPos && Game.rooms && Game.rooms[rallyPos.roomName]) {
-        return Game.rooms[rallyPos.roomName];
-      }
-    }
-  }
-  return null;
-}
-
 // --- CombatAPI ------------------------------------------------------------
 // Keeping the API object as a simple literal removes the IIFE and makes each
 // helper function easier to trace and document.
@@ -1046,10 +1017,59 @@ function focusFireTarget(flagName) {
   var prevId = bucket && bucket.targetId ? bucket.targetId : null;
   var currentId = prevId;
   var currentObj = currentId ? Game.getObjectById(currentId) : null;
-
   var formation = bucket && bucket.members ? bucket.members : null;
-  var room = resolveRoomForSquad(flagName, formation, currentObj, bucket);
-  var avoid = buildAvoidanceFromSquadMembers(bucket ? bucket.members : null);
+
+  // Determine which room to scan for hostiles. We try cheap, reliable sources
+  // in order: flag vision → flag room visibility → any living squad member →
+  // last known target → stored rally/target room memory.
+  var room = null;
+  var flag = Game.flags && Game.flags[flagName] ? Game.flags[flagName] : null;
+  if (flag && flag.room) {
+    room = flag.room;
+  } else if (flag && flag.pos && Game.rooms && Game.rooms[flag.pos.roomName]) {
+    room = Game.rooms[flag.pos.roomName];
+  }
+
+  if (!room && formation) {
+    var leader = formation.leader ? Game.getObjectById(formation.leader) : null;
+    var buddy = formation.buddy ? Game.getObjectById(formation.buddy) : null;
+    var medic = formation.medic ? Game.getObjectById(formation.medic) : null;
+    if (leader && leader.room) room = leader.room;
+    if (!room && buddy && buddy.room) room = buddy.room;
+    if (!room && medic && medic.room) room = medic.room;
+  }
+
+  if (!room && currentObj && currentObj.room) {
+    room = currentObj.room;
+  }
+
+  if (!room && bucket) {
+    if (bucket.targetRoom && Game.rooms && Game.rooms[bucket.targetRoom]) {
+      room = Game.rooms[bucket.targetRoom];
+    }
+    if (!room && bucket.rally) {
+      var rallyPos = deserializePos(bucket.rally);
+      if (rallyPos && Game.rooms && Game.rooms[rallyPos.roomName]) {
+        room = Game.rooms[rallyPos.roomName];
+      }
+    }
+  }
+
+  // Build a one-tick avoid list so the squad never targets its own members or
+  // allies they belong to.
+  var avoid = {};
+  if (formation) {
+    var owners = [];
+    owners.push(formation.leader ? Game.getObjectById(formation.leader) : null);
+    owners.push(formation.buddy ? Game.getObjectById(formation.buddy) : null);
+    owners.push(formation.medic ? Game.getObjectById(formation.medic) : null);
+    for (var idx = 0; idx < owners.length; idx++) {
+      var member = owners[idx];
+      if (member && member.owner && member.owner.username) {
+        avoid[member.owner.username] = true;
+      }
+    }
+  }
 
   var nextId = null;
   if (room) {

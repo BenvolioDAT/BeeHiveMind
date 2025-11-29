@@ -175,88 +175,28 @@ function prepareTickCaches() {
   // Early return: if we've already computed caches this tick, reuse them.
   if (C.tick === now) return C;
 
-  C.tick = now;
-  C.roomsOwned       = getOwnedRooms();
-  C.roomsMap         = indexByName(C.roomsOwned);
-  C.roomSnapshots    = Object.create(null);
-  C.spawns           = getAllSpawns();
-
-  var creepScan      = buildCreepAndRoleCounts();
-  C.creeps           = creepScan.creeps;
-  C.roleCounts       = creepScan.roleCounts;
-  C.lunaCountsByHome = creepScan.lunaCountsByHome;
-
-  var sites          = computeConstructionSiteCounts();
-  C.roomSiteCounts   = sites.byRoom;
-  C.totalSites       = sites.total;
-
-  C.remotesByHome    = computeRemotesByHome(C.roomsOwned);
-
-  if (BeeSelectors && typeof BeeSelectors.prepareRoomSnapshot === 'function') {
-    var owned = C.roomsOwned;
-    for (var i = 0; i < owned.length; i++) {
-      var room = owned[i];
-      if (!room || !room.name) continue;
-      try {
-        C.roomSnapshots[room.name] = BeeSelectors.prepareRoomSnapshot(room);
-      } catch (err) {
-        hiveLog.debug('⚠️ Selector snapshot failed for', fmt(room), err);
-        // Teaching moment: catching errors allows the tick to continue even
-        // if one room fails to generate a snapshot.
-      }
-    }
-  }
-
-  return C;
-}
-
-// Function header: getOwnedRooms()
-// Inputs: none
-// Output: array of rooms where controller.my === true (visibility dependent).
-function getOwnedRooms() {
-  var result = [];
-  var names = Object.keys(Game.rooms);
-  for (var i = 0; i < names.length; i++) {
-    var room = Game.rooms[names[i]];
+  // Rooms: gather owned list and a name lookup without bouncing to helpers.
+  var ownedRooms = [];
+  var ownedMap = Object.create(null);
+  var roomNames = Object.keys(Game.rooms);
+  for (var i = 0; i < roomNames.length; i++) {
+    var room = Game.rooms[roomNames[i]];
     if (room && room.controller && room.controller.my) {
-      result.push(room);
-      // Habit: only push valid items so later functions can assume clean data.
+      ownedRooms.push(room);
+      ownedMap[room.name] = room;
     }
   }
-  return result;
-}
 
-// Function header: indexByName(rooms)
-// Inputs: array of Room objects
-// Output: object mapping room.name to Room instance.
-function indexByName(rooms) {
-  var map = {};
-  for (var i = 0; i < rooms.length; i++) {
-    var room = rooms[i];
-    map[room.name] = room;
-  }
-  return map;
-}
+  // Spawns: simple snapshot; objectValues keeps the ES5-compatible conversion.
+  var spawns = objectValues(Game.spawns);
 
-// Function header: getAllSpawns()
-// Inputs: none
-// Output: array of owned StructureSpawn instances (from Game.spawns values).
-function getAllSpawns() {
-  return objectValues(Game.spawns);
-}
-
-// Function header: buildCreepAndRoleCounts()
-// Inputs: none
-// Output: {creeps, roleCounts, lunaCountsByHome}; excludes soon-to-expire creeps.
-// Side-effects: rewrites creep.memory.task 'remoteharvest' -> 'luna' for consistency.
-function buildCreepAndRoleCounts() {
+  // Creeps: single pass to keep counts near the data source.
   var creeps = [];
   var roleCounts = Object.create(null);
   var lunaCountsByHome = Object.create(null);
-
-  var names = Object.keys(Game.creeps);
-  for (var i = 0; i < names.length; i++) {
-    var creep = Game.creeps[names[i]];
+  var creepNames = Object.keys(Game.creeps);
+  for (var j = 0; j < creepNames.length; j++) {
+    var creep = Game.creeps[creepNames[j]];
     creeps.push(creep);
 
     // Avoid counting expiring creeps against quotas
@@ -278,40 +218,59 @@ function buildCreepAndRoleCounts() {
     }
   }
 
-  return { creeps: creeps, roleCounts: roleCounts, lunaCountsByHome: lunaCountsByHome };
-}
-
-// Function header: computeConstructionSiteCounts()
-// Inputs: none
-// Output: {byRoom, total} for owned construction sites (Game.constructionSites snapshot).
-function computeConstructionSiteCounts() {
+  // Construction sites: owned counts per room + total.
   var byRoom = Object.create(null);
-  var total = 0;
+  var totalSites = 0;
   var sites = objectValues(Game.constructionSites);
-  for (var i = 0; i < sites.length; i++) {
-    var site = sites[i];
+  for (var k = 0; k < sites.length; k++) {
+    var site = sites[k];
     if (!site || !site.my) continue;
-    total += 1;
+    totalSites += 1;
     var rn = site.pos && site.pos.roomName;
     if (rn) {
       byRoom[rn] = (byRoom[rn] || 0) + 1;
     }
   }
-  return { byRoom: byRoom, total: total };
-}
 
-// Function header: computeRemotesByHome(ownedRooms)
-// Inputs: array of owned rooms
-// Output: map of home room name -> active remote room list (from RoadPlanner).
-function computeRemotesByHome(ownedRooms) {
-  var out = Object.create(null);
+  // Remote rooms: always keep together with room data so it's easy to spot.
+  var remotesByHome = Object.create(null);
   var hasHelper = RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function';
-  if (!hasHelper) return out;
-  for (var i = 0; i < ownedRooms.length; i++) {
-    var home = ownedRooms[i];
-    out[home.name] = RoadPlanner.getActiveRemoteRooms(home) || [];
+  if (hasHelper) {
+    for (var m = 0; m < ownedRooms.length; m++) {
+      var home = ownedRooms[m];
+      remotesByHome[home.name] = RoadPlanner.getActiveRemoteRooms(home) || [];
+    }
   }
-  return out;
+
+  // Room snapshots for selectors sit at the end so they can reuse the cache fields above.
+  var snapshots = Object.create(null);
+  if (BeeSelectors && typeof BeeSelectors.prepareRoomSnapshot === 'function') {
+    for (var n = 0; n < ownedRooms.length; n++) {
+      var snapRoom = ownedRooms[n];
+      if (!snapRoom || !snapRoom.name) continue;
+      try {
+        snapshots[snapRoom.name] = BeeSelectors.prepareRoomSnapshot(snapRoom);
+      } catch (err) {
+        hiveLog.debug('⚠️ Selector snapshot failed for', fmt(snapRoom), err);
+        // Teaching moment: catching errors allows the tick to continue even
+        // if one room fails to generate a snapshot.
+      }
+    }
+  }
+
+  C.tick            = now;
+  C.roomsOwned      = ownedRooms;
+  C.roomsMap        = ownedMap;
+  C.roomSnapshots   = snapshots;
+  C.spawns          = spawns;
+  C.creeps          = creeps;
+  C.roleCounts      = roleCounts;
+  C.lunaCountsByHome = lunaCountsByHome;
+  C.roomSiteCounts  = byRoom;
+  C.totalSites      = totalSites;
+  C.remotesByHome   = remotesByHome;
+
+  return C;
 }
 
 // Function header: fmt(room)
@@ -355,7 +314,7 @@ var BeeHiveMind = {
     // come first, then creeps that exist inside those rooms.
     var rooms = C.roomsOwned;
     for (var i = 0; i < rooms.length; i++) {
-      BeeHiveMind.manageRoom(rooms[i], C);
+      BeeHiveMind.manageRoom(rooms[i]);
     }
 
     // 2) Per-creep behavior
@@ -379,10 +338,10 @@ var BeeHiveMind = {
   },
 
   /** Room loop – keep lean. */
-  // Function header: manageRoom(room, C)
-  // Inputs: owned room, tick cache C
+  // Function header: manageRoom(room)
+  // Inputs: owned room
   // Output: none; triggers planner helpers for construction/roads.
-  manageRoom: function manageRoom(room, C) {
+  manageRoom: function manageRoom(room) {
     if (!room) return;
 
     if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
@@ -393,7 +352,6 @@ var BeeHiveMind = {
     if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
       RoadPlanner.ensureRemoteRoads(room);
     }
-    void C; // placeholder to hint future use
   },
 
   /** Creep loop – dispatch by role with safe fallback. */
@@ -407,8 +365,8 @@ var BeeHiveMind = {
       var roleName = ensureCreepRole(creep);
       var roleFn = creepRoles[roleName];
       if (typeof roleFn !== 'function') {
-        // Soft fallback so a mis-typed role never crashes the tick.
-        //roleFn = roleIdle.run;
+        // Skip unknown roles so a typo never stops the loop.
+        continue;
       }
       try {
         roleFn(creep);

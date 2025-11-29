@@ -25,7 +25,7 @@ var CFG = {
 // Shared utilities
 // -----------------------------
 
-function _now() { return Game.time | 0; }
+function _now() { return Game.time; }
 function _log(msg) { if (CFG.LOG) maintLog.debug(msg); }
 
 function _hasOwn(obj, k) { return obj && Object.prototype.hasOwnProperty.call(obj, k); }
@@ -46,35 +46,6 @@ function _lastSeen(mem) {
   return -Infinity;
 }
 
-function _dropEmptyIntel(mem) {
-  if (!_isObject(mem.intel)) return;
-  var intel = mem.intel;
-  if (_isObject(intel.portals) && intel.portals.length === 0) delete intel.portals;
-  if (_isObject(intel.deposits) && intel.deposits.length === 0) delete intel.deposits;
-  if (intel.powerBank === null) delete intel.powerBank;
-
-  var keepKeys = ['lastVisited','lastScanAt','sources','owner','reservation','rcl','safeMode','invaderCore','keeperLairs','mineral','enemySpawns','enemyTowers','hostiles','powerBank','portals','deposits'];
-  for (var i1 = 0; i1 < keepKeys.length; i1++) {
-    if (_hasOwn(intel, keepKeys[i1])) {
-      return; // found something meaningful to keep
-    }
-  }
-  delete mem.intel;
-}
-
-function _dropEmptyMaintBucket(mem) {
-  if (!_isObject(mem._maint)) return;
-  if (_isObject(mem._maint.cachedRepairTargets) && mem._maint.cachedRepairTargets.length === 0) {
-    delete mem._maint.cachedRepairTargets;
-  }
-  for (var mk in mem._maint) {
-    if (_hasOwn(mem._maint, mk)) {
-      return;
-    }
-  }
-  delete mem._maint;
-}
-
 // ---- Deep compaction of a single room mem ----
 // Returns true if the room is "now empty" after compaction
 function _compactRoomMem(roomName, mem) {
@@ -87,27 +58,57 @@ function _compactRoomMem(roomName, mem) {
 
   if (_isObject(mem.sources)) {
     var hasSrc = false;
-    for (var s in mem.sources) { if (_hasOwn(mem.sources, s)) { hasSrc = true; break; } }
+    for (var s in mem.sources) {
+      if (_hasOwn(mem.sources, s)) { hasSrc = true; break; }
+    }
     if (!hasSrc) delete mem.sources;
   }
 
   if (_isObject(mem.sourceContainers)) {
+    var keepContainer = false;
     for (var cid in mem.sourceContainers) {
       if (!_hasOwn(mem.sourceContainers, cid)) continue;
-      if (!Game.getObjectById(cid)) delete mem.sourceContainers[cid];
+      if (!Game.getObjectById(cid)) {
+        delete mem.sourceContainers[cid];
+        continue;
+      }
+      keepContainer = true;
     }
-    var anyCont = false;
-    for (cid in mem.sourceContainers) { if (_hasOwn(mem.sourceContainers, cid)) { anyCont = true; break; } }
-    if (!anyCont) delete mem.sourceContainers;
+    if (!keepContainer) delete mem.sourceContainers;
   }
 
-  _dropEmptyIntel(mem);
+  // Trim intel buckets in-place so readers can see what "empty" means.
+  if (_isObject(mem.intel)) {
+    var intel = mem.intel;
+    if (_isObject(intel.portals) && intel.portals.length === 0) delete intel.portals;
+    if (_isObject(intel.deposits) && intel.deposits.length === 0) delete intel.deposits;
+    if (intel.powerBank === null) delete intel.powerBank;
+
+    var keepKeys = ['lastVisited','lastScanAt','sources','owner','reservation','rcl','safeMode','invaderCore','keeperLairs','mineral','enemySpawns','enemyTowers','hostiles','powerBank','portals','deposits'];
+    var i1;
+    for (i1 = 0; i1 < keepKeys.length; i1++) {
+      if (_hasOwn(intel, keepKeys[i1])) {
+        break; // found something meaningful to keep
+      }
+    }
+    if (i1 === keepKeys.length) delete mem.intel;
+  }
 
   if (_isObject(mem.scout) && typeof mem.scout.lastVisited !== 'number') {
     delete mem.scout;
   }
 
-  _dropEmptyMaintBucket(mem);
+  // Compact maintenance cache alongside intel so the clean-up rules live together.
+  if (_isObject(mem._maint)) {
+    if (_isObject(mem._maint.cachedRepairTargets) && mem._maint.cachedRepairTargets.length === 0) {
+      delete mem._maint.cachedRepairTargets;
+    }
+    var hasMaint = false;
+    for (var mk in mem._maint) {
+      if (_hasOwn(mem._maint, mk)) { hasMaint = true; break; }
+    }
+    if (!hasMaint) delete mem._maint;
+  }
 
   var keys = [];
   for (var k in mem) { if (_hasOwn(mem, k)) keys.push(k); }
@@ -115,7 +116,7 @@ function _compactRoomMem(roomName, mem) {
   if (keys.length === 0) return true;
 
   if (keys.length === 1 && keys[0] === 'lastSeenAt') {
-    var ls = mem.lastSeenAt | 0;
+    var ls = typeof mem.lastSeenAt === 'number' ? mem.lastSeenAt : 0;
     if (ls && (now - ls) > CFG.EMPTY_ROOM_GRACE_TICKS) return true;
   }
 
@@ -254,18 +255,29 @@ function _pruneSourceAssignments(roomMemory) {
   for (var sourceId in roomMemory.sources) {
     if (!roomMemory.sources.hasOwnProperty(sourceId)) continue;
     var assignedCreeps = roomMemory.sources[sourceId];
-    if (assignedCreeps && assignedCreeps.length >= 0) {
+    if (Array.isArray(assignedCreeps)) {
+      // Array form: keep only live creep names so miners do not reserve slots forever.
       var kept = [];
       for (var i = 0; i < assignedCreeps.length; i++) {
         if (Game.creeps[assignedCreeps[i]]) kept.push(assignedCreeps[i]);
       }
-      if (kept.length) {
-        roomMemory.sources[sourceId] = kept;
-      } else {
-        delete roomMemory.sources[sourceId];
+      if (kept.length) roomMemory.sources[sourceId] = kept;
+      else delete roomMemory.sources[sourceId];
+      continue;
+    }
+
+    if (_isObject(assignedCreeps)) {
+      // Object form: drop role slots that point at dead creeps so reassignment can happen.
+      var keptSlots = {};
+      for (var role in assignedCreeps) {
+        if (!assignedCreeps.hasOwnProperty(role)) continue;
+        var creepName = assignedCreeps[role];
+        if (creepName && Game.creeps[creepName]) {
+          keptSlots[role] = creepName;
+        }
       }
-    } else if (_isObject(assignedCreeps) && _isEmptyObject(assignedCreeps)) {
-      delete roomMemory.sources[sourceId];
+      if (_isEmptyObject(keptSlots)) delete roomMemory.sources[sourceId];
+      else roomMemory.sources[sourceId] = keptSlots;
     }
   }
 
@@ -429,7 +441,8 @@ function findStructuresNeedingRepair(room) {
   var priorityOrder = _ensurePriorityTable(bucket);
   var now = _now();
 
-  if (now < (bucket.nextRepairScanTick | 0)) {
+  var nextScanTick = (typeof bucket.nextRepairScanTick === 'number') ? bucket.nextRepairScanTick : 0;
+  if (now < nextScanTick) {
     var cached = _trimCachedTargets(bucket);
     if (cached.length) {
       return cached;
