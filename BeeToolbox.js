@@ -620,12 +620,18 @@ var BeeToolbox = {
     var carry = creep.store ? creep.store.getUsedCapacity(RESOURCE_ENERGY) : 0;
     if (carry <= 0) return ERR_NOT_ENOUGH_RESOURCES;
 
-    structureTypes = structureTypes || [];
+    // Normalize the target list so callers can pass a single type or an array.
+    var types = [];
+    if (Array.isArray(structureTypes)) {
+      types = structureTypes;
+    } else if (structureTypes) {
+      types = [structureTypes];
+    }
 
     // Build a quick lookup so the single-pass scan below stays readable.
     var allowedTypes = {};
-    for (var i = 0; i < structureTypes.length; i++) {
-      allowedTypes[structureTypes[i]] = true;
+    for (var i = 0; i < types.length; i++) {
+      allowedTypes[types[i]] = true;
     }
     if (!Object.keys(allowedTypes).length) return ERR_NOT_FOUND;
 
