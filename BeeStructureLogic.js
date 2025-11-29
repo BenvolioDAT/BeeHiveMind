@@ -86,7 +86,9 @@ var BeeStructureLogic = {
       var room = Game.rooms[rn];
       if (!room.controller || !room.controller.my) continue;
 
+      // Create the per-room bucket once so later fields never throw on undefined.
       var roomMem = Memory.rooms[rn];
+      if (!roomMem) roomMem = Memory.rooms[rn] = {};
       if (!roomMem.linkMgr) roomMem.linkMgr = { senderId: null, receiverId: null, nextScan: 0 };
       var linkMgr = roomMem.linkMgr;
 
