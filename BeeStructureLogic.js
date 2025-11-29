@@ -27,88 +27,103 @@ var MIN_SEND = 100;
 
 var BeeStructureLogic = {
   runTowerLogic: function () {
-    var spawn = findAnchorSpawn();
-    if (!spawn) return;
+    if (!Memory.rooms) Memory.rooms = {};
 
-    var room = spawn.room;
-    var RMem = ensureTowerRoomMemory(room);
-    var towers = collectRoomTowers(room);
-    if (!towers.length) return;
+    for (var roomName in Game.rooms) {
+      if (!Game.rooms.hasOwnProperty(roomName)) continue;
+      var room = Game.rooms[roomName];
+      if (!room.controller || !room.controller.my) continue;
 
-    if (handleHostilePhase(towers)) return;
-    runHealPhase(towers);
+      // Handle defenses per owned room instead of just the first spawn so every colony stays protected.
 
-    var validTargets = buildValidRepairList(RMem);
-    if (!validTargets.length) {
+      if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+      var RMem = Memory.rooms[roomName];
+      if (!RMem.repairTargets) RMem.repairTargets = [];
+      if (!RMem._towerLocks) RMem._towerLocks = {};
+
+      var towers = room.find(FIND_MY_STRUCTURES, {
+        filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
+      }) || [];
+      if (!towers.length) continue;
+
+      // Defend first: scan once for hostiles so the attack branch is obvious.
+      var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+      if (hostiles.length) {
+        fireAllTowers(towers, hostiles);
+        cleanupTowerLocks(RMem);
+        continue;
+      }
+
+      // Then patch up wounded creeps so they survive the next volley.
+      runHealPhase(towers);
+
+      // Convert the stored queue into live objects once so towers avoid repeated lookups.
+      var validTargets = [];
+      for (var i = 0; i < RMem.repairTargets.length; i++) {
+        var entry = RMem.repairTargets[i];
+        if (!entry || !entry.id) continue;
+        var targetObj = Game.getObjectById(entry.id);
+        if (!targetObj || targetObj.hits >= targetObj.hitsMax) continue;
+        validTargets.push(targetObj);
+      }
+      if (!validTargets.length) {
+        pruneRepairQueue(RMem);
+        cleanupTowerLocks(RMem);
+        continue;
+      }
+
+      runRepairPhase(towers, RMem, validTargets);
       pruneRepairQueue(RMem);
-      return;
+      cleanupTowerLocks(RMem);
     }
-
-    runRepairPhase(towers, RMem, validTargets);
-    cleanupTowerLocks(RMem);
   },
 
   runLinkManager: function () {
-    ensureGlobalRoomMemory();
+    if (!Memory.rooms) Memory.rooms = {};
+
     for (var rn in Game.rooms) {
       if (!Game.rooms.hasOwnProperty(rn)) continue;
       var room = Game.rooms[rn];
       if (!room.controller || !room.controller.my) continue;
 
-      var rmem = ensureLinkMemory(rn);
-      var pair = resolveLinkPair(room, rmem);
-      if (!pair.sender || !pair.receiver) continue;
-      if (pair.sender.id === pair.receiver.id) continue;
+      var roomMem = Memory.rooms[rn];
+      if (!roomMem.linkMgr) roomMem.linkMgr = { senderId: null, receiverId: null, nextScan: 0 };
+      var linkMgr = roomMem.linkMgr;
 
-      trySendEnergy(pair.sender, pair.receiver);
+      var sender = linkMgr.senderId ? Game.getObjectById(linkMgr.senderId) : null;
+      var receiver = linkMgr.receiverId ? Game.getObjectById(linkMgr.receiverId) : null;
+
+      var rescanAt = linkMgr.nextScan || 0;
+      var missingLink = (!sender || !receiver);
+      var rescanNeeded = missingLink || Game.time >= rescanAt;
+
+      if (rescanNeeded) {
+        // Refresh link intel so we always have a pair near storage/spawn and controller.
+        var scan = scanRoomForLinks(room);
+        linkMgr.senderId = scan.sender ? scan.sender.id : null;
+        linkMgr.receiverId = scan.receiver ? scan.receiver.id : null;
+        linkMgr.nextScan = scan.nextScan;
+        sender = scan.sender;
+        receiver = scan.receiver;
+      }
+
+      if (!sender || !receiver) continue;
+      if (sender.id === receiver.id) continue;
+
+      trySendEnergy(sender, receiver);
     }
   }
 };
 
 module.exports = BeeStructureLogic;
 
-// --------------------------------------------------
 // Tower helper functions
-// --------------------------------------------------
-function findAnchorSpawn() {
-  var spawnNames = Object.keys(Game.spawns);
-  if (!spawnNames.length) return null;
-  return Game.spawns[spawnNames[0]] || null;
-}
-
-function ensureTowerRoomMemory(room) {
-  var roomName = room.name;
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  var RMem = Memory.rooms[roomName];
-  if (!RMem.repairTargets) RMem.repairTargets = [];
-  if (!RMem._towerLocks) RMem._towerLocks = {};
-  return RMem;
-}
-
-function collectRoomTowers(room) {
-  var towers = room.find(FIND_MY_STRUCTURES, {
-    filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
-  }) || [];
-  return towers;
-}
-
-function handleHostilePhase(towers) {
-  for (var scanIdx = 0; scanIdx < towers.length; scanIdx++) {
-    if (towers[scanIdx].pos.findClosestByRange(FIND_HOSTILE_CREEPS)) {
-      fireAllTowers(towers);
-      return true;
-    }
-  }
-  return false;
-}
-
-function fireAllTowers(towers) {
+function fireAllTowers(towers, hostiles) {
   for (var i = 0; i < towers.length; i++) {
     var tower = towers[i];
-    var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
+    var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
     if (energy < CFG.ATTACK_MIN) continue;
-    var foe = tower.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+    var foe = tower.pos.findClosestByRange(hostiles);
     if (!foe) continue;
     tower.attack(foe);
     _tsay(tower, "ATK");
@@ -121,7 +136,7 @@ function fireAllTowers(towers) {
 function runHealPhase(towers) {
   for (var i = 0; i < towers.length; i++) {
     var tower = towers[i];
-    var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
+    var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
     if (energy < CFG.HEAL_MIN) continue;
     var patient = tower.pos.findClosestByRange(FIND_MY_CREEPS, {
       filter: function (c) { return c.hits < c.hitsMax; }
@@ -133,18 +148,6 @@ function runHealPhase(towers) {
     _ring(tower.room, patient.pos, CFG.DRAW.HEAL);
     _label(tower.room, patient.pos, "HEAL", CFG.DRAW.HEAL);
   }
-}
-
-function buildValidRepairList(RMem) {
-  var validTargets = [];
-  for (var i = 0; i < RMem.repairTargets.length; i++) {
-    var entry = RMem.repairTargets[i];
-    if (!entry || !entry.id) continue;
-    var obj = Game.getObjectById(entry.id);
-    if (!obj || obj.hits >= obj.hitsMax) continue;
-    validTargets.push({ id: obj.id, pos: obj.pos, hits: obj.hits, hitsMax: obj.hitsMax, type: obj.structureType });
-  }
-  return validTargets;
 }
 
 function pruneRepairQueue(RMem) {
@@ -160,7 +163,7 @@ function runRepairPhase(towers, RMem, validTargets) {
   var usedTargetIds = {};
   for (var i = 0; i < towers.length; i++) {
     var tower = towers[i];
-    var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) | 0;
+    var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
     if (energy < CFG.REPAIR_MIN) {
       _tsay(tower, "idle");
       continue;
@@ -178,7 +181,6 @@ function runRepairPhase(towers, RMem, validTargets) {
     if (CFG.DEBUG_DRAW) {
       _line(tower.room, tower.pos, target.pos, CFG.DRAW.LOCK);
     }
-    pruneRepairQueue(RMem);
   }
 }
 
@@ -195,11 +197,10 @@ function pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds) {
   for (var i = 0; i < validTargets.length; i++) {
     var candidate = validTargets[i];
     if (usedTargetIds[candidate.id]) continue;
-    var obj = Game.getObjectById(candidate.id);
-    if (!obj || obj.hits >= obj.hitsMax) continue;
+    if (!candidate || candidate.hits >= candidate.hitsMax) continue;
     usedTargetIds[candidate.id] = true;
-    RMem._towerLocks[tower.id] = { id: obj.id, ttl: CFG.LOCK_TTL | 0 };
-    return obj;
+    RMem._towerLocks[tower.id] = { id: candidate.id, ttl: CFG.LOCK_TTL };
+    return candidate;
   }
   return null;
 }
@@ -217,7 +218,7 @@ function cleanupTowerLocks(RMem) {
       delete RMem._towerLocks[towerId];
       continue;
     }
-    var ttl = (lock.ttl | 0) - 1;
+    var ttl = (lock.ttl || 0) - 1;
     if (ttl <= 0) delete RMem._towerLocks[towerId];
     else RMem._towerLocks[towerId].ttl = ttl;
   }
@@ -251,47 +252,14 @@ function _label(room, p, text, color) {
 // --------------------------------------------------
 // Link Manager helper functions
 // --------------------------------------------------
-function ensureGlobalRoomMemory() {
-  if (!Memory.rooms) Memory.rooms = {};
-}
-
-function ensureLinkMemory(roomName) {
-  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  if (!Memory.rooms[roomName].linkMgr) {
-    Memory.rooms[roomName].linkMgr = { senderId: null, receiverId: null, nextScan: 0 };
-  }
-  return Memory.rooms[roomName];
-}
-
-function resolveLinkPair(room, rmem) {
-  var cache = rmem.linkMgr;
-  var sender = cache.senderId ? Game.getObjectById(cache.senderId) : null;
-  var receiver = cache.receiverId ? Game.getObjectById(cache.receiverId) : null;
-
-  if (needsRescan(cache, sender, receiver)) {
-    var result = scanRoomForLinks(room);
-    cache.senderId = result.sender ? result.sender.id : null;
-    cache.receiverId = result.receiver ? result.receiver.id : null;
-    cache.nextScan = result.nextScan;
-    sender = result.sender;
-    receiver = result.receiver;
-  }
-
-  return { sender: sender, receiver: receiver };
-}
-
-function needsRescan(cache, sender, receiver) {
-  if (!sender || !receiver) return true;
-  return Game.time >= (cache.nextScan | 0);
-}
-
 function scanRoomForLinks(room) {
   var links = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_LINK } });
   if (!links.length) {
     return { sender: null, receiver: null, nextScan: Game.time + RESCAN_INTERVAL };
   }
 
-  var anchorSend = room.storage || (room.find(FIND_MY_SPAWNS)[0] || null);
+  var spawns = room.find(FIND_MY_SPAWNS);
+  var anchorSend = room.storage || (spawns[0] || null);
   var anchorRecv = room.controller || null;
 
   var sender = pickClosestLink(anchorSend, links);
@@ -346,12 +314,14 @@ function pickControllerLinks(anchor, links) {
 }
 
 function trySendEnergy(sender, receiver) {
-  var used = (sender.store && sender.store[RESOURCE_ENERGY]) | 0;
-  var free = (receiver.store && receiver.store.getFreeCapacity)
-    ? receiver.store.getFreeCapacity(RESOURCE_ENERGY)
-    : 0;
   if (sender.cooldown !== 0) return;
-  if (used < MIN_SEND) return;
+  if (!sender.store || !receiver.store || !receiver.store.getFreeCapacity) return;
+
+  var storedEnergy = sender.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
+  if (storedEnergy < MIN_SEND) return;
+
+  var free = receiver.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
   if (free <= 0) return;
+
   sender.transferEnergy(receiver);
 }

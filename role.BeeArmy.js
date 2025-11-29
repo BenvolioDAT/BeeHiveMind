@@ -120,54 +120,6 @@ function _buildArcherContext(creep) {
   };
 }
 
-function _kiteOrClose(creep, target) {
-  if (!target) return false;
-  if (creep.pos.inRangeTo(target, 3)) {
-    creep.rangedAttack(target);
-  } else {
-    creep.travelTo(target, { range: 3, ignoreCreeps: false });
-  }
-  return true;
-}
-
-function _followLeaderOrRally(creep, context) {
-  if (!context) return;
-  if (context.leader) {
-    creep.travelTo(context.leader, { range: 1, ignoreCreeps: false });
-    return;
-  }
-  if (context.rallyPos) {
-    creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
-  }
-}
-
-// ----------------------------- Melee helpers -----------------------------
-
-/**
- * _buildMeleeContext is identical to _buildBaseContext but split out to
- * mirror the archer/medic builders for symmetry + readability.
- */
-function _buildMeleeContext(creep) {
-  return _buildBaseContext(creep);
-}
-
-function _swingOrAdvance(creep, target) {
-  if (!target) return false;
-  if (creep.pos.inRangeTo(target, 1)) {
-    if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
-    if (creep.getActiveBodyparts(RANGED_ATTACK) > 0) creep.rangedAttack(target);
-  } else {
-    creep.travelTo(target, { range: 1, ignoreCreeps: false });
-  }
-  return true;
-}
-
-function _fallbackToRally(creep, context) {
-  if (context && context.rallyPos) {
-    creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
-  }
-}
-
 // ----------------------------- Medic helpers -----------------------------
 
 function _nearestWounded(creep, flagName) {
@@ -274,7 +226,11 @@ var roleBeeArmy = {
 
     // FORM → follow the leader/rally. ENGAGE → focusFire target via CombatAPI.
     if (context.state === 'RETREAT') {
-      _followLeaderOrRally(creep, context);
+      if (context.leader) {
+        creep.travelTo(context.leader, { range: 1, ignoreCreeps: false });
+      } else if (context.rallyPos) {
+        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+      }
       return;
     }
 
@@ -293,7 +249,17 @@ var roleBeeArmy = {
           );
         } catch (e) {}
       }
-      if (_kiteOrClose(creep, target)) return;
+
+      // Attack if close enough, otherwise close distance while staying at range 3.
+      if (target) {
+        if (creep.pos.inRangeTo(target, 3)) {
+          creep.rangedAttack(target);
+          return;
+        }
+        creep.travelTo(target, { range: 3, ignoreCreeps: false });
+        return;
+      }
+
       if (context.attackPos) {
         // march archers toward the squad's attack position even if no target is visible
         creep.travelTo(
@@ -304,13 +270,18 @@ var roleBeeArmy = {
       }
     }
 
-    _followLeaderOrRally(creep, context);
+    // Default to escorting the leader or waiting at rally.
+    if (context.leader) {
+      creep.travelTo(context.leader, { range: 1, ignoreCreeps: false });
+    } else if (context.rallyPos) {
+      creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+    }
   },
 
   runMelee: function (creep) {
     if (!creep) return;
 
-    var context = _buildMeleeContext(creep);
+    var context = _buildBaseContext(creep);
     if (!context) return;
 
     try {
@@ -324,7 +295,9 @@ var roleBeeArmy = {
 
     // Melee rally until ENGAGE, then advance + attack the shared focus target.
     if (context.state === 'RETREAT') {
-      _fallbackToRally(creep, context);
+      if (context.rallyPos) {
+        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+      }
     } else if (context.state === 'ENGAGE') {
       var target = _resolveFocusTarget(context);
       if (!target) {
@@ -340,19 +313,26 @@ var roleBeeArmy = {
           );
         } catch (e) {}
       }
-      if (!_swingOrAdvance(creep, target)) {
-        if (context.attackPos) {
-          // melee creeps advance on the stored attack position so they keep pressure on the hostile area
-          creep.travelTo(
-            context.attackPos,
-            { range: 1, ignoreCreeps: false }
-          );
+      if (target) {
+        if (creep.pos.inRangeTo(target, 1)) {
+          if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
+          if (creep.getActiveBodyparts(RANGED_ATTACK) > 0) creep.rangedAttack(target);
         } else {
-          _fallbackToRally(creep, context);
+          creep.travelTo(target, { range: 1, ignoreCreeps: false });
         }
+      } else if (context.attackPos) {
+        // melee creeps advance on the stored attack position so they keep pressure on the hostile area
+        creep.travelTo(
+          context.attackPos,
+          { range: 1, ignoreCreeps: false }
+        );
+      } else if (context.rallyPos) {
+        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
       }
     } else {
-      _fallbackToRally(creep, context);
+      if (context.rallyPos) {
+        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+      }
     }
 
     if (creep.hits < creep.hitsMax && creep.getActiveBodyparts(HEAL) > 0) {

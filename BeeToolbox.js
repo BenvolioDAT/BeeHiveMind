@@ -310,37 +310,34 @@ function refreshRoomEnergyCache(room) {
 function getEnergyTargetsFromCache(room, key, validator) {
   var cache = getRoomEnergyCache(room);
   var ids = cache[key] || [];
-  var valid = [];
-  var updatedIds = [];
+  var filtered = filterTargets(ids, validator);
+  cache[key] = filtered.ids;
+
+  // If nothing in cache is usable anymore, refresh the room intel once and try again.
+  if (filtered.objects.length === 0) {
+    cache = refreshRoomEnergyCache(room);
+    ids = cache[key] || [];
+    filtered = filterTargets(ids, validator);
+    cache[key] = filtered.ids;
+  }
+
+  return filtered.objects;
+}
+
+// Light helper shared by initial cache pass and the refresh fallback.
+function filterTargets(ids, validator) {
+  var objects = [];
+  var keptIds = [];
 
   for (var i = 0; i < ids.length; i++) {
     var obj = Game.getObjectById(ids[i]);
-    if (!obj || (validator && !validator(obj))) {
-      continue;
-    }
-    valid.push(obj);
-    updatedIds.push(ids[i]);
+    if (!obj || (validator && !validator(obj))) continue;
+
+    objects.push(obj);
+    keptIds.push(ids[i]);
   }
 
-  cache[key] = updatedIds;
-
-  if (valid.length === 0) {
-    cache = refreshRoomEnergyCache(room);
-    ids = cache[key] || [];
-    valid = [];
-    updatedIds = [];
-    for (var j = 0; j < ids.length; j++) {
-      var refreshedObj = Game.getObjectById(ids[j]);
-      if (!refreshedObj || (validator && !validator(refreshedObj))) {
-        continue;
-      }
-      valid.push(refreshedObj);
-      updatedIds.push(ids[j]);
-    }
-    cache[key] = updatedIds;
-  }
-
-  return valid;
+  return { objects: objects, ids: keptIds };
 }
 
 function withdrawOrPickup(creep, targets, action) {
@@ -436,8 +433,8 @@ var BeeToolbox = {
     if (!roomMem._toolbox.sourceContainerScan) roomMem._toolbox.sourceContainerScan = {};
 
     var scanState = roomMem._toolbox.sourceContainerScan;
-    var now = Game.time | 0;
-    var nextScan = scanState.nextScan | 0;
+    var now = Game.time;
+    var nextScan = typeof scanState.nextScan === 'number' ? scanState.nextScan : 0;
 
     if (nextScan && now < nextScan) {
       return; // recently scanned; skip heavy find work

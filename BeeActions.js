@@ -23,34 +23,6 @@
 var MovementManager = require('Movement.Manager');
 var MOVE_PRIORITIES = (MovementManager && MovementManager.PRIORITIES) ? MovementManager.PRIORITIES : {};
 
-// Function header: failInvalidPair(creep, target)
-// Inputs: creep (may be undefined), target (structure/creep/pos)
-// Output: ERR_INVALID_TARGET when either side is missing, otherwise null.
-// Side-effects: none.  This helper keeps each safeAction nice and flat: we can
-// return early when the pair is invalid instead of nesting lots of guards.
-function failInvalidPair(creep, target) {
-  if (!creep || !target) return ERR_INVALID_TARGET;
-  return null;
-}
-
-// Function header: carryAmount(creep, resource)
-// Inputs: creep, resource constant (defaults to energy when caller passes null)
-// Output: number of resource units the creep currently holds.
-function carryAmount(creep, resource) {
-  if (!creep || !creep.store) return 0;
-  var res = resource || RESOURCE_ENERGY;
-  return creep.store[res] | 0;
-}
-
-// Function header: hasStoreValue(target, resource)
-// Inputs: target with .store, resource constant
-// Output: boolean indicating whether the structure holds a positive amount.
-function hasStoreValue(target, resource) {
-  if (!target || !target.store) return false;
-  if (typeof target.store[resource] === 'undefined') return false;
-  return (target.store[resource] | 0) > 0;
-}
-
 // Function header: normalizePriority(kind, fallback)
 // Inputs: intent kind string, fallback priority number
 // Output: numeric priority for movement intents (defaults to fallback if kind
@@ -62,34 +34,24 @@ function normalizePriority(kind, fallback) {
   return fallback;
 }
 
-// Function header: queueMove(creep, target, range, priority, opts)
-// Inputs: creep, target (object or RoomPosition), desired range, explicit
-//         priority, movement options (reusePath, flee, etc.).
-// Output: none.
-// Side-effects: pushes intent into MovementManager.request (which dedups per
-//               creep). Range defaults to 1 when omitted.
-function queueMove(creep, target, range, priority, opts) {
-  if (!creep || !target) return;
-  var moveOpts = opts || {};
-  moveOpts.range = (range != null) ? range : 1;
-  var prio = (priority != null) ? priority : normalizePriority(moveOpts.intentType || 'default', 0);
-  MovementManager.request(creep, target, prio, moveOpts);
-}
-
 // Function header: handleResult(creep, code, target, range, intentKey, opts)
 // Inputs: creep, return code from Screeps action, target object/pos, range to
 //         aim for, intentKey (string used to look up priority), movement opts.
 // Output: original return code.
-// Side-effects: when code === ERR_NOT_IN_RANGE, enqueues movement intent using
-//               queueMove(). No other codes cause movement.
+// Side-effects: when code === ERR_NOT_IN_RANGE, enqueues movement intent with a
+//               normalized priority so the caller can retry next tick. No other
+//               codes cause movement.
 function handleResult(creep, code, target, range, intentKey, opts) {
   // All wrappers funnel through here so ERR_NOT_IN_RANGE automatically emits a movement intent.
-  if (code === ERR_NOT_IN_RANGE) {
-    var pr = normalizePriority(intentKey, 0);
-    var moveOpts = opts || {};
-    moveOpts.intentType = intentKey;
-    queueMove(creep, target, range, pr, moveOpts);
-  }
+  if (code !== ERR_NOT_IN_RANGE) return code;
+
+  // Copy options so callers do not see mutations on their opts objects.
+  var moveOpts = Object.assign({}, opts);
+  moveOpts.intentType = intentKey;
+  moveOpts.range = (range != null) ? range : 1;
+
+  var prio = normalizePriority(intentKey, 0);
+  MovementManager.request(creep, target, prio, moveOpts);
   return code;
 }
 
@@ -97,7 +59,7 @@ function handleResult(creep, code, target, range, intentKey, opts) {
 // the type of work they automate: logistics (withdraw/transfer/pickup), worker
 // chores (build/repair/upgrade/harvest) and combat/claim actions.  Every helper
 // follows the same simple recipe:
-//   1. Validate the actor + target pair with failInvalidPair.
+//   1. Validate the actor + target pair up front.
 //   2. Perform lightweight resource/amount checks so callers get immediate
 //      feedback (no wasted intents).
 //   3. Execute the raw Screeps action and pass the response into handleResult,
@@ -116,11 +78,11 @@ var BeeActions = {
   // Side-effects: may queue movement; does not mutate Memory.
   // Preconditions: caller should ensure creep has CARRY parts.
   safeWithdraw: function (creep, target, resource, opts) {
-    var invalid = failInvalidPair(creep, target);
-    if (invalid !== null) return invalid;
+    if (!creep || !target) return ERR_INVALID_TARGET;
     var resType = resource || RESOURCE_ENERGY;
     if (!target.store || typeof target.store[resType] === 'undefined') return ERR_INVALID_TARGET;
-    if (!hasStoreValue(target, resType)) return ERR_NOT_ENOUGH_RESOURCES;
+    var available = target.store[resType] || 0;
+    if (available <= 0) return ERR_NOT_ENOUGH_RESOURCES;
     if (creep.store.getFreeCapacity(resType) <= 0) return ERR_FULL;
     var rc = creep.withdraw(target, resType);
     return handleResult(creep, rc, target, 1, 'withdraw', opts);
@@ -135,12 +97,12 @@ var BeeActions = {
   // Caller expectation: OK => energy transferred; ERR_NOT_IN_RANGE => move
   // queued and caller should retry next tick.
   safeTransfer: function (creep, target, resource, amount, opts) {
-    var invalid = failInvalidPair(creep, target);
-    if (invalid !== null) return invalid;
+    if (!creep || !target) return ERR_INVALID_TARGET;
     var resType = resource || RESOURCE_ENERGY;
-    var carried = carryAmount(creep, resType);
+    var carried = creep.store ? (creep.store[resType] || 0) : 0;
     if (carried <= 0) return ERR_NOT_ENOUGH_RESOURCES;
-    var sendAmount = (amount == null) ? carried : Math.min(amount, carried);
+    var requested = (amount == null) ? carried : Math.max(0, Math.floor(Number(amount) || 0));
+    var sendAmount = Math.min(requested, carried);
     if (sendAmount <= 0) return ERR_NOT_ENOUGH_RESOURCES;
     var rc = (amount == null)
       ? creep.transfer(target, resType)
@@ -154,8 +116,7 @@ var BeeActions = {
   //         ERR_NOT_ENOUGH_RESOURCES when amount <= 0).
   // Side-effects: may request movement; does not handle logistics beyond pickup.
   safePickup: function (creep, resource, opts) {
-    var invalid = failInvalidPair(creep, resource);
-    if (invalid !== null) return invalid;
+    if (!creep || !resource) return ERR_INVALID_TARGET;
     if (resource.resourceType == null || resource.amount == null) return ERR_INVALID_TARGET;
     if (resource.amount <= 0) return ERR_NOT_ENOUGH_RESOURCES;
     var rc = creep.pickup(resource);
@@ -170,8 +131,7 @@ var BeeActions = {
   // Output: Screeps return code; ERR_NOT_ENOUGH_RESOURCES bubbles through.
   // Side-effects: queues move when out of range (range 3 standard for build).
   safeBuild: function (creep, site, opts) {
-    var invalid = failInvalidPair(creep, site);
-    if (invalid !== null) return invalid;
+    if (!creep || !site) return ERR_INVALID_TARGET;
     var rc = creep.build(site);
     return handleResult(creep, rc, site, 3, 'build', opts);
   },
@@ -181,8 +141,7 @@ var BeeActions = {
   // Output: Screeps return code (OK, ERR_NOT_IN_RANGE, ERR_NOT_ENOUGH_RESOURCES,
   //         ERR_INVALID_TARGET).
   safeRepair: function (creep, structure, opts) {
-    var invalid = failInvalidPair(creep, structure);
-    if (invalid !== null) return invalid;
+    if (!creep || !structure) return ERR_INVALID_TARGET;
     var rc = creep.repair(structure);
     return handleResult(creep, rc, structure, 3, 'repair', opts);
   },
@@ -194,8 +153,7 @@ var BeeActions = {
   // Note: Range 3 to match upgrade distance; ensures MovementManager keeps
   // creeps outside RCL3+ upgrades safe zone.
   safeUpgrade: function (creep, controller, opts) {
-    var invalid = failInvalidPair(creep, controller);
-    if (invalid !== null) return invalid;
+    if (!creep || !controller) return ERR_INVALID_TARGET;
     var rc = creep.upgradeController(controller);
     return handleResult(creep, rc, controller, 3, 'upgrade', opts);
   },
@@ -206,8 +164,7 @@ var BeeActions = {
   //         ERR_NOT_IN_RANGE, ERR_INVALID_TARGET).
   // Assumes creep has WORK parts; caller must manage seat reservations.
   safeHarvest: function (creep, source, opts) {
-    var invalid = failInvalidPair(creep, source);
-    if (invalid !== null) return invalid;
+    if (!creep || !source) return ERR_INVALID_TARGET;
     var rc = creep.harvest(source);
     return handleResult(creep, rc, source, 1, 'harvest', opts);
   },
@@ -219,8 +176,7 @@ var BeeActions = {
   // Inputs: melee creep, hostile target, movement opts (intentType 'attack').
   // Output: Screeps return code; on ERR_NOT_IN_RANGE we queue move with range 1.
   safeAttack: function (creep, target, opts) {
-    var invalid = failInvalidPair(creep, target);
-    if (invalid !== null) return invalid;
+    if (!creep || !target) return ERR_INVALID_TARGET;
     var rc = creep.attack(target);
     return handleResult(creep, rc, target, 1, 'attack', opts);
   },
@@ -229,8 +185,7 @@ var BeeActions = {
   // Inputs: creep with RANGED_ATTACK, hostile target, movement opts.
   // Output: Screeps return code; uses range 3 to maintain kite distance.
   safeRangedAttack: function (creep, target, opts) {
-    var invalid = failInvalidPair(creep, target);
-    if (invalid !== null) return invalid;
+    if (!creep || !target) return ERR_INVALID_TARGET;
     var rc = creep.rangedAttack(target);
     return handleResult(creep, rc, target, 3, 'rangedAttack', opts);
   },
@@ -239,8 +194,7 @@ var BeeActions = {
   // Inputs: healer creep, injured target, movement opts.
   // Output: Screeps return code; range 1 required for heal.
   safeHeal: function (creep, target, opts) {
-    var invalid = failInvalidPair(creep, target);
-    if (invalid !== null) return invalid;
+    if (!creep || !target) return ERR_INVALID_TARGET;
     var rc = creep.heal(target);
     return handleResult(creep, rc, target, 1, 'heal', opts);
   },
@@ -249,8 +203,7 @@ var BeeActions = {
   // Inputs: healer creep, injured target, movement opts.
   // Output: Screeps return code; range 3 for ranged heal.
   safeRangedHeal: function (creep, target, opts) {
-    var invalid = failInvalidPair(creep, target);
-    if (invalid !== null) return invalid;
+    if (!creep || !target) return ERR_INVALID_TARGET;
     var rc = creep.rangedHeal(target);
     return handleResult(creep, rc, target, 3, 'rangedHeal', opts);
   },
@@ -262,8 +215,7 @@ var BeeActions = {
   // Inputs: claim creep, controller, movement opts.
   // Output: Screeps return code; range 1 for reserve.
   safeReserveController: function (creep, controller, opts) {
-    var invalid = failInvalidPair(creep, controller);
-    if (invalid !== null) return invalid;
+    if (!creep || !controller) return ERR_INVALID_TARGET;
     var rc = creep.reserveController(controller);
     return handleResult(creep, rc, controller, 1, 'reserve', opts);
   },
@@ -273,8 +225,7 @@ var BeeActions = {
   // Output: Screeps return code; includes claim failure codes if controller
   //         owned/reserved.
   safeClaimController: function (creep, controller, opts) {
-    var invalid = failInvalidPair(creep, controller);
-    if (invalid !== null) return invalid;
+    if (!creep || !controller) return ERR_INVALID_TARGET;
     var rc = creep.claimController(controller);
     return handleResult(creep, rc, controller, 1, 'claim', opts);
   }

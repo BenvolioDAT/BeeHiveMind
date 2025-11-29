@@ -79,7 +79,9 @@ function getMainRoom() {
 function shouldDrawForRoom(mod, roomName) {
   if (mod <= 1) return true;
   var h = 0;
-  for (var i = 0; i < roomName.length; i++) h = (h * 31 + roomName.charCodeAt(i)) | 0;
+  for (var i = 0; i < roomName.length; i++) {
+    h = h * 31 + roomName.charCodeAt(i);
+  }
   return ((Game.time + (h & 3)) % mod) === 0;
 }
 
@@ -194,8 +196,8 @@ BeeVisuals.drawEnergyBar = function () {
 
   var v = new RoomVisual(room.name);
 
-  var energy   = room.energyAvailable | 0;
-  var capacity = room.energyCapacityAvailable | 0;
+  var energy   = room.energyAvailable || 0;
+  var capacity = room.energyCapacityAvailable || 0;
   var pct      = capacity > 0 ? (energy / capacity) : 0;
 
   // panel geometry
@@ -266,7 +268,7 @@ function collectWorkerStats() {
   for (key in WORKER_MAX_TASKS) {
     if (!WORKER_MAX_TASKS.hasOwnProperty(key)) continue;
     tasks[key] = 0;
-    maxTotal += (WORKER_MAX_TASKS[key] | 0);
+    maxTotal += Number(WORKER_MAX_TASKS[key]) || 0;
   }
 
   for (var name in Game.creeps) {
@@ -275,7 +277,7 @@ function collectWorkerStats() {
     if (!creep || !creep.memory) continue;
     var canonical = canonicalWorkerRole((creep.memory.role || creep.memory.task || '').toString());
     if (canonical && tasks.hasOwnProperty(canonical)) {
-      tasks[canonical] = (tasks[canonical] | 0) + 1;
+      tasks[canonical] = (tasks[canonical] || 0) + 1;
       totalCount++;
     }
   }
@@ -346,7 +348,7 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
   for (var k in WORKER_MAX_TASKS) {
     if (!WORKER_MAX_TASKS.hasOwnProperty(k)) continue;
     var y = yTop + row * geom.cellH;
-    var val = (stats.tasks[k] | 0) + '/' + (WORKER_MAX_TASKS[k] | 0);
+    var val = (stats.tasks[k] || 0) + '/' + (WORKER_MAX_TASKS[k] || 0);
 
     v.rect(xLeft, y, geom.nameW, geom.cellH, {
       fill: CFG.colors.panelFill,
@@ -418,8 +420,8 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
 
       var step   = rec.path[idx];
       var rname  = step.roomName;
-      var rx     = step.x | 0;
-      var ry     = step.y | 0;
+      var rx     = step.x != null ? step.x : 0;
+      var ry     = step.y != null ? step.y : 0;
       var rObj   = Game.rooms[rname];
       if (!rObj) continue;
 
@@ -457,7 +459,7 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
 // ------------------------ World / Overview overlays ----------------------
 
 function shouldDrawWorldOverlay(mod) {
-  var m = mod | 0;
+  var m = Number(mod) || 0;
   if (m <= 0) return false;
   return (Game.time % m) === 0;
 }
@@ -497,7 +499,9 @@ function drawWorldRoadDots(mapVisual, maxTiles) {
 
       for (var i = 0; i < rec.path.length; i++) {
         var step = rec.path[i];
-        var pos  = new RoomPosition(step.x | 0, step.y | 0, step.roomName || rn);
+        var pos  = new RoomPosition(step.x != null ? step.x : 0,
+                                   step.y != null ? step.y : 0,
+                                   step.roomName || rn);
         mapVisual.circle(pos, { radius: 0.8, fill: CFG.colors.plannedRoad, opacity: 0.6 });
         tiles++;
         if (tiles >= maxTiles) return tiles;

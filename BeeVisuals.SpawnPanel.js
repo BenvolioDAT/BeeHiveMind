@@ -26,8 +26,9 @@ var CFG = {
 
 /** Cheap cadence gate so the HUD can be throttled by simply raising CFG.modulo. */
 function shouldDrawSpawnPanels() {
-  var mod = CFG.modulo | 0;
-  return mod <= 1 || (Game.time % mod) === 0;
+  var cadence = CFG.modulo;
+  if (typeof cadence !== 'number' || cadence < 1) cadence = 1;
+  return cadence <= 1 || (Game.time % cadence) === 0;
 }
 
 /** Snapshot all spawns by room name so we can draw once per room. */
@@ -64,9 +65,9 @@ function readRoleFor(name) {
 
 /** Spawn queue comparator: higher priority first, then older entries. */
 function queueComparator(a, b) {
-  var pd = (b.priority | 0) - (a.priority | 0);
+  var pd = (b.priority || 0) - (a.priority || 0);
   if (pd !== 0) return pd;
-  return (a.created | 0) - (b.created | 0);
+  return (a.created || 0) - (b.created || 0);
 }
 
 /** Pull the queue for a room, clone it, and return it sorted. */
@@ -97,7 +98,7 @@ function describeSpawnProgress(spawn) {
   if (!spawn || !spawn.spawning) return null;
   var s = spawn.spawning;
   var total = (typeof s.needTime === 'number') ? s.needTime : (s.totalTime || 1);
-  var remaining = s.remainingTime | 0;
+  var remaining = typeof s.remainingTime === 'number' ? s.remainingTime : total;
   var pct = 1 - (remaining / Math.max(1, total));
   var hatchName = s.name;
   var hatchRole = readRoleFor(hatchName);
@@ -125,7 +126,8 @@ function drawQueueListing(v, baseX, startY, queueInfo) {
 
   for (var j = 0; j < queueInfo.shown.length; j++) {
     var entry = queueInfo.shown[j];
-    var tag = (j + 1) + '. ' + (entry.role || '?') + '  p' + (entry.priority | 0);
+    var priority = typeof entry.priority === 'number' ? entry.priority : 0;
+    var tag = (j + 1) + '. ' + (entry.role || '?') + '  p' + priority;
     v.text(tag, baseX, startY + (j + 1) * 0.6, {
       color: '#dddddd', font: 0.48, align: 'left', opacity: 0.95, stroke: '#000000'
     });
@@ -151,8 +153,8 @@ function drawSpawnPanel(v, spawn, currentBottomY) {
     color: '#ffffff', font: 0.7, align: 'left', opacity: 1, stroke: '#000000'
   });
 
-  var eAvail = spawn.room.energyAvailable | 0;
-  var eCap   = spawn.room.energyCapacityAvailable | 0;
+  var eAvail = typeof spawn.room.energyAvailable === 'number' ? spawn.room.energyAvailable : 0;
+  var eCap   = typeof spawn.room.energyCapacityAvailable === 'number' ? spawn.room.energyCapacityAvailable : 0;
   v.text('🔋 ' + eAvail + '/' + eCap, baseX + (CFG.barWidth - 1.6), headerY, {
     color: '#ffffff', font: 0.5, align: 'right', opacity: 0.9, stroke: '#000000'
   });

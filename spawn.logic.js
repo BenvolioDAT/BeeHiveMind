@@ -280,7 +280,7 @@ function cloneBody(body) {
 }
 
 function getBodyForRole(roleName, energyAvailable) {
-  var energy = energyAvailable | 0;
+  var energy = typeof energyAvailable === 'number' ? energyAvailable : 0;
   if (!roleName) return [];
   var list = ROLE_CONFIGS[roleName];
   if (!list) {
@@ -326,19 +326,6 @@ function copyMemory(source) {
   return target;
 }
 
-// ES5-safe combat squad memory initializer
-function _initSquadMemory(mem, squadId, targetRoom, squadFlag) {
-  if (!mem) mem = {};
-  if (squadId && !mem.squadId) mem.squadId = squadId;
-  if (targetRoom && !mem.targetRoom) mem.targetRoom = targetRoom;
-  if (squadFlag && !mem.squadFlag) mem.squadFlag = squadFlag;
-  if (!mem.assignedAt) mem.assignedAt = Game.time;
-  if (!mem.state) mem.state = 'rally';
-  if (!mem.waitUntil) mem.waitUntil = Game.time + 25;
-  // buddyId / stickTargetId handled by roles post-spawn
-  return mem;
-}
-
 function spawnRole(spawn, roleName, availableEnergy, memory) {
   if (!spawn) return false;
   var canonicalRole = normalizeRole(roleName);
@@ -348,7 +335,7 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     }
     return false;
   }
-  var energy = availableEnergy | 0;
+  var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
   var body = getBodyForRole(canonicalRole, energy);
   if (!body || !body.length) {
     return false;
@@ -365,10 +352,18 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   if (canonicalRole === 'CombatMelee' ||
       canonicalRole === 'CombatMedic' ||
       canonicalRole === 'CombatArcher') {
+    // Keep squad fields together so a newly spawned unit always knows its
+    // assignment, rally state, and initial wait timer without another helper.
     var sid = mem.squadId || (memory && memory.squadId);
     var targetRoom = mem.targetRoom || (memory && memory.targetRoom);
     var squadFlag = mem.squadFlag || (memory && memory.squadFlag);
-    mem = _initSquadMemory(mem, sid, targetRoom, squadFlag);
+    if (sid && !mem.squadId) mem.squadId = sid;
+    if (targetRoom && !mem.targetRoom) mem.targetRoom = targetRoom;
+    if (squadFlag && !mem.squadFlag) mem.squadFlag = squadFlag;
+    if (!mem.assignedAt) mem.assignedAt = Game.time;
+    if (!mem.state) mem.state = 'rally';
+    if (!mem.waitUntil) mem.waitUntil = Game.time + 25;
+    // buddyId / stickTargetId handled by roles post-spawn
   }
   var result = spawn.spawnCreep(body, creepName, { memory: mem });
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
@@ -388,18 +383,16 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
 // -----------------------------------------------------------------------------
 function Calculate_Spawn_Resource(spawnOrRoom) {
   if (spawnOrRoom) {
-    var room = null;
-    if (spawnOrRoom.room) {
-      room = spawnOrRoom.room;
-    } else if (typeof spawnOrRoom === 'string') {
-      room = Game.rooms[spawnOrRoom];
-    } else {
-      room = spawnOrRoom;
-    }
-    if (!room) return 0;
-    return room.energyAvailable;
+    // Let callers pass either a spawn, a Room, or a room name string. Once we
+    // resolve it to a Room, the available energy read is a single, clear step.
+    var room = spawnOrRoom.room || (typeof spawnOrRoom === 'string'
+      ? Game.rooms[spawnOrRoom]
+      : spawnOrRoom);
+    return room ? room.energyAvailable : 0;
   }
 
+  // Fallback path: sum all spawn + extension stores when no room hint is
+  // provided. This mirrors how Screeps counts capacity in the UI.
   var spawnEnergy = 0;
   for (var name in Game.spawns) {
     if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
@@ -452,7 +445,7 @@ function ensureSquadMemory(id) {
  * formation stays consistent with intel scoring.
  */
 function desiredSquadLayout(score) {
-  var threat = score | 0;
+  var threat = typeof score === 'number' ? score : 0;
   if (threat <= 0) return [];
   var melee = 1;
   var medic = 1;
@@ -513,7 +506,8 @@ function stampSquadPlanMemory(S, layout, targetRoom, threatScore, flag) {
   S.desiredCounts = {};
   for (var li = 0; li < layout.length; li++) {
     var plan = layout[li];
-    S.desiredCounts[plan.role] = plan.need | 0;
+    var needed = typeof plan.need === 'number' ? plan.need : 0;
+    S.desiredCounts[plan.role] = needed;
   }
   S.lastEvaluated = Game.time;
 }
@@ -521,15 +515,16 @@ function stampSquadPlanMemory(S, layout, targetRoom, threatScore, flag) {
 // Keep spawning side-effects in one loop so it's obvious when we early return.
 /**
  * spawnMissingSquadRole consumes desiredSquadLayout() output and asks
- * spawnRole() to create whichever role is currently missing, injecting
- * squadId/flag/target data via _initSquadMemory.
- */
+ * spawnRole() to create whichever role is currently missing, carrying
+ * squadId/flag/target data along so combat creeps spawn ready to rally.
+*/
 function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S, squadFlag) {
   for (var i = 0; i < layout.length; i++) {
     var plan = layout[i];
-    if ((plan.need | 0) <= 0) continue;
+    var need = typeof plan.need === 'number' ? plan.need : 0;
+    if (need <= 0) continue;
     var have = haveSquadCount(id, plan.role);
-    if (have < plan.need) {
+    if (have < need) {
       var extraMemory = {
         squadId: id,
         role: plan.role,
@@ -582,15 +577,16 @@ function Spawn_Squad(spawn, squadId) {
       threatScore = live.score;
     }
   }
-  if ((threatScore | 0) <= 0 && (!live || !live.hasThreat)) {
-    combatSpawnLog('[SpawnSkip]', id, 'room', targetRoom, 'score', threatScore,
+  var safeThreatScore = typeof threatScore === 'number' ? threatScore : 0;
+  if (safeThreatScore <= 0 && (!live || !live.hasThreat)) {
+    combatSpawnLog('[SpawnSkip]', id, 'room', targetRoom, 'score', safeThreatScore,
       'liveScore', live ? live.score : 0);
     return false;
   }
-  var layout = desiredSquadLayout(threatScore);
+  var layout = desiredSquadLayout(safeThreatScore);
   if (!layout.length) return false;
 
-  stampSquadPlanMemory(S, layout, targetRoom, threatScore, flagData.flag);
+  stampSquadPlanMemory(S, layout, targetRoom, safeThreatScore, flagData.flag);
 
   if (S.lastSpawnAt && Game.time - S.lastSpawnAt < SQUAD_COOLDOWN_TICKS) {
     return false;

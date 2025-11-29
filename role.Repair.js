@@ -85,20 +85,31 @@ function getRepairQueue(room){
   rm.repairTargets = Array.isArray(rm.repairTargets) ? rm.repairTargets : [];
   return rm.repairTargets;
 }
-function popInvalidHead(room){
-  var q = getRepairQueue(room);
-  if (!q.length) return null;
-  var head = q[0];
-  if (!head || !head.id) { q.shift(); return null; }
-  var obj = Game.getObjectById(head.id);
-  if (!obj || !obj.hits || obj.hits >= obj.hitsMax){ q.shift(); return null; }
-  return obj;
-}
 
+// Pulls the next valid repair target while cleaning stale entries from the queue.
+function getNextRepairTarget(queue){
+  while (queue.length){
+    var head = queue[0];
+    if (!head || !head.id){
+      queue.shift();
+      continue;
+    }
+
+    var obj = Game.getObjectById(head.id);
+    if (!obj || !obj.hits || obj.hits >= obj.hitsMax){
+      queue.shift();
+      continue;
+    }
+
+    return obj;
+  }
+
+  return null;
+}
 // =============== Energy Sourcing ===============
 function findDroppedEnergy(creep){
   return creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
-    filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount|0) > 0; }
+    filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount || 0) > 0; }
   });
 }
 function findWithdrawSource(creep){
@@ -107,7 +118,7 @@ function findWithdrawSource(creep){
       if (!s.store) return false;
       var t = s.structureType;
       if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN) return false;
-      return (s.store[RESOURCE_ENERGY] | 0) > 0;
+      return (s.store[RESOURCE_ENERGY] || 0) > 0;
     }
   });
 }
@@ -123,80 +134,82 @@ module.exports = {
       creep.memory.role = 'Repair';
     }
 
-    // Status HUD
-    var e = creep.store[RESOURCE_ENERGY] | 0;
+    // Status HUD shows current energy to help see why a creep might idle.
+    var e = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
     hud(creep, "🔧 " + e + "/" + creep.store.getCapacity(RESOURCE_ENERGY));
 
-    if ((creep.store[RESOURCE_ENERGY] | 0) > 0){
-      // — Have energy: repair flow —
-      var target = popInvalidHead(creep.room);
-      if (!target){
-        // queue empty or invalid → clear legacy task (caller can reassign)
-        if (creep.memory) creep.memory.task = undefined;
-        debugSay(creep, "✅ done");
+    // No energy? Grab some before looking for work so the rest of the logic can
+    // assume a ready-to-build creep.
+    if (e <= 0) {
+      var pile = findDroppedEnergy(creep);
+      if (pile){
+        debugRing(pile, CFG.COLORS.ENERGY, "💧"+(pile.amount || 0));
+        debugLine(creep, pile, CFG.COLORS.ENERGY, "pickup");
+        var pr = creep.pickup(pile);
+        if (pr === ERR_NOT_IN_RANGE) go(creep, pile, 1);
+        else if (pr === OK) debugSay(creep, "💼");
         return;
       }
 
-      // Visuals for the target
-      creep.room.visual.text(
-        "Repair " + target.structureType + " " + target.hits + "/" + target.hitsMax,
-        target.pos.x, target.pos.y - 1,
-        { align: 'center', color: '#ffffff', opacity: 0.9 }
-      );
-      debugRing(target, CFG.COLORS.REPAIR, "fix");
-
-      // Attempt repair
-      var rr = creep.repair(target);
-      if (rr === OK){
-        if (currentLogLevel >= LOG_LEVEL.DEBUG){
-          console.log("Creep "+creep.name+" repairing "+target.structureType+" @("+target.pos.x+","+target.pos.y+")");
-        }
-        debugSay(creep, "🔧");
-        // Done? pop and move on
-        if (target.hits >= target.hitsMax){
-          getRepairQueue(creep.room).shift();
-          debugSay(creep, "✔");
-        }
-        return;
-      }
-      if (rr === ERR_NOT_IN_RANGE){
-        debugLine(creep, target, CFG.COLORS.REPAIR, "to repair");
-        go(creep, target, 3);
+      var source = findWithdrawSource(creep);
+      if (source){
+        debugRing(source, CFG.COLORS.ENERGY, "ENERGY");
+        debugLine(creep, source, CFG.COLORS.ENERGY, "withdraw");
+        var wr = creep.withdraw(source, RESOURCE_ENERGY);
+        if (wr === ERR_NOT_IN_RANGE) go(creep, source, 1);
+        else if (wr === OK) debugSay(creep, "⛽");
         return;
       }
 
-      // Other errors → log & skip this target
       if (currentLogLevel >= LOG_LEVEL.DEBUG){
-        console.log("Repair error for "+creep.name+": "+rr);
+        console.log("No available energy source for "+creep.name);
       }
-      getRepairQueue(creep.room).shift();
+      debugSay(creep, "‍💨");
       return;
     }
 
-    // — No energy: acquire —
-    var pile = findDroppedEnergy(creep);
-    if (pile){
-      debugRing(pile, CFG.COLORS.ENERGY, "💧"+(pile.amount|0));
-      debugLine(creep, pile, CFG.COLORS.ENERGY, "pickup");
-      var pr = creep.pickup(pile);
-      if (pr === ERR_NOT_IN_RANGE) go(creep, pile, 1);
-      else if (pr === OK) debugSay(creep, "💼");
+    // Have energy: pull a valid target and work through it.
+    var queue = getRepairQueue(creep.room);
+    var target = getNextRepairTarget(queue);
+    if (!target){
+      // queue empty or invalid → clear legacy task (caller can reassign)
+      if (creep.memory) creep.memory.task = undefined;
+      debugSay(creep, "✅ done");
       return;
     }
 
-    var source = findWithdrawSource(creep);
-    if (source){
-      debugRing(source, CFG.COLORS.ENERGY, "ENERGY");
-      debugLine(creep, source, CFG.COLORS.ENERGY, "withdraw");
-      var wr = creep.withdraw(source, RESOURCE_ENERGY);
-      if (wr === ERR_NOT_IN_RANGE) go(creep, source, 1);
-      else if (wr === OK) debugSay(creep, "⛽");
+    // Visuals for the target
+    creep.room.visual.text(
+      "Repair " + target.structureType + " " + target.hits + "/" + target.hitsMax,
+      target.pos.x, target.pos.y - 1,
+      { align: 'center', color: '#ffffff', opacity: 0.9 }
+    );
+    debugRing(target, CFG.COLORS.REPAIR, "fix");
+
+    // Attempt repair
+    var rr = creep.repair(target);
+    if (rr === OK){
+      if (currentLogLevel >= LOG_LEVEL.DEBUG){
+        console.log("Creep "+creep.name+" repairing "+target.structureType+" @("+target.pos.x+","+target.pos.y+")");
+      }
+      debugSay(creep, "🔧");
+      // Done? pop and move on
+      if (target.hits >= target.hitsMax){
+        queue.shift();
+        debugSay(creep, "✔");
+      }
+      return;
+    }
+    if (rr === ERR_NOT_IN_RANGE){
+      debugLine(creep, target, CFG.COLORS.REPAIR, "to repair");
+      go(creep, target, 3);
       return;
     }
 
+    // Other errors → log & skip this target
     if (currentLogLevel >= LOG_LEVEL.DEBUG){
-      console.log("No available energy source for "+creep.name);
+      console.log("Repair error for "+creep.name+": "+rr);
     }
-    debugSay(creep, "‍💨");
+    queue.shift();
   }
 };
