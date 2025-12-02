@@ -117,6 +117,7 @@ function ensureRemoteRoads(homeRoom) {
 
   // Keep memory fresh and clean before doing any heavier work.
   const mem = memoryFor(homeRoom);
+  cleanPathMemory(homeRoom, mem);
   pruneOutOfRadiusPaths(homeRoom, mem);
 
   // We need at least a spawn or storage anchor to lay meaningful roads.
@@ -339,6 +340,50 @@ function memoryFor(homeRoom) {
   if (!r.roadPlanner.paths) r.roadPlanner.paths = {};
   return r.roadPlanner;
 }
+
+function cleanPathMemory(homeRoom, mem) {
+  if (!mem || !mem.paths) return;
+
+  const keys = Object.keys(mem.paths);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const rec = mem.paths[key];
+
+    if (!rec || !Array.isArray(rec.path) || rec.path.length === 0) {
+      delete mem.paths[key];
+      continue;
+    }
+
+    updatePathRecordState(key, rec);
+  }
+}
+
+function updatePathRecordState(key, rec) {
+  let earliestMissing = null;
+
+  for (let idx = 0; idx < rec.path.length; idx++) {
+    const step = rec.path[idx];
+    const roomObj = Game.rooms[step.roomName];
+    if (!roomObj) continue; // only validate where we have vision
+
+    if (roomObj.getTerrain().get(step.x, step.y) === TERRAIN_MASK_WALL) {
+      earliestMissing = earliestMissing === null ? idx : Math.min(earliestMissing, idx);
+      continue;
+    }
+
+    if (!hasRoadOrRoadSiteFast(roomObj, step.x, step.y)) {
+      earliestMissing = earliestMissing === null ? idx : Math.min(earliestMissing, idx);
+    }
+  }
+
+  if (earliestMissing === null) {
+    rec.done = true;
+    rec.i = rec.path.length;
+  } else {
+    if (typeof rec.i !== 'number' || rec.i > earliestMissing) rec.i = earliestMissing;
+    rec.done = false;
+  }
+}
  
 function getActiveRemoteRooms(homeRoom) {
   const mem = memoryFor(homeRoom);
@@ -475,6 +520,8 @@ const RoadPlanner = {
   _roomCostMatrix: roomCostMatrix,
   _getAnchorPos: getAnchorPos,
   _chooseHarvestTile: chooseHarvestTile,
+  _cleanPathMemory: cleanPathMemory,
+  _updatePathRecordState: updatePathRecordState,
   _discoverActiveRemoteRoomsFromCreeps: discoverActiveRemoteRoomsFromCreeps
 };
 
