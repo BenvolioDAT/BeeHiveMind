@@ -107,6 +107,10 @@ function debugRing(room, pos, color, text) {
   // ==============================
   // Tunables
   // ==============================
+  // Builders will commute home to withdraw when storage/terminal has at least this much energy.
+  var HOME_RICH_ENERGY = 5000;
+  // Below this threshold we consider home "low" and allow remote harvesting to stay productive.
+  var HOME_LOW_ENERGY = 1000;
   var ALLOW_HARVEST_FALLBACK = true; // flip true if you really want last-resort mining
   var PICKUP_MIN = 50;                // ignore tiny crumbs
   var SRC_CONTAINER_MIN = 100;        // minimum energy to bother at source containers
@@ -155,6 +159,47 @@ function debugRing(room, pos, color, text) {
   // B) Energy collection helpers
   // -----------------------------
   function collectEnergy(creep) {
+    // Prefer grabbing energy from a rich home storage/terminal to speed up remote building.
+    var homeName = (typeof getHomeName === 'function') ? getHomeName(creep) : null;
+    var homeRoom = homeName ? Game.rooms[homeName] : null;
+    var homeStorage = homeRoom ? homeRoom.storage : null;
+    var homeTerminal = homeRoom ? homeRoom.terminal : null;
+    var homeEnergy = 0;
+    if (homeStorage && homeStorage.store) homeEnergy += homeStorage.store[RESOURCE_ENERGY] || 0;
+    if (homeTerminal && homeTerminal.store) homeEnergy += homeTerminal.store[RESOURCE_ENERGY] || 0;
+
+    var homeIsRich = homeEnergy >= HOME_RICH_ENERGY;
+    var homeIsLow = homeEnergy <= HOME_LOW_ENERGY;
+
+    if (homeIsRich && homeName) {
+      if (!homeRoom || creep.pos.roomName !== homeName) {
+        var anchorPos = (typeof getAnchorPos === 'function') ? getAnchorPos(homeName) : null;
+        if (anchorPos) {
+          debugSay(creep, '🏠');
+          debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME•ENERGY");
+          creep.travelTo(anchorPos, { range: 2, reusePath: 25 });
+          return true; // commuting home to refuel from rich storage
+        }
+      } else {
+        var withdrawTarget = null;
+        if (homeStorage && (homeStorage.store[RESOURCE_ENERGY] || 0) > 0) {
+          withdrawTarget = homeStorage;
+        } else if (homeTerminal && (homeTerminal.store[RESOURCE_ENERGY] || 0) > 0) {
+          withdrawTarget = homeTerminal;
+        }
+
+        if (withdrawTarget) {
+          debugSay(creep, '🏦');
+          debugDrawLine(creep, withdrawTarget, CFG.DRAW.FILL_COLOR, "HOME•WITHDRAW");
+          var homeWithdraw = creep.withdraw(withdrawTarget, RESOURCE_ENERGY);
+          if (homeWithdraw === ERR_NOT_IN_RANGE) {
+            creep.travelTo(withdrawTarget, { range: 1, reusePath: 15 });
+          }
+          return true;
+        }
+      }
+    }
+
     // 1) Tombstones / Ruins
     var tomb = creep.pos.findClosestByRange(FIND_TOMBSTONES, {
       filter: function (t) {
@@ -247,7 +292,7 @@ function debugRing(room, pos, color, text) {
     }
 
     // 5) Optional last resort: harvest locally
-    if (ALLOW_HARVEST_FALLBACK) {
+    if (ALLOW_HARVEST_FALLBACK || homeIsLow) {
       var src = creep.pos.findClosestByRange(FIND_SOURCES_ACTIVE);
       if (src) {
         debugSay(creep, '⛏️');
