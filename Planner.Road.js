@@ -26,7 +26,7 @@ const CFG = Object.freeze({
 
   // NEW: hard cap on how far (in room hops) we will plan remote roads from this home.
   // Set to 0 (or negative) to disable radius limiting.
-  maxRemoteRadius: 1
+  maxRemoteRadius: 0
 });
 
 // Road planner keeps all “how do we lay roads?” choices here so the main Screeps
