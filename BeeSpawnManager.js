@@ -239,7 +239,7 @@ function getBuilderNeed(C, room) {
     var rn = remotes[i];
     remoteTotal += (C.roomSiteCounts[rn] || 0);
   }
-  var need = (local + remoteTotal) > 0 ? 4 : 0;
+  var need = (local + remoteTotal) > 0 ? 3 : 0;
   if (tickEvery(DBG_EVERY)) {
     dlog('🧱 [Signal] builderNeed', fmt(room), 'local=', local, 'remote=', remoteTotal, '->', need);
   }
