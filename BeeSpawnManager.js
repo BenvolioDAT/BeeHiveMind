@@ -239,7 +239,7 @@ function getBuilderNeed(C, room) {
     var rn = remotes[i];
     remoteTotal += (C.roomSiteCounts[rn] || 0);
   }
-  var need = (local + remoteTotal) > 0 ? 3 : 0;
+  var need = (local + remoteTotal) > 0 ? 1 : 0;
   if (tickEvery(DBG_EVERY)) {
     dlog('🧱 [Signal] builderNeed', fmt(room), 'local=', local, 'remote=', remoteTotal, '->', need);
   }
@@ -324,7 +324,7 @@ function computeRoomQuotas(C, room) {
     upgrader:     1,
     builder:      getBuilderNeed(C, room),
     scout:        1,
-    luna:         3,
+    luna:         4,
     repair:       0,
     Trucker:      0,
     Claimer:      0,
