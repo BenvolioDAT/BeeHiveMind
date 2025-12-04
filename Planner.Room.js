@@ -1,6 +1,8 @@
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
-const CFG = Object.freeze({
+// Teaching note: top-level planner config lives here so new contributors can
+// see the cadence knobs in one place. Keep this ES5-friendly (var + objects).
+var CFG = Object.freeze({
   maxSitesPerTick: 5,
   csiteSafetyLimit: 40,
   tickModulo: 2,
@@ -95,9 +97,9 @@ function isOwnedRoom(room) {
 function shouldSkipTick(room) {
   if (CFG.tickModulo <= 1) return false;
   // Spread planner work across rooms by summing the room name characters.
-  let offset = 0;
-  const name = room.name;
-  for (let i = 0; i < name.length; i++) {
+  var offset = 0;
+  var name = room.name;
+  for (var i = 0; i < name.length; i++) {
     offset += name.charCodeAt(i);
   }
   offset = offset % CFG.tickModulo;
@@ -160,25 +162,35 @@ function allowedCount(type, room) {
  *  4. Lay out the base blueprint offsets as the final drip.
  */
 function ensureSites(room) {
+  // Teaching note: This is the planner entry point. We bail out aggressively
+  // so heavy scans only run when they are most useful (interval + triggers).
   if (!isOwnedRoom(room)) return;
   if (shouldSkipTick(room)) return;
 
-  const mem = plannerMemory(room);
+  var mem = plannerMemory(room);
   if (mem.nextPlanTick && Game.time < mem.nextPlanTick) return;
 
-  const anchor = pickAnchor(room);
+  // Trigger: rerun immediately when RCL increases so new limits are applied.
+  var rcl = (room.controller && room.controller.level) || 0;
+  if (mem.lastPlannedRcl == null) mem.lastPlannedRcl = rcl;
+  if (rcl > mem.lastPlannedRcl) {
+    mem.nextPlanTick = Game.time; // force a fresh pass right now
+    mem.lastPlannedRcl = rcl;
+  }
+
+  var anchor = pickAnchor(room);
   if (!anchor) return;
 
-  const globalCount = Object.keys(Game.constructionSites).length;
+  var globalCount = Object.keys(Game.constructionSites).length;
   if (globalCount >= CFG.csiteSafetyLimit) {
     mem.nextPlanTick = Game.time + CFG.noPlacementCooldownNone;
     return;
   }
 
-  const snapshot = scanRoomState(room);
-  const allowedFn = (type) => allowedCount(type, room);
-  let placed = 0;
-  let cCount = globalCount;
+  var snapshot = scanRoomState(room);
+  var allowedFn = function (type) { return allowedCount(type, room); };
+  var placed = 0;
+  var cCount = globalCount;
 
   // Phase 1: shore up source containers so harvesters always have parking.
   const containerDelta = ensureSourceContainers(
