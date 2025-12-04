@@ -5,6 +5,72 @@ var CoreConfig = require('core.config');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 
+// ---------------------------------------------------------------------------
+// 🎨 Shared lightweight debug helpers
+// ---------------------------------------------------------------------------
+// These helpers were duplicated in several role files. Keeping them here means
+// a single bugfix or style tweak updates every role, and new contributors have
+// one obvious place to learn how our visuals work.
+
+// Safely grab a RoomPosition from any Screeps target like a creep, flag, or
+// plain object with x/y/roomName keys.
+function getTargetPosition(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
+}
+
+// Small helper to keep creep.say guarded behind a flag so new players do not
+// spam the console accidentally. Pass the role's debug flag when calling.
+function debugSay(creep, msg, enabled) {
+  if (!enabled) return;
+  if (creep && msg) creep.say(msg, true);
+}
+
+// Normalize the draw config so we always have width/opacity/font defaults even
+// if a role passes nothing. Defaults match the values roles previously copied.
+function _normalizeDrawCfg(cfg) {
+  var draw = (cfg && cfg.DRAW) || {};
+  return {
+    DEBUG_DRAW: cfg ? cfg.DEBUG_DRAW : false,
+    DRAW: {
+      WIDTH:   draw.WIDTH   != null ? draw.WIDTH   : 0.12,
+      OPACITY: draw.OPACITY != null ? draw.OPACITY : 0.45,
+      FONT:    draw.FONT    != null ? draw.FONT    : 0.6
+    }
+  };
+}
+
+// Draw a teaching-friendly line from creep to target with an optional label.
+// Pass the shared CFG so the color/opacity stays consistent across roles.
+function debugDrawLine(creep, target, color, label, cfg) {
+  var normalized = _normalizeDrawCfg(cfg);
+  if (!normalized.DEBUG_DRAW || !creep || !target) return;
+  var room = creep.room; if (!room || !room.visual) return;
+  var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
+  try {
+    room.visual.line(creep.pos, tpos, {
+      color: color, width: normalized.DRAW.WIDTH, opacity: normalized.DRAW.OPACITY, lineStyle: "solid"
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
+        color: color, opacity: normalized.DRAW.OPACITY, font: normalized.DRAW.FONT, align: "center"
+      });
+    }
+  } catch (e) {}
+}
+
+// Circle + label helper so roles can highlight seats, borders, etc.
+function debugRing(room, pos, color, text, cfg) {
+  var normalized = _normalizeDrawCfg(cfg);
+  if (!normalized.DEBUG_DRAW || !room || !room.visual || !pos) return;
+  try {
+    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: normalized.DRAW.OPACITY, width: normalized.DRAW.WIDTH });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: normalized.DRAW.FONT, opacity: normalized.DRAW.OPACITY, align: "center" });
+  } catch (e) {}
+}
+
 // This utility file gets touched by nearly every role.  The more we can keep the
 // helpers flat and well-named, the easier it is for a new contributor to spot a
 // guard or data cache they can reuse in their own logic.
@@ -394,6 +460,12 @@ var BeeToolbox = {
   isForeignPlayerRoom: function (room) { return _isForeignPlayerRoom(room); },
   canEngageTarget: function (attacker, target) { return _canEngageTarget(attacker, target); },
   myUsername: function () { return _myUsername(); },
+
+  // Lightweight draw/say helpers (used by many roles)
+  getTargetPosition: function (target) { return getTargetPosition(target); },
+  debugSay: function (creep, msg, enabled) { return debugSay(creep, msg, enabled); },
+  debugDrawLine: function (creep, target, color, label, cfg) { return debugDrawLine(creep, target, color, label, cfg); },
+  debugRing: function (room, pos, color, text, cfg) { return debugRing(room, pos, color, text, cfg); },
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL
