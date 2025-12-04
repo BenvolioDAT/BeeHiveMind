@@ -79,11 +79,26 @@ function refreshSourceIntel() {
 function maybeGeneratePixel() {
     // Optional cosmetic pixel generation when CPU bucket is healthy.
     const pixelCfg = CoreConfig.settings.pixels;
+    //---Environment guards ---
+    // 1) No Game.cpu or no generatePixel: sim/private/older envs.
+    if (!Game.cpu || typeof Game.cpu.generatePixel !== 'function') {
+        return;
+    }
+    // 2) Explicityly skip in SIM shard.
+    if (Game.shard && Game.shard.name === 'sim') {
+        return;
+    }
+    //--- Config guards ---
     if (!pixelCfg.enabled) return;
+    // Some evironments may not have bucket; guard the check:
+    if (typeof Game.cpu.bucket !== 'number') {
+        return;
+    }
+    // Bucket check
     if (Game.cpu.bucket < pixelCfg.bucketThreshold) return;
     if (pixelCfg.tickModulo > 1 && (Game.time % pixelCfg.tickModulo) !== 0) return;
-
-    const result = Game.cpu.generatePixel();
+    //--- Pixel Generation ---
+    var result = Game.cpu.generatePixel();
     if (result === OK) {
         mainLog.info('Pixel generated successfully.');
     }
