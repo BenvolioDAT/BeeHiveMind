@@ -2,7 +2,9 @@
 /** =========================
  *  Config (tweak here)
  *  ========================= */
-const CFG = Object.freeze({
+// Teaching note: road planner runs on a staggered cadence so CPU stays flat.
+// Keep config centralized and ES5-friendly for novice readability.
+var CFG = Object.freeze({
   // Pathfinding weights
   plainCost: 2,
   swampCost: 10,
@@ -112,19 +114,35 @@ function shouldSkipTick(homeRoom) {
 }
 
 function ensureRemoteRoads(homeRoom) {
+  // Teaching note: run heavy road work only on its scheduled slice so we
+  // avoid pathfinding every tick. Triggers (anchor change) reset the timer.
   if (!isOwnedRoom(homeRoom)) return;
   if (shouldSkipTick(homeRoom)) return;
 
+  var mem = memoryFor(homeRoom);
+  if (mem.nextRoadPlanTick && Game.time < mem.nextRoadPlanTick) return;
+
+  if (!mem.lastAnchorSig) mem.lastAnchorSig = null;
+
   // Keep memory fresh and clean before doing any heavier work.
-  const mem = memoryFor(homeRoom);
   pruneOutOfRadiusPaths(homeRoom, mem);
 
   // We need at least a spawn or storage anchor to lay meaningful roads.
   if (!hasAnchorReady(homeRoom)) return;
 
-  const anchor = getAnchorPos(homeRoom);
+  var anchor = getAnchorPos(homeRoom);
+  var anchorSig = anchor ? [anchor.roomName, anchor.x, anchor.y].join(',') : null;
+  if (anchorSig && mem.lastAnchorSig !== anchorSig) {
+    // Teaching note: when the anchor changes (e.g., first storage), rerun soon.
+    mem.nextRoadPlanTick = Game.time;
+    mem.lastAnchorSig = anchorSig;
+  }
+
   ensureStagedHomeNetwork(homeRoom, anchor);
   ensureRemoteSpokes(homeRoom, mem, anchor);
+
+  // Throttle future passes; remote route audits can happen less frequently.
+  mem.nextRoadPlanTick = Game.time + 50;
 }
 
 // ---------- Home network (staged) ----------

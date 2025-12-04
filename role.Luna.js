@@ -776,6 +776,10 @@ function softenRemoteDefensePlan(roomName) {
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
         var e=ensureMiningAssignment(memAssign[s.id], rn);
+        // Teaching note: remember which home owns this remote assignment so
+        // replacements can be spawned even after a wipe.
+        if (!e.homeRoom) e.homeRoom = homeName;
+        e.remoteRoom = rn;
         if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
         var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
         ensureSourceFlag(s);

@@ -113,10 +113,14 @@ function getEnergyHistory() {
 // ---------- core ----------
 const TradeEnergy = {
   run(room) {
+    // Teaching note: trade is throttled both globally (tick modulus) and per
+    // room (cooldown) so we avoid spammy market calls on quiet ticks.
     refreshTickGlobals();
+    if (Game.time % 7 !== 0) return; // light global throttle
     if (!roomMeetsBasics(room)) return;
     if (!canTradeThisTick(room)) return;
     if (!storageHasSurplus(room)) return;
+    if (!receivingRoomNeedsEnergy(room)) return;
 
     // With the boring validation out of the way, the rest of the function reads
     // as a linear recipe: find the best buyer, size the shipment, book it.
@@ -167,6 +171,22 @@ function storageHasSurplus(room) {
   // upgraders/builders never starve from an overly aggressive trade loop.
   const store = room.storage.store[RESOURCE_ENERGY] || 0;
   return store >= CFG.KEEP_ENERGY_STORAGE;
+}
+
+function receivingRoomNeedsEnergy(room) {
+  // Teaching note: avoid selling if nearby friends (our own rooms) are low on
+  // energy. This keeps commerce meaningful instead of dumping blindly.
+  var lowest = null;
+  for (var name in Game.rooms) {
+    if (!Game.rooms.hasOwnProperty(name)) continue;
+    var r = Game.rooms[name];
+    if (!r || !r.controller || !r.controller.my || !r.storage) continue;
+    if (r.name === room.name) continue;
+    var val = r.storage.store[RESOURCE_ENERGY] || 0;
+    if (lowest == null || val < lowest) lowest = val;
+  }
+  if (lowest == null) return true;
+  return lowest < (CFG.KEEP_ENERGY_STORAGE / 2);
 }
 
 function pickBestEnergyOrder(room) {

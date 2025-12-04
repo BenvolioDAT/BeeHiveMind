@@ -29,6 +29,14 @@ var FLAG_CFG = {
 
 var THREAT_DECAY_TICKS = 150;
 
+function ensureRoomCombatMem(roomName) {
+  if (!roomName) return null;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  if (!Memory.rooms[roomName].combat) Memory.rooms[roomName].combat = { lastHostileSeen: 0, lastScore: 0 };
+  return Memory.rooms[roomName].combat;
+}
+
 function flagLogDebug() {
   if (!FLAG_CFG.DEBUG || !console || !console.log) return;
   var args = Array.prototype.slice.call(arguments);
@@ -545,12 +553,27 @@ function ensureSquadFlags() {
 
     var room = flag.room || null;
     var threat = countHostiles(room);
+    if (room && room.name) {
+      // Teaching note: we track a simple per-room threat TTL so squads stand
+      // down after invaders leave instead of idling forever.
+      var combatMem = ensureRoomCombatMem(room.name);
+      if (threat.hasThreat) {
+        combatMem.lastHostileSeen = Game.time;
+        combatMem.lastScore = threat.score;
+      } else if ((Game.time - (combatMem.lastHostileSeen || 0)) > THREAT_DECAY_TICKS) {
+        combatMem.lastScore = 0;
+      }
+    }
     var targetId = CombatAPI.focusFireTarget(name);
     var currentState = CombatAPI.getSquadState(name);
     var nextState = currentState;
     if (currentState !== 'RETREAT') {
       var hostilePresent = threat.hasThreat || Boolean(targetId);
       nextState = hostilePresent ? 'ENGAGE' : 'FORM';
+      var fallbackMem = room ? ensureRoomCombatMem(room.name) : null;
+      if (!hostilePresent && fallbackMem && (Game.time - (fallbackMem.lastHostileSeen || 0)) > THREAT_DECAY_TICKS) {
+        nextState = 'RETREAT';
+      }
     }
     CombatAPI.setSquadState(name, nextState);
     updateRoomRecord(mem, flag, room, threat.score, threat.hasThreat);
