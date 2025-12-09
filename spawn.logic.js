@@ -28,79 +28,15 @@ function combatSpawnLog() {
 // -----------------------------------------------------------------------------
 // Body builders (ES5-only helpers to construct Screeps body arrays)
 // -----------------------------------------------------------------------------
-function pushParts(target, part, count) {
-  for (var i = 0; i < count; i++) {
-    target.push(part);
-  }
-}
+// Role-specific configurations
+// The ( ... ) The Spread Operator.
+//This code block the Spread Operator is taken the Array flatten it to one Array with out the Spread Operator
+//the Array turn into a nested Array meaning ( [work],[carry],[move],) we want ( [work, carry, move,] )
+const Claimer = (Claim, Move) =>  [
+  ...Array(Claim).fill(CLAIM),
+  ...Array(Move).fill(MOVE)
+];
 
-function buildBody() {
-  return [];
-}
-
-function B(w, c, m) {
-  var body = buildBody();
-  pushParts(body, WORK, w || 0);
-  pushParts(body, CARRY, c || 0);
-  pushParts(body, MOVE, m || 0);
-  return body;
-}
-
-function CM(c, m) {
-  var body = buildBody();
-  pushParts(body, CARRY, c || 0);
-  pushParts(body, MOVE, m || 0);
-  return body;
-}
-
-function WM(w, m) {
-  var body = buildBody();
-  pushParts(body, WORK, w || 0);
-  pushParts(body, MOVE, m || 0);
-  return body;
-}
-
-function MH(m, h) {
-  var body = buildBody();
-  pushParts(body, MOVE, m || 0);
-  pushParts(body, HEAL, h || 0);
-  return body;
-}
-
-function TAM(t, a, m) {
-  var body = buildBody();
-  pushParts(body, TOUGH, t || 0);
-  pushParts(body, ATTACK, a || 0);
-  pushParts(body, MOVE, m || 0);
-  return body;
-}
-
-function R(t, r, m) {
-  var body = buildBody();
-  pushParts(body, TOUGH, t || 0);
-  pushParts(body, RANGED_ATTACK, r || 0);
-  pushParts(body, MOVE, m || 0);
-  return body;
-}
-
-function A(t, a, r, h, w, c, m) {
-  var body = buildBody();
-  pushParts(body, TOUGH, t || 0);
-  pushParts(body, ATTACK, a || 0);
-  pushParts(body, RANGED_ATTACK, r || 0);
-  pushParts(body, HEAL, h || 0);
-  pushParts(body, WORK, w || 0);
-  pushParts(body, CARRY, c || 0);
-  pushParts(body, MOVE, m || 0);
-  return body;
-}
-
-function C(c, m) {
-  var body = buildBody();
-  pushParts(body, CLAIM, c || 0);
-  pushParts(body, MOVE, m || 0);
-  return body;
-}
 const WorkBody = (Work, Carry, Move) => [
   ...Array(Work).fill(WORK),
   ...Array(Carry).fill(CARRY),
@@ -124,7 +60,7 @@ var ROLE_CONFIGS = {
     WorkBody(4, 1, 4),
     WorkBody(3, 1, 3),
     WorkBody(2, 1, 2),
-    WorkBody(1, 1, 1)
+    WorkBody(1, 1, 1),
   ],
   Courier: [
     //WorkBody(0, 30, 15),
@@ -156,88 +92,87 @@ var ROLE_CONFIGS = {
     WorkBody(0, 4, 4),
     WorkBody(0, 3, 3),
     WorkBody(0, 2, 2),
-    WorkBody(0, 1, 1)
+    WorkBody(0, 1, 1),
   ],
   Builder: [
-    B(3, 6, 9),
-    B(2, 4, 6),
-    B(2, 2, 4),
-    B(1, 1, 2),
-    B(1, 1, 1)
+    WorkBody(3, 6, 9),
+    WorkBody(2, 4, 6),
+    WorkBody(2, 2, 4),
+    WorkBody(1, 1, 2),
+    WorkBody(1, 1, 1),
   ],
   Repair: [
-    B(5, 2, 7),
-    B(4, 1, 5),
-    B(2, 1, 3)
+    WorkBody(5, 2, 7),
+    WorkBody(4, 1, 5),
+    WorkBody(2, 1, 3),
   ],
   Upgrader: [
-    B(10,5, 5),
-    B(5, 5, 5),
-    B(4, 4, 8),
-    B(4, 3, 7),
-    B(3, 3, 6),
-    B(3, 2, 5),
-    B(2, 2, 4),
-    B(2, 1, 3),
-    B(1, 1, 2),
-    B(1, 1, 1)
+    WorkBody(10,5, 5),
+    WorkBody(5, 5, 5),
+    WorkBody(4, 4, 8),
+    WorkBody(4, 3, 7),
+    WorkBody(3, 3, 6),
+    WorkBody(3, 2, 5),
+    WorkBody(2, 2, 4),
+    WorkBody(2, 1, 3),
+    WorkBody(1, 1, 2),
+    WorkBody(1, 1, 1),
   ],
   Queen: [
-    //B(0, 22, 22),
-    //B(0, 21, 21),
-    //B(0, 20, 20),
-    //B(0, 19, 19),
-    B(0, 18, 9),
-    B(0, 18, 18),
-    B(0, 17, 17),
-    B(0, 16, 16),
-    B(0, 15, 15),
-    B(0, 14, 14),
-    B(0, 13, 13),
-    B(0, 12, 12),
-    B(0, 11, 11),
-    B(0, 10, 10),
-    B(0, 9, 9),
-    B(0, 8, 8),
-    B(0, 7, 7),
-    B(0, 6, 6),
-    B(0, 5, 5),
-    B(0, 4, 4),
-    B(0, 3, 3),
-    B(0, 2, 2),
-    B(0, 1, 1)
+    //WorkBody(0, 22, 22),
+    //WorkBody(0, 21, 21),
+    //WorkBody(0, 20, 20),
+    //WorkBody(0, 19, 19),
+    WorkBody(0, 18, 9),
+    WorkBody(0, 18, 18),
+    WorkBody(0, 17, 17),
+    WorkBody(0, 16, 16),
+    WorkBody(0, 15, 15),
+    WorkBody(0, 14, 14),
+    WorkBody(0, 13, 13),
+    WorkBody(0, 12, 12),
+    WorkBody(0, 11, 11),
+    WorkBody(0, 10, 10),
+    WorkBody(0, 9, 9),
+    WorkBody(0, 8, 8),
+    WorkBody(0, 7, 7),
+    WorkBody(0, 6, 6),
+    WorkBody(0, 5, 5),
+    WorkBody(0, 4, 4),
+    WorkBody(0, 3, 3),
+    WorkBody(0, 2, 2),
+    WorkBody(0, 1, 1),
   ],
   Luna: [
-    B(3, 4, 7),
-    B(2, 4, 6),
-    B(2, 3, 5),
-    B(1, 3, 4),
-    B(1, 2, 3),
-    B(1, 1, 2),
-    B(1, 1, 1)
+    WorkBody(3, 4, 7),
+    WorkBody(2, 4, 6),
+    WorkBody(2, 3, 5),
+    WorkBody(1, 3, 4),
+    WorkBody(1, 2, 3),
+    WorkBody(1, 1, 2),
+    WorkBody(1, 1, 1),
   ],
   Scout: [
-    B(0, 0, 1)
+    WorkBody(0, 0, 1)
   ],
   CombatMelee: [
-    A(0, 2, 0, 0, 0, 0, 2)
+    CombatBody(0, 2, 2, 0, 0),
   ],
   CombatArcher: [
-    R(2, 4, 6),
-    R(1, 2, 3)
+    CombatBody(0, 0, 1, 1, 0),
   ],
   CombatMedic: [
-    MH(4, 4),
-    MH(3, 3),
-    MH(2, 2),
-    MH(1, 1)
+    CombatBody(0, 0, 4, 0, 4),
+    CombatBody(0, 0, 3, 0, 3),
+    CombatBody(0, 0, 2, 0, 2),
+    CombatBody(0, 0, 1, 0, 1),
   ],
   Dismantler: [
-    WM(5, 5)
+    WorkBody(5, 0, 5)
   ],
   Claimer: [
-    C(2, 2),
-    C(1, 1)
+    Claimer(2, 2),
+    Claimer(1, 1)
   ]
 };
 
