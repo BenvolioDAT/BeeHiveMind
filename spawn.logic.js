@@ -101,50 +101,62 @@ function C(c, m) {
   pushParts(body, MOVE, m || 0);
   return body;
 }
+const WorkBody = (Work, Carry, Move) => [
+  ...Array(Work).fill(WORK),
+  ...Array(Carry).fill(CARRY),
+  ...Array(Move).fill(MOVE)
+];
 
+const CombatBody = (Tough, Attack, Move, Range_attack, Heal) => [
+  ...Array(Tough).fill(TOUGH),
+  ...Array(Attack).fill(ATTACK),
+  ...Array(Move).fill(MOVE),
+  ...Array(Range_attack).fill(RANGED_ATTACK),
+  ...Array(Heal).fill(HEAL),
+];
 // -----------------------------------------------------------------------------
 // Role configuration (canonical names only)
 // -----------------------------------------------------------------------------
 var ROLE_CONFIGS = {
   BaseHarvest: [
-    B(6, 1, 5),
-    B(5, 1, 5),
-    B(4, 1, 4),
-    B(3, 1, 3),
-    B(2, 1, 2),
-    B(1, 1, 1)
+    WorkBody(6, 1, 5),
+    WorkBody(5, 1, 5),
+    WorkBody(4, 1, 4),
+    WorkBody(3, 1, 3),
+    WorkBody(2, 1, 2),
+    WorkBody(1, 1, 1)
   ],
   Courier: [
-    //CM(30, 15),
-    //CM(29, 15),
-    //CM(28, 14),
-    //CM(27, 14),
-    //CM(26, 13),
-    //CM(25, 13),
-    CM(24, 12),
-    CM(23, 23),
-    CM(22, 22),
-    CM(21, 21),
-    CM(20, 20),
-    CM(19, 19),
-    CM(18, 18),
-    CM(17, 17),
-    CM(16, 16),
-    CM(15, 15),
-    CM(14, 14),
-    CM(13, 13),
-    CM(12, 12),
-    CM(11, 11),
-    CM(10, 10),
-    CM(9, 9),
-    CM(8, 8),
-    CM(7, 7),
-    CM(6, 6),
-    CM(5, 5),
-    CM(4, 4),
-    CM(3, 3),
-    CM(2, 2),
-    CM(1, 1)
+    //WorkBody(0, 30, 15),
+    //WorkBody(0, 29, 15),
+    //WorkBody(0, 28, 14),
+    //WorkBody(0, 27, 14),
+    //WorkBody(0, 26, 13),
+    //WorkBody(0, 25, 13),
+    WorkBody(0, 24, 12),
+    WorkBody(0, 23, 23),
+    WorkBody(0, 22, 22),
+    WorkBody(0, 21, 21),
+    WorkBody(0, 20, 20),
+    WorkBody(0, 19, 19),
+    WorkBody(0, 18, 18),
+    WorkBody(0, 17, 17),
+    WorkBody(0, 16, 16),
+    WorkBody(0, 15, 15),
+    WorkBody(0, 14, 14),
+    WorkBody(0, 13, 13),
+    WorkBody(0, 12, 12),
+    WorkBody(0, 11, 11),
+    WorkBody(0, 10, 10),
+    WorkBody(0, 9, 9),
+    WorkBody(0, 8, 8),
+    WorkBody(0, 7, 7),
+    WorkBody(0, 6, 6),
+    WorkBody(0, 5, 5),
+    WorkBody(0, 4, 4),
+    WorkBody(0, 3, 3),
+    WorkBody(0, 2, 2),
+    WorkBody(0, 1, 1)
   ],
   Builder: [
     B(3, 6, 9),
