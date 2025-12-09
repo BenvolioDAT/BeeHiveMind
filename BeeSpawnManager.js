@@ -318,14 +318,14 @@ function computeRoomQuotas(C, room) {
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
   var quotas = {
-    baseharvest:  2,
-    courier:      1,
-    queen:        1,
-    upgrader:     1,
-    builder:      getBuilderNeed(C, room),
-    scout:        1,
-    luna:         4,
-    repair:       0,
+    Baseharvest:  2,
+    Courier:      1,
+    Queen:        1,
+    Upgrader:     1,
+    Builder:      getBuilderNeed(C, room),
+    Scout:        1,
+    Luna:         4,
+    Repair:       0,
     Trucker:      0,
     Claimer:      0,
   };
