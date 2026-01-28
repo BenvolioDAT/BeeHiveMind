@@ -319,7 +319,7 @@ function computeRoomQuotas(C, room) {
   // (builder need, remote miners, etc.) so every change is a single diff.
   var quotas = {
     Baseharvest:  2,
-    Courier:      1,
+    Courier:      2,
     Queen:        1,
     Upgrader:     1,
     Builder:      getBuilderNeed(C, room),
