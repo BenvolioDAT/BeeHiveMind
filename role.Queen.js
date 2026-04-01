@@ -119,6 +119,7 @@ function drawLine(creep, target, color, label) {
   }
 
   function clearTask(creep) {
+    releaseTerminalJobClaimIfHeld(creep);
     if (!creep || !creep.memory) return;
     creep.memory._task = null;
   }
@@ -202,6 +203,130 @@ function drawLine(creep, target, color, label) {
       range: 2
     };
     return createTask('idle', anchor.id || null, data);
+  }
+
+  function logTerminalJob(room, msg) {
+    if (!room || !msg) return;
+    console.log('[Queen][' + room.name + '][terminalEnergyJob] ' + msg);
+  }
+
+  function getRoomTerminalEnergyJob(room) {
+    if (!room || !room.memory) return null;
+    if (!room.memory.terminalEnergyJob) {
+      room.memory.terminalEnergyJob = {
+        active: false,
+        thresholdTicks: 0,
+        startedAt: null,
+        targetEnergy: 300000,
+        paused: false,
+        pauseReason: null,
+        lastUpdate: Game.time,
+        claimBy: null,
+        claimTick: null
+      };
+    }
+    var job = room.memory.terminalEnergyJob;
+    if (typeof job.targetEnergy !== 'number' || job.targetEnergy <= 0) job.targetEnergy = 300000;
+    if (typeof job.thresholdTicks !== 'number') job.thresholdTicks = 0;
+    if (typeof job.active !== 'boolean') job.active = false;
+    if (typeof job.paused !== 'boolean') job.paused = false;
+    return job;
+  }
+
+  function roomHasCriticalEnergyNeeds(room) {
+    if (!room) return false;
+    var spawnLike = BeeSelectors.findSpawnLikeNeedingEnergy(room);
+    if (spawnLike && spawnLike.length) return true;
+    var towers = BeeSelectors.findTowersNeedingEnergy(room);
+    if (towers && towers.length) return true;
+    return false;
+  }
+
+  function updateTerminalEnergyJob(room) {
+    var job = getRoomTerminalEnergyJob(room);
+    if (!job) return null;
+    // Multi-Queen safety: only one updater mutates threshold/job state per tick.
+    // Other Queens read the same shared state without double-counting.
+    if (job.lastUpdate === Game.time) return job;
+    job.lastUpdate = Game.time;
+
+    if (!room.storage || !room.terminal) {
+      if (job.active || job.paused) logTerminalJob(room, 'paused: missing storage or terminal');
+      job.active = false;
+      job.paused = true;
+      job.pauseReason = 'missing_structures';
+      job.thresholdTicks = 0;
+      job.claimBy = null;
+      job.claimTick = null;
+      return job;
+    }
+
+    var storageCap = room.storage.store.getCapacity(RESOURCE_ENERGY) || 0;
+    var storageEnergy = room.storage.store[RESOURCE_ENERGY] || 0;
+    var threshold = Math.floor(storageCap * 0.75);
+    var aboveThreshold = storageCap > 0 && storageEnergy >= threshold;
+
+    if (aboveThreshold) job.thresholdTicks = (job.thresholdTicks || 0) + 1;
+    else job.thresholdTicks = 0;
+
+    if (!job.active && job.thresholdTicks === 50) {
+      logTerminalJob(room, 'storage surplus threshold reached (50 ticks above 75%)');
+    }
+
+    var terminalEnergyNow = room.terminal.store[RESOURCE_ENERGY] || 0;
+    if (!job.active && job.thresholdTicks >= 50 && terminalEnergyNow < job.targetEnergy) {
+      job.active = true;
+      job.paused = false;
+      job.pauseReason = null;
+      if (!job.startedAt) job.startedAt = Game.time;
+      logTerminalJob(room, 'job started (target=' + job.targetEnergy + ')');
+    }
+
+    if (!job.active) return job;
+
+    if ((room.terminal.store[RESOURCE_ENERGY] || 0) >= job.targetEnergy) {
+      job.active = false;
+      job.paused = false;
+      job.pauseReason = null;
+      job.claimBy = null;
+      job.claimTick = null;
+      job.startedAt = null;
+      job.lastSkipTick = null;
+      logTerminalJob(room, 'job completed (terminal reached target energy)');
+      return job;
+    }
+
+    var pauseReason = null;
+    if (!aboveThreshold) pauseReason = 'storage_below_threshold';
+    else if (roomHasCriticalEnergyNeeds(room)) pauseReason = 'critical_fill_needs';
+
+    if (pauseReason) {
+      if (!job.paused || job.pauseReason !== pauseReason) {
+        logTerminalJob(room, 'job paused (' + pauseReason + ')');
+      }
+      job.paused = true;
+      job.pauseReason = pauseReason;
+      return job;
+    }
+
+    if (job.paused) {
+      logTerminalJob(room, 'job resumed');
+    }
+    job.paused = false;
+    job.pauseReason = null;
+    return job;
+  }
+
+  function releaseTerminalJobClaimIfHeld(creep) {
+    if (!creep || !creep.room || !creep.memory || !creep.memory._task) return;
+    var task = creep.memory._task;
+    if (!task || task.type !== 'deliver' || !task.data || task.data.sink !== 'terminal_job') return;
+    var job = getRoomTerminalEnergyJob(creep.room);
+    if (!job) return;
+    if (job.claimBy === creep.name) {
+      job.claimBy = null;
+      job.claimTick = null;
+    }
   }
 
   function needsNewTask(creep, task) {
@@ -294,10 +419,15 @@ function drawLine(creep, target, color, label) {
 
     var amount = creep.store[RESOURCE_ENERGY] || 0;
     if (amount <= 0) return null;
+    var terminalJob = getRoomTerminalEnergyJob(room);
 
     var spawnLike = BeeSelectors.findSpawnLikeNeedingEnergy(room);
     var bestSpawn = BeeSelectors.selectClosestByRange(creep.pos, spawnLike);
     if (bestSpawn) {
+      if (terminalJob && terminalJob.active && (!terminalJob.lastSkipTick || Game.time - terminalJob.lastSkipTick >= 10)) {
+        logTerminalJob(room, 'queen skipped terminal stocking because spawn/extension fill exists');
+        terminalJob.lastSkipTick = Game.time;
+      }
       var freeSpawn = getFreeEnergyCapacity(bestSpawn);
       if (freeSpawn > getReserved(bestSpawn.id)) {
         var planAmount = Math.min(freeSpawn, amount);
@@ -309,6 +439,10 @@ function drawLine(creep, target, color, label) {
     var towers = BeeSelectors.findTowersNeedingEnergy(room);
     var bestTower = BeeSelectors.selectClosestByRange(creep.pos, towers);
     if (bestTower) {
+      if (terminalJob && terminalJob.active && (!terminalJob.lastSkipTick || Game.time - terminalJob.lastSkipTick >= 10)) {
+        logTerminalJob(room, 'queen skipped terminal stocking because tower fill exists');
+        terminalJob.lastSkipTick = Game.time;
+      }
       var freeTower = getFreeEnergyCapacity(bestTower);
       if (freeTower > getReserved(bestTower.id)) {
         var planTower = Math.min(freeTower, amount);
@@ -357,6 +491,22 @@ function drawLine(creep, target, color, label) {
       }
     }
 
+    if (terminalJob && terminalJob.active && !terminalJob.paused && room.terminal && room.storage) {
+      var claimOpen = !terminalJob.claimBy || terminalJob.claimBy === creep.name || (Game.time - (terminalJob.claimTick || 0) > 2);
+      if (claimOpen) {
+        var termFree = room.terminal.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+        var termEnergy = room.terminal.store[RESOURCE_ENERGY] || 0;
+        var needed = Math.max(0, terminalJob.targetEnergy - termEnergy);
+        if (termFree > 0 && needed > 0) {
+          terminalJob.claimBy = creep.name;
+          terminalJob.claimTick = Game.time;
+          var termPlan = Math.min(amount, termFree, needed);
+          reserveFill(room.terminal.id, termPlan);
+          return createTask('deliver', room.terminal.id, { sink: 'terminal_job', amount: termPlan });
+        }
+      }
+    }
+
 
     if (room.storage) {
       var storeFree = room.storage.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
@@ -390,6 +540,7 @@ function drawLine(creep, target, color, label) {
     ensureTaskSlot(creep);
     var task = creep.memory._task;
     if (needsNewTask(creep, task)) {
+      releaseTerminalJobClaimIfHeld(creep);
       task = chooseNextTask(creep);
       setTask(creep, task);
     }
@@ -448,10 +599,28 @@ function drawLine(creep, target, color, label) {
     if (!task || !target) { clearTask(creep); return; }
     drawLine(creep, target, CFG.DRAW.DELIVER, 'DL');
     debugSay(creep, '🚚');
-    var tr = BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, null, { priority: priority, reusePath: 20 });
+    var transferAmount = null;
+    if (task.data && task.data.sink === 'terminal_job' && typeof task.data.amount === 'number') {
+      var targetFree = getFreeEnergyCapacity(target);
+      var carryNow = creep.store[RESOURCE_ENERGY] || 0;
+      transferAmount = Math.min(task.data.amount, targetFree, carryNow);
+      if (transferAmount <= 0) {
+        clearTask(creep);
+        return;
+      }
+    }
+    var tr = BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, transferAmount, { priority: priority, reusePath: 20 });
     if (tr === OK) {
+      if (transferAmount != null && task.data && task.data.sink === 'terminal_job') {
+        task.data.amount = Math.max(0, (task.data.amount || 0) - transferAmount);
+      }
+      if (task.data && task.data.sink === 'terminal_job' && (task.data.amount || 0) <= 0) {
+        clearTask(creep);
+        return;
+      }
       if ((creep.store[RESOURCE_ENERGY] || 0) === 0) clearTask(creep);
     } else if (tr === ERR_FULL || tr === ERR_INVALID_TARGET) {
+      releaseTerminalJobClaimIfHeld(creep);
       clearTask(creep);
     }
   }
@@ -471,6 +640,10 @@ function drawLine(creep, target, color, label) {
     role: 'Queen',
     run: function (creep) {
       if (!creep || creep.spawning) return;
+      // Keep room-level terminal job state fresh every tick, even if this Queen
+      // is currently withdrawing or idling. updateTerminalEnergyJob itself is
+      // guarded so multiple Queens do not double-update.
+      updateTerminalEnergyJob(creep.room);
       var state = determineQueenState(creep);
 
       if (state === 'WITHDRAW') { runQueenWithdrawState(creep); return; }
