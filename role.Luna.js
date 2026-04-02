@@ -2,6 +2,7 @@
 
 const BeeToolbox = require('BeeToolbox');
 const BeeCombatSquads = require('BeeCombatSquads');
+const CombatDiplomacy = require('CombatDiplomacy');
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -1172,6 +1173,11 @@ function softenRemoteDefensePlan(roomName) {
 
       if (targetRoomObj) {
         var lunaThreat = evaluateRoomThreat(targetRoomObj, 'Luna');
+        if (CombatDiplomacy && typeof CombatDiplomacy.observeRoomIntel === 'function') {
+          // Luna keeps nearby foreign ownership visible to the watch-list model
+          // even when Scout cadence is low.
+          CombatDiplomacy.observeRoomIntel(targetRoomObj, null, 'LunaTick');
+        }
         if (lunaThreat && lunaThreat.threat && lunaThreat.threat.hasThreat && lunaThreat.canEscalate) {
           ensureRemoteDefensePlan(targetRoomObj, lunaThreat.threat, lunaThreat.distance);
         } else if (targetRoomObj && (!lunaThreat || !lunaThreat.canEscalate || !lunaThreat.threat || !lunaThreat.threat.hasThreat)) {

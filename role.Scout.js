@@ -1,6 +1,7 @@
 'use strict';
 
 const BeeCombatSquads = require('BeeCombatSquads');
+const CombatDiplomacy = require('CombatDiplomacy');
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -442,6 +443,11 @@ function logRoomIntel(room) {
 
   evaluateRoomThreat(room, 'Scout');
 
+  // Feed observed ownership/intel into centralized diplomacy watch logic.
+  if (CombatDiplomacy && typeof CombatDiplomacy.observeRoomIntel === 'function') {
+    CombatDiplomacy.observeRoomIntel(room, intel, 'Scout');
+  }
+
   if (CFG.DEBUG_DRAW) {
     var tag = (intel.owner ? ('👑 ' + intel.owner) : (intel.reservation ? ('📌 ' + intel.reservation) : 'free'));
     var extras = [];
@@ -561,6 +567,9 @@ function updateIntel(creep) {
   if (shouldLogIntel(room)) logRoomIntel(room);
   seedSourcesFromVision(room);
   var threatInfo = evaluateRoomThreat(room, 'Scout');
+  if (CombatDiplomacy && typeof CombatDiplomacy.observeRoomIntel === 'function') {
+    CombatDiplomacy.observeRoomIntel(room, getRoomIntel(room.name), 'ScoutTick');
+  }
   if (threatInfo && threatInfo.threat && threatInfo.threat.hasThreat && threatInfo.canEscalate) {
     ensureRemoteDefensePlan(room, threatInfo.threat, threatInfo.distance);
   }
