@@ -390,11 +390,16 @@ function addRetaliation(attackerUsername, reason, roomName) {
 }
 
 function findLikelyAttackerForCreep(creep) {
-  if (!creep || !creep.room) return null;
-  var hostiles = creep.room.find(FIND_HOSTILE_CREEPS) || [];
+  var pos = getSafeRoomPositionFromIncidentTarget(creep);
+  if (!pos) return null;
+
+  var room = (creep && creep.room) || (pos.roomName && Game.rooms[pos.roomName]) || null;
+  if (!room || typeof room.find !== 'function') return null;
+
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
   if (!hostiles.length) return null;
 
-  var nearest = creep.pos.findClosestByRange(hostiles);
+  var nearest = (typeof pos.findClosestByRange === 'function') ? pos.findClosestByRange(hostiles) : null;
   if (!nearest || !nearest.owner || !nearest.owner.username) return null;
 
   var u = nearest.owner.username;
@@ -408,8 +413,28 @@ function findLikelyAttackerForCreep(creep) {
     source: 'heuristic_nearest_hostile',
     attackType: null,
     damage: null,
-    targetId: creep.id
+    targetId: creep && creep.id ? creep.id : null
   };
+}
+
+function getSafeRoomPositionFromIncidentTarget(targetLike) {
+  if (!targetLike) return null;
+
+  if (targetLike.pos && typeof targetLike.pos.findClosestByRange === 'function' && typeof targetLike.pos.roomName === 'string') {
+    return targetLike.pos;
+  }
+
+  var rawPos = targetLike.pos || null;
+  if (rawPos && typeof rawPos === 'object') {
+    var roomName = (typeof rawPos.roomName === 'string') ? rawPos.roomName : null;
+    var x = (typeof rawPos.x === 'number') ? rawPos.x : null;
+    var y = (typeof rawPos.y === 'number') ? rawPos.y : null;
+    if (roomName && x != null && y != null) {
+      return new RoomPosition(x, y, roomName);
+    }
+  }
+
+  return null;
 }
 
 function getRoomEventLogSafe(room) {
@@ -528,7 +553,7 @@ function recordCreepIncident(creep, kind) {
   var room = roomName && Game.rooms[roomName] ? Game.rooms[roomName] : null;
   var roomCtx = computeRoomContext(roomName);
 
-  var targetId = creep.id || null;
+  var targetId = creep.id || (creep.memory && creep.memory.lastKnownId) || null;
   var attackerInfo = findEventLogAttribution(room, targetId, kind === 'death');
   if (!attackerInfo) {
     attackerInfo = findLikelyAttackerForCreep(creep);
@@ -606,6 +631,7 @@ function processCreepDamageAndDeaths() {
       hits: creep.hits,
       hitsMax: creep.hitsMax,
       role: creep.memory ? (creep.memory.role || creep.memory.task || null) : null,
+      id: creep.id || null,
       roomName: creep.pos ? creep.pos.roomName : null,
       t: now()
     };
@@ -628,10 +654,12 @@ function processCreepDamageAndDeaths() {
       memory: {
         role: deadInfo.role,
         task: deadInfo.role,
-        lastRoomName: deadInfo.roomName
+        lastRoomName: deadInfo.roomName,
+        lastKnownId: deadInfo.id || null
       },
       pos: deadInfo.roomName ? { roomName: deadInfo.roomName } : null,
-      room: deadInfo.roomName ? Game.rooms[deadInfo.roomName] : null
+      room: deadInfo.roomName ? Game.rooms[deadInfo.roomName] : null,
+      id: deadInfo.id || null
     };
     recordCreepIncident(fake, 'death');
     stale.push(cName);
