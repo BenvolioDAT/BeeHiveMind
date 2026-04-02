@@ -14,6 +14,7 @@ var combatLog = CoreLogger.createLogger('CombatSquads', LOG_LEVEL.DEBUG);
  */
 
 var CoreConfig = require('core.config');
+var CombatDiplomacy = require('CombatDiplomacy');
 
 // --- Squad flag orchestration (ported from SquadFlagManager) ---------------
 var FLAG_CFG = {
@@ -164,12 +165,24 @@ function combatDebugLog() {
  * Owner filtering is centralized so every detection helper respects
  * CoreConfig (PVP toggle + ally list + PvE allowances).
  */
-function shouldTargetOwner(owner, avoidMap) {
+function shouldTargetOwner(owner, avoidMap, roomName) {
   if (!owner || !owner.username) return false;
   var username = lowerUsername(owner.username);
   if (avoidMap && avoidMap[username]) return false;
   var myName = resolveMyUsername();
   if (myName && username === myName) return false;
+
+  // Central policy handoff:
+  // CombatDiplomacy decides manual targets / retaliation / watch-aware territory
+  // while still honoring ally + PvE config safeguards.
+  if (CombatDiplomacy && typeof CombatDiplomacy.shouldTargetOwnerUsername === 'function') {
+    return CombatDiplomacy.shouldTargetOwnerUsername(owner.username, {
+      avoidMap: avoidMap,
+      roomName: roomName || null,
+      source: 'BeeCombatSquads'
+    });
+  }
+
   var settings = combatSettings();
   if (username === 'invader') {
     return settings.ALLOW_INVADERS_IN_FOREIGN_ROOMS !== false;
@@ -181,21 +194,21 @@ function shouldTargetOwner(owner, avoidMap) {
   return true;
 }
 
-function isHostileCreep(creep, avoidMap) {
+function isHostileCreep(creep, avoidMap, roomName) {
   if (!creep || !creep.owner) return false;
-  return shouldTargetOwner(creep.owner, avoidMap);
+  return shouldTargetOwner(creep.owner, avoidMap, roomName);
 }
 
-function isHostilePowerCreep(powerCreep, avoidMap) {
+function isHostilePowerCreep(powerCreep, avoidMap, roomName) {
   if (!powerCreep || !powerCreep.owner) return false;
-  return shouldTargetOwner(powerCreep.owner, avoidMap);
+  return shouldTargetOwner(powerCreep.owner, avoidMap, roomName);
 }
 
-function isHostileStructure(structure, avoidMap) {
+function isHostileStructure(structure, avoidMap, roomName) {
   if (!structure || structure.my) return false;
   if (structure.structureType === STRUCTURE_INVADER_CORE) return true;
   if (!structure.owner) return false;
-  return shouldTargetOwner(structure.owner, avoidMap);
+  return shouldTargetOwner(structure.owner, avoidMap, roomName);
 }
 
 /**
@@ -208,15 +221,15 @@ function gatherHostileCandidates(room, avoidMap) {
   var candidates = { creeps: [], power: [], structures: [] };
   if (!room || typeof room.find !== 'function') return candidates;
   candidates.creeps = room.find(FIND_HOSTILE_CREEPS, {
-    filter: function (creep) { return isHostileCreep(creep, avoidMap); }
+    filter: function (creep) { return isHostileCreep(creep, avoidMap, room ? room.name : null); }
   });
   if (typeof FIND_HOSTILE_POWER_CREEPS !== 'undefined') {
     candidates.power = room.find(FIND_HOSTILE_POWER_CREEPS, {
-      filter: function (p) { return isHostilePowerCreep(p, avoidMap); }
+      filter: function (p) { return isHostilePowerCreep(p, avoidMap, room ? room.name : null); }
     });
   }
   candidates.structures = room.find(FIND_HOSTILE_STRUCTURES, {
-    filter: function (s) { return isHostileStructure(s, avoidMap); }
+    filter: function (s) { return isHostileStructure(s, avoidMap, room ? room.name : null); }
   });
   return candidates;
 }

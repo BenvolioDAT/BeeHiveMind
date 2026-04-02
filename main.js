@@ -10,6 +10,7 @@ const BeeHiveMind = require('BeeHiveMind');
 var BeeStructureLogic = require('BeeStructureLogic');
 const BeeToolbox = require('BeeToolbox');
 const BeeCombatSquads = require('BeeCombatSquads');
+const CombatDiplomacy = require('CombatDiplomacy');
 require('Traveler');
 
 const LOG_LEVEL = CoreConfig.LOG_LEVEL;
@@ -110,6 +111,10 @@ module.exports.loop = function () {
     BeeMaintenance.cleanUpMemory();
     maintainRepairTargets();
     ensureFirstSpawnMemory();
+
+    // Run diplomacy ledger before combat decisions so towers/squads share the
+    // latest watch/retaliation/manual-target policy context this tick.
+    CombatDiplomacy.runTick();
 
     // --- Primary AI behaviors ---
     BeeHiveMind.run();

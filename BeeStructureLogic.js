@@ -24,6 +24,7 @@ var CFG = Object.freeze({
 // --------------------------------------------------
 var RESCAN_INTERVAL = 500;
 var MIN_SEND = 100;
+var CombatDiplomacy = require('CombatDiplomacy');
 
 var BeeStructureLogic = {
   runTowerLogic: function () {
@@ -47,7 +48,16 @@ var BeeStructureLogic = {
       if (!towers.length) continue;
 
       // Defend first: scan once for hostiles so the attack branch is obvious.
-      var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+      var hostiles = room.find(FIND_HOSTILE_CREEPS, {
+        filter: function (c) {
+          if (!c || !c.owner || !c.owner.username) return false;
+          if (!CombatDiplomacy || typeof CombatDiplomacy.shouldTargetOwnerUsername !== 'function') return true;
+          return CombatDiplomacy.shouldTargetOwnerUsername(c.owner.username, {
+            roomName: room.name,
+            source: 'Tower'
+          });
+        }
+      }) || [];
       if (hostiles.length) {
         fireAllTowers(towers, hostiles);
         cleanupTowerLocks(RMem);

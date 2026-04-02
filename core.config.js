@@ -37,6 +37,18 @@ CoreConfig.settings = Object.freeze({
     TREAT_SOURCE_KEEPERS_AS_PVE: CoreConfig.TREAT_SOURCE_KEEPERS_AS_PVE,
     /** Toggle verbose combat logging across BeeCombatSquads + spawning. */
     DEBUG_LOGS: false,
+    /** Manual war-target usernames. Names are case-insensitive. */
+    MANUAL_TARGETS: [],
+    /** How long (ticks) to keep an observed nearby player on watch list. */
+    WATCH_TTL: 1500,
+    /** Maximum route distance from owned rooms for watch relevance. */
+    WATCH_ROUTE_DISTANCE: 2,
+    /** How long (ticks) retaliation status lasts without renewed aggression. */
+    RETALIATION_TTL: 2000,
+    /** How long (ticks) incident history entries are retained. */
+    INCIDENT_TTL: 3000,
+    /** Border distance (route rooms) treated as defensive-interest territory. */
+    BORDER_ROUTE_DISTANCE: 1,
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */
