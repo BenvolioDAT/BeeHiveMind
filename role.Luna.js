@@ -919,9 +919,11 @@ function softenRemoteDefensePlan(roomName) {
     return null;
   }
 
-  function releaseAssignment(creep){
+  function releaseAssignment(creep, reason){
     var memAssign = ensureAssignmentsMem();
     var sid = creep.memory.sourceId;
+    var targetRoom = creep.memory.targetRoom;
+    var releaseReason = reason || 'assignment_invalid';
 
     if (sid){
       maDec(memAssign, sid);
@@ -930,6 +932,14 @@ function softenRemoteDefensePlan(roomName) {
       markAvoid(creep, sid, AVOID_TTL);
     }
 
+    creep.memory._releaseReason = releaseReason;
+    creep.memory._releaseTick = Game.time;
+    creep.memory._releaseRoom = creep.pos.roomName;
+    creep.memory._releaseX = creep.pos.x;
+    creep.memory._releaseY = creep.pos.y;
+    creep.memory._releaseSourceId = sid || null;
+    creep.memory._releaseTargetRoom = targetRoom || null;
+
     creep.memory.sourceId   = null;
     creep.memory.targetRoom = null;
     creep.memory.assigned   = false;
@@ -937,6 +947,26 @@ function softenRemoteDefensePlan(roomName) {
     delete creep.memory._lockSince;
     delete creep.memory._hostileSince;
     delete creep.memory._exclusiveSince;
+
+    // Proof-oriented trace: only log border/near-border releases happening in
+    // the target room context so we can identify bounce causes without spam.
+    var nearBorder = (creep.pos.x <= 1 || creep.pos.x >= 48 || creep.pos.y <= 1 || creep.pos.y >= 48);
+    var inOrJustEnteredTarget = false;
+    if (targetRoom && creep.pos.roomName === targetRoom) inOrJustEnteredTarget = true;
+    if (!inOrJustEnteredTarget && targetRoom && typeof creep.memory._roomEntryTick === 'number') {
+      if ((Game.time - creep.memory._roomEntryTick) <= 1 && creep.pos.roomName === targetRoom) inOrJustEnteredTarget = true;
+    }
+    if (nearBorder && inOrJustEnteredTarget) {
+      console.log(
+        '[LunaReleaseBorder] name=' + creep.name +
+        ' reason=' + releaseReason +
+        ' room=' + creep.pos.roomName +
+        ' pos=' + creep.pos.x + ',' + creep.pos.y +
+        ' targetRoom=' + (targetRoom || 'null') +
+        ' sourceId=' + (sid || 'null') +
+        ' tick=' + Game.time
+      );
+    }
 
     debugSay(creep, '🌓YIELD');
   }
@@ -983,7 +1013,7 @@ function softenRemoteDefensePlan(roomName) {
       // Debounce brief ownership jitter so we do not instantly bounce on the
       // first conflicting read right after entering a room.
       if (shouldReleaseDebounced(creep, '_exclusiveSince', true, LUNA_EXCLUSIVE_CONFIRM_TICKS)) {
-        releaseAssignment(creep);
+        releaseAssignment(creep, 'exclusive_conflict');
         return false;
       }
       return true;
@@ -1014,7 +1044,7 @@ function softenRemoteDefensePlan(roomName) {
     if (win.name !== creep.name){
       if (shouldReleaseDebounced(creep, '_exclusiveSince', true, LUNA_EXCLUSIVE_CONFIRM_TICKS)) {
         console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
-        releaseAssignment(creep);
+        releaseAssignment(creep, 'exclusive_conflict');
         return false;
       }
       return true;
@@ -1079,6 +1109,15 @@ function softenRemoteDefensePlan(roomName) {
     creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
   }
 
+  // Room transition breadcrumb for "just entered target room" checks.
+  function trackRoomEntryBreadcrumb(creep) {
+    if (!creep || !creep.memory) return;
+    var prev = creep.memory._lastRoom;
+    var curr = creep.pos.roomName;
+    if (prev && prev !== curr) creep.memory._roomEntryTick = Game.time;
+    creep.memory._lastRoom = curr;
+  }
+
   function isOnBorder(pos) {
     return pos && (pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49);
   }
@@ -1114,7 +1153,7 @@ function softenRemoteDefensePlan(roomName) {
 
   function shouldReleaseForEndOfLife(creep) {
     if (creep.ticksToLive!==undefined && creep.ticksToLive<5 && creep.memory.assigned){
-      releaseAssignment(creep);
+      releaseAssignment(creep, 'eol_release');
       return true;
     }
     return false;
@@ -1122,6 +1161,23 @@ function softenRemoteDefensePlan(roomName) {
 
   function respectCooldown(creep) {
     if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt){
+      // Prevent immediate border bounce only for non-critical release jitter.
+      var rr = creep.memory._releaseReason;
+      var nonCritical = (rr === 'exclusive_conflict' || rr === 'assignment_jitter');
+      var justEntered = (typeof creep.memory._roomEntryTick === 'number') && ((Game.time - creep.memory._roomEntryTick) <= 1);
+      var releasedTargetRoom = creep.memory._releaseTargetRoom;
+      var inReleasedTargetRoom = !!(releasedTargetRoom && creep.pos.roomName === releasedTargetRoom);
+      if (nonCritical && justEntered && inReleasedTargetRoom) {
+        if (isOnBorder(creep.pos) && creep.memory._lunaMoveTick !== Game.time) {
+          creep.memory._lunaMoveTick = Game.time;
+          if (creep.pos.x === 0) creep.move(RIGHT);
+          else if (creep.pos.x === 49) creep.move(LEFT);
+          else if (creep.pos.y === 0) creep.move(BOTTOM);
+          else if (creep.pos.y === 49) creep.move(TOP);
+        }
+        debugSay(creep, '…hold');
+        return true;
+      }
       idleAtAnchor(creep, '…cd');
       return true;
     }
@@ -1131,7 +1187,7 @@ function softenRemoteDefensePlan(roomName) {
   function handleForcedYield(creep) {
     if (!creep.memory._forceYield) return false;
     delete creep.memory._forceYield;
-    releaseAssignment(creep);
+    releaseAssignment(creep, 'forced_yield');
     return true;
   }
 
@@ -1177,6 +1233,7 @@ function softenRemoteDefensePlan(roomName) {
     if (!creep.memory.home) getHomeName(creep);
     if (creep.memory._lunaMoveTick !== Game.time) delete creep.memory._lunaMoveTick;
     trackMovementBreadcrumb(creep);
+    trackRoomEntryBreadcrumb(creep);
   }
 
   // Memory keys:
@@ -1234,7 +1291,7 @@ function softenRemoteDefensePlan(roomName) {
           var center = new RoomPosition(25,25,creep.memory.targetRoom);
           debugDrawLine(creep, center, CFG.DRAW.TRAVEL_COLOR, "LOCK");
           console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
-          releaseAssignment(creep);
+          releaseAssignment(creep, 'invader_lock');
           return;
         } else {
           debugSay(creep, '⏳LOCK');
@@ -1283,7 +1340,7 @@ function softenRemoteDefensePlan(roomName) {
         if (hostileConfirmed) {
           console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
           debugSay(creep, '⚠️HOST');
-          releaseAssignment(creep);
+          releaseAssignment(creep, 'hostile_room');
           return;
         }
       } else {
@@ -1514,12 +1571,12 @@ function softenRemoteDefensePlan(roomName) {
       if (isRoomLockedByInvaderCore(creep.room.name)){
         debugSay(creep, '⛔LOCK');
         console.log('⛔ '+creep.name+' bailing from locked room '+creep.room.name+'.');
-        releaseAssignment(creep); return;
+        releaseAssignment(creep, 'invader_lock'); return;
       }
 
       var sid = creep.memory.sourceId;
       var src = Game.getObjectById(sid);
-      if (!src){ if (Game.time%25===0) console.log('Source not found for '+creep.name); releaseAssignment(creep); return; }
+      if (!src){ if (Game.time%25===0) console.log('Source not found for '+creep.name); releaseAssignment(creep, 'assignment_invalid'); return; }
 
       ensureSourceFlag(src);
       var srec = getSourceMemory(creep.room.name, sid); srec.x = src.pos.x; srec.y = src.pos.y;
