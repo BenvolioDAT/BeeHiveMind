@@ -356,7 +356,7 @@ function withdrawOrPickup(creep, targets, action) {
   if (result === ERR_NOT_IN_RANGE) {
     BeeTravel(creep, target, { range: 1, ignoreCreeps: true });
   }
-  return result === OK;
+  return result === OK || result === ERR_NOT_IN_RANGE;
 }
 
 // Helper used by collectEnergy: gives us a single line per category, which is
@@ -602,28 +602,28 @@ var BeeToolbox = {
   _getEnergyTargetsFromCache: getEnergyTargetsFromCache,
 
   collectEnergy: function (creep) {
-    if (!creep) return;
+    if (!creep) return false;
     var room = creep.room;
-    if (!room) return;
+    if (!room) return false;
 
     // Learner tip: when you have a waterfall of similar attempts, hide the
     // repeated logic in a helper (gatherEnergyFromCategory) so the high level
     // tells a clear story of "check ruins → tombstones → dropped → containers".
     if (gatherEnergyFromCategory(creep, room, 'ruins', function (target) {
       return target.store && target.store[RESOURCE_ENERGY] > 0;
-    }, 'withdraw')) return;
+    }, 'withdraw')) return true;
 
     if (gatherEnergyFromCategory(creep, room, 'tombstones', function (target) {
       return target.store && target.store[RESOURCE_ENERGY] > 0;
-    }, 'withdraw')) return;
+    }, 'withdraw')) return true;
 
     if (gatherEnergyFromCategory(creep, room, 'dropped', function (target) {
       return target.resourceType === RESOURCE_ENERGY && target.amount > 0;
-    }, 'pickup')) return;
+    }, 'pickup')) return true;
 
     if (gatherEnergyFromCategory(creep, room, 'containers', function (target) {
       return target.structureType === STRUCTURE_CONTAINER && target.store && target.store[RESOURCE_ENERGY] > 0;
-    }, 'withdraw')) return;
+    }, 'withdraw')) return true;
 
     var storage = creep.room.storage;
     if (storage && storage.store && storage.store[RESOURCE_ENERGY] > 0) {
@@ -631,7 +631,9 @@ var BeeToolbox = {
       if (res === ERR_NOT_IN_RANGE) {
         BeeTravel(creep, storage, { range: 1 });
       }
+      return res === OK || res === ERR_NOT_IN_RANGE;
     }
+    return false;
   },
 
   deliverEnergy: function (creep, structureTypes) {
