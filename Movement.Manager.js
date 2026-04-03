@@ -46,6 +46,10 @@ var MovementManager = {
   PRIORITIES: {
     emergency: 100,
     combat: 90,
+    attack: 90,
+    rangedAttack: 90,
+    heal: 90,
+    rangedHeal: 90,
     pickup: 80,
     withdraw: 70,
     deliver: 60,

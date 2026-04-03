@@ -242,7 +242,7 @@ const BeeToolbox = require('BeeToolbox');
   // -----------------------------
   function runRefuelPhase(creep) {
     if (tryLinkPull(creep)) return;
-    tryToolboxSweep(creep);
+    if (tryToolboxSweep(creep)) return;
     if (tryWithdrawStorage(creep)) return;
     if (tryWithdrawContainer(creep)) return;
     if (pickDroppedEnergy(creep)) return;
@@ -271,11 +271,13 @@ const BeeToolbox = require('BeeToolbox');
   }
 
   function tryToolboxSweep(creep) {
+    if (!creep) return false;
     try {
       if (BeeToolbox && typeof BeeToolbox.collectEnergy === 'function') {
-        BeeToolbox.collectEnergy(creep);
+        return BeeToolbox.collectEnergy(creep) === true;
       }
     } catch (e) {}
+    return false;
   }
 
   function tryWithdrawStorage(creep) {
