@@ -3,6 +3,7 @@
 var Traveler = require('Traveler');
 var BeeCombatSquads = require('BeeCombatSquads');
 var CombatAPI = BeeCombatSquads.CombatAPI;
+var MovementManager = require('Movement.Manager');
 var CoreLogger = require('core.logger');
 
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
@@ -77,8 +78,42 @@ function _buildBaseContext(creep) {
 function _resolveFocusTarget(context) {
   if (!context) return null;
   var targetId = CombatAPI.focusFireTarget(context.flagName);
+  if (!targetId && context.state === 'ENGAGE' && CombatAPI.localFallbackTarget) {
+    targetId = CombatAPI.localFallbackTarget(context.flagName, context.creep);
+  }
   if (context.state === 'RETREAT') targetId = null;
   return targetId ? Game.getObjectById(targetId) : null;
+}
+
+function _requestMove(creep, target, range, intentType) {
+  if (!creep || !target) return;
+  var opts = { range: range, ignoreCreeps: false, reusePath: 10, intentType: intentType || 'combat' };
+  if (MovementManager && typeof MovementManager.request === 'function') {
+    var rc = MovementManager.request(creep, target, null, opts);
+    if (rc === OK || (typeof rc === 'number' && rc > OK)) return;
+  }
+  creep.travelTo(target, { range: range, ignoreCreeps: false });
+}
+
+function _regroupAnchor(creep, context) {
+  if (!context || !context.squad) return context && context.rallyPos ? context.rallyPos : null;
+  var members = context.squad.members || {};
+  var anchor = members.leader ? Game.getObjectById(members.leader) : null;
+  if (anchor && anchor.id === creep.id) anchor = null;
+  if (!anchor && members.buddy) {
+    anchor = Game.getObjectById(members.buddy);
+    if (anchor && anchor.id === creep.id) anchor = null;
+  }
+  if (!anchor && members.medic) {
+    anchor = Game.getObjectById(members.medic);
+    if (anchor && anchor.id === creep.id) anchor = null;
+  }
+  var list = context.squad.memberIds || [];
+  for (var i = 0; !anchor && i < list.length; i++) {
+    var m = Game.getObjectById(list[i]);
+    if (m && m.id !== creep.id) anchor = m;
+  }
+  return anchor || context.rallyPos || null;
 }
 
 module.exports = {
@@ -89,6 +124,8 @@ module.exports = {
 
     var context = _buildBaseContext(creep);
     if (!context) return;
+    context.creep = creep;
+    context.readiness = CombatAPI.getSquadReadiness ? CombatAPI.getSquadReadiness(context.flagName) : null;
 
     try {
       combatLog.debug(
@@ -102,9 +139,14 @@ module.exports = {
     // Melee rally until ENGAGE, then advance + attack the shared focus target.
     if (context.state === 'RETREAT') {
       if (context.rallyPos) {
-        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+        _requestMove(creep, context.rallyPos, 1, 'combat');
       }
     } else if (context.state === 'ENGAGE') {
+      if (context.readiness && context.readiness.needsRegroup) {
+        var regroup = _regroupAnchor(creep, context);
+        if (regroup) _requestMove(creep, regroup, 1, 'combat');
+        return;
+      }
       var target = _resolveFocusTarget(context);
       if (!target) {
         try {
@@ -124,20 +166,17 @@ module.exports = {
           if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
           if (creep.getActiveBodyparts(RANGED_ATTACK) > 0) creep.rangedAttack(target);
         } else {
-          creep.travelTo(target, { range: 1, ignoreCreeps: false });
+          _requestMove(creep, target, 1, 'combat');
         }
       } else if (context.attackPos) {
         // melee creeps advance on the stored attack position so they keep pressure on the hostile area
-        creep.travelTo(
-          context.attackPos,
-          { range: 1, ignoreCreeps: false }
-        );
+        _requestMove(creep, context.attackPos, 1, 'combat');
       } else if (context.rallyPos) {
-        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+        _requestMove(creep, context.rallyPos, 1, 'combat');
       }
     } else {
       if (context.rallyPos) {
-        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+        _requestMove(creep, context.rallyPos, 1, 'combat');
       }
     }
 

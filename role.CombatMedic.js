@@ -5,6 +5,7 @@ var BeeCombatSquads = require('BeeCombatSquads');
 var BeeSelectors = require('BeeSelectors');
 var CombatAPI = BeeCombatSquads.CombatAPI;
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
+var MovementManager = require('Movement.Manager');
 
 function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
@@ -103,6 +104,19 @@ function _buildMedicContext(creep) {
   var members = base.squad.members || {};
   var leader = _resolveMember(members.leader);
   var buddy = _resolveMember(members.buddy);
+  if (!leader) leader = buddy;
+  if (!buddy) buddy = _resolveMember(members.medic);
+  var memberIds = base.squad.memberIds || [];
+  for (var i = 0; !leader && i < memberIds.length; i++) {
+    var fallbackLeader = _resolveMember(memberIds[i]);
+    if (!fallbackLeader || fallbackLeader.id === creep.id) continue;
+    leader = fallbackLeader;
+  }
+  for (i = 0; !buddy && i < memberIds.length; i++) {
+    var fallbackBuddy = _resolveMember(memberIds[i]);
+    if (!fallbackBuddy || fallbackBuddy.id === creep.id) continue;
+    buddy = fallbackBuddy;
+  }
   if (leader && leader.id === creep.id) leader = null;
   if (buddy && buddy.id === creep.id) buddy = null;
   return {
@@ -114,6 +128,16 @@ function _buildMedicContext(creep) {
     leader: leader,
     buddy: buddy
   };
+}
+
+function _requestMove(creep, target, range, intentType) {
+  if (!creep || !target) return;
+  var opts = { range: range, ignoreCreeps: false, reusePath: 10, intentType: intentType || 'combat' };
+  if (MovementManager && typeof MovementManager.request === 'function') {
+    var rc = MovementManager.request(creep, target, null, opts);
+    if (rc === OK || (typeof rc === 'number' && rc > OK)) return;
+  }
+  creep.travelTo(target, { range: range, ignoreCreeps: false });
 }
 
 function _selectHealTarget(creep, context) {
@@ -141,8 +165,6 @@ function _pickMoveTarget(creep, context, healTarget) {
   if (context.state === 'RETREAT' && context.rallyPos) return context.rallyPos;
   if (context.state !== 'ENGAGE' && context.rallyPos) return context.rallyPos;
 
-  if (context.state === 'ENGAGE' && context.attackPos) return context.attackPos;
-
   if (context.leader && creep.pos.getRangeTo(context.leader) > 2) return context.leader;
 
   if (
@@ -154,6 +176,8 @@ function _pickMoveTarget(creep, context, healTarget) {
   }
 
   if (context.buddy && creep.pos.getRangeTo(context.buddy) > 2) return context.buddy;
+
+  if (context.state === 'ENGAGE' && context.attackPos) return context.attackPos;
 
   if (context.rallyPos) return context.rallyPos;
   return null;
@@ -167,13 +191,19 @@ module.exports = {
 
     var context = _buildMedicContext(creep);
     if (!context) return;
+    context.readiness = CombatAPI.getSquadReadiness ? CombatAPI.getSquadReadiness(context.flagName) : null;
 
     var healTarget = _selectHealTarget(creep, context);
     _applyHealing(creep, healTarget);
 
+    if (context.readiness && context.readiness.needsRegroup && context.leader) {
+      _requestMove(creep, context.leader, 1, 'combat');
+      return;
+    }
+
     var moveTarget = _pickMoveTarget(creep, context, healTarget);
     if (moveTarget) {
-      creep.travelTo(moveTarget, { range: 1, ignoreCreeps: false });
+      _requestMove(creep, moveTarget, 1, 'combat');
     }
   }
 };
