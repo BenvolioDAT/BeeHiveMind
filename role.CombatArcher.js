@@ -3,6 +3,7 @@ var Traveler = require('Traveler');
 var BeeCombatSquads = require('BeeCombatSquads');
 var CombatAPI = BeeCombatSquads.CombatAPI;
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
+var MovementManager = require('Movement.Manager');
 
 function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
@@ -78,8 +79,21 @@ function _buildBaseContext(creep) {
 function _resolveFocusTarget(context) {
   if (!context) return null;
   var targetId = CombatAPI.focusFireTarget(context.flagName);
+  if (!targetId && context.state === 'ENGAGE' && CombatAPI.localFallbackTarget) {
+    targetId = CombatAPI.localFallbackTarget(context.flagName, context.creep);
+  }
   if (context.state === 'RETREAT') targetId = null;
   return targetId ? Game.getObjectById(targetId) : null;
+}
+
+function _requestMove(creep, target, range, intentType) {
+  if (!creep || !target) return;
+  var opts = { range: range, ignoreCreeps: false, reusePath: 10, intentType: intentType || 'combat' };
+  if (MovementManager && typeof MovementManager.request === 'function') {
+    var rc = MovementManager.request(creep, target, null, opts);
+    if (rc === OK || (typeof rc === 'number' && rc > OK)) return;
+  }
+  creep.travelTo(target, { range: range, ignoreCreeps: false });
 }
 
 function _buildArcherContext(creep) {
@@ -87,6 +101,14 @@ function _buildArcherContext(creep) {
   if (!base) return null;
   var members = base.squad.members || {};
   var leader = _resolveMember(members.leader);
+  if (!leader) leader = _resolveMember(members.buddy);
+  if (!leader) leader = _resolveMember(members.medic);
+  var memberIds = base.squad.memberIds || [];
+  for (var i = 0; !leader && i < memberIds.length; i++) {
+    var fallback = _resolveMember(memberIds[i]);
+    if (!fallback || fallback.id === creep.id) continue;
+    leader = fallback;
+  }
   if (leader && leader.id === creep.id) leader = null;
   return {
     flagName: base.flagName,
@@ -106,6 +128,8 @@ module.exports = {
 
     var context = _buildArcherContext(creep);
     if (!context) return;
+    context.creep = creep;
+    context.readiness = CombatAPI.getSquadReadiness ? CombatAPI.getSquadReadiness(context.flagName) : null;
 
     try {
       var combatLog = require('core.logger').createLogger('BeeArmy', require('core.logger').LOG_LEVEL.DEBUG);
@@ -119,14 +143,19 @@ module.exports = {
 
     if (context.state === 'RETREAT') {
       if (context.leader) {
-        creep.travelTo(context.leader, { range: 1, ignoreCreeps: false });
+        _requestMove(creep, context.leader, 1, 'combat');
       } else if (context.rallyPos) {
-        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+        _requestMove(creep, context.rallyPos, 1, 'combat');
       }
       return;
     }
 
     if (context.state === 'ENGAGE') {
+      if (context.readiness && context.readiness.needsRegroup) {
+        if (context.leader) _requestMove(creep, context.leader, 1, 'combat');
+        else if (context.rallyPos) _requestMove(creep, context.rallyPos, 1, 'combat');
+        return;
+      }
       var target = _resolveFocusTarget(context);
       if (!target) {
         try {
@@ -149,23 +178,22 @@ module.exports = {
           creep.rangedAttack(target);
           return;
         }
-        creep.travelTo(target, { range: 3, ignoreCreeps: false });
+        _requestMove(creep, target, 3, 'combat');
         return;
       }
 
       if (context.attackPos) {
-        creep.travelTo(
-          context.attackPos,
-          { range: 3, ignoreCreeps: false }
-        );
+        _requestMove(creep, context.attackPos, 3, 'combat');
         return;
       }
     }
 
     if (context.leader) {
-      creep.travelTo(context.leader, { range: 1, ignoreCreeps: false });
+      _requestMove(creep, context.leader, 1, 'combat');
     } else if (context.rallyPos) {
-      creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
+      _requestMove(creep, context.rallyPos, 1, 'combat');
+    } else if (context.attackPos && context.state === 'ENGAGE') {
+      _requestMove(creep, context.attackPos, 3, 'combat');
     }
   }
 };
