@@ -322,6 +322,11 @@ function softenRemoteDefensePlan(roomName) {
 
   var AVOID_TTL = 30;
   var RETARGET_COOLDOWN = 5;
+  // Debounce windows prevent instant room-entry reversal from transient intel.
+  var LUNA_LOCK_CONFIRM_TICKS = 3;
+  var LUNA_HOSTILE_CONFIRM_TICKS = 4;
+  var LUNA_HOSTILE_FALLBACK_TTL = 250;
+  var LUNA_EXCLUSIVE_CONFIRM_TICKS = 2;
 
   // Small bias to keep the current owner briefly (soft preference only)
   var ASSIGN_STICKY_TTL = 50;
@@ -767,7 +772,7 @@ function softenRemoteDefensePlan(roomName) {
     for (var i=0;i<rooms.length;i++){
       var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
       var rm = getRoomMemoryBucket(rn);
-      if (rm.hostile) continue;
+      if (isRoomMarkedHostile(rn)) continue;
       if (isRoomLockedByInvaderCore(rn)) continue;
 
       if (rm._lastValidFlagScan && (Game.time - rm._lastValidFlagScan) < 300) continue;
@@ -929,8 +934,42 @@ function softenRemoteDefensePlan(roomName) {
     creep.memory.targetRoom = null;
     creep.memory.assigned   = false;
     creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+    delete creep.memory._lockSince;
+    delete creep.memory._hostileSince;
+    delete creep.memory._exclusiveSince;
 
     debugSay(creep, '🌓YIELD');
+  }
+
+  function shouldReleaseDebounced(creep, memKey, active, confirmTicks) {
+    if (!creep || !creep.memory) return !!active;
+    if (!active) {
+      delete creep.memory[memKey];
+      return false;
+    }
+    if (typeof creep.memory[memKey] !== 'number') creep.memory[memKey] = Game.time;
+    return (Game.time - creep.memory[memKey]) >= confirmTicks;
+  }
+
+  function isRoomMarkedHostile(roomName) {
+    if (!roomName) return false;
+    var rm = getRoomMemoryBucket(roomName);
+    if (!rm || !rm.hostile) return false;
+    var until = (typeof rm.hostileUntil === 'number') ? rm.hostileUntil : null;
+    var seenAt = (typeof rm.hostileSeenAt === 'number') ? rm.hostileSeenAt : null;
+
+    if (until != null && Game.time > until) {
+      rm.hostile = false;
+      delete rm.hostileUntil;
+      delete rm.hostileSeenAt;
+      return false;
+    }
+    if (until == null && seenAt != null && (Game.time - seenAt) > LUNA_HOSTILE_FALLBACK_TTL) {
+      rm.hostile = false;
+      delete rm.hostileSeenAt;
+      return false;
+    }
+    return true;
   }
 
   function validateExclusiveSource(creep){
@@ -941,8 +980,13 @@ function softenRemoteDefensePlan(roomName) {
     var owner = maOwner(memAssign, sid);
 
     if (owner && owner !== creep.name){
-      releaseAssignment(creep);
-      return false;
+      // Debounce brief ownership jitter so we do not instantly bounce on the
+      // first conflicting read right after entering a room.
+      if (shouldReleaseDebounced(creep, '_exclusiveSince', true, LUNA_EXCLUSIVE_CONFIRM_TICKS)) {
+        releaseAssignment(creep);
+        return false;
+      }
+      return true;
     }
 
     var winners=[];
@@ -953,6 +997,7 @@ function softenRemoteDefensePlan(roomName) {
       }
     }
     if (winners.length <= MAX_LUNA_PER_SOURCE){
+      shouldReleaseDebounced(creep, '_exclusiveSince', false, LUNA_EXCLUSIVE_CONFIRM_TICKS);
       if (!owner) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
       return true;
     }
@@ -967,10 +1012,14 @@ function softenRemoteDefensePlan(roomName) {
     maSetOwner(memAssign, sid, win.name, win.memory.targetRoom||null);
 
     if (win.name !== creep.name){
-      console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
-      releaseAssignment(creep);
-      return false;
+      if (shouldReleaseDebounced(creep, '_exclusiveSince', true, LUNA_EXCLUSIVE_CONFIRM_TICKS)) {
+        console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
+        releaseAssignment(creep);
+        return false;
+      }
+      return true;
     }
+    shouldReleaseDebounced(creep, '_exclusiveSince', false, LUNA_EXCLUSIVE_CONFIRM_TICKS);
     return true;
   }
 
@@ -987,7 +1036,7 @@ function softenRemoteDefensePlan(roomName) {
       debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
       var br = creep.build(site);
       if (br === ERR_NOT_IN_RANGE) {
-        creep.travelTo(site, { range: 3, reusePath: 15, });
+        issueLunaMove(creep, site, { range: 3, reusePath: 15, });
       }
       return true;
     }
@@ -998,7 +1047,7 @@ function softenRemoteDefensePlan(roomName) {
       debugDrawLine(creep, ctrl, CFG.DRAW.UPG_COLOR, "UPG");
       var ur = creep.upgradeController(ctrl);
       if (ur === ERR_NOT_IN_RANGE) {
-        creep.travelTo(ctrl, { range: 3, reusePath: 15, });
+        issueLunaMove(creep, ctrl, { range: 3, reusePath: 15, });
       }
       return true;
     }
@@ -1030,11 +1079,37 @@ function softenRemoteDefensePlan(roomName) {
     creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
   }
 
+  function isOnBorder(pos) {
+    return pos && (pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49);
+  }
+
+  // Movement discipline helper:
+  // ensures Luna issues at most one movement command per tick.
+  function issueLunaMove(creep, target, opts) {
+    if (!creep || !target) return ERR_INVALID_TARGET;
+    if (creep.memory._lunaMoveTick === Game.time) return ERR_BUSY;
+    creep.memory._lunaMoveTick = Game.time;
+    return creep.travelTo(target, opts || {});
+  }
+
+  function stabilizeLunaBorder(creep) {
+    if (!creep || !creep.memory || !creep.memory.targetRoom) return false;
+    if (creep.pos.roomName !== creep.memory.targetRoom) return false;
+    if (!isOnBorder(creep.pos)) return false;
+    if (creep.memory._lunaMoveTick === Game.time) return true;
+    creep.memory._lunaMoveTick = Game.time;
+    if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
+    if (creep.pos.x === 49) return creep.move(LEFT) === OK;
+    if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
+    if (creep.pos.y === 49) return creep.move(TOP) === OK;
+    return false;
+  }
+
   function idleAtAnchor(creep, label) {
     var anchor = getAnchorPos(getHomeName(creep));
     debugSay(creep, label || 'IDLE');
     debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, label || 'IDLE');
-    creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
+    issueLunaMove(creep, anchor, { range: 2, reusePath: CFG.PATH_REUSE });
   }
 
   function shouldReleaseForEndOfLife(creep) {
@@ -1088,7 +1163,7 @@ function softenRemoteDefensePlan(roomName) {
     debugSay(creep, '➡️'+creep.memory.targetRoom);
     debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
 
-    creep.travelTo(dest, {
+    issueLunaMove(creep, dest, {
        range: 20,
         reusePath: 20,
         });
@@ -1100,6 +1175,7 @@ function softenRemoteDefensePlan(roomName) {
     ensureLunaIdentity(creep);
     auditOncePerTick();
     if (!creep.memory.home) getHomeName(creep);
+    if (creep.memory._lunaMoveTick !== Game.time) delete creep.memory._lunaMoveTick;
     trackMovementBreadcrumb(creep);
   }
 
@@ -1137,6 +1213,9 @@ function softenRemoteDefensePlan(roomName) {
       if (handleForcedYield(creep)) return;
 
       if (!ensureActiveAssignment(creep)) return;
+      // Border stabilization for the first room-entry tile in assigned room:
+      // step inward once so we avoid immediate edge ping-pong.
+      if (stabilizeLunaBorder(creep)) return;
 
       state = determineLunaState(creep);
       if (state === 'UNASSIGNED') {
@@ -1144,13 +1223,24 @@ function softenRemoteDefensePlan(roomName) {
         return;
       }
 
-      if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)){
-        debugSay(creep, '⛔LOCK');
-        var center = new RoomPosition(25,25,creep.memory.targetRoom);
-        debugDrawLine(creep, center, CFG.DRAW.TRAVEL_COLOR, "LOCK");
-        console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
-        releaseAssignment(creep);
-        return;
+      var targetRoomName = creep.memory.targetRoom;
+      var roomLocked = targetRoomName && isRoomLockedByInvaderCore(targetRoomName);
+      if (roomLocked){
+        // Debounce lock-triggered releases so a single stale read on entry
+        // does not force an immediate turn-around at room borders.
+        var lockConfirmed = shouldReleaseDebounced(creep, '_lockSince', true, LUNA_LOCK_CONFIRM_TICKS);
+        if (lockConfirmed) {
+          debugSay(creep, '⛔LOCK');
+          var center = new RoomPosition(25,25,creep.memory.targetRoom);
+          debugDrawLine(creep, center, CFG.DRAW.TRAVEL_COLOR, "LOCK");
+          console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
+          releaseAssignment(creep);
+          return;
+        } else {
+          debugSay(creep, '⏳LOCK');
+        }
+      } else {
+        shouldReleaseDebounced(creep, '_lockSince', false, LUNA_LOCK_CONFIRM_TICKS);
       }
 
       if (!validateExclusiveSource(creep)) return;
@@ -1186,11 +1276,18 @@ function softenRemoteDefensePlan(roomName) {
       }
 
       var tmem = getRoomMemoryBucket(creep.memory.targetRoom);
-      if (tmem && tmem.hostile){
-        console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
-        debugSay(creep, '⚠️HOST');
-        releaseAssignment(creep);
-        return;
+      if (isRoomMarkedHostile(creep.memory.targetRoom)){
+        // Similar debounce for hostile-room memory: require persistence for a few
+        // ticks before dropping the assignment and reversing.
+        var hostileConfirmed = shouldReleaseDebounced(creep, '_hostileSince', true, LUNA_HOSTILE_CONFIRM_TICKS);
+        if (hostileConfirmed) {
+          console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
+          debugSay(creep, '⚠️HOST');
+          releaseAssignment(creep);
+          return;
+        }
+      } else {
+        shouldReleaseDebounced(creep, '_hostileSince', false, LUNA_HOSTILE_CONFIRM_TICKS);
       }
       if (!tmem || !tmem.sources) return;
 
@@ -1222,7 +1319,7 @@ function softenRemoteDefensePlan(roomName) {
         var rm = Memory.rooms[roomName];
         if (!rm || !rm.sources) return false;
         if (!inRadius[roomName]) return false;
-        if (rm.hostile) return false;
+        if (isRoomMarkedHostile(roomName)) return false;
         if (isRoomLockedByInvaderCore(roomName)) return false;
         return roomName !== Memory.firstSpawnRoom;
       });
@@ -1331,7 +1428,7 @@ function softenRemoteDefensePlan(roomName) {
         var destHome = new RoomPosition(25, 25, homeName);
         debugSay(creep, '🏠');
         debugDrawLine(creep, destHome, CFG.DRAW.TRAVEL_COLOR, "HOME");
-        creep.travelTo(destHome, { range: 20, reusePath: 20 });
+        issueLunaMove(creep, destHome, { range: 20, reusePath: 20 });
         return;
       }
 
@@ -1353,7 +1450,7 @@ function softenRemoteDefensePlan(roomName) {
           debugDrawLine(creep, a, CFG.DRAW.DELIVER_COLOR, lbl);
           var rc = creep.transfer(a, RESOURCE_ENERGY);
           if (rc === ERR_NOT_IN_RANGE) {
-            creep.travelTo(a, { reusePath: CFG.PATH_REUSE });
+            issueLunaMove(creep, a, { reusePath: CFG.PATH_REUSE });
           }
           return;
         }
@@ -1366,7 +1463,7 @@ function softenRemoteDefensePlan(roomName) {
         debugDrawLine(creep, stor, CFG.DRAW.DELIVER_COLOR, "STO");
         var rc2 = creep.transfer(stor, RESOURCE_ENERGY);
         if (rc2 === ERR_NOT_IN_RANGE) {
-          creep.travelTo(stor, { reusePath: CFG.PATH_REUSE });
+          issueLunaMove(creep, stor, { reusePath: CFG.PATH_REUSE });
         }
         return;
       }
@@ -1385,7 +1482,7 @@ function softenRemoteDefensePlan(roomName) {
           debugDrawLine(creep, b, CFG.DRAW.DELIVER_COLOR, "CON");
           var rc3 = creep.transfer(b, RESOURCE_ENERGY);
           if (rc3 === ERR_NOT_IN_RANGE) {
-            creep.travelTo(b, { reusePath: CFG.PATH_REUSE });
+            issueLunaMove(creep, b, { reusePath: CFG.PATH_REUSE });
           }
           return;
         }
@@ -1398,7 +1495,7 @@ function softenRemoteDefensePlan(roomName) {
       var anchor = getAnchorPos(homeName);
       debugSay(creep, 'IDLE');
       debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
+      issueLunaMove(creep, anchor, { range: 2, reusePath: CFG.PATH_REUSE });
     },
 
     harvestSource: function(creep){
@@ -1410,7 +1507,7 @@ function softenRemoteDefensePlan(roomName) {
         var dest = new RoomPosition(25,25,creep.memory.targetRoom);
         debugSay(creep, '➡️'+creep.memory.targetRoom);
         debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-        creep.travelTo(dest, { range: 20, reusePath: 20});
+        issueLunaMove(creep, dest, { range: 20, reusePath: 20});
         return;
       }
 
@@ -1438,7 +1535,7 @@ function softenRemoteDefensePlan(roomName) {
 
       var stuckTicks = typeof creep.memory._stuck === 'number' ? creep.memory._stuck : 0;
       if (stuckTicks >= STUCK_WINDOW){
-        creep.travelTo(src, { range: 1, reusePath: 3,  });
+        issueLunaMove(creep, src, { range: 1, reusePath: 3,  });
         debugSay(creep, '🚧');
       }
 
@@ -1446,7 +1543,7 @@ function softenRemoteDefensePlan(roomName) {
       debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
       var rc = creep.harvest(src);
       if (rc===ERR_NOT_IN_RANGE) {
-        creep.travelTo(src, { range: 1, reusePath: 15, });
+        issueLunaMove(creep, src, { range: 1, reusePath: 15, });
       }
       else if (rc===OK){
         touchSourceActive(creep.room.name, sid);

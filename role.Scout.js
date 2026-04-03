@@ -283,6 +283,10 @@ var ROOM_STAY_TICKS = 75;
 var REVISIT_TICKS = 750;
 var INTEL_INTERVAL = 150;
 var PATH_REUSE = 30;
+// Prevents first-tick room-entry ping-pong. Scouts still retreat immediately
+// from severe danger, but not from every transient "hostile seen" signal.
+var ROOM_ENTRY_GRACE_TICKS = 3;
+var HARD_RETREAT_THREAT_SCORE = 20;
 
 function stampVisit(roomName) {
   if (!roomName) return;
@@ -493,7 +497,23 @@ function ensureScoutMem(creep) {
   if (m.targetRoom == null && creep.memory.targetRoom) m.targetRoom = creep.memory.targetRoom;
   if (!m.state) m.state = STATE_IDLE;
   if (typeof m.exitIndex !== 'number') m.exitIndex = 0;
+  if (typeof m.enteredRoomTick !== 'number') m.enteredRoomTick = Game.time;
+  if (!m.lastEnteredRoom) m.lastEnteredRoom = creep.pos.roomName;
   return m;
+}
+
+function trackRoomEntry(creep, mem) {
+  if (!creep || !mem) return;
+  if (mem.lastEnteredRoom !== creep.pos.roomName) {
+    mem.lastEnteredRoom = creep.pos.roomName;
+    mem.enteredRoomTick = Game.time;
+  }
+}
+
+function inRoomEntryGrace(creep, mem) {
+  if (!creep || !mem) return false;
+  if (typeof mem.enteredRoomTick !== 'number') return false;
+  return (Game.time - mem.enteredRoomTick) < ROOM_ENTRY_GRACE_TICKS;
 }
 
 function getIntelAge(roomName) {
@@ -576,25 +596,62 @@ function updateIntel(creep) {
   return threatInfo;
 }
 
-function shouldRetreat(creep, threatInfo) {
-  if (threatInfo && threatInfo.threat && threatInfo.threat.hasThreat && threatInfo.threat.score > 0) return true;
+function shouldRetreat(creep, threatInfo, inEntryGrace) {
+  var score = (threatInfo && threatInfo.threat && typeof threatInfo.threat.score === 'number')
+    ? threatInfo.threat.score
+    : 0;
+  var hasThreat = !!(threatInfo && threatInfo.threat && threatInfo.threat.hasThreat);
+  if (hasThreat) {
+    if (inEntryGrace && score < HARD_RETREAT_THREAT_SCORE && creep.hits === creep.hitsMax) return false;
+    return score > 0;
+  }
   var hostiles = (creep.room && creep.room.find) ? creep.room.find(FIND_HOSTILE_CREEPS) : [];
-  return hostiles.length > 0 && creep.hits < creep.hitsMax;
+  if (hostiles.length > 0 && creep.hits < creep.hitsMax) return true;
+  if (inEntryGrace && creep.hits === creep.hitsMax && hostiles.length <= 1) return false;
+  return hostiles.length > 0;
+}
+
+function isOnBorder(pos) {
+  return pos && (pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49);
+}
+
+// Movement discipline helper:
+// - guarantees this role issues at most ONE move intent per tick
+// - keeps movement boring/stable and prevents same-tick branch thrash
+function issueScoutMove(creep, target, opts) {
+  if (!creep || !target) return ERR_INVALID_TARGET;
+  if (creep.memory._scoutMoveTick === Game.time) return ERR_BUSY;
+  creep.memory._scoutMoveTick = Game.time;
+  return creep.travelTo(target, opts || {});
+}
+
+function stabilizeBorderOnEntry(creep, mem) {
+  if (!creep || !mem || !mem.targetRoom) return false;
+  if (creep.pos.roomName !== mem.targetRoom) return false;
+  if (!inRoomEntryGrace(creep, mem)) return false;
+  if (!isOnBorder(creep.pos)) return false;
+  if (creep.memory._scoutMoveTick === Game.time) return true;
+  creep.memory._scoutMoveTick = Game.time;
+  if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
+  if (creep.pos.x === 49) return creep.move(LEFT) === OK;
+  if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
+  if (creep.pos.y === 49) return creep.move(TOP) === OK;
+  return false;
 }
 
 function wanderRoom(creep) {
   if (creep.room && creep.room.controller) {
-    creep.travelTo(creep.room.controller, { range: 3, reusePath: 10 });
+    issueScoutMove(creep, creep.room.controller, { range: 3, reusePath: 10 });
     return;
   }
   var center = new RoomPosition(25, 25, creep.pos.roomName);
-  creep.travelTo(center, { range: 10, reusePath: 10 });
+  issueScoutMove(creep, center, { range: 10, reusePath: 10 });
 }
 
 function returnHome(creep, mem) {
   var homeRoom = mem.home || creep.pos.roomName;
   var anchor = new RoomPosition(25, 25, homeRoom);
-  creep.travelTo(anchor, { range: 20, reusePath: PATH_REUSE });
+  issueScoutMove(creep, anchor, { range: 20, reusePath: PATH_REUSE });
   if (creep.pos.roomName === homeRoom) {
     mem.state = STATE_IDLE;
     mem.targetRoom = null;
@@ -608,6 +665,8 @@ var roleScout = {
   role: 'Scout',
   run: function (creep) {
     var mem = ensureScoutMem(creep);
+    if (creep.memory._scoutMoveTick !== Game.time) delete creep.memory._scoutMoveTick;
+    trackRoomEntry(creep, mem);
 
     if (!mem.targetRoom) chooseTargetRoom(creep, mem);
     var state = refreshState(creep, mem);
@@ -623,14 +682,16 @@ var roleScout = {
         creep.memory.state = mem.state;
         return;
       }
-      creep.travelTo(new RoomPosition(25, 25, mem.targetRoom), { range: 20, reusePath: PATH_REUSE });
+      issueScoutMove(creep, new RoomPosition(25, 25, mem.targetRoom), { range: 20, reusePath: PATH_REUSE });
       return;
     }
 
     if (state === STATE_SCOUT) {
       if (!mem.arrivedAt) mem.arrivedAt = Game.time;
+      if (stabilizeBorderOnEntry(creep, mem)) return;
       var threatInfo = updateIntel(creep);
-      if (shouldRetreat(creep, threatInfo)) {
+      var entryGrace = inRoomEntryGrace(creep, mem) && mem.targetRoom && creep.pos.roomName === mem.targetRoom;
+      if (shouldRetreat(creep, threatInfo, entryGrace)) {
         mem.state = STATE_RETURN;
         creep.memory.state = mem.state;
         returnHome(creep, mem);
