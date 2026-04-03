@@ -4,6 +4,7 @@ var Logger = require('core.logger');
 var CoreConfig = require('core.config');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
+var HOSTILE_ROOM_TTL = 250;
 
 // This utility file gets touched by nearly every role.  The more we can keep the
 // helpers flat and well-named, the easier it is for a new contributor to spot a
@@ -509,15 +510,33 @@ var BeeToolbox = {
   // Mark room hostile if it contains an Invader Core.
   logHostileStructures: function (room) {
     if (!room) return;
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+    var roomMem = Memory.rooms[room.name];
     var invaderCore = room.find(FIND_HOSTILE_STRUCTURES, {
       filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; }
     });
     if (invaderCore.length > 0) {
-      if (!Memory.rooms) Memory.rooms = {};
-      if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-      Memory.rooms[room.name].hostile = true;
+      roomMem.hostile = true;
+      roomMem.hostileSeenAt = Game.time;
+      roomMem.hostileUntil = Game.time + HOSTILE_ROOM_TTL;
       if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
         toolboxLog.warn('Marked', room.name, 'as hostile due to Invader Core.');
+      }
+      return;
+    }
+
+    // Hostility decays unless it is refreshed by fresh Invader Core sightings.
+    if (roomMem.hostile) {
+      var until = (typeof roomMem.hostileUntil === 'number') ? roomMem.hostileUntil : null;
+      var seenAt = (typeof roomMem.hostileSeenAt === 'number') ? roomMem.hostileSeenAt : null;
+      var expired = false;
+      if (until != null) expired = Game.time > until;
+      else if (seenAt != null) expired = (Game.time - seenAt) > HOSTILE_ROOM_TTL;
+      if (expired) {
+        roomMem.hostile = false;
+        delete roomMem.hostileUntil;
+        delete roomMem.hostileSeenAt;
       }
     }
   },

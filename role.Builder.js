@@ -101,6 +101,16 @@ function debugRing(room, pos, color, text) {
   } catch (e) {}
 }
 
+// Movement discipline helper:
+// Ensures Builder issues at most one move command per tick, even when several
+// branches could request movement in the same run.
+function issueBuilderMove(creep, target, opts) {
+  if (!creep || !target) return ERR_INVALID_TARGET;
+  if (creep.memory._builderMoveTick === Game.time) return ERR_BUSY;
+  creep.memory._builderMoveTick = Game.time;
+  return creep.travelTo(target, opts || {});
+}
+
   // -----------------------------
   // A) Config + state helpers
   // -----------------------------
@@ -155,10 +165,36 @@ function debugRing(room, pos, color, text) {
     return creep.memory.builderState;
   }
 
+  function getActiveBuilderTarget(creep) {
+    if (!creep || !creep.memory || !creep.memory.builderTargetId) return null;
+    if (creep.memory.builderTargetType !== 'construction') return null;
+    return Game.constructionSites[creep.memory.builderTargetId] || null;
+  }
+
+  function shouldKeepTargetDuringRefuel(creep) {
+    var target = getActiveBuilderTarget(creep);
+    if (!target) return false;
+    var homeName = getHomeName(creep);
+    if (!homeName) return false;
+    // Keep remote build intent when the assigned site is outside home room.
+    return target.pos && target.pos.roomName !== homeName;
+  }
+
+  function refreshRefuelLock(creep) {
+    var lock = creep.memory.builderRefuelLock;
+    if (!lock) return false;
+    var target = getActiveBuilderTarget(creep);
+    if (!target) { delete creep.memory.builderRefuelLock; return false; }
+    if (lock.targetId !== target.id) { delete creep.memory.builderRefuelLock; return false; }
+    if (typeof lock.until !== 'number' || Game.time > lock.until) { delete creep.memory.builderRefuelLock; return false; }
+    return true;
+  }
+
   // -----------------------------
   // B) Energy collection helpers
   // -----------------------------
   function collectEnergy(creep) {
+    var keepRemoteIntent = refreshRefuelLock(creep);
     // Prefer grabbing energy from a rich home storage/terminal to speed up remote building.
     var homeName = (typeof getHomeName === 'function') ? getHomeName(creep) : null;
     var homeRoom = homeName ? Game.rooms[homeName] : null;
@@ -171,13 +207,13 @@ function debugRing(room, pos, color, text) {
     var homeIsRich = homeEnergy >= HOME_RICH_ENERGY;
     var homeIsLow = homeEnergy <= HOME_LOW_ENERGY;
 
-    if (homeIsRich && homeName) {
+    if (homeIsRich && homeName && !keepRemoteIntent) {
       if (!homeRoom || creep.pos.roomName !== homeName) {
         var anchorPos = (typeof getAnchorPos === 'function') ? getAnchorPos(homeName) : null;
         if (anchorPos) {
           debugSay(creep, '🏠');
           debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME•ENERGY");
-          creep.travelTo(anchorPos, { range: 2, reusePath: 25 });
+          issueBuilderMove(creep, anchorPos, { range: 2, reusePath: 25 });
           return true; // commuting home to refuel from rich storage
         }
       } else {
@@ -193,7 +229,7 @@ function debugRing(room, pos, color, text) {
           debugDrawLine(creep, withdrawTarget, CFG.DRAW.FILL_COLOR, "HOME•WITHDRAW");
           var homeWithdraw = creep.withdraw(withdrawTarget, RESOURCE_ENERGY);
           if (homeWithdraw === ERR_NOT_IN_RANGE) {
-            creep.travelTo(withdrawTarget, { range: 1, reusePath: 15 });
+            issueBuilderMove(creep, withdrawTarget, { range: 1, reusePath: 15 });
           }
           return true;
         }
@@ -212,7 +248,7 @@ function debugRing(room, pos, color, text) {
       debugDrawLine(creep, tomb, CFG.DRAW.GRAVE_COLOR, "TOMB");
       var tr = creep.withdraw(tomb, RESOURCE_ENERGY);
       if (tr === ERR_NOT_IN_RANGE) {
-        creep.travelTo(tomb, { range: 1, reusePath: 20 });
+        issueBuilderMove(creep, tomb, { range: 1, reusePath: 20 });
       }
       return true;
     }
@@ -228,7 +264,7 @@ function debugRing(room, pos, color, text) {
       debugDrawLine(creep, ruin, CFG.DRAW.GRAVE_COLOR, "RUIN");
       var rr = creep.withdraw(ruin, RESOURCE_ENERGY);
       if (rr === ERR_NOT_IN_RANGE) {
-        creep.travelTo(ruin, { range: 1, reusePath: 20 });
+        issueBuilderMove(creep, ruin, { range: 1, reusePath: 20 });
       }
       return true;
     }
@@ -244,7 +280,7 @@ function debugRing(room, pos, color, text) {
       debugSay(creep, '🍪');
       debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP");
       if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-        creep.travelTo(dropped, { range: 1, reusePath: 15 });
+        issueBuilderMove(creep, dropped, { range: 1, reusePath: 15 });
       }
       return true;
     }
@@ -263,7 +299,7 @@ function debugRing(room, pos, color, text) {
       debugDrawLine(creep, srcCont, CFG.DRAW.FILL_COLOR, "SRC•CONT");
       var cr = creep.withdraw(srcCont, RESOURCE_ENERGY);
       if (cr === ERR_NOT_IN_RANGE) {
-        creep.travelTo(srcCont, { range: 1, reusePath: 25 });
+        issueBuilderMove(creep, srcCont, { range: 1, reusePath: 25 });
       }
       return true;
     }
@@ -286,7 +322,7 @@ function debugRing(room, pos, color, text) {
       debugDrawLine(creep, storeLike, CFG.DRAW.FILL_COLOR, "WITHDRAW");
       var sr = creep.withdraw(storeLike, RESOURCE_ENERGY);
       if (sr === ERR_NOT_IN_RANGE) {
-        creep.travelTo(storeLike, { range: 1, reusePath: 25 });
+        issueBuilderMove(creep, storeLike, { range: 1, reusePath: 25 });
       }
       return true;
     }
@@ -299,7 +335,7 @@ function debugRing(room, pos, color, text) {
         debugDrawLine(creep, src, CFG.DRAW.SOURCE, "MINE");
         var hr = creep.harvest(src);
         if (hr === ERR_NOT_IN_RANGE) {
-          creep.travelTo(src, { range: 1, reusePath: 20 });
+          issueBuilderMove(creep, src, { range: 1, reusePath: 20 });
         }
         return true;
       }
@@ -313,7 +349,7 @@ function debugRing(room, pos, color, text) {
         if (anchorPos) {
           debugSay(creep, '🏠');
           debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME");
-          creep.travelTo(anchorPos, { range: 2, reusePath: 25 });
+          issueBuilderMove(creep, anchorPos, { range: 2, reusePath: 25 });
           return true; // we are actively walking home to refuel
         }
       }
@@ -329,7 +365,7 @@ function debugRing(room, pos, color, text) {
     if (anchor && anchor.pos) {
       debugSay(creep, '🧘');
       debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      creep.travelTo(anchor, { range: 2, reusePath: 20 });
+      issueBuilderMove(creep, anchor, { range: 2, reusePath: 20 });
     }
   }
 
@@ -354,7 +390,7 @@ function debugRing(room, pos, color, text) {
     debugSay(creep, '➡️SINK');
     debugDrawLine(creep, sink, CFG.DRAW.SINK_COLOR, "SINK");
     if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-      creep.travelTo(sink, { range: 1, reusePath: 20 });
+      issueBuilderMove(creep, sink, { range: 1, reusePath: 20 });
     }
     return true;
   }
@@ -436,6 +472,8 @@ function debugRing(room, pos, color, text) {
   // Step off the exit tiles so we do not bounce between rooms.
   function nudgeOffBorder(creep) {
     if (!isOnBorder(creep.pos)) return false;
+    if (creep.memory._builderMoveTick === Game.time) return true;
+    creep.memory._builderMoveTick = Game.time;
     if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
     if (creep.pos.x === 49) return creep.move(LEFT) === OK;
     if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
@@ -456,7 +494,7 @@ function debugRing(room, pos, color, text) {
     var exit = creep.pos.findClosestByRange(exitDir);
     if (exit) {
       debugDrawLine(creep, exit, CFG.DRAW.TRAVEL, 'EXIT');
-      creep.moveTo(exit, { reusePath: 10, maxRooms: 1 });
+      issueBuilderMove(creep, exit, { range: 0, reusePath: 10, maxRooms: 1 });
       return true;
     }
     return false;
@@ -476,7 +514,7 @@ function debugRing(room, pos, color, text) {
 
     if (!creep.pos.inRangeTo(target.pos, 3)) {
       debugDrawLine(creep, target, CFG.DRAW.TRAVEL, 'TO•SITE');
-      creep.moveTo(target, { range: 3, reusePath: 10 });
+      issueBuilderMove(creep, target, { range: 3, reusePath: 10 });
       return true;
     }
 
@@ -538,13 +576,27 @@ function debugRing(room, pos, color, text) {
     role: 'Builder',
     run: function (creep) {
       ensureBuilderIdentity(creep);
+      if (creep.memory._builderMoveTick !== Game.time) delete creep.memory._builderMoveTick;
+      if (!needsEnergy(creep) && creep.memory.builderRefuelLock) {
+        delete creep.memory.builderRefuelLock;
+      }
 
       var state = getBuilderState(creep);
       if (needsEnergy(creep)) {
         setBuilderState(creep, BUILDER_STATES.HARVEST);
         state = BUILDER_STATES.HARVEST;
-        creep.memory.builderTargetId = null;
-        creep.memory.builderTargetType = null;
+        // Preserve remote target intent briefly so builders do not cross into a
+        // remote room then immediately reverse toward home on the first empty tick.
+        if (shouldKeepTargetDuringRefuel(creep)) {
+          creep.memory.builderRefuelLock = {
+            targetId: creep.memory.builderTargetId,
+            until: Game.time + 35
+          };
+        } else {
+          creep.memory.builderTargetId = null;
+          creep.memory.builderTargetType = null;
+          delete creep.memory.builderRefuelLock;
+        }
       }
 
       if (state === BUILDER_STATES.HARVEST) {
