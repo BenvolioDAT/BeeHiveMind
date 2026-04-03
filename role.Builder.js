@@ -1,4 +1,5 @@
 'use strict';
+var BeeSelectors = require('BeeSelectors');
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -174,10 +175,31 @@ function issueBuilderMove(creep, target, opts) {
   function shouldKeepTargetDuringRefuel(creep) {
     var target = getActiveBuilderTarget(creep);
     if (!target) return false;
+    var targetScore = (BeeSelectors && BeeSelectors.scoreConstructionSiteForBuilder)
+      ? BeeSelectors.scoreConstructionSiteForBuilder(creep, target)
+      : null;
     var homeName = getHomeName(creep);
+    if (targetScore && targetScore.bucket <= 2) {
+      // Keep critical/support work sticky through refuel so builders resume core
+      // infrastructure instead of drifting to low-value convenience roads.
+      return true;
+    }
     if (!homeName) return false;
-    // Keep remote build intent when the assigned site is outside home room.
+    // Legacy safety: still keep remote intent for low-priority sites so cross-room
+    // trips do not immediately bounce back on the first empty tick.
     return target.pos && target.pos.roomName !== homeName;
+  }
+
+  function getRefuelLockDuration(creep) {
+    var target = getActiveBuilderTarget(creep);
+    if (!target) return 25;
+    var targetScore = (BeeSelectors && BeeSelectors.scoreConstructionSiteForBuilder)
+      ? BeeSelectors.scoreConstructionSiteForBuilder(creep, target)
+      : null;
+    if (!targetScore) return 25;
+    if (targetScore.bucket <= 1) return 80;
+    if (targetScore.bucket === 2) return 55;
+    return 25;
   }
 
   function refreshRefuelLock(creep) {
@@ -399,64 +421,49 @@ function issueBuilderMove(creep, target, opts) {
   // C) Target helpers (build only)
   // -----------------------------
   // Target selection priority:
-  // 1) Sticky target from memory; 2) construction in current room; 3) nearest other room site.
+  // 1) Evaluate sticky target score; 2) evaluate all construction sites with one
+  // shared scorer (local + remote); 3) keep sticky if it is still competitive.
   function getBuilderTarget(creep) {
     var cachedId = creep.memory.builderTargetId;
     var cachedType = creep.memory.builderTargetType;
+    var cachedSite = null;
+    var cachedScore = null;
 
-    // Reuse a remembered site when it still exists.
+    // Re-read remembered site and score it with the same model used globally.
     if (cachedId && cachedType === 'construction') {
-      var cachedSite = Game.constructionSites[cachedId];
-      if (cachedSite) {
+      cachedSite = Game.constructionSites[cachedId];
+      if (cachedSite && BeeSelectors && BeeSelectors.scoreConstructionSiteForBuilder) {
+        cachedScore = BeeSelectors.scoreConstructionSiteForBuilder(creep, cachedSite);
+      }
+      if (!cachedSite) {
+        creep.memory.builderTargetId = null;
+        creep.memory.builderTargetType = null;
+      }
+    }
+
+    // 2) Single shared scorer over ALL visible sites (local + remote).
+    var best = (BeeSelectors && BeeSelectors.selectBestConstructionSiteForBuilder)
+      ? BeeSelectors.selectBestConstructionSiteForBuilder(creep)
+      : null;
+
+    // 3) Sticky retention policy: keep high-priority targets unless there is a
+    // meaningfully better choice; allow low-priority roads to be replaced faster.
+    if (cachedSite && cachedScore && best && best.site) {
+      var keepDelta = 15;
+      if (cachedScore.bucket <= 1) keepDelta = 45; // strong stickiness for critical sites
+      else if (cachedScore.bucket === 2) keepDelta = 25;
+      // Convenience sites should be easier to replace by better work.
+      else keepDelta = 5;
+      if (best.score < (cachedScore.score + keepDelta)) {
         return { target: cachedSite, type: 'build' };
       }
-      creep.memory.builderTargetId = null;
-      creep.memory.builderTargetType = null;
     }
 
-    // 2) Prefer a nearby site with a small priority list so vital structures get finished first.
-    var localSites = creep.room.find(FIND_CONSTRUCTION_SITES);
-    if (localSites && localSites.length > 0) {
-      var prio = { 'spawn': 5, 'extension': 4, 'tower': 3, 'container': 2, 'road': 1 };
-      var bestLocal = null;
-      var bestScore = -1;
-      var bestRange = 1e9;
-      for (var i = 0; i < localSites.length; i++) {
-        var site = localSites[i];
-        var score = prio[site.structureType] || 0;
-        var range = creep.pos.getRangeTo(site.pos);
-        if (score > bestScore || (score === bestScore && range < bestRange)) {
-          bestLocal = site;
-          bestScore = score;
-          bestRange = range;
-        }
-      }
-      if (bestLocal) {
-        creep.memory.builderTargetId = bestLocal.id;
-        creep.memory.builderTargetType = 'construction';
-        debugRing(creep.room, bestLocal.pos, CFG.DRAW.BUILD_COLOR, 'BUILD');
-        return { target: bestLocal, type: 'build' };
-      }
-    }
-
-    // 3) Otherwise grab the nearest construction site in any visible room.
-    var nearestSite = null;
-    var bestDistance = 1e9;
-    for (var sid in Game.constructionSites) {
-      if (!Game.constructionSites.hasOwnProperty(sid)) continue;
-      var s2 = Game.constructionSites[sid];
-      var dist = Game.map.getRoomLinearDistance(creep.pos.roomName, s2.pos.roomName);
-      if (dist < bestDistance) {
-        bestDistance = dist;
-        nearestSite = s2;
-      }
-    }
-
-    if (nearestSite) {
-      creep.memory.builderTargetId = nearestSite.id;
+    if (best && best.site) {
+      creep.memory.builderTargetId = best.site.id;
       creep.memory.builderTargetType = 'construction';
-      debugRing(creep.room, nearestSite.pos, CFG.DRAW.BUILD_COLOR, 'REMOTE');
-      return { target: nearestSite, type: 'build' };
+      debugRing(creep.room, best.site.pos, CFG.DRAW.BUILD_COLOR, 'BUILD');
+      return { target: best.site, type: 'build' };
     }
 
     return null;
@@ -588,9 +595,10 @@ function issueBuilderMove(creep, target, opts) {
         // Preserve remote target intent briefly so builders do not cross into a
         // remote room then immediately reverse toward home on the first empty tick.
         if (shouldKeepTargetDuringRefuel(creep)) {
+          var lockFor = getRefuelLockDuration(creep);
           creep.memory.builderRefuelLock = {
             targetId: creep.memory.builderTargetId,
-            until: Game.time + 35
+            until: Game.time + lockFor
           };
         } else {
           creep.memory.builderTargetId = null;

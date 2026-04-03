@@ -66,6 +66,27 @@ var BUILD_PRIORITY = {
   road: 1
 };
 
+// Shared Builder scoring buckets (lower number = more important bucket).
+// Keeping this beside BUILD_PRIORITY makes the intent easy to compare:
+// - BUILD_PRIORITY drives per-room snapshot sorting.
+// - BUILDER_SITE_BUCKETS drives cross-room Builder targeting decisions.
+var BUILDER_SITE_BUCKETS = {
+  spawn: 1,
+  extension: 1,
+  tower: 1,
+  container: 2,
+  storage: 2,
+  terminal: 2,
+  link: 2,
+  road: 3
+};
+
+var BUILDER_BUCKET_BASE_SCORE = {
+  1: 300, // critical core
+  2: 190, // important support
+  3: 60   // convenience / fallback
+};
+
 // Function header: computeRepairGoal(structure)
 // Inputs: structure needing repairs
 // Output: desired hit points to aim for (caps vary by structure type)
@@ -209,6 +230,126 @@ function byBuildPriority(a, b) {
   var pb = BUILD_PRIORITY[b.structureType] || 0;
   if (pb !== pa) return pb - pa;
   return a.progress - b.progress;
+}
+
+// Function header: classifyBuilderSiteBucket(site)
+// Inputs: construction site
+// Output: bucket number (1 critical, 2 support, 3 convenience fallback)
+function classifyBuilderSiteBucket(site) {
+  if (!site) return 3;
+  return BUILDER_SITE_BUCKETS[site.structureType] || 2;
+}
+
+// Function header: findBuilderExtensionAnchor(room)
+// Inputs: visible room
+// Output: anchor for extension-priority scoring.
+// Rule: prefer spawn first (bootstrap core), then storage/terminal fallback.
+function findBuilderExtensionAnchor(room) {
+  if (!room) return null;
+  var spawns = room.find(FIND_MY_SPAWNS);
+  if (spawns && spawns.length) return spawns[0];
+  if (room.storage) return room.storage;
+  if (room.terminal) return room.terminal;
+  return null;
+}
+
+// Function header: findBuilderSupportAnchor(room)
+// Inputs: visible room
+// Output: fallback anchor for non-extension support scoring.
+// Rule: storage/terminal first because support infra usually clusters there.
+function findBuilderSupportAnchor(room) {
+  if (!room) return null;
+  if (room.storage) return room.storage;
+  if (room.terminal) return room.terminal;
+  var spawns = room.find(FIND_MY_SPAWNS);
+  if (spawns && spawns.length) return spawns[0];
+  return null;
+}
+
+// Function header: scoreConstructionSiteForBuilder(creep, site, opts)
+// Inputs: creep, construction site, optional opts
+// Output: { score, bucket, roomDistance, range }
+// Side-effects: none. Read-only helper used by Builder role.
+function scoreConstructionSiteForBuilder(creep, site, opts) {
+  if (!creep || !site || !site.pos) return null;
+  var options = opts || {};
+  var bucket = classifyBuilderSiteBucket(site);
+  var score = BUILDER_BUCKET_BASE_SCORE[bucket] || BUILDER_BUCKET_BASE_SCORE[2];
+
+  // Small convenience bonus for same-room work; not large enough to let roads
+  // automatically beat critical remote infrastructure.
+  var roomDistance = Game.map.getRoomLinearDistance(creep.pos.roomName, site.pos.roomName, true);
+  if (roomDistance === 0) score += 20;
+  score -= roomDistance * 25;
+
+  // In-room range is a weak tie-break only.
+  var range = (site.pos.roomName === creep.pos.roomName) ? creep.pos.getRangeTo(site.pos) : 50;
+  score -= Math.min(25, range * 0.5);
+
+  // Context bonus: source-adjacent container sites are a top economy unlock.
+  if (site.structureType === STRUCTURE_CONTAINER) {
+    if (site.pos.findInRange(FIND_SOURCES, 1).length > 0) {
+      score += 130;
+      bucket = 1;
+    }
+  }
+
+  // Context bonus: extensions near the room anchor/spawn are core bootstrap.
+  if (site.structureType === STRUCTURE_EXTENSION) {
+    var roomObj = site.room || Game.rooms[site.pos.roomName];
+    var anchor = findBuilderExtensionAnchor(roomObj);
+    if (anchor && site.pos.inRangeTo(anchor.pos, 6)) {
+      score += 120;
+    } else {
+      var spawnsNear = roomObj ? roomObj.find(FIND_MY_SPAWNS) : [];
+      if (spawnsNear && spawnsNear.length && site.pos.inRangeTo(spawnsNear[0].pos, 6)) {
+        score += 120;
+      }
+    }
+  }
+
+  // Slightly encourage finishing near-complete sites when all else is equal.
+  if (site.progressTotal > 0) {
+    var builtRatio = site.progress / site.progressTotal;
+    score += Math.floor(builtRatio * 20);
+  }
+
+  // Optional sticky bonus lets callers prefer current target without locking forever.
+  if (options.stickyId && site.id === options.stickyId) {
+    score += (options.stickyBonus != null) ? options.stickyBonus : 0;
+  }
+
+  return {
+    score: score,
+    bucket: bucket,
+    roomDistance: roomDistance,
+    range: range
+  };
+}
+
+// Function header: selectBestConstructionSiteForBuilder(creep, opts)
+// Inputs: creep, optional opts ({stickyId, stickyBonus})
+// Output: {site, score, bucket, roomDistance, range} or null.
+function selectBestConstructionSiteForBuilder(creep, opts) {
+  if (!creep) return null;
+  var best = null;
+  for (var id in Game.constructionSites) {
+    if (!Object.prototype.hasOwnProperty.call(Game.constructionSites, id)) continue;
+    var site = Game.constructionSites[id];
+    if (!site || !site.my) continue;
+    var scored = scoreConstructionSiteForBuilder(creep, site, opts);
+    if (!scored) continue;
+    if (!best || scored.score > best.score) {
+      best = {
+        site: site,
+        score: scored.score,
+        bucket: scored.bucket,
+        roomDistance: scored.roomDistance,
+        range: scored.range
+      };
+    }
+  }
+  return best;
 }
 
 // Function header: byRepairUrgency(a, b)
@@ -624,6 +765,18 @@ var BeeSelectors = {
     var snap = buildSnapshot(room);
     if (!snap || !snap.sites.length) return null;
     return snap.sites[0];
+  },
+
+  classifyBuilderSiteBucket: function (site) {
+    return classifyBuilderSiteBucket(site);
+  },
+
+  scoreConstructionSiteForBuilder: function (creep, site, opts) {
+    return scoreConstructionSiteForBuilder(creep, site, opts);
+  },
+
+  selectBestConstructionSiteForBuilder: function (creep, opts) {
+    return selectBestConstructionSiteForBuilder(creep, opts);
   },
 
   findBestRepairTarget: function (room) {
