@@ -5,6 +5,22 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 class Traveler {
+    static shouldLogLunaEntry(creep) {
+        if (!creep || creep.name !== "Luna" || !creep.memory)
+            return false;
+        let entryTick = creep.memory._roomEntryTick;
+        if (typeof entryTick === "number") {
+            let dt = Game.time - entryTick;
+            if (dt >= 0 && dt <= 4)
+                return true;
+        }
+        let targetRoom = creep.memory.targetRoom;
+        if (targetRoom && creep.pos.roomName === targetRoom) {
+            if (Traveler.isExit(creep.pos))
+                return true;
+        }
+        return false;
+    }
     /**
      * move creep to destination
      * @param creep
@@ -48,10 +64,15 @@ class Traveler {
         }
         let travelData = creep.memory._trav;
         let state = this.deserializeState(travelData, destination);
+        let lunaTrace = Traveler.shouldLogLunaEntry(creep);
+        let invalidationReason = null;
+        let hadPathAtStart = !!travelData.path;
+        let previousDestination = state.destination ? new RoomPosition(state.destination.x, state.destination.y, state.destination.roomName) : null;
 
         // If some other logic moved this creep far off the recorded path, drop the
         // cached directions so we do not keep walking a stale route.
         if (travelData.path && state.lastCoord && !this.sameCoord(creep.pos, state.lastCoord) && !creep.pos.isNearTo(state.lastCoord)) {
+            invalidationReason = "coordMismatchFar";
             delete travelData.path;
         }
         // uncomment to visualize destination
@@ -71,12 +92,14 @@ class Traveler {
         if (state.stuckCount >= options.stuckValue && Math.random() > .5) {
             options.ignoreCreeps = false;
             options.freshMatrix = true;
+            invalidationReason = invalidationReason || "stuckRepath";
             delete travelData.path;
         }
         // If another system moved the creep but kept the same destination, wipe the
         // path so we recalc from the new position instead of following a stale
         // route from the previous coord.
-        if (travelData.path && state.destination && this.samePos(state.destination, destination) && state.lastCoord && !this.sameCoord(creep.pos, state.lastCoord)) {
+        if (travelData.path && state.destination && this.samePos(state.destination, destination) && state.lastCoord && !this.sameCoord(creep.pos, state.lastCoord) && !creep.pos.isNearTo(state.lastCoord)) {
+            invalidationReason = invalidationReason || "coordMismatchSameDest";
             delete travelData.path;
             state.stuckCount = 0;
         }
@@ -87,11 +110,13 @@ class Traveler {
                 state.destination = destination;
             }
             else {
+                invalidationReason = invalidationReason || "destinationChanged";
                 delete travelData.path;
             }
         }
         if (options.repath && Math.random() < options.repath) {
             // add some chance that you will find a new path randomly
+            invalidationReason = invalidationReason || "randomRepath";
             delete travelData.path;
         }
         // pathfinding
@@ -131,6 +156,12 @@ class Traveler {
             travelData.path = travelData.path.substr(1);
         }
         let nextDirection = parseInt(travelData.path[0], 10);
+        let nextPos = null;
+        let nextIsExit = false;
+        if (nextDirection) {
+            nextPos = Traveler.positionAtDirection(creep.pos, nextDirection);
+            nextIsExit = !!(nextPos && Traveler.isExit(nextPos));
+        }
         if (options.returnData) {
             if (nextDirection) {
                 let nextPos = Traveler.positionAtDirection(creep.pos, nextDirection);
@@ -140,6 +171,12 @@ class Traveler {
             }
             options.returnData.state = state;
             options.returnData.path = travelData.path;
+        }
+        if (lunaTrace) {
+            let destTag = `${destination.roomName}:${destination.x},${destination.y}`;
+            let prevDest = previousDestination ? `${previousDestination.roomName}:${previousDestination.x},${previousDestination.y}` : "null";
+            let mode = options._lunaMode || "unknown";
+            console.log(`[LunaTrace] t=${Game.time} phase=traveler pos=${creep.pos.roomName}:${creep.pos.x},${creep.pos.y} mode=${mode} targetRoom=${creep.memory.targetRoom || "null"} sourceId=${creep.memory.sourceId || "null"} dest=${destTag} prevDest=${prevDest} hadPath=${hadPathAtStart ? "yes" : "no"} invalidated=${invalidationReason || "no"} newPath=${newPath ? "yes" : "no"} nextDir=${nextDirection || 0} nextPos=${nextPos ? (nextPos.roomName + ":" + nextPos.x + "," + nextPos.y) : "null"} nextIsExit=${nextIsExit ? "yes" : "no"}`);
         }
         return creep.move(nextDirection);
     }
