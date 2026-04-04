@@ -1128,7 +1128,28 @@ function softenRemoteDefensePlan(roomName) {
     if (!creep || !target) return ERR_INVALID_TARGET;
     if (creep.memory._lunaMoveTick === Game.time) return ERR_BUSY;
     creep.memory._lunaMoveTick = Game.time;
-    return creep.travelTo(target, opts || {});
+    var finalOpts = opts || {};
+    if (creep.name === 'Luna') {
+      var entryTick = typeof creep.memory._roomEntryTick === 'number' ? creep.memory._roomEntryTick : null;
+      var nearEntry = (entryTick != null) && ((Game.time - entryTick) >= 0) && ((Game.time - entryTick) <= 3);
+      if (nearEntry) {
+        finalOpts._lunaMode = (creep.pos.roomName === creep.memory.targetRoom) ? 'SOURCE_TRAVEL' : 'ROOM_TRAVEL';
+        var d = target.pos || target;
+        var trav = creep.memory._trav || {};
+        console.log(
+          '[LunaTrace] t=' + Game.time +
+          ' phase=issueMove' +
+          ' pos=' + creep.pos.roomName + ':' + creep.pos.x + ',' + creep.pos.y +
+          ' targetRoom=' + (creep.memory.targetRoom || 'null') +
+          ' sourceId=' + (creep.memory.sourceId || 'null') +
+          ' mode=' + finalOpts._lunaMode +
+          ' dest=' + (d.roomName || '?') + ':' + d.x + ',' + d.y +
+          ' range=' + ((finalOpts.range != null) ? finalOpts.range : 1) +
+          ' cachePath=' + (trav.path ? 'yes' : 'no')
+        );
+      }
+    }
+    return creep.travelTo(target, finalOpts);
   }
 
   function stabilizeLunaBorder(creep) {
@@ -1137,6 +1158,18 @@ function softenRemoteDefensePlan(roomName) {
     if (!isOnBorder(creep.pos)) return false;
     if (creep.memory._lunaMoveTick === Game.time) return true;
     creep.memory._lunaMoveTick = Game.time;
+    if (creep.name === 'Luna') {
+      var entryTick = typeof creep.memory._roomEntryTick === 'number' ? creep.memory._roomEntryTick : null;
+      if (entryTick != null && (Game.time - entryTick) <= 3) {
+        console.log(
+          '[LunaTrace] t=' + Game.time +
+          ' phase=borderStabilize' +
+          ' pos=' + creep.pos.roomName + ':' + creep.pos.x + ',' + creep.pos.y +
+          ' targetRoom=' + (creep.memory.targetRoom || 'null') +
+          ' sourceId=' + (creep.memory.sourceId || 'null')
+        );
+      }
+    }
     if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
     if (creep.pos.x === 49) return creep.move(LEFT) === OK;
     if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
