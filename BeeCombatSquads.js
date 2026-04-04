@@ -156,11 +156,58 @@ function combatDebugEnabled() {
   return settings && settings.DEBUG_LOGS === true;
 }
 
+function combatStateDebugEnabled() {
+  var settings = combatSettings();
+  return settings && settings.DEBUG_COMBAT_STATE === true;
+}
+
+function combatSayDebugEnabled() {
+  var settings = combatSettings();
+  return settings && settings.DEBUG_COMBAT_SAY === true;
+}
+
 function combatDebugLog() {
   if (!combatDebugEnabled() || !console || !console.log) return;
   var args = Array.prototype.slice.call(arguments);
   args.unshift('[CombatDBG]');
   console.log.apply(console, args);
+}
+
+function shouldEmitStateLog(channel, key, signature, interval) {
+  if (!combatStateDebugEnabled()) return false;
+  if (!global.__combatStateLogCache || global.__combatStateLogCache.tick !== Game.time) {
+    global.__combatStateLogCache = { tick: Game.time, entries: {} };
+  }
+  var cache = global.__combatStateLogCache.entries;
+  var mapKey = String(channel || 'default') + '|' + String(key || 'unknown');
+  var rec = cache[mapKey];
+  var step = typeof interval === 'number' ? interval : 7;
+  if (!rec) {
+    cache[mapKey] = { sig: signature, last: Game.time };
+    return true;
+  }
+  if (rec.sig !== signature) {
+    rec.sig = signature;
+    rec.last = Game.time;
+    return true;
+  }
+  if ((Game.time - (rec.last || 0)) >= step) {
+    rec.last = Game.time;
+    return true;
+  }
+  return false;
+}
+
+function emitStateLog(channel, key, signatureParts, interval) {
+  if (!combatStateDebugEnabled()) return;
+  var sig = Array.isArray(signatureParts) ? signatureParts.join('|') : String(signatureParts || '');
+  if (!shouldEmitStateLog(channel, key, sig, interval)) return;
+  var args = Array.isArray(signatureParts) ? signatureParts : [signatureParts];
+  args.unshift('[CombatState][' + channel + ']');
+  args.unshift(console);
+  try {
+    console.log.apply(console, args.slice(1));
+  } catch (e) {}
 }
 
 /**
@@ -1102,11 +1149,43 @@ function focusFireTarget(flagName) {
     }
   }
 
+  var rawHostileCount = 0;
+  var rawSourceKeeperCount = 0;
+  var filteredHostileCount = 0;
+  var filteredSourceKeeperCount = 0;
+  var skippedByPolicy = 0;
   var nextId = null;
+  var nextTargetOwner = null;
+  var nextTargetType = null;
   if (room) {
+    if (typeof room.find === 'function') {
+      var rawHostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+      rawHostileCount = rawHostiles.length;
+      for (var ri = 0; ri < rawHostiles.length; ri++) {
+        var raw = rawHostiles[ri];
+        if (!raw || !raw.owner || !raw.owner.username) continue;
+        if (lowerUsername(raw.owner.username) === 'source keeper') rawSourceKeeperCount += 1;
+      }
+      var filteredCandidates = gatherHostileCandidates(room, buildAvoidMap(avoid));
+      var fc = filteredCandidates && filteredCandidates.creeps ? filteredCandidates.creeps : [];
+      filteredHostileCount = fc.length;
+      for (var fi = 0; fi < fc.length; fi++) {
+        var filtered = fc[fi];
+        if (!filtered || !filtered.owner || !filtered.owner.username) continue;
+        if (lowerUsername(filtered.owner.username) === 'source keeper') filteredSourceKeeperCount += 1;
+      }
+      skippedByPolicy = Math.max(0, rawHostileCount - filteredHostileCount);
+    }
     var pick = getAttackTarget(room, avoid);
     if (pick) {
       nextId = pick;
+      var nextObj = Game.getObjectById(nextId);
+      if (nextObj && nextObj.owner && nextObj.owner.username) nextTargetOwner = nextObj.owner.username;
+      if (nextObj) {
+        if (nextObj.structureType) nextTargetType = 'structure:' + nextObj.structureType;
+        else if (nextObj.className) nextTargetType = String(nextObj.className).toLowerCase();
+        else nextTargetType = 'creep';
+      }
     }
     bucket.lastSeenTick = Game.time;
   }
@@ -1134,6 +1213,21 @@ function focusFireTarget(flagName) {
     combatDebugLog('[Focus]', flagName, 'room', room ? room.name : (bucket ? bucket.targetRoom : null),
       'target', currentId || 'none', '→', nextId || 'none');
   }
+
+  emitStateLog('focus', flagName, [
+    '[tick', Game.time + ']',
+    'flag=', flagName,
+    'scanRoom=', room ? room.name : '(none)',
+    'rawHostiles=', rawHostileCount,
+    'filteredHostiles=', filteredHostileCount,
+    'policySkip=', skippedByPolicy,
+    'rawSK=', rawSourceKeeperCount,
+    'filteredSK=', filteredSourceKeeperCount,
+    'seesSK=', rawSourceKeeperCount > 0 ? 'yes' : 'no',
+    'target=', nextId || 'null',
+    'owner=', nextTargetOwner || 'null',
+    'targetType=', nextTargetType || 'null'
+  ], 7);
 
   return nextId || null;
 }
@@ -1223,27 +1317,61 @@ function decideState(flagName, creepIds, targetId) {
   // 4) Otherwise                   -> FORM
   var injured = false;
   var fullyHealed = true;
+  var lowestHpRatio = 1;
   for (var i = 0; i < creepIds.length; i++) {
     var c = Game.getObjectById(creepIds[i]);
     if (!c) continue;
     var maxHits = c.hitsMax || 1;
     var ratio = (c.hits || 0) / maxHits;
+    if (ratio < lowestHpRatio) lowestHpRatio = ratio;
     if (ratio < 0.35) injured = true;
     if (ratio < 0.75) fullyHealed = false;
   }
-  if (injured) return 'RETREAT';
+  if (lowestHpRatio > 1) lowestHpRatio = 1;
   var previous = CombatAPI.getSquadState(flagName);
-  if (previous === 'RETREAT' && !fullyHealed) {
-    return 'RETREAT';
-  }
   var readiness = computeReadiness(flagName, creepIds);
-  if (targetId && readiness.ready) return 'ENGAGE';
-  // Deadlock guard: once a squad has already fought, long split regroup phases
-  // degrade to RETREAT instead of idling in FORM forever.
-  if (readiness.hasEngagedOnce && readiness.regroupTimedOut && !readiness.gatheredEnough) {
-    return 'RETREAT';
+  var nextState = 'FORM';
+  var reasonCode = 'HOLD';
+  if (injured) {
+    nextState = 'RETREAT';
+    reasonCode = 'RETREAT_HP';
+  } else if (previous === 'RETREAT' && !fullyHealed) {
+    nextState = 'RETREAT';
+    reasonCode = 'RETREAT_HP';
+  } else if (targetId && readiness.ready) {
+    nextState = 'ENGAGE';
+    reasonCode = 'READY';
+  } else if (readiness.hasEngagedOnce && readiness.regroupTimedOut && !readiness.gatheredEnough) {
+    nextState = 'RETREAT';
+    reasonCode = 'REGROUP';
+  } else if (!targetId) {
+    nextState = 'FORM';
+    reasonCode = 'NO_TGT';
+  } else if (!readiness.waitElapsed) {
+    nextState = 'FORM';
+    reasonCode = 'WAIT_TIME';
+  } else if (!readiness.hasCoreRoles) {
+    nextState = 'FORM';
+    reasonCode = 'WAIT_MED';
+  } else if (!readiness.gatheredEnough || readiness.needsRegroup) {
+    nextState = 'FORM';
+    reasonCode = readiness.needsRegroup ? 'REGROUP' : 'WAIT_FORM';
+  } else {
+    nextState = 'FORM';
+    reasonCode = 'HOLD';
   }
-  return 'FORM';
+  emitStateLog('state', flagName, [
+    '[tick', Game.time + ']',
+    'flag=', flagName,
+    'prev=', previous || 'INIT',
+    'next=', nextState,
+    'target=', targetId || 'null',
+    'ready=', readiness && readiness.ready ? '1' : '0',
+    'needsRegroup=', readiness && readiness.needsRegroup ? '1' : '0',
+    'lowestHp=', Math.round(lowestHpRatio * 100) + '%',
+    'reason=', reasonCode
+  ], 5);
+  return nextState;
 }
 
 function findCreepIdsForFlag(flagName) {
@@ -1341,6 +1469,22 @@ function computeReadiness(flagName, creepIds) {
     degradedReady = waitElapsed && (gatheredEnough || targetRoomCount > 0 || regroupTimedOut);
   }
   var ready = initialReady || degradedReady;
+  var splitAcrossRooms = roomCount > 1;
+
+  emitStateLog('readiness', flagName, [
+    '[tick', Game.time + ']',
+    'flag=', flagName,
+    'core=', hasCoreRoles ? '1' : '0',
+    'melee=', meleeCount,
+    'archer=', archerCount,
+    'medic=', medicCount,
+    'waitElapsed=', waitElapsed ? '1' : '0',
+    'gatheredEnough=', gatheredEnough ? '1' : '0',
+    'gathered=', gathered + '/' + needed,
+    'needsRegroup=', needsRegroup ? '1' : '0',
+    'splitAcrossRooms=', splitAcrossRooms ? '1' : '0',
+    'ready=', ready ? '1' : '0'
+  ], 5);
 
   return {
     total: members.length,
@@ -1354,6 +1498,7 @@ function computeReadiness(flagName, creepIds) {
     requiredGathered: needed,
     gatheredEnough: gatheredEnough,
     roomCount: roomCount,
+    splitAcrossRooms: splitAcrossRooms,
     targetRoomCount: targetRoomCount,
     hasEngagedOnce: hasEngagedOnce,
     initialReady: initialReady,
@@ -1564,7 +1709,9 @@ var BeeCombatSquads = {
   SquadFlagIntel: SquadFlagIntel,
   listSquadFlags: listSquadFlags,
   getLiveThreatForRoom: getLiveThreatForRoom,
-  getSquadState: function (flagName) { return CombatAPI.getSquadState(flagName); }
+  getSquadState: function (flagName) { return CombatAPI.getSquadState(flagName); },
+  debugCombatStateEnabled: combatStateDebugEnabled,
+  debugCombatSayEnabled: combatSayDebugEnabled
 };
 
 module.exports = BeeCombatSquads;
