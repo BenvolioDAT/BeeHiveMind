@@ -4,6 +4,42 @@ var BeeCombatSquads = require('BeeCombatSquads');
 var CombatAPI = BeeCombatSquads.CombatAPI;
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var MovementManager = require('Movement.Manager');
+var CoreConfig = require('core.config');
+
+function _combatDebugSettings() {
+  var cfg = (CoreConfig.settings && CoreConfig.settings.combat) || {};
+  return { state: cfg.DEBUG_COMBAT_STATE === true, say: cfg.DEBUG_COMBAT_SAY === true };
+}
+
+function _debugSay(creep, token) {
+  if (!creep || !token) return;
+  var dbg = _combatDebugSettings();
+  if (!dbg.say) return;
+  if (!creep.memory) creep.memory = {};
+  if (creep.memory._combatSayTick === Game.time) return;
+  if (creep.memory._combatSay === token) return;
+  creep.memory._combatSay = token;
+  creep.memory._combatSayTick = Game.time;
+  creep.say(token, true);
+}
+
+function _debugLog(creep, branch, extra, interval) {
+  if (!_combatDebugSettings().state) return;
+  if (!creep || !creep.memory) return;
+  var every = typeof interval === 'number' ? interval : 5;
+  var sig = String(branch || 'NA') + '|' + String(extra || '');
+  if (creep.memory._combatLogSig !== sig) {
+    creep.memory._combatLogSig = sig;
+    creep.memory._combatLogTick = Game.time;
+  } else if ((Game.time - (creep.memory._combatLogTick || 0)) < every) {
+    return;
+  } else {
+    creep.memory._combatLogTick = Game.time;
+  }
+  try {
+    console.log('[CombatRole][Archer]', '[tick ' + Game.time + ']', creep.name, 'branch=' + branch, extra || '');
+  } catch (e) {}
+}
 
 function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
@@ -142,6 +178,8 @@ module.exports = {
     } catch (e) {}
 
     if (context.state === 'RETREAT') {
+      _debugSay(creep, 'RETREAT');
+      _debugLog(creep, 'RETREAT', 'flag=' + context.flagName);
       if (context.leader) {
         _requestMove(creep, context.leader, 1, 'combat');
       } else if (context.rallyPos) {
@@ -152,12 +190,27 @@ module.exports = {
 
     if (context.state === 'ENGAGE') {
       if (context.readiness && context.readiness.needsRegroup) {
+        _debugSay(creep, 'REGROUP');
+        _debugLog(creep, 'REGROUP', 'flag=' + context.flagName + ' gathered=' + context.readiness.gathered + '/' + context.readiness.requiredGathered);
         if (context.leader) _requestMove(creep, context.leader, 1, 'combat');
         else if (context.rallyPos) _requestMove(creep, context.rallyPos, 1, 'combat');
         return;
       }
       var target = _resolveFocusTarget(context);
       if (!target) {
+        var roomHostiles = creep.room && creep.room.find ? (creep.room.find(FIND_HOSTILE_CREEPS) || []) : [];
+        var sawSK = false;
+        for (var si = 0; si < roomHostiles.length; si++) {
+          var hc = roomHostiles[si];
+          if (hc && hc.owner && hc.owner.username && String(hc.owner.username).toLowerCase() === 'source keeper') {
+            sawSK = true;
+            break;
+          }
+        }
+        if (sawSK) _debugSay(creep, 'SEES_SK');
+        else if (roomHostiles.length > 0) _debugSay(creep, 'SKIP');
+        else _debugSay(creep, 'NO_TGT');
+        _debugLog(creep, 'NO_TGT', 'hostiles=' + roomHostiles.length + ' seesSK=' + (sawSK ? 1 : 0));
         try {
           var logNoTarget = require('core.logger').createLogger('BeeArmy', require('core.logger').LOG_LEVEL.DEBUG);
           logNoTarget.debug('Archer', creep.name, 'ENGAGE but no target', 'flag=', context.flagName);
@@ -175,24 +228,37 @@ module.exports = {
 
       if (target) {
         if (creep.pos.inRangeTo(target, 3)) {
+          _debugSay(creep, 'ATTACK');
+          _debugLog(creep, 'ATTACK', 'target=' + target.id);
           creep.rangedAttack(target);
           return;
         }
+        _debugSay(creep, 'PUSH');
+        _debugLog(creep, 'PUSH', 'target=' + target.id);
         _requestMove(creep, target, 3, 'combat');
         return;
       }
 
       if (context.attackPos) {
+        _debugSay(creep, 'PATH');
+        _debugLog(creep, 'PATH', 'attackPos=' + context.attackPos.roomName + ':' + context.attackPos.x + ',' + context.attackPos.y);
         _requestMove(creep, context.attackPos, 3, 'combat');
         return;
       }
     }
 
+    var holdToken = 'HOLD';
+    if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
+    else if (context.readiness && !context.readiness.hasCoreRoles) holdToken = 'WAIT_MED';
+    else if (context.readiness && !context.readiness.gatheredEnough) holdToken = 'WAIT_FORM';
+    _debugSay(creep, holdToken);
+    _debugLog(creep, holdToken, 'flag=' + context.flagName);
     if (context.leader) {
       _requestMove(creep, context.leader, 1, 'combat');
     } else if (context.rallyPos) {
       _requestMove(creep, context.rallyPos, 1, 'combat');
     } else if (context.attackPos && context.state === 'ENGAGE') {
+      _debugSay(creep, 'PATH');
       _requestMove(creep, context.attackPos, 3, 'combat');
     }
   }

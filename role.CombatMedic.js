@@ -6,6 +6,42 @@ var BeeSelectors = require('BeeSelectors');
 var CombatAPI = BeeCombatSquads.CombatAPI;
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var MovementManager = require('Movement.Manager');
+var CoreConfig = require('core.config');
+
+function _combatDebugSettings() {
+  var cfg = (CoreConfig.settings && CoreConfig.settings.combat) || {};
+  return { state: cfg.DEBUG_COMBAT_STATE === true, say: cfg.DEBUG_COMBAT_SAY === true };
+}
+
+function _debugSay(creep, token) {
+  if (!creep || !token) return;
+  var dbg = _combatDebugSettings();
+  if (!dbg.say) return;
+  if (!creep.memory) creep.memory = {};
+  if (creep.memory._combatSayTick === Game.time) return;
+  if (creep.memory._combatSay === token) return;
+  creep.memory._combatSay = token;
+  creep.memory._combatSayTick = Game.time;
+  creep.say(token, true);
+}
+
+function _debugLog(creep, branch, extra, interval) {
+  if (!_combatDebugSettings().state) return;
+  if (!creep || !creep.memory) return;
+  var every = typeof interval === 'number' ? interval : 5;
+  var sig = String(branch || 'NA') + '|' + String(extra || '');
+  if (creep.memory._combatLogSig !== sig) {
+    creep.memory._combatLogSig = sig;
+    creep.memory._combatLogTick = Game.time;
+  } else if ((Game.time - (creep.memory._combatLogTick || 0)) < every) {
+    return;
+  } else {
+    creep.memory._combatLogTick = Game.time;
+  }
+  try {
+    console.log('[CombatRole][Medic]', '[tick ' + Game.time + ']', creep.name, 'branch=' + branch, extra || '');
+  } catch (e) {}
+}
 
 function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
@@ -149,14 +185,18 @@ function _selectHealTarget(creep, context) {
 }
 
 function _applyHealing(creep, target) {
-  if (!target) return;
+  if (!target) return false;
   if (target.id === creep.id) {
     creep.heal(creep);
+    return true;
   } else if (creep.pos.inRangeTo(target, 1)) {
     creep.heal(target);
+    return true;
   } else if (creep.pos.inRangeTo(target, 3)) {
     creep.rangedHeal(target);
+    return true;
   }
+  return false;
 }
 
 function _pickMoveTarget(creep, context, healTarget) {
@@ -194,15 +234,31 @@ module.exports = {
     context.readiness = CombatAPI.getSquadReadiness ? CombatAPI.getSquadReadiness(context.flagName) : null;
 
     var healTarget = _selectHealTarget(creep, context);
-    _applyHealing(creep, healTarget);
+    var didHeal = _applyHealing(creep, healTarget);
+    if (didHeal) {
+      _debugSay(creep, 'HEAL');
+      _debugLog(creep, 'HEAL', 'target=' + (healTarget ? healTarget.id : 'null'));
+    }
 
     if (context.readiness && context.readiness.needsRegroup && context.leader) {
+      _debugSay(creep, 'REGROUP');
+      _debugLog(creep, 'REGROUP', 'flag=' + context.flagName + ' leader=' + context.leader.id);
       _requestMove(creep, context.leader, 1, 'combat');
       return;
     }
 
+    var holdToken = 'HOLD';
+    if (context.state === 'RETREAT') holdToken = 'RETREAT';
+    else if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
+    else if (context.readiness && !context.readiness.hasCoreRoles) holdToken = 'WAIT_MED';
+    else if (context.readiness && !context.readiness.gatheredEnough) holdToken = 'WAIT_FORM';
+    _debugSay(creep, holdToken);
+    _debugLog(creep, holdToken, 'flag=' + context.flagName + ' state=' + context.state);
+
     var moveTarget = _pickMoveTarget(creep, context, healTarget);
     if (moveTarget) {
+      _debugSay(creep, 'PATH');
+      _debugLog(creep, 'PATH', 'toward=' + (moveTarget.id || (moveTarget.roomName + ':' + moveTarget.x + ',' + moveTarget.y)));
       _requestMove(creep, moveTarget, 1, 'combat');
     }
   }
