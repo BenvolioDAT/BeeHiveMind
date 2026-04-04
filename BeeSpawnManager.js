@@ -24,6 +24,7 @@ var QUEUE_HARD_LIMIT      = 20;
 var DEBUG_SPAWN_QUEUE     = true;
 var DBG_EVERY             = 5;
 var INVADER_LOCK_TTL      = 1500;
+var DYING_SOON_TTL        = 60;
 
 var ROLE_PRIORITY = {
   Baseharvest: 100,
@@ -152,6 +153,183 @@ function queuedCount(roomName, role) {
   return count;
 }
 
+function getQueuedRoleItems(roomName, roleName) {
+  var q = ensureRoomQueue(roomName);
+  var target = canonicalRole(roleName);
+  var items = [];
+  for (var i = 0; i < q.length; i++) {
+    var it = q[i];
+    if (!it || !it.role) continue;
+    if (canonicalRole(it.role) !== target) continue;
+    items.push(it);
+  }
+  return items;
+}
+
+function countRoleInRoom(C, roomName, roleName) {
+  if (!C || !C.creeps || !roomName || !roleName) return 0;
+  var target = canonicalRole(roleName);
+  if (!target) return 0;
+  var count = 0;
+  for (var i = 0; i < C.creeps.length; i++) {
+    var creep = C.creeps[i];
+    if (!creep || !creep.my || !creep.room || creep.room.name !== roomName) continue;
+    var ttl = creep.ticksToLive;
+    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
+    var role = creep.memory && (creep.memory.role || creep.memory.task);
+    if (canonicalRole(role) === target) count += 1;
+  }
+  return count;
+}
+
+function countWorkParts(body) {
+  if (!body || !body.length) return 0;
+  var work = 0;
+  for (var i = 0; i < body.length; i++) {
+    var part = body[i];
+    var partType = part && part.type ? part.type : part;
+    if (partType === WORK) work += 1;
+  }
+  return work;
+}
+
+function creepWorkParts(creep) {
+  if (!creep) return 0;
+  if (typeof creep.getActiveBodyparts === 'function') {
+    return creep.getActiveBodyparts(WORK);
+  }
+  return countWorkParts(creep.body || []);
+}
+
+function getBaseHarvestLiveWork(C, roomName) {
+  if (!C || !C.creeps || !roomName) return 0;
+  var total = 0;
+  for (var i = 0; i < C.creeps.length; i++) {
+    var creep = C.creeps[i];
+    if (!creep || !creep.my || !creep.room || creep.room.name !== roomName) continue;
+    var ttl = creep.ticksToLive;
+    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
+    var role = creep.memory && (creep.memory.role || creep.memory.task);
+    if (canonicalRole(role) !== 'BaseHarvest') continue;
+    total += creepWorkParts(creep);
+  }
+  return total;
+}
+
+function getPlannedBaseHarvestBody(roomName) {
+  var room = Game.rooms[roomName];
+  var energy = room ? (room.energyAvailable || 0) : 0;
+  var body = null;
+  if (spawnLogic && typeof spawnLogic.getBodyForRole === 'function') {
+    body = spawnLogic.getBodyForRole('BaseHarvest', energy);
+  }
+  if (!body || !body.length) {
+    var cfg = spawnLogic && spawnLogic.ROLE_CONFIGS && spawnLogic.ROLE_CONFIGS.BaseHarvest;
+    if (cfg && cfg.length) body = cfg[cfg.length - 1];
+  }
+  return body || [];
+}
+
+function getBaseHarvestQueuedWork(roomName) {
+  var items = getQueuedRoleItems(roomName, 'BaseHarvest');
+  if (!items.length) return 0;
+  var body = getPlannedBaseHarvestBody(roomName);
+  var perCreepWork = Math.max(1, countWorkParts(body));
+  return items.length * perCreepWork;
+}
+
+function countCoveredSourcesByMiner(C, room) {
+  if (!C || !C.creeps || !room) return 0;
+  var covered = Object.create(null);
+  for (var i = 0; i < C.creeps.length; i++) {
+    var creep = C.creeps[i];
+    if (!creep || !creep.my || !creep.room || creep.room.name !== room.name) continue;
+    var ttl = creep.ticksToLive;
+    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
+    var role = creep.memory && (creep.memory.role || creep.memory.task);
+    if (canonicalRole(role) !== 'BaseHarvest') continue;
+    var sid = creep.memory && creep.memory.assignedSource;
+    if (!sid) continue;
+    covered[sid] = true;
+  }
+  return Object.keys(covered).length;
+}
+
+function computeBaseHarvestWorkTarget(room, C) {
+  if (!room) return 0;
+  var sources = room.find(FIND_SOURCES);
+  var sourceCount = sources ? sources.length : 0;
+  if (sourceCount <= 0) return 0;
+
+  // Baseline saturation math for normal home sources: 5 WORK each.
+  var target = sourceCount * 5;
+
+  // Simple, stable uptime buffer:
+  // without collectors, miners lose time offloading instead of pure harvesting.
+  var collectorCount = countRoleInRoom(C, room.name, 'Courier') + countRoleInRoom(C, room.name, 'Queen');
+  if (collectorCount <= 0) {
+    target += sourceCount;
+  }
+
+  // If source containers are not built yet, add a tiny buffer for movement churn.
+  var missingContainers = 0;
+  for (var i = 0; i < sourceCount; i++) {
+    var containers = sources[i].pos.findInRange(FIND_STRUCTURES, 1, {
+      filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
+    });
+    if (!containers || !containers.length) {
+      missingContainers += 1;
+    }
+  }
+  target += missingContainers;
+
+  return target;
+}
+
+function computeBaseHarvestQuotaDynamic(C, room) {
+  if (!room) return 0;
+  var sources = room.find(FIND_SOURCES);
+  var sourceCount = sources ? sources.length : 0;
+  if (sourceCount <= 0) return 0;
+
+  var liveWork = getBaseHarvestLiveWork(C, room.name);
+  var queuedWork = getBaseHarvestQueuedWork(room.name);
+  var targetWork = computeBaseHarvestWorkTarget(room, C);
+  var workDeficit = Math.max(0, targetWork - (liveWork + queuedWork));
+
+  var plannedBody = getPlannedBaseHarvestBody(room.name);
+  var plannedWorkPerMiner = Math.max(1, countWorkParts(plannedBody));
+  var additionalNeeded = Math.ceil(workDeficit / plannedWorkPerMiner);
+
+  var activeCount = countRoleInRoom(C, room.name, 'BaseHarvest');
+  var queuedCountLocal = getQueuedRoleItems(room.name, 'BaseHarvest').length;
+  var quota = activeCount + queuedCountLocal + additionalNeeded;
+
+  // BaseHarvest role logic is single-incumbent per source.
+  // Keep at most one overlap miner during body-transition handoff.
+  var maxWithOverlap = sourceCount + 1;
+  if (quota > maxWithOverlap) quota = maxWithOverlap;
+
+  // Early home-room safety floor for 2-source rooms:
+  // keep at least 2 miners until both sources are actively covered.
+  var coveredSources = countCoveredSourcesByMiner(C, room);
+  if (sourceCount >= 2 && coveredSources < 2 && quota < 2) {
+    quota = 2;
+  }
+
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+  if (!Memory.rooms[room.name].spawnDebug) Memory.rooms[room.name].spawnDebug = {};
+  Memory.rooms[room.name].spawnDebug.baseHarvest = {
+    targetWork: targetWork,
+    liveWork: liveWork,
+    queuedWork: queuedWork,
+    quota: quota
+  };
+
+  return Math.max(0, quota);
+}
+
 function enqueue(roomName, role, opts) {
   var q = ensureRoomQueue(roomName);
   if (q.length >= QUEUE_HARD_LIMIT) {
@@ -202,7 +380,9 @@ function pruneOverfilledQueue(roomName, quotas, C) {
     var canonical = canonicalRole(role);
     var active = (canonical === 'Luna')
       ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
-      : (C.roleCounts[canonical] || 0);
+      : (canonical === 'BaseHarvest'
+        ? countRoleInRoom(C, roomName, canonical)
+        : (C.roleCounts[canonical] || 0));
     remaining[role] = Math.max(0, (quotas[role] || 0) - active);
   }
 
@@ -318,7 +498,7 @@ function computeRoomQuotas(C, room) {
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
   var quotas = {
-    Baseharvest:  2,
+    Baseharvest:  computeBaseHarvestQuotaDynamic(C, room),
     Courier:      2,
     Queen:        1,
     Upgrader:     1,
@@ -350,7 +530,9 @@ function fillQueueForRoom(C, room) {
     var canonical = canonicalRole(role);
     var active = canonical === 'Luna'
       ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
-      : (C.roleCounts[canonical] || 0);
+      : (canonical === 'BaseHarvest'
+        ? countRoleInRoom(C, roomName, canonical)
+        : (C.roleCounts[canonical] || 0));
     var queued = queuedCount(roomName, role);
     var deficit = Math.max(0, limit - active - queued);
     if (deficit > 0 && tickEvery(DBG_EVERY)) {
