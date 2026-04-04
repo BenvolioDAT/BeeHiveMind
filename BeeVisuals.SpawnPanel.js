@@ -89,7 +89,8 @@ function prepareQueueForPanel(queue) {
 
 /** Each panel grows upward: header + spawning section + queue block. */
 function computePanelHeight(queueLineCount) {
-  return 2.1 + (queueLineCount * 0.6);
+  // +0.6 leaves room for one optional BaseHarvest debug line.
+  return 2.7 + (queueLineCount * 0.6);
 }
 
 /**
@@ -136,6 +137,13 @@ function drawQueueListing(v, baseX, startY, queueInfo) {
   }
 }
 
+function readBaseHarvestPlanDebug(roomName) {
+  var roomMem = Memory.rooms && Memory.rooms[roomName];
+  var debug = roomMem && roomMem.spawnDebug && roomMem.spawnDebug.baseHarvest;
+  if (!debug) return null;
+  return debug;
+}
+
 /** Paint one spawn panel and return the new bottom Y cursor for stacking. */
 function drawSpawnPanel(v, spawn, currentBottomY) {
   var queue = readSpawnQueue(spawn.room.name);
@@ -178,6 +186,16 @@ function drawSpawnPanel(v, spawn, currentBottomY) {
   }
 
   drawQueueListing(v, baseX, y + 1.1, queueInfo);
+  var bhDebug = readBaseHarvestPlanDebug(spawn.room.name);
+  if (bhDebug) {
+    var debugY = y + 1.1 + ((queueInfo.lines + 1) * 0.6);
+    v.text(
+      'BH W t:' + bhDebug.targetWork + ' l:' + bhDebug.liveWork + ' q:' + bhDebug.queuedWork + ' c:' + bhDebug.quota,
+      baseX,
+      debugY,
+      { color: '#a7d7ff', font: 0.45, align: 'left', opacity: 0.9, stroke: '#000000' }
+    );
+  }
   return topY - CFG.panelGap;
 }
 
