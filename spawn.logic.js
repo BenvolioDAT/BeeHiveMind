@@ -25,6 +25,37 @@ function combatSpawnLog() {
   }
 }
 
+function combatPlannerDebugEnabled() {
+  return Boolean(CoreConfig && CoreConfig.settings && CoreConfig.settings.combat &&
+    CoreConfig.settings.combat.DEBUG_PLANNER);
+}
+
+function combatPlannerLogEvery() {
+  var cfg = CoreConfig && CoreConfig.settings && CoreConfig.settings.combat;
+  var step = cfg && typeof cfg.DEBUG_PLANNER_EVERY === 'number' ? cfg.DEBUG_PLANNER_EVERY : 15;
+  if (step < 1) step = 1;
+  return step;
+}
+
+function plannerDebugLogDecision(key, fields) {
+  if (!combatPlannerDebugEnabled()) return;
+  if (!global.__combatPlannerLogCache || global.__combatPlannerLogCache.tick !== Game.time) {
+    global.__combatPlannerLogCache = { tick: Game.time, entries: {} };
+  }
+  var map = global.__combatPlannerLogCache.entries;
+  var safeKey = String(key || 'unknown');
+  var sig = JSON.stringify(fields || {});
+  var rec = map[safeKey];
+  var every = combatPlannerLogEvery();
+  if (rec && rec.sig === sig && (Game.time - rec.last) < every) {
+    return;
+  }
+  map[safeKey] = { sig: sig, last: Game.time };
+  try {
+    spawnLog.info('[CombatPlan]', safeKey, sig);
+  } catch (e) {}
+}
+
 // -----------------------------------------------------------------------------
 // Body builders (ES5-only helpers to construct Screeps body arrays)
 // -----------------------------------------------------------------------------
@@ -176,6 +207,27 @@ var ROLE_CONFIGS = {
   ]
 };
 
+var COMBAT_BODY_TEMPLATES = {
+  CombatMelee: [
+    CombatBody(0, 1, 1, 0, 0), // tier 0: emergency cheap responder
+    CombatBody(0, 2, 2, 0, 0), // tier 1: current baseline
+    CombatBody(2, 4, 4, 0, 0), // tier 2: durable frontline
+    CombatBody(4, 6, 6, 0, 0)  // tier 3: heavier response
+  ],
+  CombatArcher: [
+    CombatBody(0, 0, 1, 1, 0), // tier 0: emergency kite
+    CombatBody(0, 0, 2, 2, 0), // tier 1: baseline ranged pair
+    CombatBody(1, 0, 5, 4, 0), // tier 2: mobile pressure
+    CombatBody(2, 0, 8, 6, 0)  // tier 3: stronger ranged backbone
+  ],
+  CombatMedic: [
+    CombatBody(0, 0, 1, 0, 1), // tier 0: bare minimum sustain
+    CombatBody(0, 0, 2, 0, 2), // tier 1: baseline sustain
+    CombatBody(1, 0, 4, 0, 3), // tier 2: mobile sustain with buffer
+    CombatBody(2, 0, 6, 0, 5)  // tier 3: sustained combat medic
+  ]
+};
+
 var ROLE_CANONICAL = [
   'BaseHarvest',
   'Courier',
@@ -233,11 +285,38 @@ function cloneBody(body) {
   return copy;
 }
 
-function getBodyForRole(roleName, energyAvailable) {
+function isCombatRole(roleName) {
+  return roleName === 'CombatMelee' || roleName === 'CombatArcher' || roleName === 'CombatMedic';
+}
+
+function clampCombatTier(roleName, tier) {
+  var list = COMBAT_BODY_TEMPLATES[roleName];
+  if (!list || !list.length) return 0;
+  var maxTier = list.length - 1;
+  if (typeof tier !== 'number') return maxTier;
+  if (tier < 0) return 0;
+  if (tier > maxTier) return maxTier;
+  return tier;
+}
+
+function getRoleBodyCatalog(roleName, opts) {
+  if (isCombatRole(roleName) && COMBAT_BODY_TEMPLATES[roleName]) {
+    var cap = clampCombatTier(roleName, opts && opts.combatBodyTierCap);
+    var tiers = COMBAT_BODY_TEMPLATES[roleName];
+    var out = [];
+    for (var ti = cap; ti >= 0; ti--) {
+      out.push(tiers[ti]);
+    }
+    return out;
+  }
+  return ROLE_CONFIGS[roleName] || null;
+}
+
+function getBodyForRole(roleName, energyAvailable, opts) {
   if (!roleName) return [];
 
   var energy = typeof energyAvailable === 'number' ? energyAvailable : 0;
-  var list = ROLE_CONFIGS[roleName];
+  var list = getRoleBodyCatalog(roleName, opts);
   if (!list) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       spawnLog.debug('No config for role', roleName);
@@ -297,7 +376,15 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   }
 
   var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
-  var body = getBodyForRole(canonicalRole, energy);
+  var bodyOpts = null;
+  if (isCombatRole(canonicalRole)) {
+    bodyOpts = {
+      combatBodyTierCap: (memory && typeof memory.combatBodyTierCap === 'number')
+        ? memory.combatBodyTierCap
+        : undefined
+    };
+  }
+  var body = getBodyForRole(canonicalRole, energy, bodyOpts);
   if (!body || !body.length) return false;
 
   var creepName = Generate_Creep_Name(canonicalRole);
@@ -324,6 +411,9 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     if (!mem.assignedAt) mem.assignedAt = Game.time;
     if (!mem.state) mem.state = 'rally';
     if (!mem.waitUntil) mem.waitUntil = Game.time + 25;
+    if (typeof mem.combatBodyTierCap === 'number' && !mem.bodyTierCap) {
+      mem.bodyTierCap = mem.combatBodyTierCap;
+    }
     // buddyId / stickTargetId handled by roles post-spawn
   }
 
@@ -372,6 +462,35 @@ function Calculate_Spawn_Resource(spawnOrRoom) {
 // Squad spawning (delegates to spawnRole)
 // -----------------------------------------------------------------------------
 var SQUAD_COOLDOWN_TICKS = 1;
+
+var ECONOMY_STATES = {
+  CRITICAL: 'CRITICAL',
+  STRAINED: 'STRAINED',
+  HEALTHY: 'HEALTHY',
+  RICH: 'RICH'
+};
+
+var MATURITY_STAGES = {
+  EARLY: 'EARLY',
+  MID: 'MID',
+  LATE: 'LATE',
+  ENDGAME: 'ENDGAME'
+};
+
+var FIGHT_TYPES = {
+  HOME_DEFENSE: 'HOME_DEFENSE',
+  SK_PVE: 'SK_PVE',
+  BORDER_RESPONSE: 'BORDER_RESPONSE',
+  INVASION_RESPONSE: 'INVASION_RESPONSE',
+  PLANNED_OFFENSE: 'PLANNED_OFFENSE'
+};
+
+var THREAT_TIERS = {
+  LOW: 'LOW',
+  MEDIUM: 'MEDIUM',
+  HIGH: 'HIGH',
+  SEVERE: 'SEVERE'
+};
 
 function normalizeSquadKey(id) {
   if (!id) return null;
@@ -431,6 +550,345 @@ function normalizeRoomName(roomLike) {
   if (roomLike.room && typeof roomLike.room.name === 'string') return roomLike.room.name;
   if (typeof roomLike.name === 'string') return roomLike.name;
   return null;
+}
+
+function plannerConfig() {
+  var combatCfg = CoreConfig && CoreConfig.settings && CoreConfig.settings.combat;
+  var planner = combatCfg && combatCfg.planner ? combatCfg.planner : {};
+  return {
+    economy: planner.economy || {},
+    threatTiers: planner.threatTiers || {}
+  };
+}
+
+function classifyRoomMaturity(room) {
+  if (!room) return MATURITY_STAGES.EARLY;
+  var rcl = (room.controller && typeof room.controller.level === 'number') ? room.controller.level : 0;
+  var cap = room.energyCapacityAvailable || 0;
+  if (rcl >= 8 || cap >= 2600) return MATURITY_STAGES.ENDGAME;
+  if (rcl >= 6 || cap >= 1800) return MATURITY_STAGES.LATE;
+  if (rcl >= 4 || cap >= 800) return MATURITY_STAGES.MID;
+  return MATURITY_STAGES.EARLY;
+}
+
+function roomStockEnergy(room) {
+  if (!room) return 0;
+  var storageEnergy = room.storage && room.storage.store ? (room.storage.store[RESOURCE_ENERGY] || 0) : 0;
+  var terminalEnergy = room.terminal && room.terminal.store ? (room.terminal.store[RESOURCE_ENERGY] || 0) : 0;
+  return storageEnergy + terminalEnergy;
+}
+
+function classifyEconomyState(room, maturity) {
+  if (!room) return ECONOMY_STATES.CRITICAL;
+  var cfg = plannerConfig().economy;
+  var storageEnergy = room.storage && room.storage.store ? (room.storage.store[RESOURCE_ENERGY] || 0) : 0;
+  var terminalEnergy = room.terminal && room.terminal.store ? (room.terminal.store[RESOURCE_ENERGY] || 0) : 0;
+  var stock = storageEnergy + terminalEnergy;
+  var cap = room.energyCapacityAvailable || 0;
+  var rcl = (room.controller && typeof room.controller.level === 'number') ? room.controller.level : 0;
+
+  var criticalStorage = typeof cfg.CRITICAL_STORAGE === 'number' ? cfg.CRITICAL_STORAGE : 20000;
+  var strainedStorage = typeof cfg.STRAINED_STORAGE === 'number' ? cfg.STRAINED_STORAGE : 80000;
+  var healthyStorage = typeof cfg.HEALTHY_STORAGE === 'number' ? cfg.HEALTHY_STORAGE : 180000;
+  var criticalTerminal = typeof cfg.CRITICAL_TERMINAL === 'number' ? cfg.CRITICAL_TERMINAL : 10000;
+  var strainedTerminal = typeof cfg.STRAINED_TERMINAL === 'number' ? cfg.STRAINED_TERMINAL : 40000;
+  var healthyTerminal = typeof cfg.HEALTHY_TERMINAL === 'number' ? cfg.HEALTHY_TERMINAL : 100000;
+  var earlyCap = typeof cfg.EARLY_CAPACITY === 'number' ? cfg.EARLY_CAPACITY : 550;
+  var midCap = typeof cfg.MID_CAPACITY === 'number' ? cfg.MID_CAPACITY : 1300;
+  var lateCap = typeof cfg.LATE_CAPACITY === 'number' ? cfg.LATE_CAPACITY : 2300;
+
+  if (!room.storage && !room.terminal) {
+    if (cap <= earlyCap || rcl <= 3) return ECONOMY_STATES.CRITICAL;
+    if (cap <= midCap || rcl <= 5) return ECONOMY_STATES.STRAINED;
+    if (cap <= lateCap || maturity === MATURITY_STAGES.LATE) return ECONOMY_STATES.HEALTHY;
+    return ECONOMY_STATES.RICH;
+  }
+
+  if (storageEnergy <= criticalStorage && terminalEnergy <= criticalTerminal) {
+    return ECONOMY_STATES.CRITICAL;
+  }
+  if (stock <= strainedStorage || (terminalEnergy > 0 && terminalEnergy <= strainedTerminal)) {
+    return ECONOMY_STATES.STRAINED;
+  }
+  if (stock <= healthyStorage || (terminalEnergy > 0 && terminalEnergy <= healthyTerminal)) {
+    return ECONOMY_STATES.HEALTHY;
+  }
+  return ECONOMY_STATES.RICH;
+}
+
+function classifyThreatTier(score) {
+  var t = typeof score === 'number' ? score : 0;
+  var cfg = plannerConfig().threatTiers;
+  var lowMax = typeof cfg.LOW_MAX === 'number' ? cfg.LOW_MAX : 7;
+  var medMax = typeof cfg.MEDIUM_MAX === 'number' ? cfg.MEDIUM_MAX : 15;
+  var highMax = typeof cfg.HIGH_MAX === 'number' ? cfg.HIGH_MAX : 24;
+  if (t <= lowMax) return THREAT_TIERS.LOW;
+  if (t <= medMax) return THREAT_TIERS.MEDIUM;
+  if (t <= highMax) return THREAT_TIERS.HIGH;
+  return THREAT_TIERS.SEVERE;
+}
+
+function listOwnedRoomNames() {
+  var set = {};
+  var out = [];
+  for (var roomName in Game.rooms) {
+    if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
+    var room = Game.rooms[roomName];
+    if (!room || !room.controller || !room.controller.my) continue;
+    if (set[room.name]) continue;
+    set[room.name] = true;
+    out.push(room.name);
+  }
+  for (var sName in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, sName)) continue;
+    var sp = Game.spawns[sName];
+    if (!sp || !sp.my || !sp.room) continue;
+    if (set[sp.room.name]) continue;
+    set[sp.room.name] = true;
+    out.push(sp.room.name);
+  }
+  return out;
+}
+
+function isMyRoom(roomName) {
+  if (!roomName) return false;
+  var owned = listOwnedRoomNames();
+  for (var i = 0; i < owned.length; i++) {
+    if (owned[i] === roomName) return true;
+  }
+  return false;
+}
+
+function containsSourceKeeperHostiles(room) {
+  if (!room || typeof room.find !== 'function') return false;
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+  for (var i = 0; i < hostiles.length; i++) {
+    var c = hostiles[i];
+    if (!c || !c.owner || !c.owner.username) continue;
+    if (String(c.owner.username).toLowerCase() === 'source keeper') return true;
+  }
+  return false;
+}
+
+function containsPlayerHostiles(room) {
+  if (!room || typeof room.find !== 'function') return false;
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+  for (var i = 0; i < hostiles.length; i++) {
+    var c = hostiles[i];
+    if (!c || !c.owner || !c.owner.username) continue;
+    var owner = String(c.owner.username).toLowerCase();
+    if (owner !== 'invader' && owner !== 'source keeper') return true;
+  }
+  return false;
+}
+
+function distanceClass(spawnRoomName, targetRoomName) {
+  if (!spawnRoomName || !targetRoomName || !Game.map || typeof Game.map.getRoomLinearDistance !== 'function') {
+    return 'local';
+  }
+  var dist = Game.map.getRoomLinearDistance(spawnRoomName, targetRoomName, true);
+  if (typeof dist !== 'number' || dist <= 1) return 'local';
+  if (dist <= 3) return 'border';
+  return 'far';
+}
+
+function classifyFightType(spawn, squadId, targetRoom, flagData, threatTier) {
+  var targetName = normalizeRoomName(targetRoom);
+  if (!targetName) return FIGHT_TYPES.BORDER_RESPONSE;
+  if (isMyRoom(targetName)) return FIGHT_TYPES.HOME_DEFENSE;
+
+  var target = Game.rooms[targetName];
+  if (target && containsSourceKeeperHostiles(target)) return FIGHT_TYPES.SK_PVE;
+
+  var distType = distanceClass(spawn && spawn.room ? spawn.room.name : null, targetName);
+  var playerThreat = target ? containsPlayerHostiles(target) : false;
+  var name = String(squadId || '');
+  var isAutoDefenseName = (name.indexOf('Squad') === 0) && name.length > 5;
+
+  if (playerThreat && (threatTier === THREAT_TIERS.HIGH || threatTier === THREAT_TIERS.SEVERE)) {
+    return FIGHT_TYPES.INVASION_RESPONSE;
+  }
+  if (distType === 'local' || distType === 'border') return FIGHT_TYPES.BORDER_RESPONSE;
+  if (flagData && flagData.flag && !isAutoDefenseName) return FIGHT_TYPES.PLANNED_OFFENSE;
+  return FIGHT_TYPES.BORDER_RESPONSE;
+}
+
+function baseCountsForThreat(threatTier) {
+  if (threatTier === THREAT_TIERS.SEVERE) return { CombatMelee: 2, CombatArcher: 2, CombatMedic: 2 };
+  if (threatTier === THREAT_TIERS.HIGH) return { CombatMelee: 2, CombatArcher: 1, CombatMedic: 1 };
+  if (threatTier === THREAT_TIERS.MEDIUM) return { CombatMelee: 1, CombatArcher: 1, CombatMedic: 1 };
+  return { CombatMelee: 1, CombatArcher: 0, CombatMedic: 1 };
+}
+
+function capCounts(totalCap, counts) {
+  if (!counts) return counts;
+  var total = (counts.CombatMelee || 0) + (counts.CombatArcher || 0) + (counts.CombatMedic || 0);
+  if (total <= totalCap) return counts;
+  while (total > totalCap) {
+    if ((counts.CombatArcher || 0) > 0) {
+      counts.CombatArcher -= 1;
+      total -= 1;
+      continue;
+    }
+    if ((counts.CombatMedic || 0) > 1) {
+      counts.CombatMedic -= 1;
+      total -= 1;
+      continue;
+    }
+    if ((counts.CombatMelee || 0) > 1) {
+      counts.CombatMelee -= 1;
+      total -= 1;
+      continue;
+    }
+    break;
+  }
+  return counts;
+}
+
+function applyFightTypeDoctrine(fightType, threatTier, counts) {
+  if (!counts) counts = { CombatMelee: 1, CombatArcher: 0, CombatMedic: 1 };
+  if (fightType === FIGHT_TYPES.HOME_DEFENSE) {
+    if (threatTier === THREAT_TIERS.LOW) {
+      counts.CombatMedic = 0;
+      if (counts.CombatMelee < 1) counts.CombatMelee = 1;
+    }
+    return counts;
+  }
+  if (fightType === FIGHT_TYPES.SK_PVE) {
+    if (counts.CombatMelee > 2) counts.CombatMelee = 2;
+    if (counts.CombatArcher > 1) counts.CombatArcher = 1;
+    if (counts.CombatMedic > 1) counts.CombatMedic = 1;
+    if (counts.CombatMelee < 1) counts.CombatMelee = 1;
+    return counts;
+  }
+  if (fightType === FIGHT_TYPES.BORDER_RESPONSE) {
+    if (counts.CombatMedic < 1 && threatTier !== THREAT_TIERS.LOW) counts.CombatMedic = 1;
+    return counts;
+  }
+  if (fightType === FIGHT_TYPES.INVASION_RESPONSE) {
+    if (counts.CombatMelee < 2) counts.CombatMelee = 2;
+    if (counts.CombatMedic < 1) counts.CombatMedic = 1;
+    return counts;
+  }
+  // Planned offense: keep current threat shape, caller/economy handles allow/deny.
+  return counts;
+}
+
+function bodyTierCapsForEconomy(economyState, fightType, threatTier, maturity) {
+  var cap = {
+    CombatMelee: 1,
+    CombatArcher: 1,
+    CombatMedic: 1
+  };
+  if (economyState === ECONOMY_STATES.STRAINED) {
+    cap = { CombatMelee: 2, CombatArcher: 1, CombatMedic: 1 };
+  } else if (economyState === ECONOMY_STATES.HEALTHY) {
+    cap = { CombatMelee: 2, CombatArcher: 2, CombatMedic: 2 };
+  } else if (economyState === ECONOMY_STATES.RICH) {
+    cap = { CombatMelee: 3, CombatArcher: 3, CombatMedic: 3 };
+  }
+
+  if (maturity === MATURITY_STAGES.EARLY) {
+    if (cap.CombatMelee > 1) cap.CombatMelee = 1;
+    if (cap.CombatArcher > 1) cap.CombatArcher = 1;
+    if (cap.CombatMedic > 1) cap.CombatMedic = 1;
+  } else if (maturity === MATURITY_STAGES.MID) {
+    if (cap.CombatMelee > 2) cap.CombatMelee = 2;
+    if (cap.CombatArcher > 2) cap.CombatArcher = 2;
+    if (cap.CombatMedic > 2) cap.CombatMedic = 2;
+  }
+
+  if (fightType === FIGHT_TYPES.HOME_DEFENSE && threatTier === THREAT_TIERS.LOW) {
+    if (cap.CombatArcher > 1) cap.CombatArcher = 1;
+    if (cap.CombatMedic > 1) cap.CombatMedic = 1;
+  }
+  if (fightType === FIGHT_TYPES.SK_PVE) {
+    if (cap.CombatMedic > 2) cap.CombatMedic = 2;
+  }
+  return cap;
+}
+
+function squadTotalCapForEconomy(economyState) {
+  if (economyState === ECONOMY_STATES.CRITICAL) return 2;
+  if (economyState === ECONOMY_STATES.STRAINED) return 3;
+  if (economyState === ECONOMY_STATES.HEALTHY) return 5;
+  return 6;
+}
+
+function reinforcementModeForState(economyState, fightType) {
+  if (economyState === ECONOMY_STATES.CRITICAL) return 'CHEAP_HOLD';
+  if (economyState === ECONOMY_STATES.STRAINED) return 'CAUTIOUS';
+  if (fightType === FIGHT_TYPES.HOME_DEFENSE) return 'FAST_RESPONSE';
+  if (economyState === ECONOMY_STATES.RICH) return 'SUSTAINED';
+  return 'BALANCED';
+}
+
+function plannedOffenseAllowed(economyState) {
+  return economyState === ECONOMY_STATES.HEALTHY || economyState === ECONOMY_STATES.RICH;
+}
+
+function combatPlanner(spawn, squadId, flagData, threatScore, liveThreat) {
+  var spawnRoom = spawn && spawn.room ? spawn.room : null;
+  var targetRoom = normalizeRoomName(flagData && flagData.targetRoom);
+  var maturity = classifyRoomMaturity(spawnRoom);
+  var economyState = classifyEconomyState(spawnRoom, maturity);
+  var tier = classifyThreatTier(threatScore);
+  var fightType = classifyFightType(spawn, squadId, targetRoom, flagData, tier);
+
+  var allowSpawn = true;
+  var denyReason = '';
+  if (fightType === FIGHT_TYPES.PLANNED_OFFENSE && !plannedOffenseAllowed(economyState)) {
+    allowSpawn = false;
+    denyReason = 'planned_offense_blocked_' + economyState.toLowerCase();
+  }
+  if (economyState === ECONOMY_STATES.CRITICAL && fightType !== FIGHT_TYPES.HOME_DEFENSE && fightType !== FIGHT_TYPES.SK_PVE) {
+    allowSpawn = false;
+    denyReason = denyReason || 'critical_economy_nonessential_combat';
+  }
+
+  var counts = baseCountsForThreat(tier);
+  counts = applyFightTypeDoctrine(fightType, tier, counts);
+  counts = capCounts(squadTotalCapForEconomy(economyState), counts);
+
+  var bodyCaps = bodyTierCapsForEconomy(economyState, fightType, tier, maturity);
+  var cooldown = SQUAD_COOLDOWN_TICKS;
+  if (economyState === ECONOMY_STATES.CRITICAL) cooldown = 20;
+  else if (economyState === ECONOMY_STATES.STRAINED) cooldown = 8;
+  else if (fightType === FIGHT_TYPES.HOME_DEFENSE && tier === THREAT_TIERS.SEVERE) cooldown = 1;
+  else if (economyState === ECONOMY_STATES.HEALTHY) cooldown = 3;
+  else cooldown = 1;
+
+  var plan = {
+    economyState: economyState,
+    maturity: maturity,
+    fightType: fightType,
+    threatTier: tier,
+    desiredCountsByRole: counts,
+    bodyTierCapByRole: bodyCaps,
+    reinforcementMode: reinforcementModeForState(economyState, fightType),
+    allowSpawn: allowSpawn,
+    denyReason: denyReason,
+    squadCooldownTicks: cooldown,
+    stockEnergy: roomStockEnergy(spawnRoom),
+    targetRoom: targetRoom,
+    liveThreat: liveThreat || null
+  };
+
+  plannerDebugLogDecision((squadId || 'unknown') + '@' + (spawnRoom ? spawnRoom.name : 'no_room'), {
+    room: spawnRoom ? spawnRoom.name : null,
+    squadId: squadId || null,
+    targetRoom: targetRoom,
+    fightType: plan.fightType,
+    threatTier: plan.threatTier,
+    economyState: plan.economyState,
+    maturity: plan.maturity,
+    desired: plan.desiredCountsByRole,
+    bodyCap: plan.bodyTierCapByRole,
+    allow: plan.allowSpawn,
+    deny: plan.denyReason || null,
+    mode: plan.reinforcementMode
+  });
+  return plan;
 }
 
 // Decide whether a remote room is too far from the spawn room based on linear room distance.
@@ -497,35 +955,57 @@ function stampSquadPlanMemory(S, layout, targetRoom, threatScore, flag) {
   S.lastEvaluated = Game.time;
 }
 
+function plannerToLayout(plan) {
+  if (!plan || !plan.desiredCountsByRole) return [];
+  var counts = plan.desiredCountsByRole;
+  var layout = [];
+  var meleeNeed = counts.CombatMelee || 0;
+  var archerNeed = counts.CombatArcher || 0;
+  var medicNeed = counts.CombatMedic || 0;
+  if (meleeNeed > 0) layout.push({ role: 'CombatMelee', need: meleeNeed });
+  if (archerNeed > 0) layout.push({ role: 'CombatArcher', need: archerNeed });
+  if (medicNeed > 0) layout.push({ role: 'CombatMedic', need: medicNeed });
+  return layout;
+}
+
 // Keep spawning side-effects in one loop so it's obvious when we early return.
 /**
  * spawnMissingSquadRole consumes desiredSquadLayout() output and asks
  * spawnRole() to create whichever role is currently missing, carrying
  * squadId/flag/target data along so combat creeps spawn ready to rally.
 */
-function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S, squadFlag) {
+function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S, squadFlag, plan) {
   for (var i = 0; i < layout.length; i++) {
-    var plan = layout[i];
-    var need = typeof plan.need === 'number' ? plan.need : 0;
+    var entry = layout[i];
+    var need = typeof entry.need === 'number' ? entry.need : 0;
     if (need <= 0) continue;
-    var have = haveSquadCount(id, plan.role);
+    var have = haveSquadCount(id, entry.role);
     if (have < need) {
+      var bodyCap = null;
+      if (plan && plan.bodyTierCapByRole &&
+          entry && entry.role && entry.role.indexOf('Combat') === 0 &&
+          Object.prototype.hasOwnProperty.call(plan.bodyTierCapByRole, entry.role)) {
+        bodyCap = plan.bodyTierCapByRole[entry.role];
+      }
       var extraMemory = {
         squadId: id,
-        role: plan.role,
+        role: entry.role,
         targetRoom: targetRoom,
         squadFlag: squadFlag,
         skipTaskMemory: true
       };
-      var ok = spawnRole(spawn, plan.role, avail, extraMemory);
+      if (typeof bodyCap === 'number') {
+        extraMemory.combatBodyTierCap = bodyCap;
+      }
+      var ok = spawnRole(spawn, entry.role, avail, extraMemory);
       if (ok) {
         S.lastSpawnAt = Game.time;
-        S.lastSpawnRole = plan.role;
-        combatSpawnLog('[SpawnSquad]', id, 'role', plan.role, 'room', targetRoom,
+        S.lastSpawnRole = entry.role;
+        combatSpawnLog('[SpawnSquad]', id, 'role', entry.role, 'room', targetRoom,
           'flag', squadFlag || 'n/a', 'via', spawn.name);
         return true;
       }
-      combatSpawnLog('[SpawnSquadFail]', id, 'role', plan.role, 'room', targetRoom,
+      combatSpawnLog('[SpawnSquadFail]', id, 'role', entry.role, 'room', targetRoom,
         'flag', squadFlag || 'n/a', 'via', spawn.name);
       return false;
     }
@@ -568,12 +1048,29 @@ function Spawn_Squad(spawn, squadId) {
       'liveScore', live ? live.score : 0);
     return false;
   }
-  var layout = desiredSquadLayout(safeThreatScore);
+  var planner = combatPlanner(spawn, id, flagData, safeThreatScore, live);
+  if (!planner.allowSpawn) {
+    combatSpawnLog('[SpawnDeny]', id, 'room', targetRoom, 'reason', planner.denyReason,
+      'econ', planner.economyState, 'fight', planner.fightType);
+    return false;
+  }
+
+  var layout = plannerToLayout(planner);
   if (!layout.length) return false;
 
   stampSquadPlanMemory(S, layout, targetRoom, safeThreatScore, flagData.flag);
+  S.combatPlan = {
+    economyState: planner.economyState,
+    maturity: planner.maturity,
+    fightType: planner.fightType,
+    threatTier: planner.threatTier,
+    bodyTierCapByRole: planner.bodyTierCapByRole,
+    reinforcementMode: planner.reinforcementMode,
+    denyReason: planner.denyReason || null,
+    desiredCounts: planner.desiredCountsByRole
+  };
 
-  if (S.lastSpawnAt && Game.time - S.lastSpawnAt < SQUAD_COOLDOWN_TICKS) {
+  if (S.lastSpawnAt && Game.time - S.lastSpawnAt < planner.squadCooldownTicks) {
     return false;
   }
 
@@ -581,7 +1078,7 @@ function Spawn_Squad(spawn, squadId) {
   combatSpawnLog('[SpawnEval]', id, 'room', targetRoom, 'score', threatScore,
     'layout', JSON.stringify(layout));
   return spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S,
-    flagData.flag ? flagData.flag.name : null);
+    flagData.flag ? flagData.flag.name : null, planner);
 }
 
 // -----------------------------------------------------------------------------
@@ -595,7 +1092,7 @@ function minEnergyFor(roleName) {
   if (Object.prototype.hasOwnProperty.call(MIN_ENERGY_CACHE, canonicalRole)) {
     return MIN_ENERGY_CACHE[canonicalRole];
   }
-  var list = ROLE_CONFIGS[canonicalRole];
+  var list = getRoleBodyCatalog(canonicalRole, null);
   if (!list || !list.length) {
     MIN_ENERGY_CACHE[canonicalRole] = 0;
     return 0;
