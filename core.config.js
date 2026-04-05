@@ -36,11 +36,11 @@ CoreConfig.settings = Object.freeze({
     /** Treat Source Keeper NPCs as PvE targets. */
     TREAT_SOURCE_KEEPERS_AS_PVE: CoreConfig.TREAT_SOURCE_KEEPERS_AS_PVE,
     /** Toggle verbose combat logging across BeeCombatSquads + spawning. */
-    DEBUG_LOGS: false,
+    DEBUG_LOGS: true,
     /** Stage-1 instrumentation: state/reason logging for combat squads + roles. */
-    DEBUG_COMBAT_STATE: false,
+    DEBUG_COMBAT_STATE: true,
     /** Stage-1 instrumentation: creep.say reason tokens for combat creeps. */
-    DEBUG_COMBAT_SAY: false,
+    DEBUG_COMBAT_SAY: true,
     /** Manual war-target usernames. Names are case-insensitive. */
     MANUAL_TARGETS: [],
     /** How long (ticks) to keep an observed nearby player on watch list. */
