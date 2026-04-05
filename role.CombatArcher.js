@@ -132,6 +132,12 @@ function _requestMove(creep, target, range, intentType) {
   creep.travelTo(target, { range: range, ignoreCreeps: false });
 }
 
+function _hostileNearby(creep, range) {
+  if (!creep || !creep.room || !creep.room.find) return false;
+  var near = creep.pos.findInRange(FIND_HOSTILE_CREEPS, typeof range === 'number' ? range : 6);
+  return near && near.length > 0;
+}
+
 function _buildArcherContext(creep) {
   var base = _buildBaseContext(creep);
   if (!base) return null;
@@ -189,6 +195,13 @@ module.exports = {
     }
 
     if (context.state === 'ENGAGE') {
+      if (context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady) {
+        _debugSay(creep, 'WAIT_SYNC');
+        _debugLog(creep, 'WAIT_SYNC', 'flag=' + context.flagName);
+        if (context.leader) _requestMove(creep, context.leader, 1, 'combat');
+        else if (context.rallyPos) _requestMove(creep, context.rallyPos, 1, 'combat');
+        return;
+      }
       if (context.readiness && context.readiness.needsRegroup) {
         _debugSay(creep, 'REGROUP');
         _debugLog(creep, 'REGROUP', 'flag=' + context.flagName + ' gathered=' + context.readiness.gathered + '/' + context.readiness.requiredGathered);
@@ -248,12 +261,17 @@ module.exports = {
     }
 
     var holdToken = 'HOLD';
-    if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
+    if (context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady) holdToken = 'WAIT_SYNC';
+    else if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
     else if (context.readiness && !context.readiness.hasCoreRoles) holdToken = 'WAIT_MED';
     else if (context.readiness && !context.readiness.gatheredEnough) holdToken = 'WAIT_FORM';
     _debugSay(creep, holdToken);
     _debugLog(creep, holdToken, 'flag=' + context.flagName);
     if (context.leader) {
+      if (_hostileNearby(creep, 6)) {
+        _debugSay(creep, 'REGROUP');
+        _debugLog(creep, 'REGROUP', 'survival=1');
+      }
       _requestMove(creep, context.leader, 1, 'combat');
     } else if (context.rallyPos) {
       _requestMove(creep, context.rallyPos, 1, 'combat');

@@ -155,6 +155,12 @@ function _regroupAnchor(creep, context) {
   return anchor || context.rallyPos || null;
 }
 
+function _hostileNearby(creep, range) {
+  if (!creep || !creep.room || !creep.room.find) return false;
+  var near = creep.pos.findInRange(FIND_HOSTILE_CREEPS, typeof range === 'number' ? range : 6);
+  return near && near.length > 0;
+}
+
 module.exports = {
   role: 'CombatMelee',
 
@@ -185,6 +191,13 @@ module.exports = {
         _requestMove(creep, context.rallyPos, 1, 'combat');
       }
     } else if (context.state === 'ENGAGE') {
+      if (context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady) {
+        _debugSay(creep, 'WAIT_SYNC');
+        _debugLog(creep, 'WAIT_SYNC', 'flag=' + context.flagName);
+        var syncAnchor = _regroupAnchor(creep, context);
+        if (syncAnchor) _requestMove(creep, syncAnchor, 1, 'combat');
+        return;
+      }
       if (context.readiness && context.readiness.needsRegroup) {
         _debugSay(creep, 'REGROUP');
         _debugLog(creep, 'REGROUP', 'flag=' + context.flagName + ' gathered=' + context.readiness.gathered + '/' + context.readiness.requiredGathered);
@@ -245,14 +258,20 @@ module.exports = {
       }
     } else {
       var holdToken = 'HOLD';
-      if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
+      if (context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady) holdToken = 'WAIT_SYNC';
+      else if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
       else if (context.readiness && !context.readiness.hasCoreRoles) holdToken = 'WAIT_MED';
       else if (context.readiness && !context.readiness.gatheredEnough) holdToken = 'WAIT_FORM';
       _debugSay(creep, holdToken);
       _debugLog(creep, holdToken, 'flag=' + context.flagName);
-      if (context.rallyPos) {
+      var holdAnchor = _regroupAnchor(creep, context);
+      if (holdAnchor) {
+        if (_hostileNearby(creep, 6)) {
+          _debugSay(creep, 'REGROUP');
+          _debugLog(creep, 'REGROUP', 'survival=1');
+        }
         _debugSay(creep, 'PATH');
-        _requestMove(creep, context.rallyPos, 1, 'combat');
+        _requestMove(creep, holdAnchor, 1, 'combat');
       }
     }
 

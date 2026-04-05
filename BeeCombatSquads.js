@@ -1347,6 +1347,9 @@ function decideState(flagName, creepIds, targetId) {
   } else if (!targetId) {
     nextState = 'FORM';
     reasonCode = 'NO_TGT';
+  } else if (!readiness.hasEngagedOnce && !readiness.initialPushReady) {
+    nextState = 'FORM';
+    reasonCode = 'WAIT_SYNC';
   } else if (!readiness.waitElapsed) {
     nextState = 'FORM';
     reasonCode = 'WAIT_TIME';
@@ -1402,6 +1405,7 @@ function computeReadiness(flagName, creepIds) {
   var bucket = ensureSquadMemory(flagName);
   var targetRoom = bucket && bucket.targetRoom ? bucket.targetRoom : null;
   var hasEngagedOnce = Boolean(bucket && bucket.hasEngagedOnce);
+  var desiredCounts = bucket && bucket.desiredCounts ? bucket.desiredCounts : {};
 
   for (i = 0; i < ids.length; i++) {
     var member = Game.getObjectById(ids[i]);
@@ -1436,6 +1440,10 @@ function computeReadiness(flagName, creepIds) {
   var leader = bucket && bucket.members && bucket.members.leader ? Game.getObjectById(bucket.members.leader) : null;
   var anchorPos = leader && leader.pos ? leader.pos : (bucket && bucket.rally ? deserializePos(bucket.rally) : null);
   var gathered = 0;
+  var targetAssembled = 0;
+  var targetMelee = 0;
+  var targetArcher = 0;
+  var targetMedic = 0;
   var gatherRange = 4;
   var needed = members.length >= 3 ? 3 : (members.length >= 2 ? 2 : members.length);
 
@@ -1443,15 +1451,45 @@ function computeReadiness(flagName, creepIds) {
     for (i = 0; i < members.length; i++) {
       var c = members[i];
       if (!c || !c.pos || c.pos.roomName !== anchorPos.roomName) continue;
-      if (c.pos.getRangeTo(anchorPos) <= gatherRange) gathered += 1;
+      if (c.pos.getRangeTo(anchorPos) <= gatherRange) {
+        gathered += 1;
+        if (targetRoom && c.pos.roomName === targetRoom) {
+          targetAssembled += 1;
+          var targetRole = c.memory && c.memory.role;
+          if (targetRole === 'CombatMelee') targetMelee += 1;
+          else if (targetRole === 'CombatArcher') targetArcher += 1;
+          else if (targetRole === 'CombatMedic') targetMedic += 1;
+        }
+      }
     }
   } else {
     gathered = members.length;
+    for (i = 0; i < members.length; i++) {
+      var m = members[i];
+      if (!m || !m.pos || !targetRoom || m.pos.roomName !== targetRoom) continue;
+      targetAssembled += 1;
+      var role = m.memory && m.memory.role;
+      if (role === 'CombatMelee') targetMelee += 1;
+      else if (role === 'CombatArcher') targetArcher += 1;
+      else if (role === 'CombatMedic') targetMedic += 1;
+    }
   }
 
   var hasCoreRoles = meleeCount > 0 && medicCount > 0;
   var waitElapsed = Game.time >= maxEffectiveWaitUntil;
   var gatheredEnough = gathered >= needed;
+  var archerExpected = false;
+  if (desiredCounts && typeof desiredCounts.CombatArcher === 'number' && desiredCounts.CombatArcher > 0) {
+    archerExpected = true;
+  } else if (archerCount > 0) {
+    archerExpected = true;
+  }
+  var targetPackageReady = targetMelee >= 1 && targetMedic >= 1 && (!archerExpected || targetArcher >= 1);
+  var targetGatherNeeded = archerExpected ? 3 : 2;
+  var targetAssembledEnough = targetAssembled >= targetGatherNeeded;
+  // Stage 2 gate: initial push must be synchronized in the target room near
+  // the squad anchor so early arrivals do not advance alone.
+  var initialPushReady = hasCoreRoles && waitElapsed && targetPackageReady && targetAssembledEnough;
   var needsRegroup = members.length > 1 && (roomCount > 1 || !gatheredEnough);
   if (needsRegroup) {
     if (!bucket.regroupSince) bucket.regroupSince = Game.time;
@@ -1461,7 +1499,7 @@ function computeReadiness(flagName, creepIds) {
   var regroupDuration = needsRegroup && bucket.regroupSince ? (Game.time - bucket.regroupSince) : 0;
   var regroupTimedOut = needsRegroup && regroupDuration >= REGROUP_TIMEOUT_TICKS;
   var hasAnyCombat = (meleeCount + archerCount + medicCount) > 0;
-  var initialReady = hasCoreRoles && waitElapsed && gatheredEnough;
+  var initialReady = initialPushReady;
   // Initial engage stays strict. After first engage, degrade readiness so we
   // do not deadlock in FORM forever when medics die or regroup drags on.
   var degradedReady = false;
@@ -1478,9 +1516,13 @@ function computeReadiness(flagName, creepIds) {
     'melee=', meleeCount,
     'archer=', archerCount,
     'medic=', medicCount,
+    'archerExpected=', archerExpected ? '1' : '0',
     'waitElapsed=', waitElapsed ? '1' : '0',
     'gatheredEnough=', gatheredEnough ? '1' : '0',
     'gathered=', gathered + '/' + needed,
+    'targetAssembled=', targetAssembled + '/' + targetGatherNeeded,
+    'targetPkg=', targetPackageReady ? '1' : '0',
+    'initPush=', initialPushReady ? '1' : '0',
     'needsRegroup=', needsRegroup ? '1' : '0',
     'splitAcrossRooms=', splitAcrossRooms ? '1' : '0',
     'ready=', ready ? '1' : '0'
@@ -1494,13 +1536,22 @@ function computeReadiness(flagName, creepIds) {
     hasCoreRoles: hasCoreRoles,
     waitUntil: maxEffectiveWaitUntil,
     waitElapsed: waitElapsed,
+    archerExpected: archerExpected,
     gathered: gathered,
     requiredGathered: needed,
     gatheredEnough: gatheredEnough,
+    targetAssembled: targetAssembled,
+    requiredTargetAssembled: targetGatherNeeded,
+    targetMelee: targetMelee,
+    targetArcher: targetArcher,
+    targetMedic: targetMedic,
+    targetPackageReady: targetPackageReady,
+    targetAssembledEnough: targetAssembledEnough,
     roomCount: roomCount,
     splitAcrossRooms: splitAcrossRooms,
     targetRoomCount: targetRoomCount,
     hasEngagedOnce: hasEngagedOnce,
+    initialPushReady: initialPushReady,
     initialReady: initialReady,
     degradedReady: degradedReady,
     needsRegroup: needsRegroup,

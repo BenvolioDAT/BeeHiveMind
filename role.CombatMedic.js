@@ -201,9 +201,10 @@ function _applyHealing(creep, target) {
 
 function _pickMoveTarget(creep, context, healTarget) {
   if (!context) return null;
+  var waitingInitialSync = context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady;
 
   if (context.state === 'RETREAT' && context.rallyPos) return context.rallyPos;
-  if (context.state !== 'ENGAGE' && context.rallyPos) return context.rallyPos;
+  if ((context.state !== 'ENGAGE' || waitingInitialSync) && context.rallyPos) return context.rallyPos;
 
   if (context.leader && creep.pos.getRangeTo(context.leader) > 2) return context.leader;
 
@@ -217,7 +218,7 @@ function _pickMoveTarget(creep, context, healTarget) {
 
   if (context.buddy && creep.pos.getRangeTo(context.buddy) > 2) return context.buddy;
 
-  if (context.state === 'ENGAGE' && context.attackPos) return context.attackPos;
+  if (context.state === 'ENGAGE' && !waitingInitialSync && context.attackPos) return context.attackPos;
 
   if (context.rallyPos) return context.rallyPos;
   return null;
@@ -249,6 +250,7 @@ module.exports = {
 
     var holdToken = 'HOLD';
     if (context.state === 'RETREAT') holdToken = 'RETREAT';
+    else if (context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady) holdToken = 'WAIT_SYNC';
     else if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
     else if (context.readiness && !context.readiness.hasCoreRoles) holdToken = 'WAIT_MED';
     else if (context.readiness && !context.readiness.gatheredEnough) holdToken = 'WAIT_FORM';
