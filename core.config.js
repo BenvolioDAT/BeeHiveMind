@@ -53,6 +53,33 @@ CoreConfig.settings = Object.freeze({
     INCIDENT_TTL: 3000,
     /** Border distance (route rooms) treated as defensive-interest territory. */
     BORDER_ROUTE_DISTANCE: 1,
+    /** Planner decision logs for squad sizing + body tier caps. */
+    DEBUG_PLANNER: false,
+    /** Emit planner logs every N ticks per squad key when unchanged. */
+    DEBUG_PLANNER_EVERY: 15,
+    /**
+     * Stage 1+2 combat planner tuning:
+     * - economy bands are intentionally simple and easy to tune.
+     * - maturity bands blend RCL + room energy capacity.
+     */
+    planner: Object.freeze({
+      economy: Object.freeze({
+        CRITICAL_STORAGE: 20000,
+        STRAINED_STORAGE: 80000,
+        HEALTHY_STORAGE: 180000,
+        CRITICAL_TERMINAL: 10000,
+        STRAINED_TERMINAL: 40000,
+        HEALTHY_TERMINAL: 100000,
+        EARLY_CAPACITY: 550,
+        MID_CAPACITY: 1300,
+        LATE_CAPACITY: 2300
+      }),
+      threatTiers: Object.freeze({
+        LOW_MAX: 7,
+        MEDIUM_MAX: 15,
+        HIGH_MAX: 24
+      })
+    }),
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */
