@@ -252,6 +252,11 @@ var ROLE_NORMALIZE_MAP = (function () {
     map[role.toLowerCase()] = role;
   }
   map.remoteharvest = 'Luna';
+  // Stage-1 clarity:
+  // Trucker currently reuses Courier spawn body planning on purpose.
+  // Runtime role.Trucker still exists, but spawn-time role normalization keeps
+  // legacy "trucker" requests safe until a dedicated Trucker body catalog is
+  // intentionally introduced.
   map.trucker = 'Courier';
   map.worker = 'BaseHarvest';
   map.harvester = 'BaseHarvest';
@@ -309,7 +314,25 @@ function getRoleBodyCatalog(roleName, opts) {
     }
     return out;
   }
-  return ROLE_CONFIGS[roleName] || null;
+  var base = ROLE_CONFIGS[roleName] || null;
+  if (!base || !base.length) return base;
+
+  // Optional Stage-1 non-combat body cap:
+  // role catalogs are ordered largest -> smallest.  Supplying
+  // opts.bodyCatalogStartIndex = N means "start evaluating at N", which caps
+  // max body size while preserving existing affordability logic.
+  var startIndex = opts && typeof opts.bodyCatalogStartIndex === 'number'
+    ? Math.floor(opts.bodyCatalogStartIndex)
+    : 0;
+  if (startIndex < 0) startIndex = 0;
+  if (startIndex >= base.length) startIndex = base.length - 1;
+  if (startIndex <= 0) return base;
+
+  var trimmed = [];
+  for (var bi = startIndex; bi < base.length; bi++) {
+    trimmed.push(base[bi]);
+  }
+  return trimmed;
 }
 
 function getBodyForRole(roleName, energyAvailable, opts) {
@@ -376,13 +399,13 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   }
 
   var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
-  var bodyOpts = null;
+  var bodyOpts = {};
   if (isCombatRole(canonicalRole)) {
-    bodyOpts = {
-      combatBodyTierCap: (memory && typeof memory.combatBodyTierCap === 'number')
-        ? memory.combatBodyTierCap
-        : undefined
-    };
+    bodyOpts.combatBodyTierCap = (memory && typeof memory.combatBodyTierCap === 'number')
+      ? memory.combatBodyTierCap
+      : undefined;
+  } else if (memory && typeof memory.bodyCatalogStartIndex === 'number') {
+    bodyOpts.bodyCatalogStartIndex = memory.bodyCatalogStartIndex;
   }
   var body = getBodyForRole(canonicalRole, energy, bodyOpts);
   if (!body || !body.length) return false;
@@ -422,6 +445,20 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     spawnLog.debug('spawnRole', canonicalRole, 'body [' + body + ']', 'cost', calculateBodyCost(body), 'avail', energy, 'result', result);
   }
   if (result === OK) {
+    // Lightweight spawn telemetry for room-level planner debugging.
+    if (spawn && spawn.room && spawn.room.name) {
+      if (!Memory.rooms) Memory.rooms = {};
+      if (!Memory.rooms[spawn.room.name]) Memory.rooms[spawn.room.name] = {};
+      if (!Memory.rooms[spawn.room.name].spawnDebug) Memory.rooms[spawn.room.name].spawnDebug = {};
+      Memory.rooms[spawn.room.name].spawnDebug.lastSpawn = {
+        tick: Game.time,
+        spawn: spawn.name,
+        role: canonicalRole,
+        name: creepName,
+        body: body,
+        cost: calculateBodyCost(body)
+      };
+    }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('Spawned', canonicalRole, '=>', creepName);
     }
