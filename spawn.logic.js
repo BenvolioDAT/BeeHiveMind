@@ -400,12 +400,18 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
 
   var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
   var bodyOpts = {};
+  var requestedBodyCatalogStartIndex = (memory && typeof memory.bodyCatalogStartIndex === 'number')
+    ? memory.bodyCatalogStartIndex
+    : null;
+  var requestedCombatBodyTierCap = (memory && typeof memory.combatBodyTierCap === 'number')
+    ? memory.combatBodyTierCap
+    : null;
   if (isCombatRole(canonicalRole)) {
-    bodyOpts.combatBodyTierCap = (memory && typeof memory.combatBodyTierCap === 'number')
-      ? memory.combatBodyTierCap
+    bodyOpts.combatBodyTierCap = (requestedCombatBodyTierCap !== null)
+      ? requestedCombatBodyTierCap
       : undefined;
-  } else if (memory && typeof memory.bodyCatalogStartIndex === 'number') {
-    bodyOpts.bodyCatalogStartIndex = memory.bodyCatalogStartIndex;
+  } else if (requestedBodyCatalogStartIndex !== null) {
+    bodyOpts.bodyCatalogStartIndex = requestedBodyCatalogStartIndex;
   }
   var body = getBodyForRole(canonicalRole, energy, bodyOpts);
   if (!body || !body.length) return false;
@@ -456,7 +462,13 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
         role: canonicalRole,
         name: creepName,
         body: body,
-        cost: calculateBodyCost(body)
+        cost: calculateBodyCost(body),
+        plannerBodyCapIndex: (memory && typeof memory.plannerBodyCapIndex === 'number') ? memory.plannerBodyCapIndex : null,
+        enqueuedBodyCapIndex: (memory && typeof memory.enqueuedBodyCapIndex === 'number') ? memory.enqueuedBodyCapIndex : null,
+        requestedBodyCatalogStartIndex: requestedBodyCatalogStartIndex,
+        appliedBodyCatalogStartIndex: (typeof bodyOpts.bodyCatalogStartIndex === 'number') ? bodyOpts.bodyCatalogStartIndex : null,
+        bodyGuidanceSource: (memory && memory.bodyGuidanceSource) ? memory.bodyGuidanceSource : null,
+        bodyGuidanceReason: (memory && memory.bodyGuidanceReason) ? memory.bodyGuidanceReason : null
       };
     }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {

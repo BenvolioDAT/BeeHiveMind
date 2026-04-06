@@ -18,6 +18,12 @@ var CFG = {
   REPAIR_SCAN_INTERVAL:       maintCfg.repairScanInterval || 5,
   REPAIR_MAX_RAMPART:      30000,
   REPAIR_MAX_WALL:         30000,
+  REPAIR_ROAD_THRESHOLD:     0.60,
+  REPAIR_CONTAINER_THRESHOLD:0.80,
+  REPAIR_CRITICAL_THRESHOLD: 0.85,
+  REPAIR_CRITICAL_EMERGENCY: 0.35,
+  REPAIR_GENERIC_THRESHOLD:  0.90,
+  REPAIR_ROAD_REQUIRE_PLANNED: true,
   LOG: Logger.shouldLog(LOG_LEVEL.DEBUG)
 };
 
@@ -399,38 +405,278 @@ function _trimCachedTargets(bucket) {
   return kept;
 }
 
+function _isCriticalStructureType(type) {
+  return type === STRUCTURE_SPAWN ||
+    type === STRUCTURE_EXTENSION ||
+    type === STRUCTURE_TOWER ||
+    type === STRUCTURE_STORAGE ||
+    type === STRUCTURE_LINK ||
+    type === STRUCTURE_TERMINAL ||
+    type === STRUCTURE_LAB ||
+    type === STRUCTURE_OBSERVER;
+}
+
+function _ensurePlannedRoadIndex() {
+  if (!global.__BHM_MAINT) global.__BHM_MAINT = {};
+  if (global.__BHM_MAINT.roadPlanIndexTick === _now() && global.__BHM_MAINT.roadPlanIndex) {
+    return global.__BHM_MAINT.roadPlanIndex;
+  }
+  var idx = { byRoom: {}, ownedRooms: {} };
+  for (var rn in Game.rooms) {
+    if (!Game.rooms.hasOwnProperty(rn)) continue;
+    var roomObj = Game.rooms[rn];
+    if (roomObj && roomObj.controller && roomObj.controller.my) {
+      idx.ownedRooms[rn] = true;
+    }
+  }
+
+  var roomsMem = Memory.rooms || {};
+  var homeNames = Object.keys(idx.ownedRooms);
+  for (var h = 0; h < homeNames.length; h++) {
+    var homeName = homeNames[h];
+    var homeMem = roomsMem[homeName];
+    if (!homeMem || !homeMem.roadPlanner || !homeMem.roadPlanner.paths) continue;
+    var paths = homeMem.roadPlanner.paths;
+    var keys = Object.keys(paths);
+    for (var k = 0; k < keys.length; k++) {
+      var key = keys[k];
+      var rec = paths[key];
+      if (!rec || !Array.isArray(rec.path)) continue;
+      var isLocalPath = key.indexOf(homeName + ':LOCAL:') === 0;
+      for (var p = 0; p < rec.path.length; p++) {
+        var step = rec.path[p];
+        if (!step || step.x == null || step.y == null || !step.roomName) continue;
+        if (!idx.byRoom[step.roomName]) idx.byRoom[step.roomName] = {};
+        var posKey = step.x + ',' + step.y;
+        var entry = idx.byRoom[step.roomName][posKey];
+        if (!entry) {
+          entry = { local: false, remote: false, homes: {} };
+          idx.byRoom[step.roomName][posKey] = entry;
+        }
+        if (isLocalPath) entry.local = true;
+        else entry.remote = true;
+        entry.homes[homeName] = true;
+      }
+    }
+  }
+
+  global.__BHM_MAINT.roadPlanIndexTick = _now();
+  global.__BHM_MAINT.roadPlanIndex = idx;
+  return idx;
+}
+
+function _plannedRoadMatch(roomName, x, y) {
+  var idx = _ensurePlannedRoadIndex();
+  var byPos = idx.byRoom[roomName];
+  if (!byPos) return { matched: false, remote: false, local: false, ownedRoom: !!idx.ownedRooms[roomName] };
+  var rec = byPos[x + ',' + y];
+  if (!rec) return { matched: false, remote: false, local: false, ownedRoom: !!idx.ownedRooms[roomName] };
+  return {
+    matched: true,
+    local: !!rec.local,
+    remote: !!rec.remote,
+    ownedRoom: !!idx.ownedRooms[roomName]
+  };
+}
+
+function _evaluateRepairTarget(structure) {
+  if (!structure || structure.hits == null || structure.hitsMax == null) return null;
+  var type = structure.structureType;
+  var hits = structure.hits;
+  var hitsMax = Math.max(1, structure.hitsMax);
+  var ratio = hits / hitsMax;
+  var include = false;
+  var category = 'generic';
+  var emergency = false;
+  var goalHits = hitsMax;
+  var severity = 0;
+
+  if (type === STRUCTURE_ROAD) {
+    category = 'road';
+    goalHits = Math.floor(hitsMax * CFG.REPAIR_ROAD_THRESHOLD);
+    var belowRoadThreshold = ratio < CFG.REPAIR_ROAD_THRESHOLD;
+    var roadMatch = _plannedRoadMatch(structure.pos.roomName, structure.pos.x, structure.pos.y);
+    include = belowRoadThreshold && (!CFG.REPAIR_ROAD_REQUIRE_PLANNED || roadMatch.matched);
+    severity = belowRoadThreshold ? ((goalHits - hits) / Math.max(1, goalHits)) : 0;
+    if (!belowRoadThreshold) return {
+      include: false,
+      category: category,
+      severity: 0,
+      road: {
+        isRoad: true,
+        planned: roadMatch.matched,
+        remote: !roadMatch.ownedRoom,
+        reason: 'ROAD_ABOVE_THRESHOLD'
+      }
+    };
+    if (!include) return {
+      include: false,
+      category: category,
+      severity: severity,
+      road: {
+        isRoad: true,
+        planned: roadMatch.matched,
+        remote: !roadMatch.ownedRoom,
+        reason: 'ROAD_NOT_IN_PLANNED_NETWORK'
+      }
+    };
+    return {
+      include: true,
+      target: {
+        id: structure.id,
+        hits: hits,
+        hitsMax: hitsMax,
+        type: type,
+        ratio: ratio,
+        category: category,
+        emergency: false,
+        goalHits: Math.max(1, goalHits),
+        severity: Math.max(0, severity),
+        roadPlanned: roadMatch.matched,
+        roadRemote: !roadMatch.ownedRoom
+      },
+      category: category,
+      severity: Math.max(0, severity),
+      road: {
+        isRoad: true,
+        planned: roadMatch.matched,
+        remote: !roadMatch.ownedRoom,
+        reason: 'ROAD_PLANNED_INCLUDED'
+      }
+    };
+  } else if (type === STRUCTURE_CONTAINER) {
+    category = 'container';
+    goalHits = Math.floor(hitsMax * CFG.REPAIR_CONTAINER_THRESHOLD);
+    include = ratio < CFG.REPAIR_CONTAINER_THRESHOLD;
+    severity = include ? ((goalHits - hits) / Math.max(1, goalHits)) : 0;
+  } else if (type === STRUCTURE_RAMPART) {
+    category = 'fort';
+    goalHits = Math.min(hitsMax, CFG.REPAIR_MAX_RAMPART);
+    include = hits < goalHits;
+    severity = include ? ((goalHits - hits) / Math.max(1, goalHits)) : 0;
+  } else if (type === STRUCTURE_WALL) {
+    category = 'fort';
+    goalHits = Math.min(hitsMax, CFG.REPAIR_MAX_WALL);
+    include = hits < goalHits;
+    severity = include ? ((goalHits - hits) / Math.max(1, goalHits)) : 0;
+  } else if (_isCriticalStructureType(type)) {
+    category = 'critical';
+    include = ratio < CFG.REPAIR_CRITICAL_THRESHOLD;
+    emergency = ratio < CFG.REPAIR_CRITICAL_EMERGENCY;
+    goalHits = Math.floor(hitsMax * CFG.REPAIR_CRITICAL_THRESHOLD);
+    severity = include ? ((goalHits - hits) / Math.max(1, goalHits)) : 0;
+  } else {
+    category = 'generic';
+    include = ratio < CFG.REPAIR_GENERIC_THRESHOLD;
+    goalHits = Math.floor(hitsMax * CFG.REPAIR_GENERIC_THRESHOLD);
+    severity = include ? ((goalHits - hits) / Math.max(1, goalHits)) : 0;
+  }
+
+  if (!include) return { include: false, category: category, severity: 0 };
+  return {
+    include: true,
+    target: {
+      id: structure.id,
+      hits: hits,
+      hitsMax: hitsMax,
+      type: type,
+      ratio: ratio,
+      category: category,
+      emergency: emergency,
+      goalHits: Math.max(1, goalHits),
+      severity: Math.max(0, severity)
+    },
+    category: category,
+    severity: Math.max(0, severity)
+  };
+}
+
+function _emptyRepairWorkload() {
+  return {
+    totalCount: 0,
+    meaningfulScore: 0,
+    emergencyCriticalCount: 0,
+    roadNetwork: {
+      damagedSeen: 0,
+      plannedAccepted: 0,
+      unplannedRejected: 0,
+      remotePlannedAccepted: 0,
+      remoteUnplannedRejected: 0,
+      plannedSeverity: 0,
+      unplannedSeverity: 0,
+      excludedReasons: {}
+    },
+    categories: {
+      road: { count: 0, severity: 0 },
+      container: { count: 0, severity: 0 },
+      critical: { count: 0, severity: 0 },
+      fort: { count: 0, severity: 0 },
+      generic: { count: 0, severity: 0 }
+    }
+  };
+}
+
+function _summarizeRepairWorkload(targets, roadNetwork) {
+  var summary = _emptyRepairWorkload();
+  if (roadNetwork) summary.roadNetwork = roadNetwork;
+  for (var i = 0; i < targets.length; i++) {
+    var t = targets[i];
+    if (!t || !t.category) continue;
+    if (!summary.categories[t.category]) continue;
+    summary.totalCount += 1;
+    summary.categories[t.category].count += 1;
+    summary.categories[t.category].severity += t.severity || 0;
+    if (t.emergency) summary.emergencyCriticalCount += 1;
+  }
+  summary.meaningfulScore =
+    summary.categories.critical.severity * 3 +
+    summary.categories.container.severity * 2 +
+    summary.categories.fort.severity * 1.5 +
+    summary.categories.road.severity +
+    summary.categories.generic.severity * 0.75;
+  summary.meaningfulScore = Math.round(summary.meaningfulScore * 100) / 100;
+  return summary;
+}
+
 // When the cache goes empty (or the cadence expires) we fall back to a full
 // scan.  Sorting by priority and damage keeps the result deterministic.
 function _scanRepairTargets(room, bucket, priorityOrder) {
-  var list = room.find(FIND_STRUCTURES, {
-    filter: function (s) {
-      if (s.structureType === STRUCTURE_ROAD) {
-        return s.hits < (s.hitsMax * 0.60);
-      }
-      if (s.structureType === STRUCTURE_RAMPART) {
-        return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_RAMPART);
-      }
-      if (s.structureType === STRUCTURE_WALL) {
-        return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_WALL);
-      }
-      return s.hits < s.hitsMax;
-    }
-  });
+  var list = room.find(FIND_STRUCTURES);
 
   var targets = [];
+  var roadNetwork = _emptyRepairWorkload().roadNetwork;
   for (var i = 0; i < list.length; i++) {
-    var s = list[i];
-    targets.push({ id: s.id, hits: s.hits, hitsMax: s.hitsMax, type: s.structureType });
+    var evalTarget = _evaluateRepairTarget(list[i]);
+    if (!evalTarget) continue;
+    if (evalTarget.road && evalTarget.road.isRoad) {
+      roadNetwork.damagedSeen += 1;
+      if (evalTarget.include && evalTarget.road.planned) {
+        roadNetwork.plannedAccepted += 1;
+        roadNetwork.plannedSeverity += evalTarget.severity || 0;
+        if (evalTarget.road.remote) roadNetwork.remotePlannedAccepted += 1;
+      } else if (!evalTarget.include) {
+        roadNetwork.unplannedRejected += 1;
+        roadNetwork.unplannedSeverity += evalTarget.severity || 0;
+        if (evalTarget.road.remote) roadNetwork.remoteUnplannedRejected += 1;
+        var reason = evalTarget.road.reason || 'ROAD_REJECTED';
+        roadNetwork.excludedReasons[reason] = (roadNetwork.excludedReasons[reason] || 0) + 1;
+      }
+    }
+    if (!evalTarget.include || !evalTarget.target) continue;
+    targets.push(evalTarget.target);
   }
 
   targets.sort(function (a, b) {
+    if (!!a.emergency !== !!b.emergency) return a.emergency ? -1 : 1;
     var pa = priorityOrder[a.type] != null ? priorityOrder[a.type] : 99;
     var pb = priorityOrder[b.type] != null ? priorityOrder[b.type] : 99;
     if (pa !== pb) return pa - pb;
+    if (a.ratio !== b.ratio) return a.ratio - b.ratio;
     return a.hits - b.hits;
   });
 
   bucket.cachedRepairTargets = targets;
+  bucket.repairWorkload = _summarizeRepairWorkload(targets, roadNetwork);
   bucket.nextRepairScanTick = _now() + CFG.REPAIR_SCAN_INTERVAL;
   return targets;
 }
@@ -445,6 +691,10 @@ function findStructuresNeedingRepair(room) {
   if (now < nextScanTick) {
     var cached = _trimCachedTargets(bucket);
     if (cached.length) {
+      var existingRoad = (bucket.repairWorkload && bucket.repairWorkload.roadNetwork)
+        ? bucket.repairWorkload.roadNetwork
+        : _emptyRepairWorkload().roadNetwork;
+      bucket.repairWorkload = _summarizeRepairWorkload(cached, existingRoad);
       return cached;
     }
   }
