@@ -605,14 +605,21 @@ function isUpgraderSafetyRequired(room) {
 
 function countRoleWithQueue(C, roomName, role) {
   var canonical = canonicalRole(role);
-  var roleCounts = (C && C.roleCounts) ? C.roleCounts : {};
-  var live = canonical === 'Luna'
-    ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
-    : (canonical === 'BaseHarvest'
-      ? countRoleInRoom(C, roomName, canonical)
-      : (roleCounts[canonical] || 0));
+  var live = getRoomLocalLiveCount(C, roomName, canonical);
   var queued = queuedCount(roomName, canonical);
   return { live: live, queued: queued, total: live + queued };
+}
+
+function getRoomLocalLiveCount(C, roomName, role) {
+  var canonical = canonicalRole(role);
+  if (!canonical) return 0;
+  if (canonical === 'Luna') {
+    return ((C && C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0);
+  }
+  // Planner quotas are computed per room, so default to room-local live counts
+  // for every non-combat role in that room.  This prevents one room's creeps
+  // from masking deficits in another room.
+  return countRoleInRoom(C, roomName, canonical);
 }
 
 function suppressedBandsForState(economyState, recoveryMode) {
@@ -1108,11 +1115,7 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   for (var i = 0; i < quotaRoles.length; i++) {
     var role = quotaRoles[i];
     var canonical = canonicalRole(role);
-    var active = (canonical === 'Luna')
-      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
-      : (canonical === 'BaseHarvest'
-        ? countRoleInRoom(C, roomName, canonical)
-        : (C.roleCounts[canonical] || 0));
+    var active = getRoomLocalLiveCount(C, roomName, canonical);
     remaining[role] = Math.max(0, (quotas[role] || 0) - active);
   }
 
@@ -1163,6 +1166,13 @@ function getRepairBacklog(room) {
   return list.length;
 }
 
+function getRepairWorkloadSummary(room) {
+  if (!room || !Memory.rooms || !Memory.rooms[room.name]) return null;
+  var maint = Memory.rooms[room.name]._maint;
+  if (!maint || !maint.repairWorkload) return null;
+  return maint.repairWorkload;
+}
+
 function countCriticalBuildBacklog(room) {
   if (!room || typeof room.find !== 'function') return 0;
   var sites = room.find(FIND_CONSTRUCTION_SITES) || [];
@@ -1194,6 +1204,13 @@ function countCriticalRepairBacklog(room) {
   return count;
 }
 
+function summarizeCriticalRepairCount(workload, fallbackCriticalCount) {
+  if (!workload || !workload.categories) return fallbackCriticalCount || 0;
+  var critical = (workload.categories.critical && workload.categories.critical.count) || 0;
+  var emergency = workload.emergencyCriticalCount || 0;
+  return critical + emergency;
+}
+
 function computeNonCombatPlan(C, room, debug) {
   var maturity = classifyRoomMaturity(room);
   var economy = classifyEconomyState(room, maturity);
@@ -1205,13 +1222,34 @@ function computeNonCombatPlan(C, room, debug) {
     remoteSites += (C.roomSiteCounts[remotes[i]] || 0);
   }
   var totalSites = localSites + remoteSites;
-  var repairBacklog = getRepairBacklog(room);
+  var repairBacklogRaw = getRepairBacklog(room);
+  var repairWorkload = getRepairWorkloadSummary(room);
+  var repairBacklog = repairWorkload && typeof repairWorkload.totalCount === 'number'
+    ? repairWorkload.totalCount
+    : repairBacklogRaw;
   var criticalBuildBacklog = countCriticalBuildBacklog(room);
-  var criticalRepairBacklog = countCriticalRepairBacklog(room);
+  var criticalRepairBacklogRaw = countCriticalRepairBacklog(room);
+  var criticalRepairBacklog = summarizeCriticalRepairCount(repairWorkload, criticalRepairBacklogRaw);
+  var repairMeaningfulScore = repairWorkload && typeof repairWorkload.meaningfulScore === 'number'
+    ? repairWorkload.meaningfulScore
+    : repairBacklog;
+  var repairRoadNetwork = repairWorkload && repairWorkload.roadNetwork
+    ? repairWorkload.roadNetwork
+    : null;
   var lunaSignal = determineLunaQuota(C, room);
   var lunaDesired = lunaSignal.desired;
   var buildBucket = buildBacklogBucket(totalSites, criticalBuildBacklog);
   var repairBucket = repairBacklogBucket(repairBacklog, criticalRepairBacklog);
+  var repairDemandReason = 'REPAIR_BUCKET_' + repairBucket;
+  if (repairWorkload && repairWorkload.emergencyCriticalCount > 0) {
+    repairDemandReason = 'REPAIR_EMERGENCY_CRITICAL';
+  } else if (repairMeaningfulScore >= 4) {
+    repairDemandReason = 'REPAIR_MEANINGFUL_PRESSURE_HIGH';
+  } else if (repairMeaningfulScore >= 2) {
+    repairDemandReason = 'REPAIR_MEANINGFUL_PRESSURE_MED';
+  } else if (repairMeaningfulScore > 0) {
+    repairDemandReason = 'REPAIR_MEANINGFUL_PRESSURE_LOW';
+  }
   var recoveryBias = (economy === 'CRITICAL') ||
     ((economy === 'STRAINED') && (criticalBuildBacklog > 0 || criticalRepairBacklog > 0));
 
@@ -1287,6 +1325,11 @@ function computeNonCombatPlan(C, room, debug) {
     demandClampReasons.Luna = 'RICH_REMOTE_SCALE';
   }
 
+  if (repairWorkload && repairWorkload.emergencyCriticalCount > 0) {
+    desired.Repair = Math.max(desired.Repair, 1);
+    demandClampReasons.RepairEmergency = 'REPAIR_EMERGENCY_FLOOR';
+  }
+
   // Recovery-bias guardrail: keep optional non-protected growth roles bounded.
   if (recoveryBias) {
     desired.Builder = Math.min(desired.Builder, criticalBuildBacklog > 0 ? 1 : 0);
@@ -1310,6 +1353,12 @@ function computeNonCombatPlan(C, room, debug) {
     tick: Game.time,
     totalSites: totalSites,
     repairBacklog: repairBacklog,
+    repairBacklogRaw: repairBacklogRaw,
+    repairMeaningfulScore: repairMeaningfulScore,
+    repairDemandReason: repairDemandReason,
+    repairRoadsSeen: repairRoadNetwork ? (repairRoadNetwork.damagedSeen || 0) : 0,
+    repairRoadsPlannedAccepted: repairRoadNetwork ? (repairRoadNetwork.plannedAccepted || 0) : 0,
+    repairRoadsUnplannedRejected: repairRoadNetwork ? (repairRoadNetwork.unplannedRejected || 0) : 0,
     missingEnergy: missingEnergy,
     controllerLevel: controllerLevel,
     controllerProgress: controllerProgress
@@ -1508,7 +1557,7 @@ function computeNonCombatPlan(C, room, debug) {
 
   var reasons = {
     Builder: buildBucket === 'NONE' ? 'NO_BACKLOG' : ('BUILD_' + buildBucket + '_' + totalSites),
-    Repair: repairBucket === 'NONE' ? 'REPAIR_LOW_PRIORITY' : ('REPAIR_' + repairBucket + '_' + repairBacklog),
+    Repair: repairBucket === 'NONE' ? 'REPAIR_LOW_PRIORITY' : ('REPAIR_' + repairBucket + '_' + repairBacklog + '_' + repairDemandReason),
     Upgrader: 'ECON_' + economy,
     Luna: lunaDesired > 0 ? ('REMOTE_' + lunaDesired) : 'REMOTE_DISABLED',
     Courier: 'REMOTE_' + remoteCount + '_ECON_' + economy,
@@ -1553,8 +1602,20 @@ function computeNonCombatPlan(C, room, debug) {
       repairBacklog: repairBacklog,
       criticalBuildBacklog: criticalBuildBacklog,
       criticalRepairBacklog: criticalRepairBacklog,
+      criticalRepairBacklogRaw: criticalRepairBacklogRaw,
       buildBacklogBucket: buildBucket,
-      repairBacklogBucket: repairBucket
+      repairBacklogBucket: repairBucket,
+      repairWorkload: repairWorkload,
+      repairMeaningfulScore: repairMeaningfulScore,
+      repairDemandReason: repairDemandReason,
+      repairRoadNetwork: repairRoadNetwork ? {
+        damagedSeen: repairRoadNetwork.damagedSeen || 0,
+        plannedAccepted: repairRoadNetwork.plannedAccepted || 0,
+        unplannedRejected: repairRoadNetwork.unplannedRejected || 0,
+        remotePlannedAccepted: repairRoadNetwork.remotePlannedAccepted || 0,
+        remoteUnplannedRejected: repairRoadNetwork.remoteUnplannedRejected || 0,
+        excludedReasons: repairRoadNetwork.excludedReasons || {}
+      } : null
     },
     recoveryBias: recoveryBias,
     demandClampReasons: demandClampReasons,
@@ -1711,11 +1772,7 @@ function fillQueueForRoom(C, room) {
     var role = roles[i];
     var limit = quotas[role] || 0;
     var canonical = canonicalRole(role);
-    var active = canonical === 'Luna'
-      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
-      : (canonical === 'BaseHarvest'
-        ? countRoleInRoom(C, roomName, canonical)
-        : (C.roleCounts[canonical] || 0));
+    var active = getRoomLocalLiveCount(C, roomName, canonical);
     var queued = queuedCount(roomName, role);
     var deficit = Math.max(0, limit - active - queued);
     var surplus = Math.max(0, active + queued - limit);
@@ -1723,6 +1780,7 @@ function fillQueueForRoom(C, room) {
       band: roleBand(canonical),
       desired: limit,
       live: active,
+      localLive: active,
       queued: queued,
       deficit: deficit,
       surplus: surplus
@@ -1739,8 +1797,23 @@ function fillQueueForRoom(C, room) {
         'active=', active, 'queued=', queued, 'deficit=', deficit);
     }
     for (var j = 0; j < deficit; j++) {
-      var guidance = roleBodyGuidance(canonical, debug.planner || {});
-      var capIndex = guidance.capIndex;
+      var guidance = null;
+      var guidanceSource = 'RECOMPUTED';
+      var plannerBodyGuidance = debug && debug.planner && debug.planner.bodyGuidance
+        ? debug.planner.bodyGuidance
+        : null;
+      if (plannerBodyGuidance &&
+          plannerBodyGuidance[canonical] &&
+          typeof plannerBodyGuidance[canonical].capIndex === 'number') {
+        guidance = plannerBodyGuidance[canonical];
+        guidanceSource = 'PLANNER_ADJUSTED';
+      } else {
+        guidance = roleBodyGuidance(canonical, debug.planner || {});
+      }
+      var plannerCap = guidance && typeof guidance.capIndex === 'number'
+        ? guidance.capIndex
+        : 0;
+      var capIndex = plannerCap;
       if (arbitration && arbitration.recoveryMode) {
         // Stage-2 recovery bias:
         // favor faster-to-field utility/economy creeps while recovering.
@@ -1762,11 +1835,17 @@ function fillQueueForRoom(C, room) {
       }
       roleStats[canonical].bodyCapIndex = capIndex;
       roleStats[canonical].bodyGuidanceReason = guidance.reason || 'UNSPECIFIED';
+      roleStats[canonical].bodyGuidanceSource = guidanceSource;
+      roleStats[canonical].plannerBodyCapIndex = plannerCap;
+      roleStats[canonical].enqueuedBodyCapIndex = capIndex;
       roleStats[canonical].demandClampReason = (debug.planner && debug.planner.demandClampReasons)
         ? (debug.planner.demandClampReasons[canonical] || debug.planner.demandClampReasons.recoveryBias || null)
         : null;
       enqueue(roomName, canonical, {
         bodyCatalogStartIndex: capIndex,
+        plannerBodyCapIndex: plannerCap,
+        enqueuedBodyCapIndex: capIndex,
+        bodyGuidanceSource: guidanceSource,
         plannerReason: enqueueReason,
         bodyGuidanceReason: guidance.reason || null,
         demandClampReason: roleStats[canonical].demandClampReason,
@@ -1878,7 +1957,10 @@ function dequeueAndSpawn(spawner) {
       action: 'SPAWNED',
       role: item.role,
       reason: item.plannerReason || 'SPAWN_OK',
+      plannerBodyCapIndex: (typeof item.plannerBodyCapIndex === 'number') ? item.plannerBodyCapIndex : null,
+      enqueuedBodyCapIndex: (typeof item.enqueuedBodyCapIndex === 'number') ? item.enqueuedBodyCapIndex : null,
       bodyCatalogStartIndex: (typeof item.bodyCatalogStartIndex === 'number') ? item.bodyCatalogStartIndex : null,
+      bodyGuidanceSource: item.bodyGuidanceSource || null,
       bodyGuidanceReason: item.bodyGuidanceReason || null,
       demandClampReason: item.demandClampReason || null,
       selectedRoleReason: pickReason || 'ALLOWED',
