@@ -68,12 +68,19 @@ class Traveler {
         let invalidationReason = null;
         let hadPathAtStart = !!travelData.path;
         let previousDestination = state.destination ? new RoomPosition(state.destination.x, state.destination.y, state.destination.roomName) : null;
+        let previousCoord = state.lastCoord || null;
+        let justEnteredRoom = !!(previousCoord && previousCoord.roomName && previousCoord.roomName !== creep.pos.roomName);
+        let onBorderNow = Traveler.isExit(creep.pos);
+        Traveler.pruneReverseHold(creep, travelData);
 
         // If some other logic moved this creep far off the recorded path, drop the
         // cached directions so we do not keep walking a stale route.
-        if (travelData.path && state.lastCoord && !this.sameCoord(creep.pos, state.lastCoord) && !creep.pos.isNearTo(state.lastCoord)) {
+        if (travelData.path && state.lastCoord && !justEnteredRoom && !this.sameCoord(creep.pos, state.lastCoord) && !creep.pos.isNearTo(state.lastCoord)) {
             invalidationReason = "coordMismatchFar";
             delete travelData.path;
+            if (onBorderNow || justEnteredRoom) {
+                Traveler.logBorderDiagnostic(creep, destination, invalidationReason, hadPathAtStart, false, null, null, false, false, previousCoord);
+            }
         }
         // uncomment to visualize destination
         // this.circle(destination, "orange");
@@ -98,10 +105,13 @@ class Traveler {
         // If another system moved the creep but kept the same destination, wipe the
         // path so we recalc from the new position instead of following a stale
         // route from the previous coord.
-        if (travelData.path && state.destination && this.samePos(state.destination, destination) && state.lastCoord && !this.sameCoord(creep.pos, state.lastCoord) && !creep.pos.isNearTo(state.lastCoord)) {
+        if (travelData.path && state.destination && this.samePos(state.destination, destination) && state.lastCoord && !justEnteredRoom && !this.sameCoord(creep.pos, state.lastCoord) && !creep.pos.isNearTo(state.lastCoord)) {
             invalidationReason = invalidationReason || "coordMismatchSameDest";
             delete travelData.path;
             state.stuckCount = 0;
+            if (onBorderNow || justEnteredRoom) {
+                Traveler.logBorderDiagnostic(creep, destination, invalidationReason, hadPathAtStart, false, null, null, false, false, previousCoord);
+            }
         }
         // delete path cache if destination is different
         if (!this.samePos(state.destination, destination)) {
@@ -161,6 +171,32 @@ class Traveler {
         if (nextDirection) {
             nextPos = Traveler.positionAtDirection(creep.pos, nextDirection);
             nextIsExit = !!(nextPos && Traveler.isExit(nextPos));
+        }
+        let extraReverseGuard = Traveler.shouldApplyExtraReverseGuard(creep, travelData, nextDirection);
+        let aboutToReverseExit = justEnteredRoom && Traveler.wouldReverseExit(creep.pos, previousCoord, nextDirection);
+        if (aboutToReverseExit || extraReverseGuard) {
+            Traveler.logBorderDiagnostic(creep, destination, invalidationReason || "none", hadPathAtStart, newPath, nextDirection, nextPos, nextIsExit, false, previousCoord);
+            let inwardDirection = Traveler.inwardDirection(creep.pos);
+            if (inwardDirection && Traveler.canStepDirection(creep, inwardDirection)) {
+                Traveler.clearReverseHold(travelData);
+                if (options.returnData) {
+                    options.returnData.reverseExitBlocked = true;
+                }
+                Traveler.logBorderDiagnostic(creep, destination, invalidationReason || "none", hadPathAtStart, newPath, inwardDirection, Traveler.positionAtDirection(creep.pos, inwardDirection), false, true, previousCoord);
+                return creep.move(inwardDirection);
+            }
+            if (aboutToReverseExit && !extraReverseGuard) {
+                Traveler.setReverseHold(creep, travelData, nextDirection);
+            }
+            else {
+                Traveler.clearReverseHold(travelData);
+            }
+            delete travelData.path;
+            if (options.returnData) {
+                options.returnData.reverseExitBlocked = true;
+            }
+            Traveler.logBorderDiagnostic(creep, destination, invalidationReason || "none", hadPathAtStart, newPath, nextDirection, nextPos, nextIsExit, true, previousCoord);
+            return ERR_BUSY;
         }
         if (options.returnData) {
             if (nextDirection) {
@@ -580,7 +616,7 @@ class Traveler {
     static deserializeState(travelData, destination) {
         let state = {};
         if (travelData.state) {
-            state.lastCoord = { x: travelData.state[STATE_PREV_X], y: travelData.state[STATE_PREV_Y] };
+            state.lastCoord = { x: travelData.state[STATE_PREV_X], y: travelData.state[STATE_PREV_Y], roomName: travelData.state[STATE_PREV_ROOMNAME] || null };
             state.cpu = travelData.state[STATE_CPU];
             state.stuckCount = travelData.state[STATE_STUCK];
             state.destination = new RoomPosition(travelData.state[STATE_DEST_X], travelData.state[STATE_DEST_Y], travelData.state[STATE_DEST_ROOMNAME]);
@@ -593,7 +629,105 @@ class Traveler {
     }
     static serializeState(creep, destination, state, travelData) {
         travelData.state = [creep.pos.x, creep.pos.y, state.stuckCount, state.cpu, destination.x, destination.y,
-            destination.roomName];
+            destination.roomName, creep.pos.roomName];
+    }
+    static inwardDirection(pos) {
+        if (!pos)
+            return null;
+        if (pos.x === 0)
+            return RIGHT;
+        if (pos.x === 49)
+            return LEFT;
+        if (pos.y === 0)
+            return BOTTOM;
+        if (pos.y === 49)
+            return TOP;
+        return null;
+    }
+    static wouldReverseExit(currentPos, previousCoord, direction) {
+        if (!currentPos || !previousCoord || !direction)
+            return false;
+        if (!Traveler.isExit(currentPos))
+            return false;
+        if (currentPos.x === 0 && direction === LEFT && previousCoord.x === 49)
+            return true;
+        if (currentPos.x === 49 && direction === RIGHT && previousCoord.x === 0)
+            return true;
+        if (currentPos.y === 0 && direction === TOP && previousCoord.y === 49)
+            return true;
+        if (currentPos.y === 49 && direction === BOTTOM && previousCoord.y === 0)
+            return true;
+        return false;
+    }
+    static canStepDirection(creep, direction) {
+        if (!creep || !direction)
+            return false;
+        let target = Traveler.positionAtDirection(creep.pos, direction);
+        if (!target)
+            return false;
+        let terrain = Game.map.getRoomTerrain(creep.pos.roomName);
+        if (terrain.get(target.x, target.y) === TERRAIN_MASK_WALL)
+            return false;
+        if (creep.room) {
+            let structures = creep.room.lookForAt(LOOK_STRUCTURES, target.x, target.y) || [];
+            for (let s of structures) {
+                if (s.structureType !== STRUCTURE_ROAD &&
+                    s.structureType !== STRUCTURE_CONTAINER &&
+                    !(s.structureType === STRUCTURE_RAMPART && s.my)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    static setReverseHold(creep, travelData, blockedDir) {
+        if (!creep || !travelData || !blockedDir)
+            return;
+        travelData.reverseHold = {
+            tick: Game.time,
+            roomName: creep.pos.roomName,
+            x: creep.pos.x,
+            y: creep.pos.y,
+            blockedDir: blockedDir
+        };
+    }
+    static clearReverseHold(travelData) {
+        if (!travelData)
+            return;
+        delete travelData.reverseHold;
+    }
+    static pruneReverseHold(creep, travelData) {
+        if (!creep || !travelData || !travelData.reverseHold)
+            return;
+        let h = travelData.reverseHold;
+        let stale = (Game.time > (h.tick + 1)) ||
+            h.roomName !== creep.pos.roomName ||
+            h.x !== creep.pos.x ||
+            h.y !== creep.pos.y;
+        if (stale) {
+            delete travelData.reverseHold;
+        }
+    }
+    static shouldApplyExtraReverseGuard(creep, travelData, direction) {
+        if (!creep || !travelData || !travelData.reverseHold || !direction)
+            return false;
+        let h = travelData.reverseHold;
+        if (Game.time !== (h.tick + 1))
+            return false;
+        if (h.roomName !== creep.pos.roomName || h.x !== creep.pos.x || h.y !== creep.pos.y)
+            return false;
+        return h.blockedDir === direction;
+    }
+    static logBorderDiagnostic(creep, destination, invalidationReason, hadPath, newPath, nextDirection, nextPos, nextIsExit, reverseExitBlocked, previousCoord) {
+        if (!creep || !destination)
+            return;
+        let pos = creep.pos;
+        let justEntered = !!(previousCoord && previousCoord.roomName && previousCoord.roomName !== pos.roomName);
+        if (!Traveler.isExit(pos) && !justEntered)
+            return;
+        let prevTag = previousCoord ? `${previousCoord.roomName || "?"}:${previousCoord.x},${previousCoord.y}` : "null";
+        let nextTag = nextPos ? `${nextPos.roomName}:${nextPos.x},${nextPos.y}` : "null";
+        console.log(`[TravelerBounce] name=${creep.name} t=${Game.time} pos=${pos.roomName}:${pos.x},${pos.y} prev=${prevTag} dest=${destination.roomName}:${destination.x},${destination.y} invalid=${invalidationReason || "none"} hadPath=${hadPath ? "yes" : "no"} newPath=${newPath ? "yes" : "no"} nextDir=${nextDirection || 0} nextPos=${nextTag} nextIsExit=${nextIsExit ? "yes" : "no"} reverseExitBlocked=${reverseExitBlocked ? "yes" : "no"}`);
     }
     static isStuck(creep, state) {
         let stuck = false;
@@ -625,6 +759,7 @@ const STATE_CPU = 3;
 const STATE_DEST_X = 4;
 const STATE_DEST_Y = 5;
 const STATE_DEST_ROOMNAME = 6;
+const STATE_PREV_ROOMNAME = 7;
 // assigns a function to Creep.prototype: creep.travelTo(destination)
 Creep.prototype.travelTo = function (destination, options) {
     return Traveler.travelTo(this, destination, options);
