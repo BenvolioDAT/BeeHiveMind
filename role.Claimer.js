@@ -512,6 +512,7 @@ var CFG = Object.freeze({
       debugSay(creep, '📌');
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "+RES");
       creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
+      return;
     } else if (res === OK) {
       debugSay(creep, '📌');
     } else {
