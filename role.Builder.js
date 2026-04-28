@@ -495,16 +495,12 @@ function issueBuilderMove(creep, target, opts) {
 
     if (nudgeOffBorder(creep)) return true;
 
-    var exitDir = Game.map.findExit(creep.room, targetRoomName);
-    if (exitDir < 0) return false;
-
-    var exit = creep.pos.findClosestByRange(exitDir);
-    if (exit) {
-      debugDrawLine(creep, exit, CFG.DRAW.TRAVEL, 'EXIT');
-      issueBuilderMove(creep, exit, { range: 0, reusePath: 10, maxRooms: 1 });
-      return true;
-    }
-    return false;
+    // Prefer an interior room-center target so Traveler handles room crossing
+    // without explicitly parking on exit tiles.
+    var roomCenter = new RoomPosition(25, 25, targetRoomName);
+    debugDrawLine(creep, roomCenter, CFG.DRAW.TRAVEL, 'ROOM');
+    issueBuilderMove(creep, roomCenter, { range: 20, reusePath: 10 });
+    return true;
   }
 
   // -----------------------------

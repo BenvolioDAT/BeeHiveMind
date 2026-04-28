@@ -215,15 +215,49 @@ function BeeTravel(creep, target, a3, a4, a5) {
   };
   for (var k in opts) { if (opts.hasOwnProperty(k)) options[k] = opts[k]; }
 
+  var borderNudge = nudgeOffExitIfNeeded(creep, destination, options);
+  if (borderNudge.didMove) {
+    return borderNudge.code;
+  }
+
   try {
     return Traveler.travelTo(creep, destination, options);
   } catch (e) {
     // Fallback to vanilla moveTo if something odd happens
     if (creep.pos && destination) {
       var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
-      return creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
+      var moveToResult = creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
+      if (creep.memory && creep.memory._move) {
+        delete creep.memory._move;
+      }
+      return moveToResult;
     }
   }
+}
+
+function nudgeOffExitIfNeeded(creep, destination, options) {
+  if (!creep || !creep.pos || !destination) return { didMove: false, code: ERR_INVALID_TARGET };
+  if (options && options.flee) return { didMove: false, code: OK };
+
+  var d = (destination && destination.pos) ? destination.pos : destination;
+  if (!d || !d.roomName) return { didMove: false, code: ERR_INVALID_TARGET };
+  if (creep.pos.roomName !== d.roomName) return { didMove: false, code: OK };
+
+  var onBorder = (creep.pos.x === 0 || creep.pos.x === 49 || creep.pos.y === 0 || creep.pos.y === 49);
+  if (!onBorder) return { didMove: false, code: OK };
+
+  var dir = null;
+  if (creep.pos.x === 0) dir = RIGHT;
+  else if (creep.pos.x === 49) dir = LEFT;
+  else if (creep.pos.y === 0) dir = BOTTOM;
+  else if (creep.pos.y === 49) dir = TOP;
+  if (!dir) return { didMove: false, code: OK };
+
+  var rc = creep.move(dir);
+  if (rc === OK || rc === ERR_TIRED) {
+    return { didMove: true, code: rc };
+  }
+  return { didMove: false, code: rc };
 }
 
 // Interval (in ticks) before we rescan containers adjacent to sources.
@@ -829,7 +863,8 @@ var BeeToolbox = {
   // 🚚 MOVEMENT: Traveler wrapper
   // ---------------------------------------------------------------------------
 
-  BeeTravel: BeeTravel
+  BeeTravel: BeeTravel,
+  nudgeOffExitIfNeeded: nudgeOffExitIfNeeded
 
 }; // end BeeToolbox
 
