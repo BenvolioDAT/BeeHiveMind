@@ -480,11 +480,22 @@ function issueBuilderMove(creep, target, opts) {
   function nudgeOffBorder(creep) {
     if (!isOnBorder(creep.pos)) return false;
     if (creep.memory._builderMoveTick === Game.time) return true;
-    creep.memory._builderMoveTick = Game.time;
-    if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
-    if (creep.pos.x === 49) return creep.move(LEFT) === OK;
-    if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
-    if (creep.pos.y === 49) return creep.move(TOP) === OK;
+    var dir = null;
+    if (creep.pos.x === 0) dir = RIGHT;
+    else if (creep.pos.x === 49) dir = LEFT;
+    else if (creep.pos.y === 0) dir = BOTTOM;
+    else if (creep.pos.y === 49) dir = TOP;
+    if (!dir) return false;
+
+    var rc = creep.move(dir);
+    // Consume the per-tick lock only when movement intent is accepted (OK),
+    // or already present this tick (ERR_BUSY/ERR_TIRED). If nudge fails,
+    // leave lock open so normal travelTo/Traveler can run this tick and avoid
+    // stalling on exit tiles.
+    if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
+      creep.memory._builderMoveTick = Game.time;
+      return true;
+    }
     return false;
   }
 

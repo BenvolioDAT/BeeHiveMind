@@ -631,11 +631,21 @@ function stabilizeBorderOnEntry(creep, mem) {
   if (!inRoomEntryGrace(creep, mem)) return false;
   if (!isOnBorder(creep.pos)) return false;
   if (creep.memory._scoutMoveTick === Game.time) return true;
-  creep.memory._scoutMoveTick = Game.time;
-  if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
-  if (creep.pos.x === 49) return creep.move(LEFT) === OK;
-  if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
-  if (creep.pos.y === 49) return creep.move(TOP) === OK;
+  var dir = null;
+  if (creep.pos.x === 0) dir = RIGHT;
+  else if (creep.pos.x === 49) dir = LEFT;
+  else if (creep.pos.y === 0) dir = BOTTOM;
+  else if (creep.pos.y === 49) dir = TOP;
+  if (!dir) return false;
+
+  var rc = creep.move(dir);
+  // Lock should only be consumed when move intent was accepted/already present.
+  // If the nudge fails, allow issueScoutMove -> Traveler fallback this tick so
+  // border entry does not stall and bounce back out.
+  if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
+    creep.memory._scoutMoveTick = Game.time;
+    return true;
+  }
   return false;
 }
 

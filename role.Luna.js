@@ -1157,7 +1157,6 @@ function softenRemoteDefensePlan(roomName) {
     if (creep.pos.roomName !== creep.memory.targetRoom) return false;
     if (!isOnBorder(creep.pos)) return false;
     if (creep.memory._lunaMoveTick === Game.time) return true;
-    creep.memory._lunaMoveTick = Game.time;
     if (creep.name === 'Luna') {
       var entryTick = typeof creep.memory._roomEntryTick === 'number' ? creep.memory._roomEntryTick : null;
       if (entryTick != null && (Game.time - entryTick) <= 3) {
@@ -1170,10 +1169,21 @@ function softenRemoteDefensePlan(roomName) {
         );
       }
     }
-    if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
-    if (creep.pos.x === 49) return creep.move(LEFT) === OK;
-    if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
-    if (creep.pos.y === 49) return creep.move(TOP) === OK;
+    var dir = null;
+    if (creep.pos.x === 0) dir = RIGHT;
+    else if (creep.pos.x === 49) dir = LEFT;
+    else if (creep.pos.y === 0) dir = BOTTOM;
+    else if (creep.pos.y === 49) dir = TOP;
+    if (!dir) return false;
+
+    var rc = creep.move(dir);
+    // Consume per-tick move lock only if the nudge intent is accepted (or the
+    // creep already has a move intent this tick). If nudge fails, keep lock
+    // open so issueLunaMove/Traveler fallback can still run this tick.
+    if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
+      creep.memory._lunaMoveTick = Game.time;
+      return true;
+    }
     return false;
   }
 
@@ -1202,11 +1212,17 @@ function softenRemoteDefensePlan(roomName) {
       var inReleasedTargetRoom = !!(releasedTargetRoom && creep.pos.roomName === releasedTargetRoom);
       if (nonCritical && justEntered && inReleasedTargetRoom) {
         if (isOnBorder(creep.pos) && creep.memory._lunaMoveTick !== Game.time) {
-          creep.memory._lunaMoveTick = Game.time;
-          if (creep.pos.x === 0) creep.move(RIGHT);
-          else if (creep.pos.x === 49) creep.move(LEFT);
-          else if (creep.pos.y === 0) creep.move(BOTTOM);
-          else if (creep.pos.y === 49) creep.move(TOP);
+          var dir = null;
+          if (creep.pos.x === 0) dir = RIGHT;
+          else if (creep.pos.x === 49) dir = LEFT;
+          else if (creep.pos.y === 0) dir = BOTTOM;
+          else if (creep.pos.y === 49) dir = TOP;
+          if (dir) {
+            var rc = creep.move(dir);
+            if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
+              creep.memory._lunaMoveTick = Game.time;
+            }
+          }
         }
         debugSay(creep, '…hold');
         return true;
