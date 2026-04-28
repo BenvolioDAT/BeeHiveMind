@@ -4,6 +4,7 @@
  */
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+const CoreConfig = require("core.config");
 class Traveler {
     static shouldLogLunaEntry(creep) {
         if (!creep || creep.name !== "Luna" || !creep.memory)
@@ -39,6 +40,9 @@ class Traveler {
             return ERR_TIRED;
         }
         destination = this.normalizePos(destination);
+        if (!destination || destination.x == null || destination.y == null || !destination.roomName) {
+            return ERR_INVALID_ARGS;
+        }
         // manage case where creep is nearby destination
         let rangeToDestination = creep.pos.getRangeTo(destination);
         let hasCustomRange = options.range !== undefined;
@@ -72,6 +76,29 @@ class Traveler {
         let justEnteredRoom = !!(previousCoord && previousCoord.roomName && previousCoord.roomName !== creep.pos.roomName);
         let onBorderNow = Traveler.isExit(creep.pos);
         Traveler.pruneReverseHold(creep, travelData);
+        let bounceState = Traveler.updateBorderBounceHistory(creep, destination, options);
+        if (bounceState && bounceState.lastReason === "REPEATED_ROOM_BOUNCE" && bounceState.lastEntryTick === Game.time) {
+            Traveler.logBounceHistoryDiagnostic(creep, destination, bounceState, "REPEATED_ROOM_BOUNCE", 0, false, false, null);
+        }
+        let bounceRecovery = Traveler.getActiveBounceRecovery(creep, destination, options);
+        if (bounceRecovery && bounceRecovery.forceRepath) {
+            delete travelData.path;
+            delete travelData.state;
+            delete travelData.reverseHold;
+        }
+        if (bounceRecovery && bounceRecovery.clearMoveCache && creep.memory && creep.memory._move) {
+            delete creep.memory._move;
+        }
+        if (bounceRecovery && bounceRecovery.mode === "A" && onBorderNow) {
+            let recoveryDirection = Traveler.chooseRecoveryDirection(creep);
+            if (recoveryDirection) {
+                let moveResult = creep.move(recoveryDirection);
+                Traveler.logBounceHistoryDiagnostic(creep, destination, bounceState, "RECOVERY_INWARD_STEP", recoveryDirection, !!bounceRecovery.forceRepath, bounceRecovery.clearMoveCache, moveResult);
+                return moveResult;
+            }
+            Traveler.logBounceHistoryDiagnostic(creep, destination, bounceState, "RECOVERY_BLOCKED", 0, !!bounceRecovery.forceRepath, bounceRecovery.clearMoveCache, ERR_BUSY);
+            return ERR_BUSY;
+        }
 
         // If some other logic moved this creep far off the recorded path, drop the
         // cached directions so we do not keep walking a stale route.
@@ -79,7 +106,7 @@ class Traveler {
             invalidationReason = "coordMismatchFar";
             delete travelData.path;
             if (onBorderNow || justEnteredRoom) {
-                Traveler.logBorderDiagnostic(creep, destination, invalidationReason, hadPathAtStart, false, null, null, false, false, previousCoord);
+                Traveler.logBorderDiagnostic(creep, destination, "INTENT_CONFLICT", invalidationReason, hadPathAtStart, false, null, null, false, false, true, false, previousCoord);
             }
         }
         // uncomment to visualize destination
@@ -110,7 +137,7 @@ class Traveler {
             delete travelData.path;
             state.stuckCount = 0;
             if (onBorderNow || justEnteredRoom) {
-                Traveler.logBorderDiagnostic(creep, destination, invalidationReason, hadPathAtStart, false, null, null, false, false, previousCoord);
+                Traveler.logBorderDiagnostic(creep, destination, "INTENT_CONFLICT", invalidationReason, hadPathAtStart, false, null, null, false, false, true, false, previousCoord);
             }
         }
         // delete path cache if destination is different
@@ -131,6 +158,15 @@ class Traveler {
         }
         // pathfinding
         let newPath = false;
+        let pathOptions = options;
+        if (bounceRecovery && bounceRecovery.forceRepath) {
+            pathOptions = Object.assign({}, options);
+            pathOptions.repath = 1;
+            pathOptions.useFindRoute = true;
+            if (bounceRecovery.avoidRoom && bounceRecovery.avoidRoom !== destination.roomName) {
+                pathOptions.avoidRoom = bounceRecovery.avoidRoom;
+            }
+        }
         if (!travelData.path) {
             newPath = true;
             if (creep.spawning) {
@@ -138,7 +174,7 @@ class Traveler {
             }
             state.destination = destination;
             let cpu = Game.cpu.getUsed();
-            let ret = this.findTravelPath(creep.pos, destination, options);
+            let ret = this.findTravelPath(creep.pos, destination, pathOptions);
             let cpuUsed = Game.cpu.getUsed() - cpu;
             state.cpu = _.round(cpuUsed + state.cpu);
             if (state.cpu > REPORT_CPU_THRESHOLD) {
@@ -157,6 +193,9 @@ class Traveler {
             travelData.path = Traveler.serializePath(creep.pos, ret.path, color);
             state.stuckCount = 0;
         }
+        if (bounceRecovery && bounceRecovery.mode === "B") {
+            Traveler.logBounceHistoryDiagnostic(creep, destination, bounceState, "RECOVERY_REPATH_ONLY", 0, !!bounceRecovery.forceRepath, bounceRecovery.clearMoveCache, null);
+        }
         this.serializeState(creep, destination, state, travelData);
         if (!travelData.path || travelData.path.length === 0) {
             return ERR_NO_PATH;
@@ -168,21 +207,37 @@ class Traveler {
         let nextDirection = parseInt(travelData.path[0], 10);
         let nextPos = null;
         let nextIsExit = false;
+        let nextLeavesRoom = false;
         if (nextDirection) {
             nextPos = Traveler.positionAtDirection(creep.pos, nextDirection);
             nextIsExit = !!(nextPos && Traveler.isExit(nextPos));
+            nextLeavesRoom = Traveler.isLeavingCurrentRoom(creep.pos, nextDirection);
         }
         let extraReverseGuard = Traveler.shouldApplyExtraReverseGuard(creep, travelData, nextDirection);
-        let aboutToReverseExit = justEnteredRoom && Traveler.wouldReverseExit(creep.pos, previousCoord, nextDirection);
+        let destinationInCurrentRoom = destination.roomName === creep.pos.roomName;
+        let roomEntryReverseGuard = justEnteredRoom &&
+            destinationInCurrentRoom &&
+            !options.flee &&
+            Traveler.isExit(creep.pos) &&
+            nextLeavesRoom;
+        let reverseByPreviousCoord = justEnteredRoom &&
+            destinationInCurrentRoom &&
+            !options.flee &&
+            Traveler.wouldReverseExit(creep.pos, previousCoord, nextDirection);
+        let aboutToReverseExit = roomEntryReverseGuard || reverseByPreviousCoord;
+        if (justEnteredRoom && nextLeavesRoom && !destinationInCurrentRoom) {
+            Traveler.logBorderDiagnostic(creep, destination, "TARGET_ROOM_CHANGED", invalidationReason || "none", hadPathAtStart, newPath, nextDirection, nextPos, nextIsExit, nextLeavesRoom, false, false, previousCoord);
+        }
         if (aboutToReverseExit || extraReverseGuard) {
-            Traveler.logBorderDiagnostic(creep, destination, invalidationReason || "none", hadPathAtStart, newPath, nextDirection, nextPos, nextIsExit, false, previousCoord);
+            let reasonCode = "STALE_PATH_REVERSE_EXIT";
+            Traveler.logBorderDiagnostic(creep, destination, reasonCode, invalidationReason || "none", hadPathAtStart, newPath, nextDirection, nextPos, nextIsExit, nextLeavesRoom, false, false, previousCoord);
             let inwardDirection = Traveler.inwardDirection(creep.pos);
             if (inwardDirection && Traveler.canStepDirection(creep, inwardDirection)) {
                 Traveler.clearReverseHold(travelData);
                 if (options.returnData) {
                     options.returnData.reverseExitBlocked = true;
                 }
-                Traveler.logBorderDiagnostic(creep, destination, invalidationReason || "none", hadPathAtStart, newPath, inwardDirection, Traveler.positionAtDirection(creep.pos, inwardDirection), false, true, previousCoord);
+                Traveler.logBorderDiagnostic(creep, destination, "ROOM_ENTRY_STABILIZE", invalidationReason || "none", hadPathAtStart, newPath, inwardDirection, Traveler.positionAtDirection(creep.pos, inwardDirection), false, false, false, true, previousCoord);
                 return creep.move(inwardDirection);
             }
             if (aboutToReverseExit && !extraReverseGuard) {
@@ -195,7 +250,7 @@ class Traveler {
             if (options.returnData) {
                 options.returnData.reverseExitBlocked = true;
             }
-            Traveler.logBorderDiagnostic(creep, destination, invalidationReason || "none", hadPathAtStart, newPath, nextDirection, nextPos, nextIsExit, true, previousCoord);
+            Traveler.logBorderDiagnostic(creep, destination, reasonCode, invalidationReason || "none", hadPathAtStart, newPath, nextDirection, nextPos, nextIsExit, nextLeavesRoom, true, false, previousCoord);
             return ERR_BUSY;
         }
         if (options.returnData) {
@@ -222,10 +277,18 @@ class Traveler {
      * @returns {any}
      */
     static normalizePos(destination) {
-        if (!(destination instanceof RoomPosition)) {
+        if (!destination)
+            return null;
+        if (destination instanceof RoomPosition) {
+            return destination;
+        }
+        if (destination.pos && destination.pos.x != null && destination.pos.y != null && destination.pos.roomName) {
             return destination.pos;
         }
-        return destination;
+        if (destination.x != null && destination.y != null && destination.roomName) {
+            return destination;
+        }
+        return null;
     }
     /**
      * check if room should be avoided by findRoute algorithm
@@ -323,6 +386,10 @@ class Traveler {
             if (allowedRooms && !allowedRooms[roomName]) {
                 return false;
             }
+            if (options.avoidRoom && roomName === options.avoidRoom &&
+                roomName !== originRoomName && roomName !== destRoomName) {
+                return false;
+            }
             if (!allowedRooms && !options.allowHostile && Traveler.checkAvoid(roomName)
                 && roomName !== destRoomName && roomName !== originRoomName) {
                 return false;
@@ -372,6 +439,11 @@ class Traveler {
             roomCallback: callback,
         });
         if (!ret.incomplete || !options.ensurePath) return ret;
+        if (ret.incomplete && options.avoidRoom) {
+            const retryWithoutAvoid = Object.assign({}, options);
+            delete retryWithoutAvoid.avoidRoom;
+            return this.findTravelPath(origin, destination, retryWithoutAvoid);
+        }
 
         // PathFinder can miss a valid short path if it avoids findRoute; retry once
         // with findRoute enabled instead of mutating the caller's options.
@@ -411,6 +483,10 @@ class Traveler {
                     if (outcome !== undefined) {
                         return outcome;
                     }
+                }
+                if (options.avoidRoom && roomName === options.avoidRoom &&
+                    roomName !== destination && roomName !== origin) {
+                    return Number.POSITIVE_INFINITY;
                 }
                 let rangeToRoom = Game.map.getRoomLinearDistance(origin, roomName);
                 if (rangeToRoom > restrictDistance) {
@@ -677,6 +753,18 @@ class Traveler {
                     return false;
                 }
             }
+            let blockingCreeps = creep.room.lookForAt(LOOK_CREEPS, target.x, target.y) || [];
+            for (let c of blockingCreeps) {
+                if (c.id !== creep.id)
+                    return false;
+            }
+            if (typeof LOOK_POWER_CREEPS !== "undefined") {
+                let blockingPowerCreeps = creep.room.lookForAt(LOOK_POWER_CREEPS, target.x, target.y) || [];
+                for (let pc of blockingPowerCreeps) {
+                    if (pc.id !== creep.id)
+                        return false;
+                }
+            }
         }
         return true;
     }
@@ -718,16 +806,224 @@ class Traveler {
             return false;
         return h.blockedDir === direction;
     }
-    static logBorderDiagnostic(creep, destination, invalidationReason, hadPath, newPath, nextDirection, nextPos, nextIsExit, reverseExitBlocked, previousCoord) {
+    static movementBounceConfig() {
+        let movementCfg = CoreConfig && CoreConfig.settings ? CoreConfig.settings.movement : null;
+        return {
+            enabled: !!((movementCfg && movementCfg.MOVEMENT_BOUNCE_HISTORY_ENABLED !== undefined)
+                ? movementCfg.MOVEMENT_BOUNCE_HISTORY_ENABLED
+                : (CoreConfig && CoreConfig.MOVEMENT_BOUNCE_HISTORY_ENABLED)),
+            window: (movementCfg && movementCfg.MOVEMENT_BOUNCE_HISTORY_WINDOW) || CoreConfig.MOVEMENT_BOUNCE_HISTORY_WINDOW || 6,
+            recoveryTicks: (movementCfg && movementCfg.MOVEMENT_BOUNCE_RECOVERY_TICKS) || CoreConfig.MOVEMENT_BOUNCE_RECOVERY_TICKS || 5,
+            debug: !!((movementCfg && movementCfg.DEBUG_MOVEMENT_BOUNCE_HISTORY) || (CoreConfig && CoreConfig.DEBUG_MOVEMENT_BOUNCE_HISTORY)),
+            logInterval: (movementCfg && movementCfg.MOVEMENT_BOUNCE_LOG_INTERVAL) || 5
+        };
+    }
+    static isNearBorder(pos, margin = 1) {
+        if (!pos)
+            return false;
+        return pos.x <= margin || pos.x >= (49 - margin) || pos.y <= margin || pos.y >= (49 - margin);
+    }
+    static updateBorderBounceHistory(creep, destination, options) {
+        if (!creep || !creep.memory || !destination || !destination.roomName)
+            return null;
+        let cfg = Traveler.movementBounceConfig();
+        if (!cfg.enabled) {
+            delete creep.memory._borderBounce;
+            return null;
+        }
+        let b = creep.memory._borderBounce || {};
+        if (!b.lastPositions)
+            b.lastPositions = [];
+        if (!b.transitions)
+            b.transitions = [];
+        b.lastPositions.push({
+            t: Game.time,
+            room: creep.pos.roomName,
+            x: creep.pos.x,
+            y: creep.pos.y
+        });
+        while (b.lastPositions.length > 6)
+            b.lastPositions.shift();
+        let roomChanged = !!(b.lastRoom && b.lastRoom !== creep.pos.roomName);
+        if (roomChanged) {
+            b.previousRoom = b.lastRoom;
+            b.lastEntryTick = Game.time;
+            b.transitions.push({ t: Game.time, from: b.lastRoom, to: creep.pos.roomName });
+        }
+        b.lastRoom = creep.pos.roomName;
+        while (b.transitions.length > 6)
+            b.transitions.shift();
+        let repeated = false;
+        if (b.transitions.length >= 3) {
+            let t0 = b.transitions[b.transitions.length - 3];
+            let t1 = b.transitions[b.transitions.length - 2];
+            let t2 = b.transitions[b.transitions.length - 1];
+            let inWindow = (Game.time - t0.t) <= cfg.window;
+            let alternates = t0.from === t1.to && t0.to === t1.from && t2.from === t1.to && t2.to === t1.from;
+            repeated = inWindow && alternates;
+        }
+        if (!b.bounceCount)
+            b.bounceCount = 0;
+        if (repeated)
+            b.bounceCount++;
+        if (repeated &&
+            roomChanged &&
+            Traveler.isNearBorder(creep.pos, 1) &&
+            !options.flee &&
+            destination.roomName !== creep.pos.roomName) {
+            b.recoveryUntil = Game.time + cfg.recoveryTicks;
+            b.repathUntil = Game.time + cfg.recoveryTicks;
+            b.clearMoveUntil = Game.time + 1;
+            b.lastReason = "REPEATED_ROOM_BOUNCE";
+            b.mode = "B";
+            b.avoidRoom = null;
+            b.avoidRoomUntil = 0;
+        }
+        if (repeated &&
+            roomChanged &&
+            Traveler.isNearBorder(creep.pos, 1) &&
+            !options.flee &&
+            destination.roomName === creep.pos.roomName) {
+            b.recoveryUntil = Game.time + cfg.recoveryTicks;
+            b.repathUntil = Game.time + cfg.recoveryTicks;
+            b.clearMoveUntil = Game.time + 1;
+            b.lastReason = "REPEATED_ROOM_BOUNCE";
+            b.mode = "A";
+            let avoidCandidate = b.previousRoom || null;
+            if (avoidCandidate && avoidCandidate !== destination.roomName) {
+                b.avoidRoom = avoidCandidate;
+                b.avoidRoomUntil = Game.time + Math.min(cfg.recoveryTicks, 5);
+            }
+            else {
+                b.avoidRoom = null;
+                b.avoidRoomUntil = 0;
+            }
+        }
+        if (b.avoidRoom && b.avoidRoomUntil && Game.time > b.avoidRoomUntil) {
+            b.avoidRoom = null;
+            b.avoidRoomUntil = 0;
+        }
+        if (!b.recoveryUntil || Game.time > b.recoveryUntil) {
+            delete b.mode;
+        }
+        let idleTicks = Game.time - (b.lastEntryTick || Game.time);
+        if (idleTicks > (cfg.window * 3) && (!b.recoveryUntil || Game.time > b.recoveryUntil)) {
+            delete creep.memory._borderBounce;
+            return null;
+        }
+        creep.memory._borderBounce = b;
+        return b;
+    }
+    static getActiveBounceRecovery(creep, destination, options) {
+        if (!creep || !creep.memory || !creep.memory._borderBounce)
+            return null;
+        if (!destination || options.flee)
+            return null;
+        let b = creep.memory._borderBounce;
+        if (!b.recoveryUntil || Game.time > b.recoveryUntil)
+            return null;
+        let currentRoom = creep.pos.roomName;
+        if (b.mode === "A" && currentRoom !== destination.roomName)
+            return null;
+        if (b.mode === "B" && currentRoom === destination.roomName)
+            return null;
+        let avoidRoom = null;
+        if (b.avoidRoom && b.avoidRoomUntil && Game.time <= b.avoidRoomUntil && b.avoidRoom !== destination.roomName) {
+            avoidRoom = b.avoidRoom;
+        }
+        return {
+            mode: b.mode || null,
+            avoidRoom: avoidRoom,
+            forceRepath: !!(b.repathUntil && Game.time <= b.repathUntil),
+            clearMoveCache: !!(b.clearMoveUntil && Game.time <= b.clearMoveUntil)
+        };
+    }
+    static chooseRecoveryDirection(creep) {
+        if (!creep || !Traveler.isExit(creep.pos))
+            return 0;
+        let dirs = [];
+        if (creep.pos.x === 0 && creep.pos.y === 0)
+            dirs = [BOTTOM_RIGHT, RIGHT, BOTTOM];
+        else if (creep.pos.x === 0 && creep.pos.y === 49)
+            dirs = [TOP_RIGHT, RIGHT, TOP];
+        else if (creep.pos.x === 49 && creep.pos.y === 0)
+            dirs = [BOTTOM_LEFT, LEFT, BOTTOM];
+        else if (creep.pos.x === 49 && creep.pos.y === 49)
+            dirs = [TOP_LEFT, LEFT, TOP];
+        else if (creep.pos.x === 0)
+            dirs = [RIGHT, TOP_RIGHT, BOTTOM_RIGHT];
+        else if (creep.pos.x === 49)
+            dirs = [LEFT, TOP_LEFT, BOTTOM_LEFT];
+        else if (creep.pos.y === 0)
+            dirs = [BOTTOM, BOTTOM_LEFT, BOTTOM_RIGHT];
+        else if (creep.pos.y === 49)
+            dirs = [TOP, TOP_LEFT, TOP_RIGHT];
+        for (let d of dirs) {
+            if (Traveler.canStepDirection(creep, d))
+                return d;
+        }
+        return 0;
+    }
+    static isLeavingCurrentRoom(pos, direction) {
+        if (!pos || !direction)
+            return false;
+        let offsetX = [0, 0, 1, 1, 1, 0, -1, -1, -1];
+        let offsetY = [0, -1, -1, 0, 1, 1, 1, 0, -1];
+        let dx = offsetX[direction] || 0;
+        let dy = offsetY[direction] || 0;
+        let nextX = pos.x + dx;
+        let nextY = pos.y + dy;
+        return nextX < 0 || nextX > 49 || nextY < 0 || nextY > 49;
+    }
+    static shouldLogBounce(creep, travelData) {
+        let movementCfg = CoreConfig && CoreConfig.settings ? CoreConfig.settings.movement : null;
+        let enabled = !!((CoreConfig && (CoreConfig.DEBUG_MOVEMENT_BOUNCE || CoreConfig.DEBUG_TRAVELER_BOUNCE)) ||
+            (movementCfg && (movementCfg.DEBUG_MOVEMENT_BOUNCE || movementCfg.DEBUG_TRAVELER_BOUNCE)));
+        if (!enabled || !creep || !travelData)
+            return false;
+        let interval = (movementCfg && typeof movementCfg.BOUNCE_DEBUG_LOG_INTERVAL === "number")
+            ? movementCfg.BOUNCE_DEBUG_LOG_INTERVAL
+            : 5;
+        if (travelData._bounceLogTick != null && Game.time < (travelData._bounceLogTick + interval)) {
+            return false;
+        }
+        travelData._bounceLogTick = Game.time;
+        return true;
+    }
+    static shouldLogBounceHistory(creep) {
+        let cfg = Traveler.movementBounceConfig();
+        if (!cfg.debug || !creep || !creep.memory || !creep.memory._borderBounce)
+            return false;
+        let b = creep.memory._borderBounce;
+        if (b._logTick != null && Game.time < (b._logTick + cfg.logInterval))
+            return false;
+        b._logTick = Game.time;
+        return true;
+    }
+    static logBounceHistoryDiagnostic(creep, destination, bounceState, reasonCode, inwardDirection, pathCleared, moveCleared, resultCode) {
+        if (!Traveler.shouldLogBounceHistory(creep))
+            return;
+        let b = bounceState || (creep.memory && creep.memory._borderBounce) || {};
+        let roleName = creep.memory && creep.memory.role ? creep.memory.role : "unknown";
+        let hist = (b.lastPositions || []).map((p) => `${p.room}:${p.x},${p.y}@${p.t}`).join(">");
+        let res = (resultCode != null) ? resultCode : "na";
+        console.log(`[TravelerBounceHistory] t=${Game.time} creep=${creep.name} role=${roleName} room=${creep.pos.roomName} prevRoom=${b.previousRoom || "unknown"} targetRoom=${destination ? destination.roomName : "none"} pos=${creep.pos.roomName}:${creep.pos.x},${creep.pos.y} history=${hist || "none"} bounceCount=${b.bounceCount || 0} avoidRoom=${b.avoidRoom || "none"} recoveryUntil=${b.recoveryUntil || 0} pathCleared=${pathCleared ? "yes" : "no"} moveCleared=${moveCleared ? "yes" : "no"} inwardDir=${inwardDirection || 0} result=${res} reason=${reasonCode || "none"}`);
+    }
+    static logBorderDiagnostic(creep, destination, reasonCode, invalidationReason, hadPath, newPath, nextDirection, nextPos, nextIsExit, nextLeavesRoom, cacheInvalidated, inwardNudgeUsed, previousCoord) {
         if (!creep || !destination)
+            return;
+        let travelData = creep.memory && creep.memory._trav ? creep.memory._trav : null;
+        if (!Traveler.shouldLogBounce(creep, travelData))
             return;
         let pos = creep.pos;
         let justEntered = !!(previousCoord && previousCoord.roomName && previousCoord.roomName !== pos.roomName);
         if (!Traveler.isExit(pos) && !justEntered)
             return;
+        let targetRoom = creep.memory ? creep.memory.targetRoom : null;
+        let roleName = creep.memory && creep.memory.role ? creep.memory.role : "unknown";
         let prevTag = previousCoord ? `${previousCoord.roomName || "?"}:${previousCoord.x},${previousCoord.y}` : "null";
         let nextTag = nextPos ? `${nextPos.roomName}:${nextPos.x},${nextPos.y}` : "null";
-        console.log(`[TravelerBounce] name=${creep.name} t=${Game.time} pos=${pos.roomName}:${pos.x},${pos.y} prev=${prevTag} dest=${destination.roomName}:${destination.x},${destination.y} invalid=${invalidationReason || "none"} hadPath=${hadPath ? "yes" : "no"} newPath=${newPath ? "yes" : "no"} nextDir=${nextDirection || 0} nextPos=${nextTag} nextIsExit=${nextIsExit ? "yes" : "no"} reverseExitBlocked=${reverseExitBlocked ? "yes" : "no"}`);
+        console.log(`[TravelerBounce] t=${Game.time} creep=${creep.name} role=${roleName} room=${pos.roomName} prevRoom=${previousCoord && previousCoord.roomName ? previousCoord.roomName : "unknown"} targetRoom=${targetRoom || "none"} pos=${pos.roomName}:${pos.x},${pos.y} dest=${destination.roomName}:${destination.x},${destination.y} prev=${prevTag} nextDir=${nextDirection || 0} nextPos=${nextTag} nextIsExit=${nextIsExit ? "yes" : "no"} nextLeavesRoom=${nextLeavesRoom ? "yes" : "no"} cacheInvalidated=${cacheInvalidated ? "yes" : "no"} inwardNudge=${inwardNudgeUsed ? "yes" : "no"} hadPath=${hadPath ? "yes" : "no"} newPath=${newPath ? "yes" : "no"} invalid=${invalidationReason || "none"} reason=${reasonCode || "none"}`);
     }
     static isStuck(creep, state) {
         let stuck = false;
