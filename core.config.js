@@ -8,6 +8,12 @@ const LOG_LEVEL = Object.freeze({
 // Top-level toggles and shared lists referenced by multiple systems.
 const CoreConfig = {
   LOG_LEVEL,
+  DEBUG_MOVEMENT_BOUNCE: false,
+  DEBUG_TRAVELER_BOUNCE: false,
+  DEBUG_MOVEMENT_BOUNCE_HISTORY: false,
+  MOVEMENT_BOUNCE_HISTORY_ENABLED: true,
+  MOVEMENT_BOUNCE_HISTORY_WINDOW: 6,
+  MOVEMENT_BOUNCE_RECOVERY_TICKS: 5,
   ALLY_USERNAMES: [
     'walter_bell',
     'sleek',
@@ -94,6 +100,24 @@ CoreConfig.settings = Object.freeze({
     repairScanInterval: 5,
     /** How long before the stale room sweep runs. */
     roomSweepInterval: 50,
+  }),
+  movement: Object.freeze({
+    /** Traveler/Movement border-bounce diagnostics. */
+    DEBUG_MOVEMENT_BOUNCE: CoreConfig.DEBUG_MOVEMENT_BOUNCE,
+    /** Traveler border-bounce diagnostics (same toggle alias). */
+    DEBUG_TRAVELER_BOUNCE: CoreConfig.DEBUG_TRAVELER_BOUNCE,
+    /** Per-creep minimum tick interval between bounce debug log lines. */
+    BOUNCE_DEBUG_LOG_INTERVAL: 5,
+    /** Toggle repeated room-border bounce detection and recovery. */
+    MOVEMENT_BOUNCE_HISTORY_ENABLED: CoreConfig.MOVEMENT_BOUNCE_HISTORY_ENABLED,
+    /** Window (ticks) used to detect repeated room alternation. */
+    MOVEMENT_BOUNCE_HISTORY_WINDOW: CoreConfig.MOVEMENT_BOUNCE_HISTORY_WINDOW,
+    /** Duration (ticks) of temporary recovery mode once bounce is detected. */
+    MOVEMENT_BOUNCE_RECOVERY_TICKS: CoreConfig.MOVEMENT_BOUNCE_RECOVERY_TICKS,
+    /** Toggle repeated-bounce recovery debug logs. */
+    DEBUG_MOVEMENT_BOUNCE_HISTORY: CoreConfig.DEBUG_MOVEMENT_BOUNCE_HISTORY,
+    /** Per-creep minimum tick interval between repeated-bounce logs. */
+    MOVEMENT_BOUNCE_LOG_INTERVAL: 5,
   }),
 });
 
