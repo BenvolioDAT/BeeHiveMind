@@ -15,6 +15,7 @@
 //   MovementManager.request() to queue movement.
 // -----------------------------------------------------------------------------
 'use strict';
+var MovementOwnership = require('Movement.Ownership');
 
 /**
  * What changed & why:
@@ -182,6 +183,20 @@ var MovementManager = {
     return this.PRIORITIES.default;
   },
 
+  _isExitPosition: function (pos) {
+    if (!pos) return false;
+    return pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49;
+  },
+
+  _tryMoveOffExit: function (creep, reason, destination, travelOpts) {
+    if (!creep || creep.fatigue > 0 || !this._isExitPosition(creep.pos)) return null;
+    if (typeof creep.travelTo !== 'function') return null;
+    var resultData = {};
+    var opts = Object.assign({}, travelOpts || {}, { range: 0, returnData: resultData });
+    var result = creep.travelTo(destination, opts);
+    return { result: result, data: resultData, reason: reason };
+  },
+
   /**
    * Resolve all movement intents in deterministic priority order.
    */
@@ -192,21 +207,32 @@ var MovementManager = {
   // Side-effects: issues move intents to creeps, clears internal intent list.
   // Failure modes: silently skips creeps with fatigue or invalid targets.
   resolveAndMove: function () {
-    if (!this._intents || !this._intents.length) return;
-    this._intents.sort(compareIntents);
+    var hadIntentByCreep = {};
+    var intents = this._intents || [];
+    for (var h = 0; h < intents.length; h++) {
+      var hi = intents[h];
+      if (hi && hi.creepName) hadIntentByCreep[hi.creepName] = true;
+    }
+    if (intents.length) this._intents.sort(compareIntents);
     for (var i = 0; i < this._intents.length; i++) {
       var intent = this._intents[i];
       if (!intent) continue;
       var creep = Game.creeps[intent.creepName];
       // Skip intents that can never execute this tick so we avoid wasted CPU.
       if (!creep) continue;
+      if (MovementOwnership.has(creep)) {
+        MovementOwnership.logSkip(creep, 'MovementManager', 'alreadyMoved');
+        continue;
+      }
       if (creep.fatigue > 0) continue;
       if (intent.startRoom && creep.room && creep.room.name !== intent.startRoom) continue;
       if (!intent.roomName || intent.x == null || intent.y == null) continue;
       if (intent.shard && Game.shard && Game.shard.name !== intent.shard) continue;
       if (intent.targetId && Game.rooms[intent.roomName] && !Game.getObjectById(intent.targetId)) continue;
       var pos = new RoomPosition(intent.x, intent.y, intent.roomName);
-      if (creep.pos.getRangeTo(pos) <= intent.range) continue; // Already within desired range; no move issued to avoid thrashing.
+      var inRange = creep.pos.getRangeTo(pos) <= intent.range;
+      var onExit = this._isExitPosition(creep.pos);
+      if (inRange && !onExit) continue; // Already within desired range and not on a transfer border.
       var travelOpts = {
         range: intent.range,
         reusePath: (intent.reusePath != null) ? intent.reusePath : 20,
@@ -214,8 +240,13 @@ var MovementManager = {
         maxOps: (intent.maxOps != null) ? intent.maxOps : 4000,
         plainCost: intent.plainCost,
         swampCost: intent.swampCost,
-        flee: intent.flee || false
+        flee: intent.flee || false,
+        _hadIntentThisTick: true
       };
+      if (inRange && onExit) {
+        this._tryMoveOffExit(creep, 'rangeSkipOnExit', pos, travelOpts);
+        continue;
+      }
       if (typeof creep.travelTo === 'function') {
         // Traveler (Traveler.js) handles caching/stuck detection internally and
         // respects reusePath/maxOps options provided.
@@ -224,6 +255,29 @@ var MovementManager = {
         // When Traveler is not mixed in, we skip issuing a move to avoid
         // inconsistent behaviour; callers should provide travelTo globally.
       }
+    }
+    // Post-resolve, per-creep safety fallback: even when queue had other intents,
+    // a creep with no intent can still be stranded on an exit tile and bounce.
+    for (var name in Game.creeps) {
+      var idleCreep = Game.creeps[name];
+      if (!idleCreep || idleCreep.spawning || idleCreep.fatigue > 0) continue;
+      if (hadIntentByCreep[name]) continue;
+      if (MovementOwnership.has(idleCreep)) {
+        MovementOwnership.logSkip(idleCreep, 'MovementManager', 'alreadyMoved');
+        continue;
+      }
+      if (!this._isExitPosition(idleCreep.pos)) continue;
+      var fallbackDest = new RoomPosition(
+        Math.max(1, Math.min(48, idleCreep.pos.x)),
+        Math.max(1, Math.min(48, idleCreep.pos.y)),
+        idleCreep.pos.roomName
+      );
+      this._tryMoveOffExit(idleCreep, 'postResolveIdleOnExitFallback', fallbackDest, {
+        reusePath: 0,
+        ignoreCreeps: false,
+        maxOps: 800,
+        _hadIntentThisTick: false
+      });
     }
     this._intents = [];
     this._indexByCreep = {};

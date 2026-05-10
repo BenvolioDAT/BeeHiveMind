@@ -5,6 +5,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const CoreConfig = require("core.config");
+const MovementOwnership = require("Movement.Ownership");
 class Traveler {
     static shouldLogLunaEntry(creep) {
         if (!creep || creep.name !== "Luna" || !creep.memory)
@@ -46,6 +47,16 @@ class Traveler {
         // manage case where creep is nearby destination
         let rangeToDestination = creep.pos.getRangeTo(destination);
         let hasCustomRange = options.range !== undefined;
+        let onExitNow = Traveler.isExit(creep.pos);
+        let destinationIsExit = Traveler.isExit(destination);
+        // Exit tiles are dangerous in Screeps: ending a tick on border can bounce a creep back
+        // to the previous room. Stabilize inward before returning early in-range OK when possible.
+        if (onExitNow && !options.flee && destination.roomName === creep.pos.roomName && !destinationIsExit) {
+            let stabilize = Traveler.tryExitStabilize(creep, destination, "earlyRangeGuard", options);
+            if (stabilize.attempted) {
+                return stabilize.result;
+            }
+        }
         if (hasCustomRange && rangeToDestination <= options.range) {
             return OK;
         }
@@ -56,7 +67,7 @@ class Traveler {
                 options.returnData.nextPos = destination;
                 options.returnData.path = direction.toString();
             }
-            return creep.move(direction);
+            return MovementOwnership.move(creep, direction, "adjacentStep", "Traveler");
         }
         if (rangeToDestination <= 1) {
             return OK;
@@ -92,7 +103,7 @@ class Traveler {
         if (bounceRecovery && bounceRecovery.mode === "A" && onBorderNow) {
             let recoveryDirection = Traveler.chooseRecoveryDirection(creep);
             if (recoveryDirection) {
-                let moveResult = creep.move(recoveryDirection);
+                let moveResult = MovementOwnership.move(creep, recoveryDirection, "bounceRecoveryStep", "Traveler");
                 Traveler.logBounceHistoryDiagnostic(creep, destination, bounceState, "RECOVERY_INWARD_STEP", recoveryDirection, !!bounceRecovery.forceRepath, bounceRecovery.clearMoveCache, moveResult);
                 return moveResult;
             }
@@ -202,7 +213,7 @@ class Traveler {
         }
         // consume path
         if (state.stuckCount === 0 && !newPath) {
-            travelData.path = travelData.path.substr(1);
+            travelData.path = travelData.path.slice(1);
         }
         let nextDirection = parseInt(travelData.path[0], 10);
         let nextPos = null;
@@ -231,14 +242,15 @@ class Traveler {
         if (aboutToReverseExit || extraReverseGuard) {
             let reasonCode = "STALE_PATH_REVERSE_EXIT";
             Traveler.logBorderDiagnostic(creep, destination, reasonCode, invalidationReason || "none", hadPathAtStart, newPath, nextDirection, nextPos, nextIsExit, nextLeavesRoom, false, false, previousCoord);
-            let inwardDirection = Traveler.inwardDirection(creep.pos);
+            let inwardDirection = Traveler.chooseExitStabilizeDirection(creep);
             if (inwardDirection && Traveler.canStepDirection(creep, inwardDirection)) {
                 Traveler.clearReverseHold(travelData);
                 if (options.returnData) {
                     options.returnData.reverseExitBlocked = true;
                 }
+                Traveler.logExitStabilize(creep, destination, "reverseExitBlocked", inwardDirection, OK, null, hadPathAtStart, nextDirection, !!options._hadIntentThisTick);
                 Traveler.logBorderDiagnostic(creep, destination, "ROOM_ENTRY_STABILIZE", invalidationReason || "none", hadPathAtStart, newPath, inwardDirection, Traveler.positionAtDirection(creep.pos, inwardDirection), false, false, false, true, previousCoord);
-                return creep.move(inwardDirection);
+                return MovementOwnership.move(creep, inwardDirection, "reverseExitBlocked", "Traveler");
             }
             if (aboutToReverseExit && !extraReverseGuard) {
                 Traveler.setReverseHold(creep, travelData, nextDirection);
@@ -269,7 +281,7 @@ class Traveler {
             let mode = options._lunaMode || "unknown";
             console.log(`[LunaTrace] t=${Game.time} phase=traveler pos=${creep.pos.roomName}:${creep.pos.x},${creep.pos.y} mode=${mode} targetRoom=${creep.memory.targetRoom || "null"} sourceId=${creep.memory.sourceId || "null"} dest=${destTag} prevDest=${prevDest} hadPath=${hadPathAtStart ? "yes" : "no"} invalidated=${invalidationReason || "no"} newPath=${newPath ? "yes" : "no"} nextDir=${nextDirection || 0} nextPos=${nextPos ? (nextPos.roomName + ":" + nextPos.x + "," + nextPos.y) : "null"} nextIsExit=${nextIsExit ? "yes" : "no"}`);
         }
-        return creep.move(nextDirection);
+        return MovementOwnership.move(creep, nextDirection, "pathStep", "Traveler");
     }
     /**
      * make position objects consistent so that either can be used as an argument
@@ -720,6 +732,51 @@ class Traveler {
             return TOP;
         return null;
     }
+    static chooseExitStabilizeDirection(creep) {
+        if (!creep || !Traveler.isExit(creep.pos))
+            return 0;
+        let preferred = Traveler.inwardDirection(creep.pos);
+        let dirs = [];
+        if (preferred)
+            dirs.push(preferred);
+        if (creep.pos.x === 0 && creep.pos.y === 0)
+            dirs.push(BOTTOM_RIGHT, RIGHT, BOTTOM);
+        else if (creep.pos.x === 0 && creep.pos.y === 49)
+            dirs.push(TOP_RIGHT, RIGHT, TOP);
+        else if (creep.pos.x === 49 && creep.pos.y === 0)
+            dirs.push(BOTTOM_LEFT, LEFT, BOTTOM);
+        else if (creep.pos.x === 49 && creep.pos.y === 49)
+            dirs.push(TOP_LEFT, LEFT, TOP);
+        else if (creep.pos.x === 0)
+            dirs.push(TOP_RIGHT, BOTTOM_RIGHT);
+        else if (creep.pos.x === 49)
+            dirs.push(TOP_LEFT, BOTTOM_LEFT);
+        else if (creep.pos.y === 0)
+            dirs.push(BOTTOM_LEFT, BOTTOM_RIGHT);
+        else if (creep.pos.y === 49)
+            dirs.push(TOP_LEFT, TOP_RIGHT);
+        let unique = _.uniq(dirs);
+        for (let d of unique) {
+            if (Traveler.canStepDirection(creep, d))
+                return d;
+        }
+        return 0;
+    }
+    static tryExitStabilize(creep, destination, reasonCode, options = {}) {
+        if (!creep || !Traveler.isExit(creep.pos) || creep.fatigue > 0 || options.flee) {
+            return { attempted: false, result: ERR_INVALID_TARGET };
+        }
+        let dir = Traveler.chooseExitStabilizeDirection(creep);
+        if (!dir)
+            return { attempted: true, result: ERR_BUSY, direction: 0 };
+        let result = MovementOwnership.move(creep, dir, reasonCode, "Traveler");
+        if (options.returnData) {
+            options.returnData.exitStabilize = true;
+            options.returnData.exitStabilizeDir = dir;
+        }
+        Traveler.logExitStabilize(creep, destination, reasonCode, dir, result, null, !!(creep.memory && creep.memory._trav && creep.memory._trav.path), 0, !!options._hadIntentThisTick);
+        return { attempted: true, result: result, direction: dir };
+    }
     static wouldReverseExit(currentPos, previousCoord, direction) {
         if (!currentPos || !previousCoord || !direction)
             return false;
@@ -1024,6 +1081,30 @@ class Traveler {
         let prevTag = previousCoord ? `${previousCoord.roomName || "?"}:${previousCoord.x},${previousCoord.y}` : "null";
         let nextTag = nextPos ? `${nextPos.roomName}:${nextPos.x},${nextPos.y}` : "null";
         console.log(`[TravelerBounce] t=${Game.time} creep=${creep.name} role=${roleName} room=${pos.roomName} prevRoom=${previousCoord && previousCoord.roomName ? previousCoord.roomName : "unknown"} targetRoom=${targetRoom || "none"} pos=${pos.roomName}:${pos.x},${pos.y} dest=${destination.roomName}:${destination.x},${destination.y} prev=${prevTag} nextDir=${nextDirection || 0} nextPos=${nextTag} nextIsExit=${nextIsExit ? "yes" : "no"} nextLeavesRoom=${nextLeavesRoom ? "yes" : "no"} cacheInvalidated=${cacheInvalidated ? "yes" : "no"} inwardNudge=${inwardNudgeUsed ? "yes" : "no"} hadPath=${hadPath ? "yes" : "no"} newPath=${newPath ? "yes" : "no"} invalid=${invalidationReason || "none"} reason=${reasonCode || "none"}`);
+    }
+    static shouldLogExitStabilize(creep) {
+        let movementCfg = CoreConfig && CoreConfig.settings ? CoreConfig.settings.movement : null;
+        if (!movementCfg || !movementCfg.DEBUG_EXIT_STABILIZE || !creep)
+            return false;
+        let roles = movementCfg.DEBUG_EXIT_STABILIZE_ROLES || [];
+        let roleName = (creep.memory && creep.memory.role) || "unknown";
+        if (roles.length && roles.indexOf(roleName) === -1)
+            return false;
+        let interval = (typeof movementCfg.DEBUG_EXIT_STABILIZE_INTERVAL === "number") ? movementCfg.DEBUG_EXIT_STABILIZE_INTERVAL : 1;
+        let travelData = creep.memory && creep.memory._trav ? creep.memory._trav : null;
+        if (!travelData)
+            return false;
+        if (travelData._exitLogTick != null && Game.time < (travelData._exitLogTick + interval))
+            return false;
+        travelData._exitLogTick = Game.time;
+        return true;
+    }
+    static logExitStabilize(creep, destination, reason, dir, result, blockedBy, hadPath, nextDir, hadIntentThisTick) {
+        if (!Traveler.shouldLogExitStabilize(creep))
+            return;
+        let roleName = (creep.memory && creep.memory.role) || "unknown";
+        let destTag = destination ? `${destination.roomName}:${destination.x},${destination.y}` : "none";
+        console.log(`[ExitStabilize] t=${Game.time} creep=${creep.name} role=${roleName} pos=${creep.pos.roomName}:${creep.pos.x},${creep.pos.y} dest=${destTag} reason=${reason} dir=${dir || 0} result=${result} blockedBy=${blockedBy || "null"} hadPath=${hadPath ? "yes" : "no"} nextDir=${nextDir || 0} hadIntentThisTick=${hadIntentThisTick ? "yes" : "no"}`);
     }
     static isStuck(creep, state) {
         let stuck = false;

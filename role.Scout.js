@@ -2,6 +2,7 @@
 
 const BeeCombatSquads = require('BeeCombatSquads');
 const CombatDiplomacy = require('CombatDiplomacy');
+var MovementOwnership = require('Movement.Ownership');
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -638,7 +639,7 @@ function stabilizeBorderOnEntry(creep, mem) {
   else if (creep.pos.y === 49) dir = TOP;
   if (!dir) return false;
 
-  var rc = creep.move(dir);
+  var rc = MovementOwnership.move(creep, dir, "role.Scout.js/directStep", "role.Scout");
   // Lock should only be consumed when move intent was accepted/already present.
   // If the nudge fails, allow issueScoutMove -> Traveler fallback this tick so
   // border entry does not stall and bounce back out.
