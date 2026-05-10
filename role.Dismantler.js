@@ -10,6 +10,7 @@
 // Buzz motto: “measure twice, dismantle once.” 🐝
 
 var BeeToolbox = require('BeeToolbox');
+var MovementOwnership = require('Movement.Ownership');
 
 function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
 function _isInvaderCore(s)   { return !!(s && s.structureType === STRUCTURE_INVADER_CORE); }
@@ -86,7 +87,7 @@ function moveSmart(creep, dest, range){
       return BeeToolbox.BeeTravel(creep, d, { range: (range!=null?range:1), reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
     }
   } catch(e){}
-  return creep.moveTo(d, { reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
+  return MovementOwnership.moveTo(creep, d, { reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms }, "role.Dismantler/moveSmart", "Dismantler");
 }
 
 var roleDismantler = {

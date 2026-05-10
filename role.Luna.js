@@ -1,6 +1,7 @@
 'use strict';
 
 const BeeToolbox = require('BeeToolbox');
+var MovementOwnership = require('Movement.Ownership');
 const BeeCombatSquads = require('BeeCombatSquads');
 const CombatDiplomacy = require('CombatDiplomacy');
 
@@ -1176,7 +1177,7 @@ function softenRemoteDefensePlan(roomName) {
     else if (creep.pos.y === 49) dir = TOP;
     if (!dir) return false;
 
-    var rc = creep.move(dir);
+    var rc = MovementOwnership.move(creep, dir, "role.Luna.js/directStep", "role.Luna");
     // Consume per-tick move lock only if the nudge intent is accepted (or the
     // creep already has a move intent this tick). If nudge fails, keep lock
     // open so issueLunaMove/Traveler fallback can still run this tick.
@@ -1218,7 +1219,7 @@ function softenRemoteDefensePlan(roomName) {
           else if (creep.pos.y === 0) dir = BOTTOM;
           else if (creep.pos.y === 49) dir = TOP;
           if (dir) {
-            var rc = creep.move(dir);
+            var rc = MovementOwnership.move(creep, dir, "role.Luna.js/directStep", "role.Luna");
             if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
               creep.memory._lunaMoveTick = Game.time;
             }

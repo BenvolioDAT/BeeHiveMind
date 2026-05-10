@@ -1,5 +1,6 @@
 // role.Repair.js — with Debug_say & Debug_draw
 var BeeToolbox = require('BeeToolbox');
+var MovementOwnership = require('Movement.Ownership');
 
 // =============== Config ===============
 var CFG = Object.freeze({
@@ -77,7 +78,7 @@ function go(creep, dest, range){
   if (typeof creep.travelTo === 'function'){
     return creep.travelTo(dpos, { range: R, reusePath: CFG.TRAVEL_REUSE, ignoreCreeps: false, maxOps: 4000 });
   }
-  return creep.moveTo(dpos, { reusePath: CFG.TRAVEL_REUSE, maxOps: 1500 });
+  return MovementOwnership.moveTo(creep, dpos, { reusePath: CFG.TRAVEL_REUSE, maxOps: 1500 }, "role.Repair/goFallback", "Repair");
 }
 
 // =============== Safe Memory Accessors ===============

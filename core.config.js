@@ -11,6 +11,13 @@ const CoreConfig = {
   DEBUG_MOVEMENT_BOUNCE: false,
   DEBUG_TRAVELER_BOUNCE: false,
   DEBUG_MOVEMENT_BOUNCE_HISTORY: false,
+  DEBUG_EXIT_STABILIZE: false,
+  DEBUG_EXIT_STABILIZE_ROLES: [],
+  DEBUG_EXIT_STABILIZE_INTERVAL: 1,
+  DEBUG_EXIT_STABILIZE_BORDERS_ONLY: true,
+  DEBUG_MOVE_OWNERSHIP: false,
+  DEBUG_MOVE_OWNERSHIP_INTERVAL: 1,
+  DEBUG_MOVE_OWNERSHIP_ROLES: [],
   MOVEMENT_BOUNCE_HISTORY_ENABLED: true,
   MOVEMENT_BOUNCE_HISTORY_WINDOW: 6,
   MOVEMENT_BOUNCE_RECOVERY_TICKS: 5,
@@ -118,6 +125,20 @@ CoreConfig.settings = Object.freeze({
     DEBUG_MOVEMENT_BOUNCE_HISTORY: CoreConfig.DEBUG_MOVEMENT_BOUNCE_HISTORY,
     /** Per-creep minimum tick interval between repeated-bounce logs. */
     MOVEMENT_BOUNCE_LOG_INTERVAL: 5,
+    /** Exit stabilization debug logging. */
+    DEBUG_EXIT_STABILIZE: CoreConfig.DEBUG_EXIT_STABILIZE,
+    /** If non-empty, only listed roles emit exit stabilization logs. */
+    DEBUG_EXIT_STABILIZE_ROLES: CoreConfig.DEBUG_EXIT_STABILIZE_ROLES,
+    /** Minimum ticks between exit stabilization logs per creep. */
+    DEBUG_EXIT_STABILIZE_INTERVAL: CoreConfig.DEBUG_EXIT_STABILIZE_INTERVAL,
+    /** Restrict exit stabilization logs to border positions. */
+    DEBUG_EXIT_STABILIZE_BORDERS_ONLY: CoreConfig.DEBUG_EXIT_STABILIZE_BORDERS_ONLY,
+    /** Shared movement ownership debug logs. */
+    DEBUG_MOVE_OWNERSHIP: CoreConfig.DEBUG_MOVE_OWNERSHIP,
+    /** Per-creep minimum ticks between ownership logs. */
+    DEBUG_MOVE_OWNERSHIP_INTERVAL: CoreConfig.DEBUG_MOVE_OWNERSHIP_INTERVAL,
+    /** Optional role filter for ownership logs. */
+    DEBUG_MOVE_OWNERSHIP_ROLES: CoreConfig.DEBUG_MOVE_OWNERSHIP_ROLES,
   }),
 });
 

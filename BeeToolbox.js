@@ -1,5 +1,6 @@
 
 var Traveler = require('Traveler');
+var MovementOwnership = require('Movement.Ownership');
 var Logger = require('core.logger');
 var CoreConfig = require('core.config');
 var LOG_LEVEL = Logger.LOG_LEVEL;
@@ -226,7 +227,7 @@ function BeeTravel(creep, target, a3, a4, a5) {
     // Fallback to vanilla moveTo if something odd happens
     if (creep.pos && destination) {
       var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
-      var moveToResult = creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
+      var moveToResult = MovementOwnership.moveTo(creep, rp, { reusePath: 20, maxOps: 2000 }, 'BeeToolbox/BeeTravelFallback', 'BeeToolbox');
       if (creep.memory && creep.memory._move) {
         delete creep.memory._move;
       }
@@ -253,7 +254,7 @@ function nudgeOffExitIfNeeded(creep, destination, options) {
   else if (creep.pos.y === 49) dir = TOP;
   if (!dir) return { didMove: false, code: OK };
 
-  var rc = creep.move(dir);
+  var rc = MovementOwnership.move(creep, dir, 'BeeToolbox/nudgeOffExitIfNeeded', 'BeeToolbox');
   if (rc === OK || rc === ERR_TIRED) {
     return { didMove: true, code: rc };
   }

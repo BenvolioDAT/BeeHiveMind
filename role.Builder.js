@@ -1,5 +1,6 @@
 'use strict';
 var BeeSelectors = require('BeeSelectors');
+var MovementOwnership = require('Movement.Ownership');
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -487,7 +488,7 @@ function issueBuilderMove(creep, target, opts) {
     else if (creep.pos.y === 49) dir = TOP;
     if (!dir) return false;
 
-    var rc = creep.move(dir);
+    var rc = MovementOwnership.move(creep, dir, "role.Builder.js/directStep", "role.Builder");
     // Consume the per-tick lock only when movement intent is accepted (OK),
     // or already present this tick (ERR_BUSY/ERR_TIRED). If nudge fails,
     // leave lock open so normal travelTo/Traveler can run this tick and avoid
