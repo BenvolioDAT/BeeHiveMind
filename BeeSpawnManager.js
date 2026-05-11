@@ -1276,6 +1276,13 @@ function computeNonCombatPlan(C, room, debug) {
   if (economy === 'CRITICAL') {
     desired.Courier = (remoteCount > 0) ? 2 : 1;
     desired.Upgrader = 0;
+    // Keep at least one upgrader before mature economy infrastructure exists.
+    // Without this guard, rooms that classify as CRITICAL pre-storage can
+    // become permanently stuck with zero upgrade throughput.
+    if (!room.storage && !room.terminal) {
+      desired.Upgrader = 1;
+      demandClampReasons.UpgraderBootstrap = 'CRITICAL_BOOTSTRAP_KEEP_ONE';
+    }
     desired.Builder = (buildBucket === 'CRITICAL' || buildBucket === 'HIGH' || buildBucket === 'MEDIUM') ? 1 : 0;
     desired.Repair = (repairBucket === 'CRITICAL') ? 1 : 0;
     desired.Luna = Math.min(lunaDesired, remoteCount > 0 ? 1 : 0);
