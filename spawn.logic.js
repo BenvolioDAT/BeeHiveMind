@@ -131,6 +131,32 @@ var ROLE_CONFIGS = {
     WorkBody(0, 2, 2),
     WorkBody(0, 1, 1),
   ],
+  Trucker: [
+    WorkBody(0, 24, 12),
+    WorkBody(0, 23, 23),
+    WorkBody(0, 22, 22),
+    WorkBody(0, 21, 21),
+    WorkBody(0, 20, 20),
+    WorkBody(0, 19, 19),
+    WorkBody(0, 18, 18),
+    WorkBody(0, 17, 17),
+    WorkBody(0, 16, 16),
+    WorkBody(0, 15, 15),
+    WorkBody(0, 14, 14),
+    WorkBody(0, 13, 13),
+    WorkBody(0, 12, 12),
+    WorkBody(0, 11, 11),
+    WorkBody(0, 10, 10),
+    WorkBody(0, 9, 9),
+    WorkBody(0, 8, 8),
+    WorkBody(0, 7, 7),
+    WorkBody(0, 6, 6),
+    WorkBody(0, 5, 5),
+    WorkBody(0, 4, 4),
+    WorkBody(0, 3, 3),
+    WorkBody(0, 2, 2),
+    WorkBody(0, 1, 1),
+  ],
   Builder: [
     WorkBody(3, 6, 9),
     WorkBody(2, 4, 6),
@@ -237,6 +263,7 @@ var COMBAT_BODY_TEMPLATES = {
 var ROLE_CANONICAL = [
   'BaseHarvest',
   'Courier',
+  'Trucker',
   'Builder',
   'Repair',
   'Upgrader',
@@ -258,12 +285,9 @@ var ROLE_NORMALIZE_MAP = (function () {
     map[role.toLowerCase()] = role;
   }
   map.remoteharvest = 'Luna';
-  // Stage-1 clarity:
-  // Trucker currently reuses Courier spawn body planning on purpose.
-  // Runtime role.Trucker still exists, but spawn-time role normalization keeps
-  // legacy "trucker" requests safe until a dedicated Trucker body catalog is
-  // intentionally introduced.
-  map.trucker = 'Courier';
+  // Trucker is now a first-class canonical role in spawn planning.
+  // Keep a lowercase alias so legacy memory/queue entries still resolve.
+  map.trucker = 'Trucker';
   map.worker = 'BaseHarvest';
   map.harvester = 'BaseHarvest';
   return map;
@@ -277,6 +301,19 @@ function normalizeRole(role) {
   // Try exact match first, then lowercase alias (e.g. "baseharvest" → BaseHarvest).
   var canonical = ROLE_NORMALIZE_MAP[key] || ROLE_NORMALIZE_MAP[key.toLowerCase()];
   return canonical || null;
+}
+
+function spawnCodeReason(code) {
+  switch (code) {
+    case OK: return 'ok';
+    case ERR_NOT_OWNER: return 'err_not_owner';
+    case ERR_NAME_EXISTS: return 'err_name_exists';
+    case ERR_BUSY: return 'err_busy';
+    case ERR_NOT_ENOUGH_ENERGY: return 'err_not_enough_energy';
+    case ERR_INVALID_ARGS: return 'err_invalid_args';
+    case ERR_RCL_NOT_ENOUGH: return 'err_rcl_not_enough';
+    default: return 'err_unknown';
+  }
 }
 
 function calculateBodyCost(body) {
@@ -393,7 +430,12 @@ function copyMemory(source) {
 }
 
 function spawnRole(spawn, roleName, availableEnergy, memory) {
-  if (!spawn) return false;
+  var noSpawnResult = {
+    ok: false, code: ERR_INVALID_ARGS, role: null, requestedRole: roleName || null,
+    canonicalRole: null, name: null, body: [], bodyCost: 0, energyAvailable: 0,
+    energyCapacityAvailable: 0, reason: 'blocked_by_missing_spawn'
+  };
+  if (!spawn) return noSpawnResult;
 
   // Resolve the requested role into our canonical spelling before continuing.
   var canonicalRole = normalizeRole(roleName);
@@ -401,7 +443,13 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     if (Logger.shouldLog(LOG_LEVEL.WARN)) {
       spawnLog.warn('Unknown role requested:', roleName);
     }
-    return false;
+    return {
+      ok: false, code: ERR_INVALID_ARGS, role: null, requestedRole: roleName || null,
+      canonicalRole: null, name: null, body: [], bodyCost: 0,
+      energyAvailable: spawn.room ? (spawn.room.energyAvailable || 0) : 0,
+      energyCapacityAvailable: spawn.room ? (spawn.room.energyCapacityAvailable || 0) : 0,
+      reason: 'blocked_by_unknown_role'
+    };
   }
 
   var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
@@ -420,10 +468,26 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     bodyOpts.bodyCatalogStartIndex = requestedBodyCatalogStartIndex;
   }
   var body = getBodyForRole(canonicalRole, energy, bodyOpts);
-  if (!body || !body.length) return false;
+  if (!body || !body.length) {
+    return {
+      ok: false, code: ERR_NOT_ENOUGH_ENERGY, role: canonicalRole, requestedRole: roleName || null,
+      canonicalRole: canonicalRole, name: null, body: [], bodyCost: 0,
+      energyAvailable: spawn.room ? (spawn.room.energyAvailable || 0) : 0,
+      energyCapacityAvailable: spawn.room ? (spawn.room.energyCapacityAvailable || 0) : 0,
+      reason: 'blocked_by_no_body'
+    };
+  }
 
   var creepName = Generate_Creep_Name(canonicalRole);
-  if (!creepName) return false;
+  if (!creepName) {
+    return {
+      ok: false, code: ERR_NAME_EXISTS, role: canonicalRole, requestedRole: roleName || null,
+      canonicalRole: canonicalRole, name: null, body: body, bodyCost: calculateBodyCost(body),
+      energyAvailable: spawn.room ? (spawn.room.energyAvailable || 0) : 0,
+      energyCapacityAvailable: spawn.room ? (spawn.room.energyCapacityAvailable || 0) : 0,
+      reason: 'blocked_by_name_exhausted'
+    };
+  }
 
   // Copy over provided memory so we never mutate the caller's object.
   var mem = copyMemory(memory);
@@ -453,6 +517,19 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   }
 
   var result = spawn.spawnCreep(body, creepName, { memory: mem });
+  var out = {
+    ok: result === OK,
+    code: result,
+    role: canonicalRole,
+    requestedRole: roleName || null,
+    canonicalRole: canonicalRole,
+    name: creepName,
+    body: body,
+    bodyCost: calculateBodyCost(body),
+    energyAvailable: spawn.room ? (spawn.room.energyAvailable || 0) : 0,
+    energyCapacityAvailable: spawn.room ? (spawn.room.energyCapacityAvailable || 0) : 0,
+    reason: spawnCodeReason(result)
+  };
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     spawnLog.debug('spawnRole', canonicalRole, 'body [' + body + ']', 'cost', calculateBodyCost(body), 'avail', energy, 'result', result);
   }
@@ -480,9 +557,9 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('Spawned', canonicalRole, '=>', creepName);
     }
-    return true;
+    return out;
   }
-  return false;
+  return out;
 }
 
 // -----------------------------------------------------------------------------
@@ -1052,14 +1129,24 @@ function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S, squadFla
       if (typeof bodyCap === 'number') {
         extraMemory.combatBodyTierCap = bodyCap;
       }
-      var ok = spawnRole(spawn, entry.role, avail, extraMemory);
-      if (ok) {
+      var spawnResult = spawnRole(spawn, entry.role, avail, extraMemory);
+      if (spawnResult && spawnResult.ok) {
         S.lastSpawnAt = Game.time;
         S.lastSpawnRole = entry.role;
         combatSpawnLog('[SpawnSquad]', id, 'role', entry.role, 'room', targetRoom,
           'flag', squadFlag || 'n/a', 'via', spawn.name);
         return true;
       }
+      S.lastSpawnFailure = {
+        tick: Game.time,
+        role: entry.role,
+        spawn: spawn.name,
+        code: spawnResult && typeof spawnResult.code === 'number' ? spawnResult.code : null,
+        reason: spawnResult && spawnResult.reason ? spawnResult.reason : 'spawn_failed',
+        bodyCost: spawnResult && typeof spawnResult.bodyCost === 'number' ? spawnResult.bodyCost : 0,
+        energyAvailable: spawnResult && typeof spawnResult.energyAvailable === 'number' ? spawnResult.energyAvailable : (spawn.room ? (spawn.room.energyAvailable || 0) : 0),
+        energyCapacityAvailable: spawnResult && typeof spawnResult.energyCapacityAvailable === 'number' ? spawnResult.energyCapacityAvailable : (spawn.room ? (spawn.room.energyCapacityAvailable || 0) : 0)
+      };
       combatSpawnLog('[SpawnSquadFail]', id, 'role', entry.role, 'room', targetRoom,
         'flag', squadFlag || 'n/a', 'via', spawn.name);
       return false;
