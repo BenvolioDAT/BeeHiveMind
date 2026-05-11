@@ -358,6 +358,13 @@ function ensureSpawnDebug(roomName) {
   return Memory.rooms[roomName].spawnDebug;
 }
 
+function compactEnergy(room) {
+  return {
+    energyAvailable: room ? (room.energyAvailable || 0) : 0,
+    energyCapacityAvailable: room ? (room.energyCapacityAvailable || 0) : 0
+  };
+}
+
 function emaUpdate(prev, sample, alpha) {
   if (typeof prev !== 'number') return sample;
   return (prev * (1 - alpha)) + (sample * alpha);
@@ -1083,6 +1090,9 @@ function enqueue(roomName, role, opts) {
     priority: rolePriority(role),
     retryAt: 0
   };
+  var seq = Memory.__spawnQueueSeq || 0;
+  item.id = item.id || (String(Game.time) + ':' + String(item.role) + ':' + String(seq));
+  Memory.__spawnQueueSeq = seq + 1;
   if (opts) {
     for (var key in opts) {
       if (Object.prototype.hasOwnProperty.call(opts, key)) {
@@ -1874,12 +1884,16 @@ function dequeueAndSpawn(spawner) {
   var quotas = (debug && debug.planner && debug.planner.quotas) ? debug.planner.quotas : computeRoomQuotas(global.__BHM || {}, room);
   var arb = buildArbitrationState(global.__BHM || {}, room, roomName, quotas);
   if (!q.length) {
+    var emptyEnergy = compactEnergy(room);
     debug.lastDecision = {
       tick: Game.time,
       spawn: spawner.name,
+      selectedRole: null,
       action: 'WAIT',
-      reason: 'QUEUE_EMPTY',
-      energy: energyStatus(room)
+      reason: 'queue_empty',
+      queueLength: q.length,
+      energyAvailable: emptyEnergy.energyAvailable,
+      energyCapacityAvailable: emptyEnergy.energyCapacityAvailable
     };
     if (tickEvery(DBG_EVERY)) {
       dlog('🕳️ [Queue]', roomName, 'empty (energy', energyStatus(room) + ')');
@@ -1907,14 +1921,18 @@ function dequeueAndSpawn(spawner) {
     break;
   }
   if (pickIndex === -1) {
+    var blockedEnergy = compactEnergy(room);
     debug.lastDecision = {
       tick: Game.time,
       spawn: spawner.name,
+      selectedRole: null,
       action: 'WAIT',
       reason: (debug.arbitration && debug.arbitration.unmetFloors && debug.arbitration.unmetFloors.length)
-        ? 'ARBITRATION_BLOCK'
-        : 'QUEUE_COOLDOWN',
-      energy: energyStatus(room)
+        ? 'blocked_by_recovery'
+        : 'blocked_by_retry_cooldown',
+      queueLength: q.length,
+      energyAvailable: blockedEnergy.energyAvailable,
+      energyCapacityAvailable: blockedEnergy.energyCapacityAvailable
     };
     if (tickEvery(DBG_EVERY)) {
       dlog('⏸️ [Queue]', roomName, 'head priority cooling down');
@@ -1925,14 +1943,18 @@ function dequeueAndSpawn(spawner) {
   var item = q[pickIndex];
   var needed = minEnergyFor(item.role);
   if ((room.energyAvailable || 0) < needed) {
+    var lowEnergy = compactEnergy(room);
     debug.lastDecision = {
       tick: Game.time,
       spawn: spawner.name,
+      selectedRole: item.role,
       action: 'WAIT',
-      role: item.role,
-      reason: 'BODY_UNAFFORDABLE',
+      reason: 'blocked_by_min_energy',
+      queueLength: q.length,
       need: needed,
-      have: room.energyAvailable || 0
+      have: room.energyAvailable || 0,
+      energyAvailable: lowEnergy.energyAvailable,
+      energyCapacityAvailable: lowEnergy.energyCapacityAvailable
     };
     if (tickEvery(DBG_EVERY)) {
       dlog('⛽ [QueueHold]', roomName, 'prio', item.priority, 'role', item.role,
@@ -1951,19 +1973,21 @@ function dequeueAndSpawn(spawner) {
     spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
   }
 
-  var ok = false;
+  var spawnResult = null;
   if (spawnLogic && typeof spawnLogic.spawnRole === 'function') {
-    ok = spawnLogic.spawnRole(spawner, item.role, spawnResource, item);
+    spawnResult = spawnLogic.spawnRole(spawner, item.role, spawnResource, item);
   }
+  var ok = !!(spawnResult && spawnResult.ok);
 
   if (ok) {
     pushSpawnHistory(debug, item.role, item.roleBand || roleBand(item.role), 'queue', item.plannerReason || 'SPAWN_OK');
     debug.lastDecision = {
       tick: Game.time,
       spawn: spawner.name,
+      selectedRole: item.role,
       action: 'SPAWNED',
-      role: item.role,
-      reason: item.plannerReason || 'SPAWN_OK',
+      reason: item.plannerReason || 'spawn_ok',
+      queueLength: q.length,
       plannerBodyCapIndex: (typeof item.plannerBodyCapIndex === 'number') ? item.plannerBodyCapIndex : null,
       enqueuedBodyCapIndex: (typeof item.enqueuedBodyCapIndex === 'number') ? item.enqueuedBodyCapIndex : null,
       bodyCatalogStartIndex: (typeof item.bodyCatalogStartIndex === 'number') ? item.bodyCatalogStartIndex : null,
@@ -1972,7 +1996,9 @@ function dequeueAndSpawn(spawner) {
       demandClampReason: item.demandClampReason || null,
       selectedRoleReason: pickReason || 'ALLOWED',
       band: item.roleBand || roleBand(item.role),
-      age: Game.time - item.created
+      age: Game.time - item.created,
+      energyAvailable: (spawnResult && typeof spawnResult.energyAvailable === 'number') ? spawnResult.energyAvailable : (room.energyAvailable || 0),
+      energyCapacityAvailable: (spawnResult && typeof spawnResult.energyCapacityAvailable === 'number') ? spawnResult.energyCapacityAvailable : (room.energyCapacityAvailable || 0)
     };
     dlog('✅ [SpawnOK]', roomName, 'spawned', item.role, 'at', spawner.name);
     q.splice(pickIndex, 1);
@@ -1980,13 +2006,32 @@ function dequeueAndSpawn(spawner) {
   }
 
   item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
+  var failEnergy = compactEnergy(room);
+  debug.lastSpawnFailure = {
+    tick: Game.time,
+    spawn: spawner.name,
+    room: roomName,
+    requestedRole: item.role,
+    canonicalRole: spawnResult ? spawnResult.canonicalRole : canonicalRole(item.role),
+    queueItemId: item.id || null,
+    body: (spawnResult && spawnResult.body) ? spawnResult.body : [],
+    bodyCost: (spawnResult && typeof spawnResult.bodyCost === 'number') ? spawnResult.bodyCost : 0,
+    energyAvailable: (spawnResult && typeof spawnResult.energyAvailable === 'number') ? spawnResult.energyAvailable : failEnergy.energyAvailable,
+    energyCapacityAvailable: (spawnResult && typeof spawnResult.energyCapacityAvailable === 'number') ? spawnResult.energyCapacityAvailable : failEnergy.energyCapacityAvailable,
+    code: (spawnResult && typeof spawnResult.code === 'number') ? spawnResult.code : null,
+    reason: (spawnResult && spawnResult.reason) ? spawnResult.reason : 'spawn_failed',
+    retryAt: item.retryAt
+  };
   debug.lastDecision = {
     tick: Game.time,
     spawn: spawner.name,
+    selectedRole: item.role,
     action: 'WAIT',
-    role: item.role,
-    reason: 'SPAWN_FAILED_RETRY',
-    retryAt: item.retryAt
+    reason: (spawnResult && spawnResult.reason) ? spawnResult.reason : 'spawn_failed_retry',
+    queueLength: q.length,
+    retryAt: item.retryAt,
+    energyAvailable: failEnergy.energyAvailable,
+    energyCapacityAvailable: failEnergy.energyCapacityAvailable
   };
   dlog('⏳ [SpawnWait]', roomName, item.role, 'backoff to', item.retryAt,
     '(energy', energyStatus(room) + ')');
