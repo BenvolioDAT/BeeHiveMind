@@ -7,6 +7,12 @@ var CombatAPI = BeeCombatSquads.CombatAPI;
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var MovementManager = require('Movement.Manager');
 var CoreConfig = require('core.config');
+var CoreLogger = require('core.logger');
+var combatMedicLog = CoreLogger.createLogger('CombatMedic', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 function _combatDebugSettings() {
   var cfg = (CoreConfig.settings && CoreConfig.settings.combat) || {};
@@ -40,7 +46,9 @@ function _debugLog(creep, branch, extra, interval) {
   }
   try {
     console.log('[CombatRole][Medic]', '[tick ' + Game.time + ']', creep.name, 'branch=' + branch, extra || '');
-  } catch (e) {}
+  } catch (e) {
+    combatMedicLog.warnEvery('combatMedic.debugLog.console', 250, 'debug combat log failed for', creep && creep.name, describeError(e));
+  }
 }
 
 function _resolveFlagName(creep) {
@@ -166,14 +174,37 @@ function _buildMedicContext(creep) {
   };
 }
 
+function hasUsableTravelTarget(target) {
+  var pos = target && (target.pos || target);
+  return !!(pos && typeof pos.x === 'number' && typeof pos.y === 'number' && pos.roomName);
+}
+
+function isManagerRequestHandled(result) {
+  return result === OK || (typeof result === 'number' && result > OK);
+}
+
 function _requestMove(creep, target, range, intentType) {
   if (!creep || !target) return;
   var opts = { range: range, ignoreCreeps: false, reusePath: 10, intentType: intentType || 'combat' };
   if (MovementManager && typeof MovementManager.request === 'function') {
-    var rc = MovementManager.request(creep, target, null, opts);
-    if (rc === OK || (typeof rc === 'number' && rc > OK)) return;
+    var requestResult = MovementManager.request(creep, target, null, opts);
+
+    // Request contract:
+    // - OK: manager accepted/replaced intent; no direct fallback.
+    // - numeric > OK: manager kept existing higher/equal-priority intent; no fallback.
+    // - ERR_INVALID_ARGS: malformed request; guarded fail-open fallback only for usable target.
+    // - any other value: no fallback.
+    if (isManagerRequestHandled(requestResult)) return requestResult;
+
+    if (requestResult === ERR_INVALID_ARGS) {
+      if (creep && typeof creep.travelTo === 'function' && hasUsableTravelTarget(target)) {
+        return creep.travelTo(target, { range: range, ignoreCreeps: false });
+      }
+    }
+    return requestResult;
   }
-  creep.travelTo(target, { range: range, ignoreCreeps: false });
+  // Manager unavailable: do not direct-fallback here; preserve manager arbitration discipline.
+  return ERR_INVALID_ARGS;
 }
 
 function _selectHealTarget(creep, context) {

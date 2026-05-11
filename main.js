@@ -99,7 +99,7 @@ function maybeGeneratePixel() {
     if (Game.cpu.bucket < pixelCfg.bucketThreshold) return;
     if (pixelCfg.tickModulo > 1 && (Game.time % pixelCfg.tickModulo) !== 0) return;
     //--- Pixel Generation ---
-    var result = Game.cpu.generatePixel();
+    const result = Game.cpu.generatePixel();
     if (result === OK) {
         mainLog.info('Pixel generated successfully.');
     }
@@ -134,4 +134,3 @@ module.exports.loop = function () {
 
     maybeGeneratePixel();
 };
-

@@ -1,4 +1,10 @@
 'use strict';
+var CoreLogger = require('core.logger');
+var claimerLog = CoreLogger.createLogger('Claimer', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -91,7 +97,9 @@ var CFG = Object.freeze({
           color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
         });
       }
-    } catch (e) {}
+    } catch (e) {
+      claimerLog.warnEvery('claimer.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
+    }
   }
 
   function debugRing(room, pos, color, text) {
@@ -99,7 +107,9 @@ var CFG = Object.freeze({
     try {
       room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
       if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-    } catch (e) {}
+    } catch (e) {
+      claimerLog.warnEvery('claimer.debugRing.visual', 250, 'debugRing failed for room', room && room.name, describeError(e));
+    }
   }
 
   function debugLabel(room, pos, text, color) {
@@ -109,7 +119,9 @@ var CFG = Object.freeze({
         color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
         backgroundColor: "#000000", backgroundOpacity: 0.25
       });
-    } catch (e) {}
+    } catch (e) {
+      claimerLog.warnEvery('claimer.debugLabel.visual', 250, 'debugLabel failed for room', room && room.name, describeError(e));
+    }
   }
 
   // =========================

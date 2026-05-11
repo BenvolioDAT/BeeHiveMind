@@ -11,6 +11,10 @@ var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var CoreConfig = require('core.config');
 
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
+
 function combatDebugEnabled() {
   return Boolean(CoreConfig && CoreConfig.settings && CoreConfig.settings.combat &&
     CoreConfig.settings.combat.DEBUG_LOGS);
@@ -53,7 +57,9 @@ function plannerDebugLogDecision(key, fields) {
   map[safeKey] = { sig: sig, last: Game.time };
   try {
     spawnLog.info('[CombatPlan]', safeKey, sig);
-  } catch (e) {}
+  } catch (e) {
+    spawnLog.warnEvery('spawnLogic.plannerDebugLogDecision.info', 250, 'planner debug log write failed for', safeKey, describeError(e));
+  }
 }
 
 // -----------------------------------------------------------------------------

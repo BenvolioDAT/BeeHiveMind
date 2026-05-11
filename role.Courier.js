@@ -1,4 +1,40 @@
 'use strict';
+var CoreLogger = require('core.logger');
+var MovementManager = require('Movement.Manager');
+var courierLog = CoreLogger.createLogger('Courier', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
+
+
+function hasUsableTravelTarget(target) {
+  var pos = target && (target.pos || target);
+  return !!(pos && typeof pos.x === 'number' && typeof pos.y === 'number' && pos.roomName);
+}
+
+function isManagerRequestHandled(result) {
+  return result === OK || (typeof result === 'number' && result > OK);
+}
+
+function requestCourierMove(creep, target, range, opts, reason) {
+  // Use MovementManager.request for Courier movement arbitration.
+  // OK = accepted/replaced.
+  // numeric > OK = existing higher/equal intent kept.
+  // ERR_INVALID_ARGS or manager unavailable = no direct fallback in this phase.
+  if (!creep || !target) return ERR_INVALID_ARGS;
+  if (!hasUsableTravelTarget(target)) return ERR_INVALID_ARGS;
+  if (!MovementManager || typeof MovementManager.request !== 'function') return ERR_INVALID_ARGS;
+
+  var requestOpts = opts ? Object.assign({}, opts) : {};
+  requestOpts.range = range;
+  requestOpts.intentType = requestOpts.intentType || 'courier_deliver';
+
+  var requestResult = MovementManager.request(creep, target, null, requestOpts);
+  if (isManagerRequestHandled(requestResult)) return requestResult;
+  if (requestResult === ERR_INVALID_ARGS) return ERR_INVALID_ARGS;
+  return requestResult;
+}
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -90,7 +126,9 @@ function debugDrawLine(creep, target, color, label) {
         color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
       });
     }
-  } catch (e) {}
+  } catch (e) {
+    courierLog.warnEvery('courier.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
+  }
 }
 
   // Shares PIB + same-tick reservation scheme with Queen to avoid target dogpiles.
@@ -299,7 +337,9 @@ function debugDrawLine(creep, target, color, label) {
     var rc = creep.transfer(target, res);
 
     if (rc === ERR_NOT_IN_RANGE) {
-      creep.travelTo(target, { range: 1, reusePath: CFG.PATH_REUSE });
+      // Delivery movement is routed through MovementManager first with no direct fallback in this phase.
+      // Collect and idle movement remain direct for staged migration in later phases.
+      requestCourierMove(creep, target, 1, { reusePath: CFG.PATH_REUSE }, 'courier.deliver.transfer');
       return rc;
     }
 
@@ -430,7 +470,7 @@ function debugDrawLine(creep, target, color, label) {
     debugSay(creep, '↘️Drop');
     debugDrawLine(creep, pile, CFG.DRAW.DROP_COLOR, "DROP*");
     if (creep.pickup(pile) === ERR_NOT_IN_RANGE) {
-      creep.travelTo(pile, { range: 1, reusePath: 20 });
+      requestCourierMove(creep, pile, 1, { reusePath: 20, intentType: 'courier_collect' }, 'courier.collect.pickupEnRoute');
     }
     return true;
   }
@@ -451,7 +491,7 @@ function debugDrawLine(creep, target, color, label) {
       debugDrawLine(creep, bestDrop, CFG.DRAW.DROP_COLOR, "DROP");
       var pr = creep.pickup(bestDrop);
       if (pr === ERR_NOT_IN_RANGE) {
-        creep.travelTo(bestDrop, { range: 1, reusePath: 20 });
+        requestCourierMove(creep, bestDrop, 1, { reusePath: 20, intentType: 'courier_collect' }, 'courier.collect.containerDropPickup');
         return true;
       }
       if (pr === OK && creep.store.getFreeCapacity() === 0) { creep.memory.transferring = true; return true; }
@@ -468,7 +508,7 @@ function debugDrawLine(creep, target, color, label) {
     debugDrawLine(creep, container, CFG.DRAW.WD_COLOR, "CON");
     var wr = creep.withdraw(container, RESOURCE_ENERGY);
     if (wr === ERR_NOT_IN_RANGE) {
-      creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE });
+      requestCourierMove(creep, container, 1, { reusePath: CFG.PATH_REUSE, intentType: 'courier_collect' }, 'courier.collect.containerWithdraw');
       return true;
     }
     if (wr === OK) {
@@ -502,7 +542,7 @@ function debugDrawLine(creep, target, color, label) {
     debugDrawLine(creep, grave, CFG.DRAW.GRAVE_COLOR, "GRAVE");
     var gw = creep.withdraw(grave, RESOURCE_ENERGY);
     if (gw === ERR_NOT_IN_RANGE) {
-      creep.travelTo(grave, { range: 1, reusePath: 20 });
+      requestCourierMove(creep, grave, 1, { reusePath: 20, intentType: 'courier_collect' }, 'courier.collect.graveWithdraw');
     }
     return true;
   }
@@ -515,7 +555,7 @@ function debugDrawLine(creep, target, color, label) {
     debugSay(creep, '↘️Drop');
     debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP");
     if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-      creep.travelTo(dropped, { range: 1, reusePath: 20 });
+      requestCourierMove(creep, dropped, 1, { reusePath: 20, intentType: 'courier_collect' }, 'courier.collect.genericDrop');
     }
     return true;
   }
@@ -530,7 +570,7 @@ function debugDrawLine(creep, target, color, label) {
     debugDrawLine(creep, storeLike, CFG.DRAW.WD_COLOR, storeLike.structureType === STRUCTURE_STORAGE ? "STO" : "TERM");
     var sr = creep.withdraw(storeLike, RESOURCE_ENERGY);
     if (sr === ERR_NOT_IN_RANGE) {
-      creep.travelTo(storeLike, { range: 1, reusePath: CFG.PATH_REUSE });
+      requestCourierMove(creep, storeLike, 1, { reusePath: CFG.PATH_REUSE, intentType: 'courier_collect' }, 'courier.collect.storageWithdraw');
     }
     return true;
   }

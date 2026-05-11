@@ -11,6 +11,12 @@
 
 var BeeToolbox = require('BeeToolbox');
 var MovementOwnership = require('Movement.Ownership');
+var CoreLogger = require('core.logger');
+var dismantlerLog = CoreLogger.createLogger('Dismantler', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
 function _isInvaderCore(s)   { return !!(s && s.structureType === STRUCTURE_INVADER_CORE); }
@@ -86,7 +92,9 @@ function moveSmart(creep, dest, range){
     if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function'){
       return BeeToolbox.BeeTravel(creep, d, { range: (range!=null?range:1), reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms });
     }
-  } catch(e){}
+  } catch(e){
+    dismantlerLog.warnEvery('dismantler.moveSmart.beeTravel', 250, 'BeeTravel failed for', creep && creep.name, describeError(e));
+  }
   return MovementOwnership.moveTo(creep, d, { reusePath: CONFIG.reusePath, maxRooms: CONFIG.maxRooms }, "role.Dismantler/moveSmart", "Dismantler");
 }
 

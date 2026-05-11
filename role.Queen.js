@@ -3,6 +3,12 @@
 const BeeSelectors = require('BeeSelectors');
 const BeeActions = require('BeeActions');
 const MovementManager = require('Movement.Manager');
+var CoreLogger = require('core.logger');
+var queenLog = CoreLogger.createLogger('Queen', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -94,7 +100,9 @@ function drawLine(creep, target, color, label) {
         align: 'center'
       });
     }
-  } catch (e) {}
+  } catch (e) {
+    queenLog.warnEvery('queen.drawLine.visual', 250, 'drawLine failed for', creep && creep.name, describeError(e));
+  }
 }
 
   // -----------------------------

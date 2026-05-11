@@ -1,6 +1,12 @@
 // role.Repair.js — with Debug_say & Debug_draw
 var BeeToolbox = require('BeeToolbox');
 var MovementOwnership = require('Movement.Ownership');
+var CoreLogger = require('core.logger');
+var repairLog = CoreLogger.createLogger('Repair', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 // =============== Config ===============
 var CFG = Object.freeze({
@@ -74,7 +80,9 @@ function go(creep, dest, range){
     if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function'){
       return BeeToolbox.BeeTravel(creep, dpos, { range: R, reusePath: CFG.TRAVEL_REUSE });
     }
-  } catch(e){}
+  } catch(e){
+    repairLog.warnEvery('repair.go.beeTravel', 250, 'BeeTravel failed for', creep && creep.name, describeError(e));
+  }
   if (typeof creep.travelTo === 'function'){
     return creep.travelTo(dpos, { range: R, reusePath: CFG.TRAVEL_REUSE, ignoreCreeps: false, maxOps: 4000 });
   }

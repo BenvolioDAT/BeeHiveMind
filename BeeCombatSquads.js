@@ -5,6 +5,10 @@ var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 
 var combatLog = CoreLogger.createLogger('CombatSquads', LOG_LEVEL.DEBUG);
 
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
+
 /**
  * BeeCombatSquads owns the combat squad state machine and exports a CombatAPI
  * helper bundle (INIT → FORM → ENGAGE → RETREAT). Roles consume
@@ -207,7 +211,9 @@ function emitStateLog(channel, key, signatureParts, interval) {
   args.unshift(console);
   try {
     console.log.apply(console, args.slice(1));
-  } catch (e) {}
+  } catch (e) {
+    combatLog.warnEvery('beeCombatSquads.emitStateLog.console', 250, 'emitStateLog console write failed for channel', channel, 'key', key, describeError(e));
+  }
 }
 
 /**
@@ -1206,7 +1212,9 @@ function focusFireTarget(flagName) {
         'prevTarget=', prevId,
         'nextTarget=', bucket.targetId
       );
-    } catch (e) {}
+    } catch (e) {
+      combatLog.warnEvery('beeCombatSquads.resolveSquadTarget.debugLog', 250, 'focusFireTarget debug log failed for flag', flagName, 'room', room ? room.name : '(no room)', describeError(e));
+    }
   }
 
   if (combatDebugEnabled() && currentId !== nextId) {
@@ -1737,7 +1745,9 @@ function getLiveThreatForRoom(roomName) {
       'count=', total,
       'bestId=', bestId
     );
-  } catch (e) {}
+  } catch (e) {
+    combatLog.warnEvery('beeCombatSquads.getLiveThreatForRoom.debugLog', 250, 'getLiveThreatForRoom debug log failed for room', room ? room.name : String(roomName), describeError(e));
+  }
 
   return { score: score, hasThreat: total > 0, bestId: bestId };
 }

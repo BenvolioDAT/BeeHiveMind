@@ -1,6 +1,59 @@
 'use strict';
 
 var CoreConfig = require('core.config');
+var MovementVerify = require('Movement.Verify');
+
+
+function getCreepName(creep) {
+  return (creep && creep.name) ? creep.name : null;
+}
+
+function getCreepRole(creep) {
+  return (creep && creep.memory && creep.memory.role) ? creep.memory.role : null;
+}
+
+function getPosFields(pos, prefix) {
+  var out = {};
+  if (!pos) return out;
+  var p = prefix || '';
+  if (pos.roomName != null) out[p + 'rm'] = pos.roomName;
+  if (pos.x != null) out[p + 'x'] = pos.x;
+  if (pos.y != null) out[p + 'y'] = pos.y;
+  return out;
+}
+
+function getTargetFields(target) {
+  if (!target) return {};
+  var pos = target.pos || target;
+  return getPosFields(pos, 'd');
+}
+
+function buildVerifyBase(creep, source, reason, op) {
+  var base = {
+    c: getCreepName(creep),
+    r: getCreepRole(creep),
+    src: source || 'MovementOwnership',
+    reason: reason || 'none'
+  };
+  if (op) base.op = op;
+  if (creep && creep.pos) {
+    var p = getPosFields(creep.pos);
+    if (p.rm != null) base.rm = p.rm;
+    if (p.x != null) base.x = p.x;
+    if (p.y != null) base.y = p.y;
+  }
+  return base;
+}
+
+function recordMoveVerify(type, data) {
+  try {
+    if (!MovementVerify || typeof MovementVerify.event !== 'function') return;
+    if (MovementVerify.isEnabled && !MovementVerify.isEnabled()) return;
+    MovementVerify.event(type, data || {});
+  } catch (e) {
+    // verifier is strictly side-channel and must never affect movement behavior
+  }
+}
 
 function _state() {
   if (typeof global === 'undefined') return null;
@@ -71,6 +124,11 @@ var MovementOwnership = {
         result: result,
         extra: extra || {}
       };
+      var markBase = buildVerifyBase(creep, source || 'unknown', reason || 'none', 'mark');
+      markBase.rc = result;
+      markBase.ownerSource = source || 'unknown';
+      markBase.ownerReason = reason || 'none';
+      recordMoveVerify('mv.own.mark.ok', markBase);
     }
     _debug(creep, source || 'unknown', 'mark', reason || 'none', result, extra || {});
     return result;
@@ -78,16 +136,35 @@ var MovementOwnership = {
 
   move: function (creep, direction, reason, source) {
     if (!creep || typeof creep.move !== 'function') return ERR_INVALID_ARGS;
+    var moveBase = buildVerifyBase(creep, source || 'MovementOwnership.move', reason || 'move', 'move');
+    moveBase.dir = direction;
+    recordMoveVerify('mv.own.call', moveBase);
     var rc = creep.move(direction);
     this.mark(creep, source || 'direct', reason || 'move', rc, { direction: direction });
+    if (rc !== OK) {
+      moveBase.rc = rc;
+      moveBase.ownerReason = reason || 'move';
+      recordMoveVerify('mv.fail', moveBase);
+    }
     _debug(creep, source || 'direct', 'move', reason || 'move', rc, { direction: direction });
     return rc;
   },
 
   moveTo: function (creep, target, opts, reason, source) {
     if (!creep || typeof creep.moveTo !== 'function') return ERR_INVALID_ARGS;
+    var moveToBase = buildVerifyBase(creep, source || 'MovementOwnership.moveTo', reason || 'moveTo', 'moveTo');
+    var t = getTargetFields(target);
+    if (t.drm != null) moveToBase.drm = t.drm;
+    if (t.dx != null) moveToBase.dx = t.dx;
+    if (t.dy != null) moveToBase.dy = t.dy;
+    recordMoveVerify('mv.own.call', moveToBase);
     var rc = creep.moveTo(target, opts || {});
     this.mark(creep, source || 'direct', reason || 'moveTo', rc, {});
+    if (rc !== OK) {
+      moveToBase.rc = rc;
+      moveToBase.ownerReason = reason || 'moveTo';
+      recordMoveVerify('mv.fail', moveToBase);
+    }
     _debug(creep, source || 'direct', 'moveTo', reason || 'moveTo', rc, {});
     return rc;
   },
@@ -95,6 +172,10 @@ var MovementOwnership = {
   logSkip: function (creep, source, reason, extra) {
     var owner = this.get(creep);
     var ownerReason = owner && owner.reason ? owner.reason : 'none';
+    var skipBase = buildVerifyBase(creep, source || 'unknown', reason || 'alreadyMoved', 'skip');
+    skipBase.ownerSource = owner && owner.source ? owner.source : 'none';
+    skipBase.ownerReason = ownerReason;
+    recordMoveVerify('mv.own.skip', skipBase);
     _debug(creep, source || 'unknown', 'skip', reason || 'alreadyMoved', OK, Object.assign({}, extra || {}, { ownerReason: ownerReason }));
   }
 };
