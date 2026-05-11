@@ -1,6 +1,12 @@
 'use strict';
 var BeeSelectors = require('BeeSelectors');
 var MovementOwnership = require('Movement.Ownership');
+var CoreLogger = require('core.logger');
+var builderLog = CoreLogger.createLogger('Builder', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -92,7 +98,9 @@ function debugDrawLine(creep, target, color, label) {
         color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
       });
     }
-  } catch (e) {}
+  } catch (e) {
+    builderLog.warnEvery('builder.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
+  }
 }
 
 function debugRing(room, pos, color, text) {
@@ -100,7 +108,9 @@ function debugRing(room, pos, color, text) {
   try {
     room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH});
     if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align:"center" });
-  } catch (e) {}
+  } catch (e) {
+    builderLog.warnEvery('builder.debugRing.visual', 250, 'debugRing failed for room', room && room.name, describeError(e));
+  }
 }
 
 // Movement discipline helper:

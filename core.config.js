@@ -40,6 +40,10 @@ CoreConfig.settings = Object.freeze({
   logging: Object.freeze({
     /** Default log level applied on boot. */
     defaultLevel: LOG_LEVEL.NONE,
+    /** Minimum ticks between identical throttled log keys when interval is omitted. */
+    throttleInterval: 25,
+    /** Soft cap for in-memory throttled-log key records (global cache, not Memory). */
+    throttleMaxKeys: 200,
   }),
   combat: Object.freeze({
     /** Allow combat creeps to engage non-ally players. */
@@ -85,13 +89,13 @@ CoreConfig.settings = Object.freeze({
         HEALTHY_TERMINAL: 100000,
         EARLY_CAPACITY: 550,
         MID_CAPACITY: 1300,
-        LATE_CAPACITY: 2300
+        LATE_CAPACITY: 2300,
       }),
       threatTiers: Object.freeze({
         LOW_MAX: 7,
         MEDIUM_MAX: 15,
-        HIGH_MAX: 24
-      })
+        HIGH_MAX: 24,
+      }),
     }),
   }),
   pixels: Object.freeze({
@@ -139,6 +143,24 @@ CoreConfig.settings = Object.freeze({
     DEBUG_MOVE_OWNERSHIP_INTERVAL: CoreConfig.DEBUG_MOVE_OWNERSHIP_INTERVAL,
     /** Optional role filter for ownership logs. */
     DEBUG_MOVE_OWNERSHIP_ROLES: CoreConfig.DEBUG_MOVE_OWNERSHIP_ROLES,
+    /** Default-off movement verifier harness. */
+    DEBUG_MOVEMENT_VERIFY: false,
+    /** Optional role filter for movement verifier events. */
+    DEBUG_MOVEMENT_VERIFY_ROLES: [],
+    /** Optional creep-name filter for movement verifier events. */
+    DEBUG_MOVEMENT_VERIFY_CREEPS: [],
+    /** Optional room-name filter for movement verifier events. */
+    DEBUG_MOVEMENT_VERIFY_ROOMS: [],
+    /** Minimum ticks between movement verifier summary logs. */
+    DEBUG_MOVEMENT_VERIFY_INTERVAL: 25,
+    /** Restrict movement verifier events to border creeps when enabled. */
+    DEBUG_MOVEMENT_VERIFY_BORDERS_ONLY: true,
+    /** Emit periodic summary lines for movement verifier counters. */
+    DEBUG_MOVEMENT_VERIFY_SUMMARY: true,
+    /** Include stack details in movement verifier logs (off by default). */
+    DEBUG_MOVEMENT_VERIFY_STACK: false,
+    /** Hard cap on movement verifier sample events stored per tick. */
+    DEBUG_MOVEMENT_VERIFY_MAX_EVENTS_PER_TICK: 200,
   }),
 });
 

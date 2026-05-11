@@ -3,9 +3,71 @@ var Traveler = require('Traveler');
 var MovementOwnership = require('Movement.Ownership');
 var Logger = require('core.logger');
 var CoreConfig = require('core.config');
+var MovementVerify = require('Movement.Verify');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 var HOSTILE_ROOM_TTL = 250;
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
+
+
+function getCreepName(creep) {
+  return (creep && creep.name) ? creep.name : null;
+}
+
+function getCreepRole(creep) {
+  return (creep && creep.memory && creep.memory.role) ? creep.memory.role : null;
+}
+
+function getPosFields(pos, prefix) {
+  var out = {};
+  if (!pos) return out;
+  var p = prefix || '';
+  if (pos.roomName != null) out[p + 'rm'] = pos.roomName;
+  if (pos.x != null) out[p + 'x'] = pos.x;
+  if (pos.y != null) out[p + 'y'] = pos.y;
+  return out;
+}
+
+function getDestFields(target) {
+  if (!target) return {};
+  var pos = target.pos || target;
+  return getPosFields(pos, 'd');
+}
+
+function isBorderPos(pos) {
+  if (!pos) return false;
+  return pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49;
+}
+
+function buildVerifyBase(creep, src, op) {
+  var base = {
+    c: getCreepName(creep),
+    r: getCreepRole(creep),
+    src: src || 'BeeToolbox',
+    op: op || 'BeeTravel'
+  };
+  if (creep && creep.pos) {
+    var p = getPosFields(creep.pos, '');
+    if (p.rm != null) base.rm = p.rm;
+    if (p.x != null) base.x = p.x;
+    if (p.y != null) base.y = p.y;
+  }
+  return base;
+}
+
+function recordMoveVerify(type, data) {
+  try {
+    if (!MovementVerify || typeof MovementVerify.event !== 'function') return;
+    if (MovementVerify.isEnabled && !MovementVerify.isEnabled()) return;
+    MovementVerify.event(type, data || {});
+  } catch (e) {
+    // verifier is side-channel only
+  }
+}
+
 
 // This utility file gets touched by nearly every role.  The more we can keep the
 // helpers flat and well-named, the easier it is for a new contributor to spot a
@@ -188,6 +250,14 @@ function _canEngageTarget(attacker, target) {
 function BeeTravel(creep, target, a3, a4, a5) {
   if (!creep || !target) return ERR_INVALID_TARGET;
 
+  var verifyBase = buildVerifyBase(creep, 'BeeToolbox.BeeTravel', 'BeeTravel');
+  var verifyDest = getDestFields(target);
+  verifyBase.border = isBorderPos(creep && creep.pos ? creep.pos : null);
+  if (verifyDest.drm != null) verifyBase.drm = verifyDest.drm;
+  if (verifyDest.dx != null) verifyBase.dx = verifyDest.dx;
+  if (verifyDest.dy != null) verifyBase.dy = verifyDest.dy;
+  recordMoveVerify('mv.toolbox.call', verifyBase);
+
   // Normalize destination
   var destination = (target && target.pos) ? target.pos : target;
 
@@ -218,16 +288,29 @@ function BeeTravel(creep, target, a3, a4, a5) {
 
   var borderNudge = nudgeOffExitIfNeeded(creep, destination, options);
   if (borderNudge.didMove) {
+    verifyBase.rc = borderNudge.code;
+    recordMoveVerify('mv.toolbox.result', verifyBase);
     return borderNudge.code;
   }
 
   try {
-    return Traveler.travelTo(creep, destination, options);
+    var travelRc = Traveler.travelTo(creep, destination, options);
+    verifyBase.rc = travelRc;
+    recordMoveVerify('mv.toolbox.result', verifyBase);
+    return travelRc;
   } catch (e) {
     // Fallback to vanilla moveTo if something odd happens
     if (creep.pos && destination) {
       var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
       var moveToResult = MovementOwnership.moveTo(creep, rp, { reusePath: 20, maxOps: 2000 }, 'BeeToolbox/BeeTravelFallback', 'BeeToolbox');
+      var fallbackEvt = buildVerifyBase(creep, 'BeeToolbox.BeeTravelFallback', 'BeeTravel');
+      var fallbackDest = getDestFields(rp);
+      fallbackEvt.reason = 'travelToExceptionFallback';
+      fallbackEvt.rc = moveToResult;
+      if (fallbackDest.drm != null) fallbackEvt.drm = fallbackDest.drm;
+      if (fallbackDest.dx != null) fallbackEvt.dx = fallbackDest.dx;
+      if (fallbackDest.dy != null) fallbackEvt.dy = fallbackDest.dy;
+      recordMoveVerify('mv.toolbox.fallback', fallbackEvt);
       if (creep.memory && creep.memory._move) {
         delete creep.memory._move;
       }
@@ -255,6 +338,15 @@ function nudgeOffExitIfNeeded(creep, destination, options) {
   if (!dir) return { didMove: false, code: OK };
 
   var rc = MovementOwnership.move(creep, dir, 'BeeToolbox/nudgeOffExitIfNeeded', 'BeeToolbox');
+  var nudgeEvt = buildVerifyBase(creep, 'BeeToolbox.nudgeOffExitIfNeeded', 'nudge');
+  var nudgeDest = getDestFields(d);
+  nudgeEvt.border = true;
+  nudgeEvt.reason = 'offExitNudge';
+  nudgeEvt.rc = rc;
+  if (nudgeDest.drm != null) nudgeEvt.drm = nudgeDest.drm;
+  if (nudgeDest.dx != null) nudgeEvt.dx = nudgeDest.dx;
+  if (nudgeDest.dy != null) nudgeEvt.dy = nudgeDest.dy;
+  recordMoveVerify('mv.border.recover', nudgeEvt);
   if (rc === OK || rc === ERR_TIRED) {
     return { didMove: true, code: rc };
   }
@@ -462,7 +554,9 @@ var BeeToolbox = {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       try {
         toolboxLog.debug('Final sources in', room.name + ':', JSON.stringify(Memory.rooms[room.name].sources));
-      } catch (e) {}
+      } catch (e) {
+        toolboxLog.warnEvery('beeToolbox.logSourcesInRoom.debugSerialize', 250, 'debug source serialization failed in', room && room.name, describeError(e));
+      }
     }
   },
 

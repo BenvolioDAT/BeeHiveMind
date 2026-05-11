@@ -29,6 +29,7 @@ var BeeVisualsSpawnPanel = require('BeeVisuals.SpawnPanel'); // UI overlay for s
 var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
+var MovementVerify       = require('Movement.Verify');
 var BeeSpawnManager      = require('BeeSpawnManager');
 var BaseHarvest          = require('role.BaseHarvest');
 var Builder              = require('role.Builder');
@@ -364,6 +365,9 @@ var BeeHiveMind = {
       // Reset movement queue before any role enqueues requests.
       MovementManager.startTick();
     }
+    if (MovementVerify && typeof MovementVerify.startTick === 'function') {
+      MovementVerify.startTick();
+    }
 
     // Visual overlays (spawn HUD + queue)
     if (BeeVisualsSpawnPanel && typeof BeeVisualsSpawnPanel.drawVisuals === 'function') {
@@ -397,6 +401,14 @@ var BeeHiveMind = {
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
       // if (Game.time % 3 === 0) TradeEnergy.runAll();
       TradeEnergy.runAll();
+    }
+
+    if (MovementVerify && typeof MovementVerify.flushSummary === 'function') {
+      try {
+        MovementVerify.flushSummary();
+      } catch (e) {
+        hiveLog.warnEvery('hiveMind.movementVerify.flushSummary', 250, 'MovementVerify.flushSummary failed', e && (e.stack || e.message || String(e)));
+      }
     }
   },
 

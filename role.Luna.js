@@ -4,6 +4,12 @@ const BeeToolbox = require('BeeToolbox');
 var MovementOwnership = require('Movement.Ownership');
 const BeeCombatSquads = require('BeeCombatSquads');
 const CombatDiplomacy = require('CombatDiplomacy');
+var CoreLogger = require('core.logger');
+var lunaLog = CoreLogger.createLogger('Luna', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -95,7 +101,9 @@ function debugDrawLine(creep, target, color, label) {
         color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
       });
     }
-  } catch (e) {}
+  } catch (e) {
+    lunaLog.warnEvery('luna.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
+  }
 }
 
 function debugRing(room, pos, color, text) {
@@ -103,7 +111,9 @@ function debugRing(room, pos, color, text) {
   try {
     room.visual.circle(pos, { radius: 0.45, fill: 'transparent', stroke: color || '#fff', opacity: CFG.DRAW.OPACITY });
     if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color || '#fff', opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT });
-  } catch (e) {}
+  } catch (e) {
+    lunaLog.warnEvery('luna.debugRing.visual', 250, 'debugRing failed for room', room && room.name, describeError(e));
+  }
 }
 
 // =========================
@@ -197,12 +207,16 @@ function computeThreatBundle(room) {
     try {
       var data = BeeCombatSquads.getLiveThreatForRoom(room);
       if (data) return data;
-    } catch (e) {}
+    } catch (e) {
+      lunaLog.warnEvery('luna.computeThreatBundle.getLiveThreatForRoom', 250, 'getLiveThreatForRoom failed in', room && room.name, describeError(e));
+    }
   }
   var hostiles = [];
   try {
     hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
-  } catch (err) {}
+  } catch (err) {
+    lunaLog.warnEvery('luna.computeThreatBundle.findHostiles', 250, 'hostile scan failed in', room && room.name, describeError(err));
+  }
   var bestId = hostiles.length ? hostiles[0].id : null;
   return { score: hostiles.length * 5, hasThreat: hostiles.length > 0, bestId: bestId };
 }
@@ -344,7 +358,7 @@ function softenRemoteDefensePlan(roomName) {
   // ============================
   function shortSid(id) {
     if (!id || typeof id !== 'string') return '??????';
-    var n = id.length; return id.substr(n - 6);
+    var n = id.length; return id.slice(n - 6);
   }
 
   // Returns the Memory.rooms[roomName] bucket, creating it if missing.
@@ -453,7 +467,9 @@ function softenRemoteDefensePlan(roomName) {
 
     var f = Game.flags[fname];
     if (f) {
-      try { f.remove(); } catch (e) {}
+      try { f.remove(); } catch (e) {
+        lunaLog.warnEvery('luna.pruneSourceFlags.remove', 250, 'failed to remove source flag', f && f.name, describeError(e));
+      }
     }
     delete rm.controllerFlagName;
   }
@@ -676,7 +692,9 @@ function softenRemoteDefensePlan(roomName) {
             var tileOk = srcObj ? (f.pos.x === srcObj.pos.x && f.pos.y === srcObj.pos.y && f.pos.roomName === srcObj.pos.roomName) : true;
 
             if (looksLikeOurs && (posMatches && tileOk)) {
-              try { f.remove(); } catch (e1) {}
+              try { f.remove(); } catch (e1) {
+                lunaLog.warnEvery('luna.pruneSourceFlags.foreignRemove', 250, 'failed to remove stale source flag', f && f.name, describeError(e1));
+              }
             }
           }
           delete srec.flagName;
@@ -811,7 +829,9 @@ function softenRemoteDefensePlan(roomName) {
       if (!locked && room.controller && room.controller.reservation &&
           room.controller.reservation.username==='Invader'){ locked=true; }
       if (!locked && BeeToolbox && BeeToolbox.isRoomInvaderLocked){
-        try{ if (BeeToolbox.isRoomInvaderLocked(room)) locked=true; }catch(e){}
+        try{ if (BeeToolbox.isRoomInvaderLocked(room)) locked=true; }catch(e){
+          lunaLog.warnEvery('luna.assignRoom.invaderLockCheck', 250, 'invader lock check failed in', room && room.name, describeError(e));
+        }
       }
       rm._invaderLock = { locked: locked, t: now };
       return locked;
@@ -1366,7 +1386,9 @@ function softenRemoteDefensePlan(roomName) {
       }
 
       var targetRoomObj = Game.rooms[creep.memory.targetRoom];
-      if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ try { BeeToolbox.logSourcesInRoom(targetRoomObj); } catch (e) {} }
+      if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ try { BeeToolbox.logSourcesInRoom(targetRoomObj); } catch (e) {
+        lunaLog.warnEvery('luna.logSourcesInRoom', 250, 'logSourcesInRoom failed in', targetRoomObj && targetRoomObj.name, describeError(e));
+      } }
 
       if (targetRoomObj) {
         var lunaThreat = evaluateRoomThreat(targetRoomObj, 'Luna');

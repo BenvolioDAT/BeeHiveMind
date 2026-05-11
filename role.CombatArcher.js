@@ -5,6 +5,12 @@ var CombatAPI = BeeCombatSquads.CombatAPI;
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var MovementManager = require('Movement.Manager');
 var CoreConfig = require('core.config');
+var CoreLogger = require('core.logger');
+var combatArcherLog = CoreLogger.createLogger('CombatArcher', CoreLogger.LOG_LEVEL.DEBUG);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 function _combatDebugSettings() {
   var cfg = (CoreConfig.settings && CoreConfig.settings.combat) || {};
@@ -38,7 +44,9 @@ function _debugLog(creep, branch, extra, interval) {
   }
   try {
     console.log('[CombatRole][Archer]', '[tick ' + Game.time + ']', creep.name, 'branch=' + branch, extra || '');
-  } catch (e) {}
+  } catch (e) {
+    combatArcherLog.warnEvery('combatArcher.debugLog.console', 250, 'debug combat log failed for', creep && creep.name, describeError(e));
+  }
 }
 
 function _resolveFlagName(creep) {
@@ -122,14 +130,37 @@ function _resolveFocusTarget(context) {
   return targetId ? Game.getObjectById(targetId) : null;
 }
 
+function hasUsableTravelTarget(target) {
+  var pos = target && (target.pos || target);
+  return !!(pos && typeof pos.x === 'number' && typeof pos.y === 'number' && pos.roomName);
+}
+
+function isManagerRequestHandled(result) {
+  return result === OK || (typeof result === 'number' && result > OK);
+}
+
 function _requestMove(creep, target, range, intentType) {
   if (!creep || !target) return;
   var opts = { range: range, ignoreCreeps: false, reusePath: 10, intentType: intentType || 'combat' };
   if (MovementManager && typeof MovementManager.request === 'function') {
-    var rc = MovementManager.request(creep, target, null, opts);
-    if (rc === OK || (typeof rc === 'number' && rc > OK)) return;
+    var requestResult = MovementManager.request(creep, target, null, opts);
+
+    // Request contract:
+    // - OK: manager accepted/replaced intent; no direct fallback.
+    // - numeric > OK: manager kept existing higher/equal-priority intent; no fallback.
+    // - ERR_INVALID_ARGS: malformed request; guarded fail-open fallback only for usable target.
+    // - any other value: no fallback.
+    if (isManagerRequestHandled(requestResult)) return requestResult;
+
+    if (requestResult === ERR_INVALID_ARGS) {
+      if (creep && typeof creep.travelTo === 'function' && hasUsableTravelTarget(target)) {
+        return creep.travelTo(target, { range: range, ignoreCreeps: false });
+      }
+    }
+    return requestResult;
   }
-  creep.travelTo(target, { range: range, ignoreCreeps: false });
+  // Manager unavailable: do not direct-fallback here; preserve manager arbitration discipline.
+  return ERR_INVALID_ARGS;
 }
 
 function _hostileNearby(creep, range) {
@@ -181,7 +212,9 @@ module.exports = {
         'flag=', context.flagName,
         'room=', creep.room ? creep.room.name : '(no room)'
       );
-    } catch (e) {}
+    } catch (e) {
+      combatArcherLog.warnEvery('combatArcher.run.stateSnapshot', 250, 'state snapshot log failed for', creep && creep.name, describeError(e));
+    }
 
     if (context.state === 'RETREAT') {
       _debugSay(creep, 'RETREAT');
@@ -227,7 +260,9 @@ module.exports = {
         try {
           var logNoTarget = require('core.logger').createLogger('BeeArmy', require('core.logger').LOG_LEVEL.DEBUG);
           logNoTarget.debug('Archer', creep.name, 'ENGAGE but no target', 'flag=', context.flagName);
-        } catch (e) {}
+        } catch (e) {
+          combatArcherLog.warnEvery('combatArcher.run.noTargetLog', 250, 'no-target debug log failed for', creep && creep.name, describeError(e));
+        }
       } else {
         try {
           var combatLogAttack = require('core.logger').createLogger('BeeArmy', require('core.logger').LOG_LEVEL.DEBUG);
@@ -236,7 +271,9 @@ module.exports = {
             'targetId=', target.id,
             'targetRoom=', target.pos.roomName
           );
-        } catch (e) {}
+        } catch (e) {
+          combatArcherLog.warnEvery('combatArcher.run.attackLog', 250, 'attack debug log failed for', creep && creep.name, describeError(e));
+        }
       }
 
       if (target) {

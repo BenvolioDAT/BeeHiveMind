@@ -3,6 +3,12 @@
 const BeeCombatSquads = require('BeeCombatSquads');
 const CombatDiplomacy = require('CombatDiplomacy');
 var MovementOwnership = require('Movement.Ownership');
+var CoreLogger = require('core.logger');
+var scoutLog = CoreLogger.createLogger('Scout', CoreLogger.LOG_LEVEL.BASIC);
+
+function describeError(e) {
+  return e && (e.stack || e.message || String(e));
+}
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -79,7 +85,9 @@ function debugLabel(room, pos, text, color) {
       color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
       backgroundColor: "#000000", backgroundOpacity: 0.25
     });
-  } catch (e) {}
+  } catch (e) {
+    scoutLog.warnEvery('scout.debugLabel.visual', 250, 'debugLabel failed for room', room && room.name, describeError(e));
+  }
 }
 
 //=========================
@@ -170,12 +178,16 @@ function computeThreatBundle(room) {
     try {
       var data = BeeCombatSquads.getLiveThreatForRoom(room);
       if (data) return data;
-    } catch (e) {}
+    } catch (e) {
+      scoutLog.warnEvery('scout.computeThreatBundle.getLiveThreatForRoom', 250, 'getLiveThreatForRoom failed in', room && room.name, describeError(e));
+    }
   }
   var hostiles = [];
   try {
     hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
-  } catch (err) {}
+  } catch (err) {
+    scoutLog.warnEvery('scout.computeThreatBundle.findHostiles', 250, 'hostile scan failed in', room && room.name, describeError(err));
+  }
   var bestId = hostiles.length ? hostiles[0].id : null;
   return { score: hostiles.length * 5, hasThreat: hostiles.length > 0, bestId: bestId };
 }
