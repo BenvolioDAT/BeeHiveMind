@@ -5,6 +5,11 @@ var BeeRoles = require('BeeRoles');
 var MovementManager = require('Movement.Manager');
 var courierLog = CoreLogger.createLogger('Courier', CoreLogger.LOG_LEVEL.BASIC);
 
+var COURIER_STATE = Object.freeze({
+  COLLECT: 'COLLECT',
+  DELIVER: 'DELIVER'
+});
+
 function describeError(e) {
   return e && (e.stack || e.message || String(e));
 }
@@ -372,7 +377,7 @@ function debugDrawLine(creep, target, color, label) {
     if (creep.memory.pickupContainerId === undefined) creep.memory.pickupContainerId = null;
     if (creep.memory.retargetAt === undefined) creep.memory.retargetAt = 0;
     if (creep.memory.dropoffId === undefined) creep.memory.dropoffId = null;
-    creep.memory.state = creep.memory.transferring ? 'DELIVER' : 'COLLECT';
+    creep.memory.state = creep.memory.transferring ? COURIER_STATE.DELIVER : COURIER_STATE.COLLECT;
     return creep.memory.state;
   }
 
@@ -561,11 +566,14 @@ function debugDrawLine(creep, target, color, label) {
     run: function (creep) {
       var state = determineCourierState(creep);
 
-      if (state === 'DELIVER') {
+      // Story step 1-2: prepare memory and decide state.
+      if (state === COURIER_STATE.DELIVER) {
+        // Story step 3-5 (deliver): pick target, act, request movement if needed.
         roleCourier.deliverEnergy(creep);
         return;
       }
 
+      // Story step 3-5 (collect): pick target, act, request movement if needed.
       roleCourier.collectEnergy(creep);
     },
 
@@ -577,6 +585,13 @@ function debugDrawLine(creep, target, color, label) {
       var rc = getCourierRoomCache(creep.room);
       var container = pickBestSourceContainer(creep, rc, now);
 
+      // Decision order for beginners (behavior preserved):
+      // 1) en-route dropped energy
+      // 2) source container workflow (including nearby drops)
+      // 3) graves/ruins
+      // 4) generic dropped energy
+      // 5) storage/terminal withdraw
+      // 6) idle near anchor
       if (tryPickupEnRoute(creep)) return;
       if (container && tryContainerWorkflow(creep, container)) return;
 
@@ -591,6 +606,8 @@ function debugDrawLine(creep, target, color, label) {
     // Delivery (PIB-aware, avoids Queen conflicts)
     // -----------------------------
     deliverEnergy: function (creep) {
+      // Delivery order for beginners (behavior preserved):
+      // spawn/extension -> tower -> storage (selected in ensureDropoffTarget)
       var carryAmt = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
       if (carryAmt <= 0) { creep.memory.transferring = false; creep.memory.dropoffId = null; return; }
 
