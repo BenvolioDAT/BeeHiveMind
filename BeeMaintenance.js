@@ -149,10 +149,12 @@ function _stampVisibleRooms(now) {
 function _deleteStaleRooms(now) {
   if (!Memory.rooms) return;
   Memory.recentlyCleanedRooms = [];
+  var protectedRooms = _protectedRoomSet();
 
   for (var roomName in Memory.rooms) {
     if (!Memory.rooms.hasOwnProperty(roomName)) continue;
     if (Game.rooms[roomName]) continue;
+    if (protectedRooms[roomName]) continue;
 
     var mem = Memory.rooms[roomName];
     var seenAt = _lastSeen(mem);
@@ -162,6 +164,40 @@ function _deleteStaleRooms(now) {
       _log('🧼 Cleaned stale room mem: ' + roomName);
     }
   }
+}
+
+function _protectedRoomSet() {
+  var out = Object.create(null);
+
+  // Keep currently owned rooms even if not visible this tick (shard jitter/sim).
+  for (var roomName in Game.rooms) {
+    if (!Game.rooms.hasOwnProperty(roomName)) continue;
+    var room = Game.rooms[roomName];
+    if (room && room.controller && room.controller.my) out[roomName] = true;
+  }
+
+  // Keep active planner remotes used by economy systems.
+  var remotesByHome = Memory.__BHM && Memory.__BHM.remotesByHome;
+  if (remotesByHome && typeof remotesByHome === 'object') {
+    for (var home in remotesByHome) {
+      if (!Object.prototype.hasOwnProperty.call(remotesByHome, home)) continue;
+      var remotes = remotesByHome[home];
+      if (!Array.isArray(remotes)) continue;
+      for (var i = 0; i < remotes.length; i++) {
+        if (typeof remotes[i] === 'string' && remotes[i].length > 0) out[remotes[i]] = true;
+      }
+    }
+  }
+
+  // Optional explicit allow-list for source intel persistence.
+  if (Array.isArray(Memory.sourceIntelApprovedRooms)) {
+    for (var j = 0; j < Memory.sourceIntelApprovedRooms.length; j++) {
+      var rn = Memory.sourceIntelApprovedRooms[j];
+      if (typeof rn === 'string' && rn.length > 0) out[rn] = true;
+    }
+  }
+
+  return out;
 }
 
 function _compactRemainingRooms() {

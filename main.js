@@ -76,6 +76,7 @@ function refreshSourceIntel() {
     if (Game.time % 3 !== 0) return;
 
     for (const room of Object.values(Game.rooms)) {
+        if (!BeeToolbox.isApprovedRemoteIntelRoom(room.name)) continue;
         BeeToolbox.logSourceContainersInRoom(room);
     }
 }
