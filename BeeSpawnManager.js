@@ -966,6 +966,63 @@ function queuedCount(roomName, role) {
   return count;
 }
 
+function spawningRoleCount(roomName, role) {
+  var canonical = canonicalRole(role);
+  if (!canonical) return 0;
+  var room = Game.rooms[roomName];
+  if (!room || typeof room.find !== 'function') return 0;
+  var spawns = room.find(FIND_MY_SPAWNS) || [];
+  var count = 0;
+  for (var i = 0; i < spawns.length; i++) {
+    var spawning = spawns[i].spawning;
+    if (!spawning) continue;
+    var c = Game.creeps[spawning.name];
+    if (!c || !c.memory) continue;
+    var spawnRole = canonicalRole(c.memory.role || c.memory.task);
+    if (spawnRole === canonical) count += 1;
+  }
+  return count;
+}
+
+function plannedRoleCount(C, roomName, role) {
+  var canonical = canonicalRole(role);
+  if (!canonical) return 0;
+  var live = getRoomLocalLiveCount(C, roomName, canonical);
+  var queued = queuedCount(roomName, canonical);
+  var spawning = spawningRoleCount(roomName, canonical);
+  return live + queued + spawning;
+}
+
+function roleCapForRoom(C, room, roomName, role, quotas) {
+  var canonical = canonicalRole(role);
+  if (!canonical) return 0;
+  var q = quotas || {};
+  if (canonical === 'BaseHarvest') {
+    var sourceCount = 0;
+    if (room && typeof room.find === 'function') sourceCount = (room.find(FIND_SOURCES) || []).length;
+    return Math.max(0, (typeof q.BaseHarvest === 'number') ? q.BaseHarvest : sourceCount);
+  }
+  if (canonical === 'Queen') return 1;
+  if (canonical === 'Scout') return 1;
+  if (canonical === 'Builder') {
+    var builderQuota = Math.max(0, q.Builder || 0);
+    if (builderQuota > 0) return builderQuota;
+    var builderQueued = queuedCount(roomName, 'Builder');
+    var builderLive = getRoomLocalLiveCount(C, roomName, 'Builder');
+    if (builderQueued > 0 && builderLive <= 0) return 1;
+    return 0;
+  }
+  if (canonical === 'Upgrader') {
+    var base = Math.max(0, q.Upgrader || 0);
+    return Math.max(base, isUpgraderSafetyRequired(room) ? 1 : 0);
+  }
+  if (canonical === 'Courier' || canonical === 'Repair' || canonical === 'Luna' ||
+      canonical === 'Trucker' || canonical === 'Claimer' || canonical === 'Dismantler') {
+    return Math.max(0, q[canonical] || 0);
+  }
+  return Math.max(0, q[canonical] || 0);
+}
+
 function getQueuedRoleItems(roomName, roleName) {
   var q = ensureRoomQueue(roomName);
   var target = canonicalRole(roleName);
@@ -1272,14 +1329,16 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   // waste CPU dequeuing later.
   var remaining = {};
   var quotaRoles = Object.keys(quotas);
+  var room = Game.rooms[roomName];
   for (var i = 0; i < quotaRoles.length; i++) {
     var role = quotaRoles[i];
     var canonical = canonicalRole(role);
+    if (canonical === 'CombatArcher' || canonical === 'CombatMelee' || canonical === 'CombatMedic') continue;
     var active = getRoomLocalLiveCount(C, roomName, canonical);
-    remaining[canonical] = Math.max(0, (quotas[role] || 0) - active);
+    var spawning = spawningRoleCount(roomName, canonical);
+    var cap = roleCapForRoom(C, room, roomName, canonical, quotas);
+    remaining[canonical] = Math.max(0, cap - active - spawning);
   }
-
-  var room = Game.rooms[roomName];
   var sourceCount = 0;
   if (room && typeof room.find === 'function') sourceCount = (room.find(FIND_SOURCES) || []).length;
   var baseHarvestCap = quotas && typeof quotas.BaseHarvest === 'number' ? quotas.BaseHarvest : sourceCount;
@@ -1295,7 +1354,7 @@ function pruneOverfilledQueue(roomName, quotas, C) {
     var canonicalItemRole = canonicalRole(it.role);
     if (!canonicalItemRole) continue;
     it.role = canonicalItemRole;
-    var left = remaining[canonicalItemRole] || 0;
+    var left = Object.prototype.hasOwnProperty.call(remaining, canonicalItemRole) ? remaining[canonicalItemRole] : Infinity;
     var usedSoFar = used[canonicalItemRole] || 0;
     if (canonicalItemRole === "BaseHarvest" && (baseHarvestLive + baseHarvestSpawning + keptBaseHarvest) >= baseHarvestCap) continue;
     if (canonicalItemRole === "BaseHarvest" && it.assignedSource) {
@@ -1966,6 +2025,7 @@ function fillQueueForRoom(C, room) {
   var debug = ensureSpawnDebug(roomName);
   var arbitration = buildArbitrationState(C, room, roomName, quotas);
   var roleStats = {};
+  var roleCapsDebug = {};
 
   pruneOverfilledQueue(roomName, quotas, C);
   var bhDebug = debug.baseHarvest || {};
@@ -2051,7 +2111,10 @@ function fillQueueForRoom(C, room) {
     var limit = quotas[role] || 0;
     var canonical = canonicalRole(role);
     var active = getRoomLocalLiveCount(C, roomName, canonical);
-    var queued = queuedCount(roomName, role);
+    var queued = queuedCount(roomName, canonical);
+    var spawning = spawningRoleCount(roomName, canonical);
+    var cap = roleCapForRoom(C, room, roomName, canonical, quotas);
+    var planned = active + queued + spawning;
     var deficit = Math.max(0, limit - active - queued);
     var surplus = Math.max(0, active + queued - limit);
     roleStats[canonical] = {
@@ -2060,8 +2123,19 @@ function fillQueueForRoom(C, room) {
       live: active,
       localLive: active,
       queued: queued,
+      spawning: spawning,
+      cap: cap,
+      planned: planned,
       deficit: deficit,
       surplus: surplus
+    };
+    roleCapsDebug[canonical] = {
+      live: active,
+      queued: queued,
+      spawning: spawning,
+      planned: planned,
+      cap: cap,
+      overCap: planned > cap
     };
 
     if (deficit <= 0 && !surplus) {
@@ -2075,6 +2149,15 @@ function fillQueueForRoom(C, room) {
         'active=', active, 'queued=', queued, 'deficit=', deficit);
     }
     for (var j = 0; j < deficit; j++) {
+      var capCheck = plannedRoleCount(C, roomName, canonical);
+      var roleCap = roleCapForRoom(C, room, roomName, canonical, quotas);
+      if (canonical !== 'CombatArcher' && canonical !== 'CombatMelee' && canonical !== 'CombatMedic' &&
+          capCheck >= roleCap) {
+        roleStats[canonical].reason = 'ROLE_CAP_REACHED';
+        debug.lastCapBlockedRole = canonical;
+        debug.lastCapBlockedReason = 'ROLE_CAP_REACHED';
+        break;
+      }
       var guidance = null;
       var guidanceSource = 'RECOMPUTED';
       var plannerBodyGuidance = debug && debug.planner && debug.planner.bodyGuidance
@@ -2129,10 +2212,22 @@ function fillQueueForRoom(C, room) {
         demandClampReason: roleStats[canonical].demandClampReason,
         roleBand: roleBand(canonical)
       });
+      var updatedLive = getRoomLocalLiveCount(C, roomName, canonical);
+      var updatedQueued = queuedCount(roomName, canonical);
+      var updatedSpawning = spawningRoleCount(roomName, canonical);
+      roleCapsDebug[canonical] = {
+        live: updatedLive,
+        queued: updatedQueued,
+        spawning: updatedSpawning,
+        planned: updatedLive + updatedQueued + updatedSpawning,
+        cap: roleCap,
+        overCap: (updatedLive + updatedQueued + updatedSpawning) > roleCap
+      };
     }
   }
 
   debug.roleStats = roleStats;
+  debug.roleCaps = roleCapsDebug;
   if (!debug.baseHarvest) debug.baseHarvest = {};
   debug.baseHarvest.queuedReasons = bhQueuedReasons;
   debug.baseHarvest.suppressedReasons = bhSuppressedReasons;
@@ -2240,6 +2335,18 @@ function dequeueAndSpawn(spawner) {
   }
 
   var item = q[pickIndex];
+  var itemCanonical = canonicalRole(item.role);
+  if (itemCanonical !== 'CombatArcher' && itemCanonical !== 'CombatMelee' && itemCanonical !== 'CombatMedic') {
+    var finalCap = roleCapForRoom(C, room, roomName, itemCanonical, quotas);
+    var finalPlanned = plannedRoleCount(C, roomName, itemCanonical);
+    var effectivePlanned = Math.max(0, finalPlanned - 1); // current queue item is being consumed now
+    if (effectivePlanned >= finalCap) {
+      debug.lastCapBlockedRole = itemCanonical;
+      debug.lastCapBlockedReason = 'FINAL_CAP_REACHED';
+      q.splice(pickIndex, 1);
+      return false;
+    }
+  }
   var needed = minEnergyFor(item.role);
   if ((room.energyAvailable || 0) < needed) {
     var lowEnergy = compactEnergy(room);
