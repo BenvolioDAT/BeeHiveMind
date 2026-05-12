@@ -15,10 +15,49 @@ function getReservedEnergyForStructure(structureId) {
   return map[structureId] || 0;
 }
 
+function pruneExpiredPibReservations(roomName) {
+  var root = Memory._PIB;
+  if (!root || !root.rooms || !roomName) return;
+  var roomCache = root.rooms[roomName];
+  if (!roomCache || !roomCache.fills) return;
+
+  // PIB reservations are in-flight delivery promises.
+  // Expired promises should be removed so Memory does not grow.
+  var fills = roomCache.fills;
+  var targetIds = Object.keys(fills);
+  for (var i = 0; i < targetIds.length; i++) {
+    var targetId = targetIds[i];
+    var byCreep = fills[targetId];
+    if (!byCreep) {
+      delete fills[targetId];
+      continue;
+    }
+    var creepNames = Object.keys(byCreep);
+    for (var j = 0; j < creepNames.length; j++) {
+      var creepName = creepNames[j];
+      var entry = byCreep[creepName];
+      if (!entry) {
+        delete byCreep[creepName];
+        continue;
+      }
+      if (typeof entry.untilTick === 'number' && entry.untilTick < Game.time) {
+        delete byCreep[creepName];
+      }
+    }
+    if (Object.keys(byCreep).length === 0) {
+      delete fills[targetId];
+    }
+  }
+  if (Object.keys(fills).length === 0) {
+    roomCache.fills = {};
+  }
+}
+
 function sumPibReservedEnergy(roomName, targetId, resourceType) {
   resourceType = resourceType || RESOURCE_ENERGY;
   var root = Memory._PIB;
   if (!root || root.tick !== Game.time || !root.rooms) return 0;
+  pruneExpiredPibReservations(roomName);
   var roomCache = root.rooms[roomName];
   if (!roomCache || !roomCache.fills) return 0;
   var map = roomCache.fills[targetId];
@@ -53,6 +92,7 @@ function reservePibFill(creep, target, amount, resourceType) {
 
   if (!Memory._PIB.rooms[roomName]) Memory._PIB.rooms[roomName] = { fills: {}, withdrawals: {} };
   var roomCache = Memory._PIB.rooms[roomName];
+  pruneExpiredPibReservations(roomName);
   if (!roomCache.fills[target.id]) roomCache.fills[target.id] = {};
 
   var eta = creep.pos.getRangeTo(target);

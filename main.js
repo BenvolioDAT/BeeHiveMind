@@ -121,6 +121,18 @@ function maybeGeneratePixel() {
     }
 }
 
+function shouldRunVisuals() {
+    var visualsCfg = (CoreConfig.settings && CoreConfig.settings.visuals) || {};
+    if (visualsCfg.enabled === false) return false;
+    // Visuals are optional; CPU bucket guard keeps gameplay systems safe.
+    if (Game.cpu && typeof Game.cpu.bucket === 'number') {
+        var minBucket = (typeof visualsCfg.minBucket === 'number') ? visualsCfg.minBucket : 0;
+        if (Game.cpu.bucket < minBucket) return false;
+    }
+    // Private/sim shards may not expose bucket; allow visuals in that case.
+    return true;
+}
+
 module.exports.loop = function () {
     // --- Intel and housekeeping ---
     refreshSourceIntel();
@@ -139,9 +151,11 @@ module.exports.loop = function () {
     BeeCombatSquads.ensureSquadFlags();
 
     // --- Visual aids for quick debugging ---
-    BeeVisuals.drawVisuals();
-    BeeVisuals.drawEnergyBar();
-    BeeVisuals.drawWorkerBeeTaskTable();
+    if (shouldRunVisuals()) {
+        BeeVisuals.drawVisuals();
+        BeeVisuals.drawEnergyBar();
+        BeeVisuals.drawWorkerBeeTaskTable();
+    }
 
     // --- Less frequent maintenance ---
     if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {

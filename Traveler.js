@@ -5,8 +5,16 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const CoreConfig = require("core.config");
+const CoreLogger = require("core.logger");
 const MovementOwnership = require("Movement.Ownership");
 const MovementVerify = require("Movement.Verify");
+
+function travelerWarningInterval() {
+    const cfg = (CoreConfig && CoreConfig.settings && CoreConfig.settings.logging) || null;
+    if (cfg && typeof cfg.travelerWarningInterval === "number" && cfg.travelerWarningInterval > 0)
+        return cfg.travelerWarningInterval;
+    return 75;
+}
 
 function getCreepName(creep) {
     return (creep && creep.name) ? creep.name : null;
@@ -284,7 +292,7 @@ class Traveler {
             state.cpu = _.round(cpuUsed + state.cpu);
             if (state.cpu > REPORT_CPU_THRESHOLD) {
                 // see note at end of file for more info on this
-                console.log(`TRAVELER: heavy cpu use: ${creep.name}, cpu: ${state.cpu} origin: ${creep.pos}, dest: ${destination}`);
+                CoreLogger.warnEvery(`traveler.heavyCpu.${creep.name}`, travelerWarningInterval(), `TRAVELER: heavy cpu use: ${creep.name}, cpu: ${state.cpu} origin: ${creep.pos}, dest: ${destination}`);
             }
             let color = "orange";
             if (ret.incomplete) {
@@ -572,11 +580,12 @@ class Traveler {
         // PathFinder can miss a valid short path if it avoids findRoute; retry once
         // with findRoute enabled instead of mutating the caller's options.
         if (options.useFindRoute === undefined && roomDistance <= 2) {
-            console.log(`TRAVELER: path failed without findroute, trying with options.useFindRoute = true`);
-            console.log(`from: ${origin}, destination: ${destination}`);
+            const warnInterval = travelerWarningInterval();
+            CoreLogger.warnEvery(`traveler.findRouteRetry.${origin.roomName || "unknown"}->${destination.roomName || "unknown"}`, warnInterval, `TRAVELER: path failed without findroute, trying with options.useFindRoute = true`);
+            CoreLogger.warnEvery(`traveler.findRouteRetry.fromTo.${origin.roomName || "unknown"}->${destination.roomName || "unknown"}`, warnInterval, `from: ${origin}, destination: ${destination}`);
             const retryOptions = Object.assign({}, options, { useFindRoute: true });
             ret = this.findTravelPath(origin, destination, retryOptions);
-            console.log(`TRAVELER: second attempt was ${ret.incomplete ? "not " : ""}successful`);
+            CoreLogger.warnEvery(`traveler.findRouteRetry.result.${origin.roomName || "unknown"}->${destination.roomName || "unknown"}`, warnInterval, `TRAVELER: second attempt was ${ret.incomplete ? "not " : ""}successful`);
             return ret;
         }
 

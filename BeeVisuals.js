@@ -16,6 +16,7 @@
 var Builder = require('role.Builder'); // exposes structurePlacements metadata
 var Logger      = require('core.logger');
 var LOG_LEVEL   = Logger.LOG_LEVEL;
+var CoreConfig  = require('core.config');
 
 // ------------------------------- Settings --------------------------------
 var CFG = {
@@ -117,6 +118,19 @@ function text(visual, str, x, y, size, align, opacity, color) {
   });
 }
 
+function visualsConfig() {
+  return (CoreConfig && CoreConfig.settings && CoreConfig.settings.visuals) || {};
+}
+
+function shouldSkipOptionalVisualsForCpu() {
+  // Bucket gating protects the bot when CPU is low.
+  // Keep visuals working in private/sim where bucket may not exist.
+  if (!Game.cpu || typeof Game.cpu.bucket !== 'number') return false;
+  var cfg = visualsConfig();
+  var minBucket = (typeof cfg.minBucket === 'number') ? cfg.minBucket : 0;
+  return Game.cpu.bucket < minBucket;
+}
+
 // ------------------------------- Module ----------------------------------
 var BeeVisuals = {};
 
@@ -157,6 +171,9 @@ function _reserveBottomRight(roomName, panelWidth, panelHeight) {
  *  - Energy bar (bottom-right) + worker table stacked above it
  */
 BeeVisuals.drawVisuals = function () {
+  var cfg = visualsConfig();
+  if (cfg.enabled === false) return;
+
   var room = getMainRoom();
   if (!room) return;
 
@@ -177,11 +194,16 @@ BeeVisuals.drawVisuals = function () {
     drawCpuStats(visual);
   }
 
-  // 3) In-room planned roads (debug)
-  BeeVisuals.drawPlannedRoadsDebug();
+  // 3) In-room planned roads (debug).
+  // Optional visuals can be skipped on low bucket.
+  if (!shouldSkipOptionalVisualsForCpu()) {
+    BeeVisuals.drawPlannedRoadsDebug();
+  }
 
   // 4) World overlays (flags + planned roads)
-  BeeVisuals.drawWorldOverview();
+  if (!shouldSkipOptionalVisualsForCpu()) {
+    BeeVisuals.drawWorldOverview();
+  }
 
   // 5) Repair counter line
   if (CFG.showRepairCounter) {
@@ -378,13 +400,16 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
  * Draws a handful per tick to avoid going ham on CPU.
  */
 BeeVisuals.drawPlannedRoadsDebug = function () {
+  var cfg = visualsConfig();
+  if (cfg.enabled === false || cfg.plannedRoadsEnabled === false) return;
+  if (shouldSkipOptionalVisualsForCpu()) return;
   if (!Logger.shouldLog(LOG_LEVEL.DEBUG)) return;
 
   var room = getMainRoom();
   if (!room) return;
 
   // Light tick-gate (set MOD>1 if you want to throttle)
-  var MOD = 1;
+  var MOD = (typeof cfg.plannedRoadsModulo === 'number' && cfg.plannedRoadsModulo > 0) ? cfg.plannedRoadsModulo : 1;
   if (((Game.time + 3) % MOD) !== 0) return;
 
   var v = new RoomVisual(room.name);
@@ -522,7 +547,13 @@ function drawWorldRoadDots(mapVisual, maxTiles) {
  * then the flag overlays, then the planner data walk.
  */
 BeeVisuals.drawWorldOverview = function () {
-  if (!shouldDrawWorldOverlay(CFG.worldDrawModulo)) return;
+  var cfg = visualsConfig();
+  if (cfg.enabled === false || cfg.worldOverlayEnabled === false) return;
+  if (shouldSkipOptionalVisualsForCpu()) return;
+  var worldModulo = (typeof cfg.worldOverlayModulo === 'number' && cfg.worldOverlayModulo > 0)
+    ? cfg.worldOverlayModulo
+    : CFG.worldDrawModulo;
+  if (!shouldDrawWorldOverlay(worldModulo)) return;
 
   var mv = Game.map.visual;
   drawWorldFlagMarkers(mv, CFG.worldMaxFlagMarkers);

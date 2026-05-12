@@ -1,10 +1,20 @@
 'use strict';
 
 var BeeSelectors = require('BeeSelectors');
+var CoreLogger = require('core.logger');
+var CoreConfig = require('core.config');
 
-function logTerminalJob(room, message) {
+function terminalJobLogInterval() {
+  var cfg = (CoreConfig && CoreConfig.settings && CoreConfig.settings.logging) || null;
+  if (cfg && typeof cfg.terminalJobLogInterval === 'number' && cfg.terminalJobLogInterval > 0) return cfg.terminalJobLogInterval;
+  return 75;
+}
+
+function logTerminalJob(room, message, messageType) {
   if (!room || !message) return;
-  console.log('[Queen][' + room.name + '][terminalEnergyJob] ' + message);
+  var type = messageType || message;
+  var key = 'queen.terminalJob.' + room.name + '.' + type;
+  CoreLogger.warnEvery(key, terminalJobLogInterval(), '[Queen][' + room.name + '][terminalEnergyJob] ' + message);
 }
 
 function getRoomTerminalEnergyJob(room) {
@@ -52,7 +62,7 @@ function updateTerminalEnergyJob(room) {
   job.lastUpdate = Game.time;
 
   if (!room.storage || !room.terminal) {
-    if (job.active || job.paused) logTerminalJob(room, 'paused: missing storage or terminal');
+    if (job.active || job.paused) logTerminalJob(room, 'paused: missing storage or terminal', 'paused_missing_structures');
     job.active = false;
     job.paused = true;
     job.pauseReason = 'missing_structures';
@@ -69,7 +79,7 @@ function updateTerminalEnergyJob(room) {
   if (aboveThreshold) job.thresholdTicks = (job.thresholdTicks || 0) + 1;
   else job.thresholdTicks = 0;
 
-  if (!job.active && job.thresholdTicks === 50) logTerminalJob(room, 'storage surplus threshold reached (50 ticks above 75%)');
+  if (!job.active && job.thresholdTicks === 50) logTerminalJob(room, 'storage surplus threshold reached (50 ticks above 75%)', 'threshold_reached');
 
   var terminalEnergyNow = room.terminal.store[RESOURCE_ENERGY] || 0;
   if (!job.active && job.thresholdTicks >= 50 && terminalEnergyNow < job.targetEnergy) {
@@ -77,7 +87,7 @@ function updateTerminalEnergyJob(room) {
     job.paused = false;
     job.pauseReason = null;
     if (!job.startedAt) job.startedAt = Game.time;
-    logTerminalJob(room, 'job started (target=' + job.targetEnergy + ')');
+    logTerminalJob(room, 'job started (target=' + job.targetEnergy + ')', 'job_started');
   }
 
   if (!job.active) return job;
@@ -89,7 +99,7 @@ function updateTerminalEnergyJob(room) {
     job.claimTick = null;
     job.startedAt = null;
     job.lastSkipTick = null;
-    logTerminalJob(room, 'job completed (terminal reached target energy)');
+    logTerminalJob(room, 'job completed (terminal reached target energy)', 'job_completed');
     return job;
   }
 
@@ -98,13 +108,13 @@ function updateTerminalEnergyJob(room) {
   else if (roomHasCriticalEnergyNeeds(room)) pauseReason = 'critical_fill_needs';
 
   if (pauseReason) {
-    if (!job.paused || job.pauseReason !== pauseReason) logTerminalJob(room, 'job paused (' + pauseReason + ')');
+    if (!job.paused || job.pauseReason !== pauseReason) logTerminalJob(room, 'job paused (' + pauseReason + ')', 'job_paused_' + pauseReason);
     job.paused = true;
     job.pauseReason = pauseReason;
     return job;
   }
 
-  if (job.paused) logTerminalJob(room, 'job resumed');
+  if (job.paused) logTerminalJob(room, 'job resumed', 'job_resumed');
   job.paused = false;
   job.pauseReason = null;
   return job;
