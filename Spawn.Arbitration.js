@@ -40,6 +40,10 @@ function recordBlockedRoleReason(debug, role, reason) {
 }
 
 function canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas, deps) {
+  deps = deps || {};
+  var protectedFloors = deps.PROTECTED_ROLE_FLOORS || {};
+  var floorRoleSet = deps.FLOOR_ROLE_SET || {};
+  if (typeof deps.getRoomLocalLiveCount !== 'function') return { allowed: false, reason: 'BLOCKED_MISSING_DEPENDENCY' };
   var canonical = deps.canonicalRole(role);
   if (!canonical) return { allowed: false, reason: 'INVALID_ROLE' };
   var energyAvailable = room && typeof room.energyAvailable === 'number' ? room.energyAvailable : 0;
@@ -50,8 +54,8 @@ function canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas, deps) {
   var baseHarvestFloor = sourceCount > 0 ? Math.min(quotaBaseHarvest, sourceCount) : Math.max(0, quotaBaseHarvest);
   var survivalFloors = {
     BaseHarvest: Math.max(0, baseHarvestFloor),
-    Courier: Math.max(0, Math.min((quotas && quotas.Courier) || 0, deps.PROTECTED_ROLE_FLOORS.Courier)),
-    Queen: Math.max(0, Math.min((quotas && quotas.Queen) || 0, deps.PROTECTED_ROLE_FLOORS.Queen))
+    Courier: Math.max(0, Math.min((quotas && quotas.Courier) || 0, protectedFloors.Courier || 0)),
+    Queen: Math.max(0, Math.min((quotas && quotas.Queen) || 0, protectedFloors.Queen || 0))
   };
 
   var survivalRoles = ['BaseHarvest', 'Courier', 'Queen'];
@@ -64,11 +68,11 @@ function canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas, deps) {
     if (live < floor) unmetSurvival.push(sRole);
   }
 
-  if (deps.FLOOR_ROLE_SET[canonical]) {
+  if (floorRoleSet[canonical]) {
     var required = survivalFloors[canonical] || 0;
     if (required > 0 && deps.getRoomLocalLiveCount(C, roomName, canonical) < required) return { allowed: true, reason: 'SURVIVAL_FLOOR_NEEDED' };
   }
-  if (unmetSurvival.length > 0 && !deps.FLOOR_ROLE_SET[canonical]) return { allowed: false, reason: 'BLOCKED_SURVIVAL_FLOOR_UNMET', unmetSurvival: unmetSurvival };
+  if (unmetSurvival.length > 0 && !floorRoleSet[canonical]) return { allowed: false, reason: 'BLOCKED_SURVIVAL_FLOOR_UNMET', unmetSurvival: unmetSurvival };
 
   // Support gate: Builder and Scout use simple gates so they do not get starved forever or over-spawn.
   if (canonical === 'Builder' || canonical === 'Scout') {
@@ -85,7 +89,12 @@ function queueItemAllowed(item, arb, deps) {
   // Arbitration decides whether a queued creep is allowed to spawn right now.
   if (!item || !arb) return { allowed: true, reason: 'NO_ARB' };
   var role = deps.canonicalRole(item.role);
-  if (role === 'Builder' || role === 'Scout') return canSpawnQueuedRoleSimple(arb.C, arb.room, arb.roomName, role, item, arb.quotas || {}, deps);
+  if (role === 'Builder' || role === 'Scout') {
+    if (deps && typeof deps.canSpawnQueuedRoleSimple === 'function') {
+      return deps.canSpawnQueuedRoleSimple(arb.C, arb.room, arb.roomName, role, item, arb.quotas || {});
+    }
+    return canSpawnQueuedRoleSimple(arb.C, arb.room, arb.roomName, role, item, arb.quotas || {}, deps);
+  }
 
   var band = deps.roleBand(role);
   var builderException = role === 'Builder' && arb.urgentBacklog && arb.urgentBacklog.builder && arb.recoveryMode && ((arb.roleTotals && arb.roleTotals.Builder) || 0) < 1;
