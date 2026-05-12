@@ -162,6 +162,18 @@ function queuedCount(roomName, role) {
   return count;
 }
 
+function getRoomLocalLiveCount(C, roomName, role) {
+  if (!C || !roomName || !role) return 0;
+
+  if (role === 'Luna') {
+    return (C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0;
+  }
+
+  var byRoom = C.roleCountsByRoom || {};
+  var roomCounts = byRoom[roomName] || {};
+  return roomCounts[role] || 0;
+}
+
 function enqueue(roomName, role, opts) {
   var q = ensureRoomQueue(roomName);
   if (q.length >= QUEUE_HARD_LIMIT) {
@@ -210,9 +222,7 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   for (var i = 0; i < quotaRoles.length; i++) {
     var role = quotaRoles[i];
     var canonical = canonicalRole(role);
-    var active = (canonical === 'Luna')
-      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
-      : (C.roleCounts[canonical] || 0);
+    var active = getRoomLocalLiveCount(C, roomName, canonical);
     remaining[role] = Math.max(0, (quotas[role] || 0) - active);
   }
 
@@ -467,9 +477,7 @@ function fillQueueForRoom(C, room) {
     var role = roles[i];
     var limit = quotas[role] || 0;
     var canonical = canonicalRole(role);
-    var active = canonical === 'Luna'
-      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
-      : (C.roleCounts[canonical] || 0);
+    var active = getRoomLocalLiveCount(C, roomName, canonical);
     var queued = queuedCount(roomName, role);
     var deficit = Math.max(0, limit - active - queued);
     if (deficit > 0 && tickEvery(DBG_EVERY)) {
