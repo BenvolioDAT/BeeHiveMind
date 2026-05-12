@@ -256,7 +256,7 @@ var MovementManager = {
     if (borderDest.dx != null) borderBase.dx = borderDest.dx;
     if (borderDest.dy != null) borderBase.dy = borderDest.dy;
     recordMoveVerify('mv.border.recover', borderBase);
-    return { result: result, data: resultData, reason: reason };
+    return { result: result, data: moved.data, reason: reason };
   },
 
   /**
