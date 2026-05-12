@@ -71,10 +71,11 @@ function _compactRoomMem(roomName, mem) {
   }
 
   if (_isObject(mem.sourceContainers)) {
+    var hasVision = !!(Game.rooms && Game.rooms[roomName]);
     var keepContainer = false;
     for (var cid in mem.sourceContainers) {
       if (!_hasOwn(mem.sourceContainers, cid)) continue;
-      if (!Game.getObjectById(cid)) {
+      if (hasVision && !Game.getObjectById(cid)) {
         delete mem.sourceContainers[cid];
         continue;
       }
@@ -202,13 +203,14 @@ function _protectedRoomSet() {
 
 function _compactRemainingRooms() {
   if (!Memory.rooms) return;
+  var protectedRooms = _protectedRoomSet();
 
   for (var roomName in Memory.rooms) {
     if (!Memory.rooms.hasOwnProperty(roomName)) continue;
     var mem = Memory.rooms[roomName];
 
     if (_compactRoomMem(roomName, mem)) {
-      if (!Game.rooms[roomName]) {
+      if (!Game.rooms[roomName] && !protectedRooms[roomName]) {
         delete Memory.rooms[roomName];
         Memory.recentlyCleanedRooms.push(roomName);
         _log('🧼 Deleted empty room mem: ' + roomName);
@@ -333,6 +335,7 @@ function _pruneSourceAssignments(roomMemory) {
 
 function _pruneContainerAssignments(roomName, roomMemory) {
   if (!_isObject(roomMemory.sourceContainers)) return;
+  var hasVision = !!(Game.rooms && Game.rooms[roomName]);
 
   for (var containerId in roomMemory.sourceContainers) {
     if (!roomMemory.sourceContainers.hasOwnProperty(containerId)) continue;
@@ -345,7 +348,7 @@ function _pruneContainerAssignments(roomName, roomMemory) {
 
   for (containerId in roomMemory.sourceContainers) {
     if (!_hasOwn(roomMemory.sourceContainers, containerId)) continue;
-    if (!Game.getObjectById(containerId)) delete roomMemory.sourceContainers[containerId];
+    if (hasVision && !Game.getObjectById(containerId)) delete roomMemory.sourceContainers[containerId];
   }
 
   for (containerId in roomMemory.sourceContainers) {
