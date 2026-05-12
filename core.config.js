@@ -37,6 +37,12 @@ CoreConfig.settings = Object.freeze({
     TREAT_SOURCE_KEEPERS_AS_PVE: CoreConfig.TREAT_SOURCE_KEEPERS_AS_PVE,
     /** Toggle verbose combat logging across BeeCombatSquads + spawning. */
     DEBUG_LOGS: false,
+    /**
+     * When false, BeeSpawnManager will not spawn combat units through the old
+     * squad/flag system. This does not delete BeeCombatSquads.js and is
+     * temporary while local autonomous defense is being built.
+     */
+    ENABLE_SQUAD_SPAWNING: false,
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */
