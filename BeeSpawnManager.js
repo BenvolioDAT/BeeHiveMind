@@ -26,6 +26,7 @@ var SpawnFeedback = require('Spawn.Feedback');
 var SpawnStability = require('Spawn.Stability');
 var SpawnArbitration = require('Spawn.Arbitration');
 var SpawnQuotas = require('Spawn.Quotas');
+var RoomStagePolicy = require('Room.StagePolicy');
 var roleLuna    = require('role.Luna');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -1916,6 +1917,21 @@ function prepareRoomQueues(C) {
     var room = rooms[i];
     if (!room.find(FIND_MY_SPAWNS).length) continue;
     ensureRoomQueue(room.name);
+
+    var roomStage = RoomStagePolicy.getRoomStage(room);
+    var roomStagePolicy = RoomStagePolicy.getRoomStagePolicy(room);
+    var roomDebug = ensureSpawnDebug(room.name);
+    roomDebug.roomStagePolicy = {
+      tick: Game.time,
+      rcl: roomStage.rcl,
+      id: roomStage.id,
+      name: roomStage.name,
+      primaryGoal: roomStagePolicy.primaryGoal,
+      structureFocus: roomStagePolicy.structureFocus,
+      spawnStrategyHint: roomStagePolicy.spawnStrategyHint,
+      behaviorActive: false
+    };
+
     fillQueueForRoom(C, room);
   }
 }
