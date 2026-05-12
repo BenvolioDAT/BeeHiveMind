@@ -10,6 +10,7 @@ var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var CoreConfig = require('core.config');
+var BodyConfig = require('Spawn.BodyConfig');
 
 function combatDebugEnabled() {
   return Boolean(CoreConfig && CoreConfig.settings && CoreConfig.settings.combat &&
@@ -26,155 +27,9 @@ function combatSpawnLog() {
 }
 
 // -----------------------------------------------------------------------------
-// Body builders (ES5-only helpers to construct Screeps body arrays)
-// -----------------------------------------------------------------------------
-// Role-specific configurations
-// The ( ... ) The Spread Operator.
-//This code block the Spread Operator is taken the Array flatten it to one Array with out the Spread Operator
-//the Array turn into a nested Array meaning ( [work],[carry],[move],) we want ( [work, carry, move,] )
-const Claimer = (Claim, Move) =>  [
-  ...Array(Claim).fill(CLAIM),
-  ...Array(Move).fill(MOVE)
-];
-
-const WorkBody = (Work, Carry, Move) => [
-  ...Array(Work).fill(WORK),
-  ...Array(Carry).fill(CARRY),
-  ...Array(Move).fill(MOVE)
-];
-
-const CombatBody = (Tough, Attack, Move, Range_attack, Heal) => [
-  ...Array(Tough).fill(TOUGH),
-  ...Array(Attack).fill(ATTACK),
-  ...Array(Move).fill(MOVE),
-  ...Array(Range_attack).fill(RANGED_ATTACK),
-  ...Array(Heal).fill(HEAL),
-];
-// -----------------------------------------------------------------------------
 // Role configuration (canonical names only)
 // -----------------------------------------------------------------------------
-var ROLE_CONFIGS = {
-  BaseHarvest: [
-    WorkBody(6, 1, 5),
-    WorkBody(5, 1, 5),
-    WorkBody(4, 1, 4),
-    WorkBody(3, 1, 3),
-    WorkBody(2, 1, 2),
-    WorkBody(1, 1, 1),
-  ],
-  Courier: [
-    //WorkBody(0, 30, 15),
-    //WorkBody(0, 29, 15),
-    //WorkBody(0, 28, 14),
-    //WorkBody(0, 27, 14),
-    //WorkBody(0, 26, 13),
-    //WorkBody(0, 25, 13),
-    WorkBody(0, 24, 12),
-    WorkBody(0, 23, 23),
-    WorkBody(0, 22, 22),
-    WorkBody(0, 21, 21),
-    WorkBody(0, 20, 20),
-    WorkBody(0, 19, 19),
-    WorkBody(0, 18, 18),
-    WorkBody(0, 17, 17),
-    WorkBody(0, 16, 16),
-    WorkBody(0, 15, 15),
-    WorkBody(0, 14, 14),
-    WorkBody(0, 13, 13),
-    WorkBody(0, 12, 12),
-    WorkBody(0, 11, 11),
-    WorkBody(0, 10, 10),
-    WorkBody(0, 9, 9),
-    WorkBody(0, 8, 8),
-    WorkBody(0, 7, 7),
-    WorkBody(0, 6, 6),
-    WorkBody(0, 5, 5),
-    WorkBody(0, 4, 4),
-    WorkBody(0, 3, 3),
-    WorkBody(0, 2, 2),
-    WorkBody(0, 1, 1),
-  ],
-  Builder: [
-    WorkBody(3, 6, 9),
-    WorkBody(2, 4, 6),
-    WorkBody(2, 2, 4),
-    WorkBody(1, 1, 2),
-    WorkBody(1, 1, 1),
-  ],
-  Repair: [
-    WorkBody(5, 2, 7),
-    WorkBody(4, 1, 5),
-    WorkBody(2, 1, 3),
-  ],
-  Upgrader: [
-    WorkBody(10,5, 5),
-    WorkBody(5, 5, 5),
-    WorkBody(4, 4, 8),
-    WorkBody(4, 3, 7),
-    WorkBody(3, 3, 6),
-    WorkBody(3, 2, 5),
-    WorkBody(2, 2, 4),
-    WorkBody(2, 1, 3),
-    WorkBody(1, 1, 2),
-    WorkBody(1, 1, 1),
-  ],
-  Queen: [
-    //WorkBody(0, 22, 22),
-    //WorkBody(0, 21, 21),
-    //WorkBody(0, 20, 20),
-    //WorkBody(0, 19, 19),
-    WorkBody(0, 18, 9),
-    WorkBody(0, 18, 18),
-    WorkBody(0, 17, 17),
-    WorkBody(0, 16, 16),
-    WorkBody(0, 15, 15),
-    WorkBody(0, 14, 14),
-    WorkBody(0, 13, 13),
-    WorkBody(0, 12, 12),
-    WorkBody(0, 11, 11),
-    WorkBody(0, 10, 10),
-    WorkBody(0, 9, 9),
-    WorkBody(0, 8, 8),
-    WorkBody(0, 7, 7),
-    WorkBody(0, 6, 6),
-    WorkBody(0, 5, 5),
-    WorkBody(0, 4, 4),
-    WorkBody(0, 3, 3),
-    WorkBody(0, 2, 2),
-    WorkBody(0, 1, 1),
-  ],
-  Luna: [
-    WorkBody(3, 4, 7),
-    WorkBody(2, 4, 6),
-    WorkBody(2, 3, 5),
-    WorkBody(1, 3, 4),
-    WorkBody(1, 2, 3),
-    WorkBody(1, 1, 2),
-    WorkBody(1, 1, 1),
-  ],
-  Scout: [
-    WorkBody(0, 0, 1)
-  ],
-  CombatMelee: [
-    CombatBody(0, 2, 2, 0, 0),
-  ],
-  CombatArcher: [
-    CombatBody(0, 0, 1, 1, 0),
-  ],
-  CombatMedic: [
-    CombatBody(0, 0, 4, 0, 4),
-    CombatBody(0, 0, 3, 0, 3),
-    CombatBody(0, 0, 2, 0, 2),
-    CombatBody(0, 0, 1, 0, 1),
-  ],
-  Dismantler: [
-    WorkBody(5, 0, 5)
-  ],
-  Claimer: [
-    Claimer(2, 2),
-    Claimer(1, 1)
-  ]
-};
+var ROLE_CONFIGS = BodyConfig.ROLE_CONFIGS;
 
 var ROLE_CANONICAL = [
   'BaseHarvest',
