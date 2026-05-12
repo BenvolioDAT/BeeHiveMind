@@ -527,6 +527,40 @@ var BeeToolbox = {
   isForeignPlayerRoom: function (room) { return _isForeignPlayerRoom(room); },
   canEngageTarget: function (attacker, target) { return _canEngageTarget(attacker, target); },
   myUsername: function () { return _myUsername(); },
+  isApprovedRemoteIntelRoom: function (roomName) {
+    if (!roomName) return false;
+
+    var room = Game.rooms && Game.rooms[roomName];
+    if (room && room.controller && room.controller.my) return true;
+
+    var remotesByHome = Memory.__BHM && Memory.__BHM.remotesByHome;
+    if (remotesByHome && typeof remotesByHome === 'object') {
+      for (var home in remotesByHome) {
+        if (!Object.prototype.hasOwnProperty.call(remotesByHome, home)) continue;
+        var remotes = remotesByHome[home];
+        if (!Array.isArray(remotes)) continue;
+        for (var i = 0; i < remotes.length; i++) {
+          if (remotes[i] === roomName) return true;
+        }
+      }
+    }
+
+    // Active Luna assignment entries imply this room is currently in-use.
+    var assignments = Memory.remoteAssignments;
+    if (assignments && typeof assignments === 'object') {
+      for (var sid in assignments) {
+        if (!Object.prototype.hasOwnProperty.call(assignments, sid)) continue;
+        var entry = assignments[sid];
+        if (!entry || typeof entry !== 'object') continue;
+        if (entry.roomName !== roomName) continue;
+        var hasCount = (typeof entry.count === 'number' && entry.count > 0);
+        var hasOwner = !!(entry.owner && Game.creeps && Game.creeps[entry.owner]);
+        if (hasCount || hasOwner) return true;
+      }
+    }
+
+    return false;
+  },
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL
@@ -568,6 +602,7 @@ var BeeToolbox = {
   // Logs containers that are within 1 tile of any source.
   logSourceContainersInRoom: function (room) {
     if (!room) return;
+    if (!BeeToolbox.isApprovedRemoteIntelRoom(room.name)) return;
     if (!Memory.rooms) Memory.rooms = {};
     if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
     if (!Memory.rooms[room.name].sourceContainers) Memory.rooms[room.name].sourceContainers = {};
