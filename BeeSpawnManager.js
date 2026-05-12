@@ -15,6 +15,10 @@ var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 var CoreConfig  = require('core.config');
 
 var spawnLogic  = require('spawn.logic');
+var SpawnConstants = require('Spawn.Constants');
+var SpawnDebug = require('Spawn.Debug');
+var SpawnQueue = require('Spawn.Queue');
+var SpawnCounts = require('Spawn.Counts');
 var roleLuna    = require('role.Luna');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -43,39 +47,8 @@ var RECOVERY_BAND_BUDGET_CAPS = {
   SITUATIONAL: 0.10
 };
 
-var ROLE_PRIORITY = {
-  BaseHarvest: 100,
-  Courier:      95,
-  Queen:        90,
-  Upgrader:     80,
-  Builder:      75,
-  Luna:         70,
-  Repair:       60,
-  Claimer:      55,
-  Scout:        40,
-  Trucker:      35,
-  Dismantler:   30,
-  CombatArcher: 25,
-  CombatMelee:  25,
-  CombatMedic:  25
-};
-
-var ROLE_MIN_ENERGY = {
-  BaseHarvest: 200,
-  Courier:     150,
-  Queen:       200,
-  Upgrader:    200,
-  Builder:     200,
-  Luna:        250,
-  Repair:      200,
-  Claimer:     650,
-  Scout:       50,
-  Trucker:     200,
-  Dismantler:  150,
-  CombatArcher:200,
-  CombatMelee: 200,
-  CombatMedic: 200
-};
+var ROLE_PRIORITY = SpawnConstants.ROLE_PRIORITY;
+var ROLE_MIN_ENERGY = SpawnConstants.ROLE_MIN_ENERGY;
 
 var ROLE_ALIAS_MAP = (function () {
   var map = Object.create(null);
@@ -104,43 +77,10 @@ var ROLE_ALIAS_MAP = (function () {
   return map;
 })();
 
-var ROLE_BAND = {
-  BaseHarvest: 'SURVIVAL',
-  Courier: 'SURVIVAL',
-  Queen: 'SURVIVAL',
-  Upgrader: 'ECONOMY',
-  Luna: 'ECONOMY',
-  Builder: 'GROWTH',
-  Repair: 'SUPPORT',
-  Scout: 'SUPPORT',
-  Trucker: 'SITUATIONAL',
-  Claimer: 'SITUATIONAL',
-  Dismantler: 'SITUATIONAL',
-  CombatArcher: 'COMBAT',
-  CombatMelee: 'COMBAT',
-  CombatMedic: 'COMBAT'
-};
-
-var BAND_PRIORITY_BONUS = {
-  SURVIVAL: 10,
-  ECONOMY: 6,
-  GROWTH: 3,
-  SUPPORT: 1,
-  SITUATIONAL: 0,
-  COMBAT: 0
-};
-
-var PROTECTED_ROLE_FLOORS = {
-  BaseHarvest: 1,
-  Courier: 1,
-  Queen: 1
-};
-
-var FLOOR_ROLE_SET = {
-  BaseHarvest: true,
-  Courier: true,
-  Queen: true
-};
+var ROLE_BAND = SpawnConstants.ROLE_BAND;
+var BAND_PRIORITY_BONUS = SpawnConstants.BAND_PRIORITY_BONUS;
+var PROTECTED_ROLE_FLOORS = SpawnConstants.PROTECTED_ROLE_FLOORS;
+var FLOOR_ROLE_SET = SpawnConstants.FLOOR_ROLE_SET;
 
 function canonicalRole(role) {
   if (!role) return null;
@@ -354,10 +294,7 @@ function bodyCapIndexForRole(role, planner) {
 }
 
 function ensureSpawnDebug(roomName) {
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  if (!Memory.rooms[roomName].spawnDebug) Memory.rooms[roomName].spawnDebug = {};
-  return Memory.rooms[roomName].spawnDebug;
+  return SpawnDebug.ensureSpawnDebug(roomName);
 }
 
 function compactEnergy(room) {
@@ -950,23 +887,11 @@ function queueItemAllowed(item, arb) {
 
 // ------------------------------ Spawn Queue ------------------------------
 function ensureRoomQueue(roomName) {
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  if (!Array.isArray(Memory.rooms[roomName].spawnQueue)) {
-    Memory.rooms[roomName].spawnQueue = [];
-  }
-  return Memory.rooms[roomName].spawnQueue;
+  return SpawnQueue.ensureRoomQueue(roomName);
 }
 
 function queuedCount(roomName, role) {
-  var q = ensureRoomQueue(roomName);
-  var count = 0;
-  for (var i = 0; i < q.length; i++) {
-    if (q[i] && q[i].role === role) {
-      count++;
-    }
-  }
-  return count;
+  return SpawnQueue.queuedCount(roomName, role);
 }
 
 function spawningRoleCount(roomName, role) {
@@ -1040,19 +965,7 @@ function getQueuedRoleItems(roomName, roleName) {
 }
 
 function countRoleInRoom(C, roomName, roleName) {
-  if (!C || !C.creeps || !roomName || !roleName) return 0;
-  var target = canonicalRole(roleName);
-  if (!target) return 0;
-  var count = 0;
-  for (var i = 0; i < C.creeps.length; i++) {
-    var creep = C.creeps[i];
-    if (!creep || !creep.my || !creep.room || creep.room.name !== roomName) continue;
-    var ttl = creep.ticksToLive;
-    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
-    var role = creep.memory && (creep.memory.role || creep.memory.task);
-    if (canonicalRole(role) === target) count += 1;
-  }
-  return count;
+  return SpawnCounts.countRoleInRoom(C, roomName, roleName, canonicalRole, DYING_SOON_TTL);
 }
 
 function getScoutHomeFromMemory(memory) {
@@ -1064,20 +977,9 @@ function getScoutHomeFromMemory(memory) {
 }
 
 function countScoutByHome(C, roomName) {
-  if (!C || !C.creeps || !roomName) return 0;
-  var count = 0;
-  for (var i = 0; i < C.creeps.length; i++) {
-    var creep = C.creeps[i];
-    if (!creep || !creep.my) continue;
-    var ttl = creep.ticksToLive;
-    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
-    var role = creep.memory && (creep.memory.role || creep.memory.task);
-    if (canonicalRole(role) !== 'Scout') continue;
-    var home = getScoutHomeFromMemory(creep.memory);
-    if (!home && creep.room && creep.room.name) home = creep.room.name; // legacy fallback
-    if (home === roomName) count += 1;
-  }
-  return count;
+  // Scout counting remains HOME_AWARE so remote-traveling scouts are counted
+  // against their owning home room rather than current room location.
+  return SpawnCounts.countScoutByHome(C, roomName, canonicalRole, DYING_SOON_TTL);
 }
 
 function countWorkParts(body) {
