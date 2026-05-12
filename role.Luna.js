@@ -5,6 +5,8 @@ var MovementOwnership = require('Movement.Ownership');
 const BeeCombatSquads = require('BeeCombatSquads');
 const CombatDiplomacy = require('CombatDiplomacy');
 var CoreLogger = require('core.logger');
+var BeeRoleVisuals = require('BeeRoleVisuals');
+var BeeRoles = require('BeeRoles');
 var lunaLog = CoreLogger.createLogger('Luna', CoreLogger.LOG_LEVEL.BASIC);
 
 function describeError(e) {
@@ -77,15 +79,12 @@ var CFG = Object.freeze({
 // Debug helpers
 // =========================
 function debugSay(creep, msg) {
-  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+  BeeRoleVisuals.debugSay(CFG.DEBUG_SAY, creep, msg);
 }
 
 // Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
 function getTargetPosition(target) {
-  if (!target) return null;
-  if (target.pos) return target.pos;
-  if (target.x != null && target.y != null && target.roomName) return target;
-  return null;
+  return BeeRoleVisuals.getTargetPosition(target);
 }
 
 function debugDrawLine(creep, target, color, label) {
@@ -1111,7 +1110,7 @@ function softenRemoteDefensePlan(roomName) {
   // ============================
   function ensureLunaIdentity(creep) {
     if (!creep || !creep.memory) return;
-    creep.memory.role = 'Luna';
+    creep.memory.role = BeeRoles.ROLE_NAMES.LUNA;
     if (creep.memory.task === 'remoteharvest') {
       creep.memory.task = 'luna';
     } else if (!creep.memory.task) {
