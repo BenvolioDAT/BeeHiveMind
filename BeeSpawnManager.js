@@ -19,6 +19,8 @@ var SpawnConstants = require('Spawn.Constants');
 var SpawnDebug = require('Spawn.Debug');
 var SpawnQueue = require('Spawn.Queue');
 var SpawnCounts = require('Spawn.Counts');
+var SpawnRoles = require('Spawn.Roles');
+var SpawnEconomy = require('Spawn.Economy');
 var roleLuna    = require('role.Luna');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -50,48 +52,14 @@ var RECOVERY_BAND_BUDGET_CAPS = {
 var ROLE_PRIORITY = SpawnConstants.ROLE_PRIORITY;
 var ROLE_MIN_ENERGY = SpawnConstants.ROLE_MIN_ENERGY;
 
-var ROLE_ALIAS_MAP = (function () {
-  var map = Object.create(null);
-  var canon = [
-    'BaseHarvest',
-    'Builder',
-    'Courier',
-    'Repair',
-    'Upgrader',
-    'Dismantler',
-    'Luna',
-    'Scout',
-    'Queen',
-    'Trucker',
-    'Claimer',
-    'CombatArcher',
-    'CombatMedic',
-    'CombatMelee'
-  ];
-  for (var i = 0; i < canon.length; i++) {
-    var name = canon[i];
-    map[name] = name;
-    map[name.toLowerCase()] = name;
-  }
-  map.remoteharvest = 'Luna';
-  return map;
-})();
-
 var ROLE_BAND = SpawnConstants.ROLE_BAND;
 var BAND_PRIORITY_BONUS = SpawnConstants.BAND_PRIORITY_BONUS;
 var PROTECTED_ROLE_FLOORS = SpawnConstants.PROTECTED_ROLE_FLOORS;
 var FLOOR_ROLE_SET = SpawnConstants.FLOOR_ROLE_SET;
 
-function canonicalRole(role) {
-  if (!role) return null;
-  var key = String(role);
-  if (ROLE_ALIAS_MAP[key]) return ROLE_ALIAS_MAP[key];
-  var lower = key.toLowerCase();
-  if (ROLE_ALIAS_MAP[lower]) return ROLE_ALIAS_MAP[lower];
-  var fallback = key.charAt(0).toUpperCase() + key.slice(1);
-  if (ROLE_ALIAS_MAP[fallback]) return ROLE_ALIAS_MAP[fallback];
-  return key;
-}
+var canonicalRole = SpawnRoles.canonicalRole;
+var roleBand = SpawnRoles.roleBand;
+var rolePriority = SpawnRoles.rolePriority;
 
 // ------------------------------ Debug utils ------------------------------
 function tickEvery(n) {
@@ -127,68 +95,14 @@ function minEnergyFor(role) {
   return ROLE_MIN_ENERGY[role] || 200;
 }
 
-function roleBand(role) {
-  var canonical = canonicalRole(role);
-  return ROLE_BAND[canonical] || 'SITUATIONAL';
-}
 
-function rolePriority(role) {
-  var canonical = canonicalRole(role);
-  var base = ROLE_PRIORITY[canonical] || 0;
-  var band = roleBand(canonical);
-  return base + (BAND_PRIORITY_BONUS[band] || 0);
-}
 
-function plannerConfig() {
-  var planner = CoreConfig && CoreConfig.settings && CoreConfig.settings.combat && CoreConfig.settings.combat.planner
-    ? CoreConfig.settings.combat.planner
-    : {};
-  return {
-    economy: planner.economy || {}
-  };
-}
 
-function classifyRoomMaturity(room) {
-  if (!room) return 'EARLY';
-  var rcl = (room.controller && typeof room.controller.level === 'number') ? room.controller.level : 0;
-  var cap = room.energyCapacityAvailable || 0;
-  if (rcl >= 8 || cap >= 2600) return 'ENDGAME';
-  if (rcl >= 6 || cap >= 1800) return 'LATE';
-  if (rcl >= 4 || cap >= 800) return 'MID';
-  return 'EARLY';
-}
 
-function classifyEconomyState(room, maturity) {
-  if (!room) return 'CRITICAL';
-  var cfg = plannerConfig().economy;
-  var storageEnergy = room.storage && room.storage.store ? (room.storage.store[RESOURCE_ENERGY] || 0) : 0;
-  var terminalEnergy = room.terminal && room.terminal.store ? (room.terminal.store[RESOURCE_ENERGY] || 0) : 0;
-  var stock = storageEnergy + terminalEnergy;
-  var cap = room.energyCapacityAvailable || 0;
-  var rcl = (room.controller && typeof room.controller.level === 'number') ? room.controller.level : 0;
 
-  var criticalStorage = typeof cfg.CRITICAL_STORAGE === 'number' ? cfg.CRITICAL_STORAGE : 20000;
-  var strainedStorage = typeof cfg.STRAINED_STORAGE === 'number' ? cfg.STRAINED_STORAGE : 80000;
-  var healthyStorage = typeof cfg.HEALTHY_STORAGE === 'number' ? cfg.HEALTHY_STORAGE : 180000;
-  var criticalTerminal = typeof cfg.CRITICAL_TERMINAL === 'number' ? cfg.CRITICAL_TERMINAL : 10000;
-  var strainedTerminal = typeof cfg.STRAINED_TERMINAL === 'number' ? cfg.STRAINED_TERMINAL : 40000;
-  var healthyTerminal = typeof cfg.HEALTHY_TERMINAL === 'number' ? cfg.HEALTHY_TERMINAL : 100000;
-  var earlyCap = typeof cfg.EARLY_CAPACITY === 'number' ? cfg.EARLY_CAPACITY : 550;
-  var midCap = typeof cfg.MID_CAPACITY === 'number' ? cfg.MID_CAPACITY : 1300;
-  var lateCap = typeof cfg.LATE_CAPACITY === 'number' ? cfg.LATE_CAPACITY : 2300;
-
-  if (!room.storage && !room.terminal) {
-    if (cap <= earlyCap || rcl <= 3) return 'CRITICAL';
-    if (cap <= midCap || rcl <= 5) return 'STRAINED';
-    if (cap <= lateCap || maturity === 'LATE') return 'HEALTHY';
-    return 'RICH';
-  }
-
-  if (storageEnergy <= criticalStorage && terminalEnergy <= criticalTerminal) return 'CRITICAL';
-  if (stock <= strainedStorage || (terminalEnergy > 0 && terminalEnergy <= strainedTerminal)) return 'STRAINED';
-  if (stock <= healthyStorage || (terminalEnergy > 0 && terminalEnergy <= healthyTerminal)) return 'HEALTHY';
-  return 'RICH';
-}
+function plannerConfig() { return SpawnEconomy.plannerConfig(CoreConfig); }
+function classifyRoomMaturity(room) { return SpawnEconomy.classifyRoomMaturity(room); }
+function classifyEconomyState(room, maturity) { return SpawnEconomy.classifyEconomyState(room, maturity, CoreConfig); }
 
 function clampInt(n, min, max) {
   if (n < min) return min;
