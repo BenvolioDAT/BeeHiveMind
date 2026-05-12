@@ -368,11 +368,21 @@ function debugRing(room, pos, color, text) {
   }
 
   function countCreepsWithRole(roleName, legacyTask) {
+    if (!global.__BHM) global.__BHM = {};
+    var bucket = global.__BHM.baseHarvestRoleCounts;
+    if (!bucket || bucket.tick !== Game.time) {
+      bucket = { tick: Game.time, map: Object.create(null) };
+      global.__BHM.baseHarvestRoleCounts = bucket;
+    }
+    var key = String(roleName || '') + '|' + String(legacyTask || '');
+    if (bucket.map[key] != null) return bucket.map[key];
+
     var n = 0;
     for (var name in Game.creeps) {
       var c = Game.creeps[name];
       if (c && matchesRole(c, roleName, legacyTask)) n++;
     }
+    bucket.map[key] = n;
     return n;
   }
 
