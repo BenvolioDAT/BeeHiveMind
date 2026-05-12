@@ -1,3 +1,14 @@
+'use strict';
+
+/**
+ * BeeMaintenance keeps Memory tidy and prepares repair target queues.
+ *
+ * Design notes for beginners:
+ * - Runs small cheap tasks every tick.
+ * - Runs heavy cleanup on a configurable cadence.
+ * - Never assumes optional memory buckets already exist.
+ */
+
 
 var CoreConfig = require('core.config');
 var Logger = require('core.logger');
@@ -31,7 +42,7 @@ var CFG = {
 // Shared utilities
 // -----------------------------
 
-function _now() { return Game.time; }
+function currentTick() { return Game.time; }
 function _log(msg) { if (CFG.LOG) maintLog.debug(msg); }
 
 function _hasOwn(obj, k) { return obj && Object.prototype.hasOwnProperty.call(obj, k); }
@@ -56,7 +67,7 @@ function _lastSeen(mem) {
 // Returns true if the room is "now empty" after compaction
 function _compactRoomMem(roomName, mem) {
   if (!mem) return true;
-  var now = _now();
+  var now = currentTick();
 
   if (_hasOwn(mem, 'blocked') && typeof mem.blocked === 'number') {
     if (now - mem.blocked > CFG.BLOCK_MARK_TTL) delete mem.blocked;
@@ -220,7 +231,7 @@ function _compactRemainingRooms() {
 }
 
 function cleanStaleRooms() {
-  var now = _now();
+  var now = currentTick();
   _stampVisibleRooms(now);
 
   if ((now % CFG.ROOM_PRUNE_INTERVAL) !== 0) {
@@ -382,7 +393,7 @@ function _heavyRoomSweep(roomName, roomMemory) {
 }
 
 function cleanUpMemory() {
-  var now = _now();
+  var now = currentTick();
   _removeDeadCreepMemory();
 
   // Heavy work is cadence gated.  This way the cheap dead-creep prune runs
@@ -467,7 +478,7 @@ function _isCriticalStructureType(type) {
 
 function _ensurePlannedRoadIndex() {
   if (!global.__BHM_MAINT) global.__BHM_MAINT = {};
-  if (global.__BHM_MAINT.roadPlanIndexTick === _now() && global.__BHM_MAINT.roadPlanIndex) {
+  if (global.__BHM_MAINT.roadPlanIndexTick === currentTick() && global.__BHM_MAINT.roadPlanIndex) {
     return global.__BHM_MAINT.roadPlanIndex;
   }
   var idx = { byRoom: {}, ownedRooms: {} };
@@ -509,7 +520,7 @@ function _ensurePlannedRoadIndex() {
     }
   }
 
-  global.__BHM_MAINT.roadPlanIndexTick = _now();
+  global.__BHM_MAINT.roadPlanIndexTick = currentTick();
   global.__BHM_MAINT.roadPlanIndex = idx;
   return idx;
 }
@@ -726,7 +737,7 @@ function _scanRepairTargets(room, bucket, priorityOrder) {
 
   bucket.cachedRepairTargets = targets;
   bucket.repairWorkload = _summarizeRepairWorkload(targets, roadNetwork);
-  bucket.nextRepairScanTick = _now() + CFG.REPAIR_SCAN_INTERVAL;
+  bucket.nextRepairScanTick = currentTick() + CFG.REPAIR_SCAN_INTERVAL;
   return targets;
 }
 
@@ -734,7 +745,7 @@ function findStructuresNeedingRepair(room) {
   if (!room) return [];
   var bucket = _ensureMaintBucket(room.name);
   var priorityOrder = _ensurePriorityTable(bucket);
-  var now = _now();
+  var now = currentTick();
 
   var nextScanTick = (typeof bucket.nextRepairScanTick === 'number') ? bucket.nextRepairScanTick : 0;
   if (now < nextScanTick) {

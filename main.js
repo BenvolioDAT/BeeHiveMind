@@ -1,4 +1,16 @@
 
+'use strict';
+
+/**
+ * Main loop orchestrator for BeeHiveMind.
+ *
+ * Beginner map:
+ * 1) Refresh low-cost intel and maintenance caches.
+ * 2) Run diplomacy so combat modules share one policy source.
+ * 3) Run economy/combat/structure gameplay systems.
+ * 4) Draw visuals and optional cosmetic pixel generation.
+ */
+
 // Core utilities and shared config
 const CoreConfig = require('core.config');
 const Logger = require('core.logger');
@@ -89,7 +101,7 @@ function maybeGeneratePixel() {
     if (!Game.cpu || typeof Game.cpu.generatePixel !== 'function') {
         return;
     }
-    // 2) Explicityly skip in SIM shard.
+    // 2) Explicitly skip in SIM shard.
     if (Game.shard && Game.shard.name === 'sim') {
         return;
     }
