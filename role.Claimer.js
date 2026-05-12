@@ -6,7 +6,7 @@ function describeError(e) {
   return e && (e.stack || e.message || String(e));
 }
 
-// Shared debug + tuning config (copied from role.BeeWorker for consistency)
+// Shared debug + tuning config used by this role.
 var CFG = Object.freeze({
   // --- Debug toggles (shared) ---
   DEBUG_SAY: false,
@@ -86,8 +86,11 @@ var CFG = Object.freeze({
 
   function debugDrawLine(creep, target, color, label) {
     if (!CFG.DEBUG_DRAW || !creep || !target) return;
-    var room = creep.room; if (!room || !room.visual) return;
-    var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
+    var room = creep.room;
+    if (!room || !room.visual) return;
+
+    var tpos = getTargetPosition(target);
+    if (!tpos || tpos.roomName !== room.name) return;
     try {
       room.visual.line(creep.pos, tpos, {
         color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
