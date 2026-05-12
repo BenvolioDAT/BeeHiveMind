@@ -380,7 +380,57 @@ function computeEarlyUpgraderQuota(room) {
   return quota;
 }
 
+function getLocalDefenseThreat(room) {
+  if (!room) return 0;
+
+  try {
+    if (BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
+      var liveThreat = BeeCombatSquads.getLiveThreatForRoom(room.name);
+      if (typeof liveThreat === 'number') {
+        return liveThreat > 0 ? liveThreat : 0;
+      }
+      if (liveThreat && liveThreat.hasThreat === true) {
+        return (typeof liveThreat.score === 'number' && liveThreat.score > 0) ? liveThreat.score : 1;
+      }
+      if (liveThreat && typeof liveThreat.score === 'number' && liveThreat.score > 0) {
+        return liveThreat.score;
+      }
+    }
+  } catch (e) {
+    // Ignore BeeCombatSquads threat lookup failures and fall through to local scan.
+  }
+
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+  return hostiles.length;
+}
+
+function computeLocalDefenseQuotas(room) {
+  var threat = getLocalDefenseThreat(room);
+  var hasThreat = threat > 0;
+  var energyCap = (room && room.energyCapacityAvailable) || 0;
+
+  if (!hasThreat) {
+    return {
+      CombatMelee: 0,
+      CombatArcher: 0,
+      CombatMedic: 0
+    };
+  }
+
+  var combatMelee = energyCap >= 550 ? 2 : 1;
+  var combatArcher = energyCap >= 800 ? 1 : 0;
+  var combatMedic = combatMelee > 0 ? (energyCap >= 800 ? 1 : 0) : 0;
+
+  return {
+    CombatMelee: combatMelee,
+    CombatArcher: combatArcher,
+    CombatMedic: combatMedic
+  };
+}
+
 function computeRoomQuotas(C, room) {
+  var localDefense = computeLocalDefenseQuotas(room);
+
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
   var quotas = {
@@ -394,6 +444,9 @@ function computeRoomQuotas(C, room) {
     Repair:       0,
     Trucker:      0,
     Claimer:      0,
+    CombatMelee:  localDefense.CombatMelee,
+    CombatArcher: localDefense.CombatArcher,
+    CombatMedic:  localDefense.CombatMedic
   };
   if (tickEvery(DBG_EVERY)) {
     dlog('🎯 [Quotas]', fmt(room), JSON.stringify(quotas));
