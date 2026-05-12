@@ -1,5 +1,16 @@
 "use strict";
 
+/**
+ * BeeStructureLogic owns owned-room structure automation.
+ *
+ * Responsibilities:
+ * - Tower combat/heal/repair priorities.
+ * - Link sender/receiver auto-discovery and transfer.
+ *
+ * This module intentionally keeps legacy public entry points:
+ *   runTowerLogic() and runLinkManager().
+ */
+
 // --------------------------------------------------
 // Tower Logic (merged from tower.logic.js)
 // --------------------------------------------------

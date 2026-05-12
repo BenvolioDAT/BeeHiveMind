@@ -1,3 +1,7 @@
+'use strict';
+
+/** Beginner-friendly logging wrapper with global + namespace thresholds. */
+
 
 const CoreConfig = require('core.config');
 const LOG_LEVEL = CoreConfig.LOG_LEVEL;
