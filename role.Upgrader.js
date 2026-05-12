@@ -3,72 +3,24 @@ var BeeRoleVisuals = require('BeeRoleVisuals');
 var BeeRoles = require('BeeRoles');
 
 
-// Shared debug + tuning config (copied from role.BeeWorker for consistency)
+// Role-specific debug and visual settings.
 var CFG = Object.freeze({
-  // --- Debug toggles (shared) ---
   DEBUG_SAY: false,
   DEBUG_DRAW: true,
-
-  // --- Visual styles (shared) ---
   DRAW: {
-    // BaseHarvest-style visuals
-    TRAVEL:   "#8ab6ff",
-    SOURCE:   "#ffd16e",
-    SEAT:     "#6effa1",
-    QUEUE:    "#ffe66e",
-    YIELD:    "#ff6e6e",
-    OFFLOAD:  "#6ee7ff",
-    IDLE:     "#bfbfbf",
     CTRL:     "#8ab6ff",
     LINK:     "#6ec1ff",
     STORE:    "#6effa1",
     CONT:     "#ffe66e",
     DROP:     "#ffb0e0",
-    // Courier-style visuals
-    WD_COLOR:    "#6ec1ff",  // withdraw lines
-    FILL_COLOR:  "#6effa1",  // delivery lines
-    DROP_COLOR:  "#ffe66e",  // dropped energy
-    GRAVE_COLOR: "#ffb0e0",  // tombstones/ruins
-    IDLE_COLOR:  "#bfbfbf",
-    // Shared
     WIDTH:   0.12,
     OPACITY: 0.45,
     FONT:    0.6
   },
-
-  // --- Towers (Courier) ---
-  TOWER_REFILL_AT_OR_BELOW: 0.70,
-
-  //Upgrader role Behavior
   SIGN_TEXT: "BeeNice Please.",
   SKIP_RCL8_IF_SAFE: false,
   RCL8_SAFE_TTL: 150000,
-  //Trucker role Behavior
-  PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
-  MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
-  SEARCH_RADIUS: 50,               // how far from flag to look
-  // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
-  ALLOW_NON_ENERGY: true,
-  // Fallback park if no flag & no home (harmless; rarely used)
-  PARK_POS: { x:25, y:25, roomName:"W0N0" },
-
-  //--- Pathing (used by Queen)----
-  STUCK_TICKS: 6,
-  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, idle: 5 },
-
-  // --- Pathing (used by Courier & any others that want it) ---
-  PATH_REUSE: 40,
-  MAX_OPS_MOVE: 2000,
-  TRAVEL_MAX_OPS: 4000,
-  // --- Targeting cadences (Courier) ---
-  RETARGET_COOLDOWN: 10,
-  GRAVE_SCAN_COOLDOWN: 20,
-  BETTER_CONTAINER_DELTA: 150,
-  // --- Thresholds / radii (Courier) ---
-  CONTAINER_MIN: 50,
-  DROPPED_BIG_MIN: 150,
-  DROPPED_NEAR_CONTAINER_R: 2,
-  DROPPED_ALONG_ROUTE_R: 2,
+  PATH_REUSE: 40
 });
 
 // -------------------------
@@ -78,34 +30,17 @@ function debugSay(creep, msg) {
   BeeRoleVisuals.debugSay(CFG.DEBUG_SAY, creep, msg);
 }
 
-// Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
-function getTargetPosition(target) {
-  return BeeRoleVisuals.getTargetPosition(target);
-}
-
 function debugDrawLine(creep, target, color, label) {
-  if (!CFG.DEBUG_DRAW || !creep || !target) return;
-  var room = creep.room; if (!room || !room.visual) return;
-  var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
   try {
-    room.visual.line(creep.pos, tpos, {
-      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
-    });
-    if (label) {
-      room.visual.text(label, tpos.x, tpos.y - 0.3, {
-        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
-      });
-    }
+    BeeRoleVisuals.drawLine(CFG.DEBUG_DRAW, creep, target, color, label, CFG.DRAW);
   } catch (e) {
     upgraderLog.warnEvery('upgrader.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
   }
 }
 
 function debugRing(room, pos, color, text) {
-  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
   try {
-    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
+    BeeRoleVisuals.drawRing(CFG.DEBUG_DRAW, room, pos, color, text, CFG.DRAW);
   } catch (e) {
     upgraderLog.warnEvery('upgrader.debugRing.visual', 250, 'debugRing failed for room', room && room.name, describeError(e));
   }
