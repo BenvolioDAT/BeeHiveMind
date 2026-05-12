@@ -6,6 +6,8 @@ module.exports = Object.freeze({
   DEBUG_DRAW: true,
   SIGN_TEXT: "BeeNice Please.",
   PATH_REUSE: 40,
+  SKIP_RCL8_IF_SAFE: false,
+  RCL8_SAFE_TTL: 0,
 
   DRAW: Object.freeze({
     DROP: "#ffe66e",

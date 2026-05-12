@@ -262,28 +262,7 @@ function softenRemoteDefensePlan(roomName) {
   // Tunables (existing behaviour)
   // ============================
   // NOTE: REMOTE_RADIUS is measured in "room hops" from the home room.
-  var REMOTE_RADIUS = 3;
-
-  var MAX_PF_OPS    = 3000;
-  var PLAIN_COST    = 2;
-  var SWAMP_COST    = 10;
-  var MAX_LUNA_PER_SOURCE = 1;
-
-  var PF_CACHE_TTL = 150;
-  var INVADER_LOCK_MEMO_TTL = 1500;
-
-  var AVOID_TTL = 30;
-  var RETARGET_COOLDOWN = 5;
-
-  // Small bias to keep the current owner briefly (soft preference only)
-  var ASSIGN_STICKY_TTL = 50;
-
-  // Anti-stuck
-  var STUCK_WINDOW = 4;
-
-  // Flag pruning cadence & grace (sources only)
-  var FLAG_PRUNE_PERIOD   = 25;   // how often to scan for source-flag deletions
-  var FLAG_RETENTION_TTL  = 200;  // keep a source-flag this many ticks since last activity
+  // Values are sourced from config-backed declarations near the file top.
 
   // ============================
   // Helpers: short id, flags
