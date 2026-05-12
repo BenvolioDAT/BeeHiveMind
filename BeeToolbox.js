@@ -299,9 +299,14 @@ function BeeTravel(creep, target, a3, a4, a5) {
     recordMoveVerify('mv.toolbox.result', verifyBase);
     return travelRc;
   } catch (e) {
+    toolboxLog.warnEvery('toolbox.beeTravel.exception', 100, 'BeeTravel exception for', creep && creep.name, describeError(e));
     // Fallback to vanilla moveTo if something odd happens
     if (creep.pos && destination) {
-      var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
+      var destPos = destination.pos || destination;
+      if (!destPos || destPos.x == null || destPos.y == null || !destPos.roomName) {
+        return ERR_INVALID_TARGET;
+      }
+      var rp = (destination.x != null) ? destination : new RoomPosition(destPos.x, destPos.y, destPos.roomName);
       var moveToResult = MovementOwnership.moveTo(creep, rp, { reusePath: 20, maxOps: 2000 }, 'BeeToolbox/BeeTravelFallback', 'BeeToolbox');
       var fallbackEvt = buildVerifyBase(creep, 'BeeToolbox.BeeTravelFallback', 'BeeTravel');
       var fallbackDest = getDestFields(rp);

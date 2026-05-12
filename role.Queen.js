@@ -47,7 +47,6 @@ var CFG = Object.freeze({
   PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
   MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
   SEARCH_RADIUS: 50,               // how far from flag to look
-  PATH_REUSE: 20,                  // reusePath hint
   // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
   ALLOW_NON_ENERGY: true,
   // Fallback park if no flag & no home (harmless; rarely used)

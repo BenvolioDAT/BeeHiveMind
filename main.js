@@ -63,6 +63,9 @@ function maintainRepairTargets() {
     if (!Memory.rooms) Memory.rooms = {};
 
     for (const room of Object.values(Game.rooms)) {
+        // Only track repair targets for owned rooms. Caching every visible
+        // room (highway/remotes/hostile) grows Memory.rooms and wastes CPU.
+        if (!room.controller || !room.controller.my) continue;
         if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
         Memory.rooms[room.name].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
     }
