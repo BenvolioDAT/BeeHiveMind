@@ -836,9 +836,59 @@ function recordBlockedRoleReason(debug, role, reason) {
   debug.arbitration.blockedRoleReasons[role] = reason;
 }
 
+function canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas) {
+  var canonical = canonicalRole(role);
+  if (!canonical) return { allowed: false, reason: 'INVALID_ROLE' };
+  var energyAvailable = room && typeof room.energyAvailable === 'number' ? room.energyAvailable : 0;
+  var minEnergy = minEnergyFor(canonical);
+  if (energyAvailable < minEnergy) return { allowed: false, reason: 'BLOCKED_LOW_ENERGY' };
+
+  var baseHarvestFloor = Math.min((quotas && quotas.BaseHarvest) || 0, maxBaseHarvestBySource(roomName));
+  var survivalFloors = {
+    BaseHarvest: Math.max(0, baseHarvestFloor),
+    Courier: Math.max(0, Math.min((quotas && quotas.Courier) || 0, PROTECTED_ROLE_FLOORS.Courier)),
+    Queen: Math.max(0, Math.min((quotas && quotas.Queen) || 0, PROTECTED_ROLE_FLOORS.Queen))
+  };
+  var survivalRoles = ['BaseHarvest', 'Courier', 'Queen'];
+  var unmetSurvival = [];
+  for (var i = 0; i < survivalRoles.length; i++) {
+    var sRole = survivalRoles[i];
+    var floor = survivalFloors[sRole] || 0;
+    if (floor <= 0) continue;
+    var live = getRoomLocalLiveCount(C, roomName, sRole);
+    if (live < floor) unmetSurvival.push(sRole);
+  }
+
+  if (FLOOR_ROLE_SET[canonical]) {
+    var required = survivalFloors[canonical] || 0;
+    if (required > 0 && getRoomLocalLiveCount(C, roomName, canonical) < required) {
+      return { allowed: true, reason: 'SURVIVAL_FLOOR_NEEDED' };
+    }
+  }
+
+  if (unmetSurvival.length > 0 && !FLOOR_ROLE_SET[canonical]) {
+    return { allowed: false, reason: 'BLOCKED_SURVIVAL_FLOOR_UNMET', unmetSurvival: unmetSurvival };
+  }
+
+  if (canonical === 'Builder' || canonical === 'Scout') {
+    var quota = Math.max(0, (quotas && quotas[canonical]) || 0);
+    var liveCount = getRoomLocalLiveCount(C, roomName, canonical);
+    if (quota <= 0) {
+      if (liveCount <= 0) return { allowed: true, reason: 'SIMPLE_SUPPORT_ALLOWED' };
+      return { allowed: false, reason: 'BLOCKED_LIVE_AT_OR_ABOVE_QUOTA' };
+    }
+    if (liveCount >= quota) return { allowed: false, reason: 'BLOCKED_LIVE_AT_OR_ABOVE_QUOTA' };
+    return { allowed: true, reason: 'SIMPLE_SUPPORT_ALLOWED' };
+  }
+  return { allowed: true, reason: 'ALLOWED' };
+}
+
 function queueItemAllowed(item, arb) {
   if (!item || !arb) return { allowed: true, reason: 'NO_ARB' };
   var role = canonicalRole(item.role);
+  if (role === 'Builder' || role === 'Scout') {
+    return canSpawnQueuedRoleSimple(arb.C, arb.room, arb.roomName, role, item, arb.quotas || {});
+  }
   var band = roleBand(role);
   var builderException = role === 'Builder' && arb.urgentBacklog && arb.urgentBacklog.builder &&
     arb.recoveryMode && ((arb.roleTotals && arb.roleTotals.Builder) || 0) < 1;
@@ -2101,10 +2151,16 @@ function dequeueAndSpawn(spawner) {
   if (!spawner || spawner.spawning) return false;
   var room = spawner.room;
   var roomName = room.name;
+  var C = global.__BHM || {};
   var q = ensureRoomQueue(roomName);
   var debug = ensureSpawnDebug(roomName);
-  var quotas = (debug && debug.planner && debug.planner.quotas) ? debug.planner.quotas : computeRoomQuotas(global.__BHM || {}, room);
-  var arb = buildArbitrationState(global.__BHM || {}, room, roomName, quotas);
+  var quotas = (debug && debug.planner && debug.planner.quotas) ? debug.planner.quotas : computeRoomQuotas(C, room);
+  var arb = buildArbitrationState(C, room, roomName, quotas);
+  arb.C = C;
+  arb.room = room;
+  arb.roomName = roomName;
+  arb.quotas = quotas;
+  debug.supportGate = null;
   if (!q.length) {
     var emptyEnergy = compactEnergy(room);
     debug.lastDecision = {
@@ -2137,6 +2193,14 @@ function dequeueAndSpawn(spawner) {
     var minReq = minEnergyFor(canonical);
     if (it.retryAt && Game.time < it.retryAt) { considered.push({ role: it.role, canonicalRole: canonical, priority: it.priority || 0, queueAge: Game.time - (it.created || Game.time), retryAt: it.retryAt, allowed: false, reason: "retry cooldown", minEnergyRequired: minReq }); continue; }
     var gate = queueItemAllowed(it, arb);
+    if (canonical === 'Builder' || canonical === 'Scout') {
+      debug.supportGate = gate.reason;
+      if (gate.allowed) {
+        debug.lastAllowedQueuedRole = canonical;
+      } else {
+        debug.lastBlockedQueuedRole = canonical;
+      }
+    }
     if (!gate.allowed) {
       recordBlockedRoleReason(debug, canonical, gate.reason);
       considered.push({ role: it.role, canonicalRole: canonical, priority: it.priority || 0, queueAge: Game.time - (it.created || Game.time), retryAt: it.retryAt || 0, allowed: false, reason: gate.reason === "WAITING_ON_SURVIVAL" ? "blocked by survival floor" : (gate.reason.indexOf("RECOVERY")===0 ? "blocked by recovery mode" : gate.reason), minEnergyRequired: minReq });
