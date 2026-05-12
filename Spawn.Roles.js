@@ -12,11 +12,24 @@ var BAND_PRIORITY_BONUS = SpawnConstants.BAND_PRIORITY_BONUS;
 
 var ROLE_ALIAS_MAP = (function () {
   var map = Object.create(null);
-  var canon = [
-    'BaseHarvest','Builder','Courier','Repair','Upgrader','Dismantler','Luna','Scout','Queen','Trucker','Claimer','CombatArcher','CombatMedic','CombatMelee'
+  var canonicalRoleNames = [
+    'BaseHarvest',
+    'Builder',
+    'Courier',
+    'Repair',
+    'Upgrader',
+    'Dismantler',
+    'Luna',
+    'Scout',
+    'Queen',
+    'Trucker',
+    'Claimer',
+    'CombatArcher',
+    'CombatMedic',
+    'CombatMelee'
   ];
-  for (var i = 0; i < canon.length; i++) {
-    var name = canon[i];
+  for (var i = 0; i < canonicalRoleNames.length; i++) {
+    var name = canonicalRoleNames[i];
     map[name] = name;
     map[name.toLowerCase()] = name;
   }
