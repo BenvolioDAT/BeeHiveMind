@@ -89,8 +89,8 @@ function prepareQueueForPanel(queue) {
 
 /** Each panel grows upward: header + spawning section + queue block. */
 function computePanelHeight(queueLineCount) {
-  // +0.6 leaves room for one optional BaseHarvest debug line.
-  return 2.7 + (queueLineCount * 0.6);
+  // +1.2 leaves room for optional gate + BaseHarvest debug lines.
+  return 3.3 + (queueLineCount * 0.6);
 }
 
 /**
@@ -135,6 +135,11 @@ function drawQueueListing(v, baseX, startY, queueInfo) {
       color: '#dddddd', font: 0.48, align: 'left', opacity: 0.95, stroke: '#000000'
     });
   }
+}
+
+function readSpawnDecisionDebug(roomName) {
+  var roomMem = Memory.rooms && Memory.rooms[roomName];
+  return roomMem && roomMem.spawnDebug && roomMem.spawnDebug.lastDecision ? roomMem.spawnDebug.lastDecision : null;
 }
 
 function readBaseHarvestPlanDebug(roomName) {
@@ -186,11 +191,16 @@ function drawSpawnPanel(v, spawn, currentBottomY) {
   }
 
   drawQueueListing(v, baseX, y + 1.1, queueInfo);
+  var lastDecision = readSpawnDecisionDebug(spawn.room.name);
+  var gateY = y + 1.1 + ((queueInfo.lines + 1) * 0.6);
+  if (lastDecision && lastDecision.reason) {
+    v.text('Gate: ' + lastDecision.reason, baseX, gateY, { color: '#ffe08a', font: 0.45, align: 'left', opacity: 0.9, stroke: '#000000' });
+  }
   var bhDebug = readBaseHarvestPlanDebug(spawn.room.name);
   if (bhDebug) {
-    var debugY = y + 1.1 + ((queueInfo.lines + 1) * 0.6);
+    var debugY = gateY + 0.55;
     v.text(
-      'BH W t:' + bhDebug.targetWork + ' l:' + bhDebug.liveWork + ' q:' + bhDebug.queuedWork + ' c:' + bhDebug.quota,
+      'BH src:' + (bhDebug.sourceCount || 0) + ' repl:' + (bhDebug.replacementNeeded || 0) + ' q:' + (bhDebug.quota || 0),
       baseX,
       debugY,
       { color: '#a7d7ff', font: 0.45, align: 'left', opacity: 0.9, stroke: '#000000' }
