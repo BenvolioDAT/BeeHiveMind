@@ -115,7 +115,9 @@ module.exports.loop = function () {
     BeeHiveMind.run();
     BeeStructureLogic.runTowerLogic();
     BeeStructureLogic.runLinkManager();
-    BeeCombatSquads.ensureSquadFlags();
+    if (CoreConfig.settings.combat.ENABLE_SQUAD_SPAWNING === true) {
+        BeeCombatSquads.ensureSquadFlags();
+    }
 
     // --- Visual aids for quick debugging ---
     BeeVisuals.drawVisuals();
@@ -129,4 +131,3 @@ module.exports.loop = function () {
 
     maybeGeneratePixel();
 };
-

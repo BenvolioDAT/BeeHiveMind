@@ -30,6 +30,9 @@ var ROLE_PRIORITY = {
   Baseharvest: 100,
   Courier:      95,
   Queen:        90,
+  CombatMelee:  88,
+  CombatArcher: 87,
+  CombatMedic:  86,
   Upgrader:     80,
   Builder:      75,
   Luna:         70,
@@ -38,9 +41,7 @@ var ROLE_PRIORITY = {
   Scout:        40,
   Trucker:      35,
   Dismantler:   30,
-  CombatArcher: 25,
-  CombatMelee:  25,
-  CombatMedic:  25
+  
 };
 
 var ROLE_MIN_ENERGY = {
@@ -673,7 +674,7 @@ function runSpawnPass(C) {
 var BeeSpawnManager = {
   manageSpawns: function manageSpawns(C) {
     if (!C || !Array.isArray(C.spawns) || !Array.isArray(C.roomsOwned)) return;
-    if (BeeCombatSquads && typeof BeeCombatSquads.refreshAutoDefensePlans === 'function') {
+    if (squadSpawningEnabled() && BeeCombatSquads && typeof BeeCombatSquads.refreshAutoDefensePlans === 'function') {
       // BHM Combat Fix: keep squad plans in sync before evaluating spawn needs.
       BeeCombatSquads.refreshAutoDefensePlans();
     }
