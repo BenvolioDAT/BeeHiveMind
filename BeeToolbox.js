@@ -545,6 +545,12 @@ var BeeToolbox = {
       }
     }
 
+    if (Array.isArray(Memory.sourceIntelApprovedRooms)) {
+      for (var j = 0; j < Memory.sourceIntelApprovedRooms.length; j++) {
+        if (Memory.sourceIntelApprovedRooms[j] === roomName) return true;
+      }
+    }
+
     // Active Luna assignment entries imply this room is currently in-use.
     var assignments = Memory.remoteAssignments;
     if (assignments && typeof assignments === 'object') {
