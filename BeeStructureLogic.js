@@ -1,16 +1,5 @@
 "use strict";
 
-/**
- * BeeStructureLogic owns owned-room structure automation.
- *
- * Responsibilities:
- * - Tower combat/heal/repair priorities.
- * - Link sender/receiver auto-discovery and transfer.
- *
- * This module intentionally keeps legacy public entry points:
- *   runTowerLogic() and runLinkManager().
- */
-
 // --------------------------------------------------
 // Tower Logic (merged from tower.logic.js)
 // --------------------------------------------------
@@ -35,7 +24,6 @@ var CFG = Object.freeze({
 // --------------------------------------------------
 var RESCAN_INTERVAL = 500;
 var MIN_SEND = 100;
-var CombatDiplomacy = require('CombatDiplomacy');
 
 var BeeStructureLogic = {
   runTowerLogic: function () {
@@ -59,16 +47,7 @@ var BeeStructureLogic = {
       if (!towers.length) continue;
 
       // Defend first: scan once for hostiles so the attack branch is obvious.
-      var hostiles = room.find(FIND_HOSTILE_CREEPS, {
-        filter: function (c) {
-          if (!c || !c.owner || !c.owner.username) return false;
-          if (!CombatDiplomacy || typeof CombatDiplomacy.shouldTargetOwnerUsername !== 'function') return true;
-          return CombatDiplomacy.shouldTargetOwnerUsername(c.owner.username, {
-            roomName: room.name,
-            source: 'Tower'
-          });
-        }
-      }) || [];
+      var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
       if (hostiles.length) {
         fireAllTowers(towers, hostiles);
         cleanupTowerLocks(RMem);

@@ -10,7 +10,6 @@
  */
 
 var BeeVisualsSpawnPanel = {};
-var CoreConfig = require('core.config');
 
 // ------------------------------- Settings ---------------------------------
 var CFG = {
@@ -27,16 +26,7 @@ var CFG = {
 
 /** Cheap cadence gate so the HUD can be throttled by simply raising CFG.modulo. */
 function shouldDrawSpawnPanels() {
-  var visualsCfg = (CoreConfig.settings && CoreConfig.settings.visuals) || {};
-  if (visualsCfg.enabled === false || visualsCfg.spawnPanelEnabled === false) return false;
-
-  // Visuals are optional; skip this panel when bucket is low if bucket exists.
-  if (Game.cpu && typeof Game.cpu.bucket === 'number') {
-    var minBucket = (typeof visualsCfg.minBucket === 'number') ? visualsCfg.minBucket : 0;
-    if (Game.cpu.bucket < minBucket) return false;
-  }
-
-  var cadence = (typeof visualsCfg.spawnPanelModulo === 'number') ? visualsCfg.spawnPanelModulo : CFG.modulo;
+  var cadence = CFG.modulo;
   if (typeof cadence !== 'number' || cadence < 1) cadence = 1;
   return cadence <= 1 || (Game.time % cadence) === 0;
 }
@@ -99,8 +89,7 @@ function prepareQueueForPanel(queue) {
 
 /** Each panel grows upward: header + spawning section + queue block. */
 function computePanelHeight(queueLineCount) {
-  // +1.2 leaves room for optional gate + BaseHarvest debug lines.
-  return 3.3 + (queueLineCount * 0.6);
+  return 2.1 + (queueLineCount * 0.6);
 }
 
 /**
@@ -147,18 +136,6 @@ function drawQueueListing(v, baseX, startY, queueInfo) {
   }
 }
 
-function readSpawnDecisionDebug(roomName) {
-  var roomMem = Memory.rooms && Memory.rooms[roomName];
-  return roomMem && roomMem.spawnDebug && roomMem.spawnDebug.lastDecision ? roomMem.spawnDebug.lastDecision : null;
-}
-
-function readBaseHarvestPlanDebug(roomName) {
-  var roomMem = Memory.rooms && Memory.rooms[roomName];
-  var debug = roomMem && roomMem.spawnDebug && roomMem.spawnDebug.baseHarvest;
-  if (!debug) return null;
-  return debug;
-}
-
 /** Paint one spawn panel and return the new bottom Y cursor for stacking. */
 function drawSpawnPanel(v, spawn, currentBottomY) {
   var queue = readSpawnQueue(spawn.room.name);
@@ -201,21 +178,6 @@ function drawSpawnPanel(v, spawn, currentBottomY) {
   }
 
   drawQueueListing(v, baseX, y + 1.1, queueInfo);
-  var lastDecision = readSpawnDecisionDebug(spawn.room.name);
-  var gateY = y + 1.1 + ((queueInfo.lines + 1) * 0.6);
-  if (lastDecision && lastDecision.reason) {
-    v.text('Gate: ' + lastDecision.reason, baseX, gateY, { color: '#ffe08a', font: 0.45, align: 'left', opacity: 0.9, stroke: '#000000' });
-  }
-  var bhDebug = readBaseHarvestPlanDebug(spawn.room.name);
-  if (bhDebug) {
-    var debugY = gateY + 0.55;
-    v.text(
-      'BH src:' + (bhDebug.sourceCount || 0) + ' repl:' + (bhDebug.replacementNeeded || 0) + ' q:' + (bhDebug.quota || 0),
-      baseX,
-      debugY,
-      { color: '#a7d7ff', font: 0.45, align: 'left', opacity: 0.9, stroke: '#000000' }
-    );
-  }
   return topY - CFG.panelGap;
 }
 

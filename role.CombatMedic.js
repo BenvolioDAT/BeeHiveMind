@@ -5,51 +5,6 @@ var BeeCombatSquads = require('BeeCombatSquads');
 var BeeSelectors = require('BeeSelectors');
 var CombatAPI = BeeCombatSquads.CombatAPI;
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
-var MovementManager = require('Movement.Manager');
-var CoreConfig = require('core.config');
-var CoreLogger = require('core.logger');
-var combatMedicLog = CoreLogger.createLogger('CombatMedic', CoreLogger.LOG_LEVEL.BASIC);
-
-function describeError(e) {
-  return e && (e.stack || e.message || String(e));
-}
-
-function _combatDebugSettings() {
-  var cfg = (CoreConfig.settings && CoreConfig.settings.combat) || {};
-  return { state: cfg.DEBUG_COMBAT_STATE === true, say: cfg.DEBUG_COMBAT_SAY === true };
-}
-
-function _debugSay(creep, token) {
-  if (!creep || !token) return;
-  var dbg = _combatDebugSettings();
-  if (!dbg.say) return;
-  if (!creep.memory) creep.memory = {};
-  if (creep.memory._combatSayTick === Game.time) return;
-  if (creep.memory._combatSay === token) return;
-  creep.memory._combatSay = token;
-  creep.memory._combatSayTick = Game.time;
-  creep.say(token, true);
-}
-
-function _debugLog(creep, branch, extra, interval) {
-  if (!_combatDebugSettings().state) return;
-  if (!creep || !creep.memory) return;
-  var every = typeof interval === 'number' ? interval : 5;
-  var sig = String(branch || 'NA') + '|' + String(extra || '');
-  if (creep.memory._combatLogSig !== sig) {
-    creep.memory._combatLogSig = sig;
-    creep.memory._combatLogTick = Game.time;
-  } else if ((Game.time - (creep.memory._combatLogTick || 0)) < every) {
-    return;
-  } else {
-    creep.memory._combatLogTick = Game.time;
-  }
-  try {
-    console.log('[CombatRole][Medic]', '[tick ' + Game.time + ']', creep.name, 'branch=' + branch, extra || '');
-  } catch (e) {
-    combatMedicLog.warnEvery('combatMedic.debugLog.console', 250, 'debug combat log failed for', creep && creep.name, describeError(e));
-  }
-}
 
 function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
@@ -148,19 +103,6 @@ function _buildMedicContext(creep) {
   var members = base.squad.members || {};
   var leader = _resolveMember(members.leader);
   var buddy = _resolveMember(members.buddy);
-  if (!leader) leader = buddy;
-  if (!buddy) buddy = _resolveMember(members.medic);
-  var memberIds = base.squad.memberIds || [];
-  for (var i = 0; !leader && i < memberIds.length; i++) {
-    var fallbackLeader = _resolveMember(memberIds[i]);
-    if (!fallbackLeader || fallbackLeader.id === creep.id) continue;
-    leader = fallbackLeader;
-  }
-  for (i = 0; !buddy && i < memberIds.length; i++) {
-    var fallbackBuddy = _resolveMember(memberIds[i]);
-    if (!fallbackBuddy || fallbackBuddy.id === creep.id) continue;
-    buddy = fallbackBuddy;
-  }
   if (leader && leader.id === creep.id) leader = null;
   if (buddy && buddy.id === creep.id) buddy = null;
   return {
@@ -174,39 +116,6 @@ function _buildMedicContext(creep) {
   };
 }
 
-function hasUsableTravelTarget(target) {
-  var pos = target && (target.pos || target);
-  return !!(pos && typeof pos.x === 'number' && typeof pos.y === 'number' && pos.roomName);
-}
-
-function isManagerRequestHandled(result) {
-  return result === OK || (typeof result === 'number' && result > OK);
-}
-
-function _requestMove(creep, target, range, intentType) {
-  if (!creep || !target) return;
-  var opts = { range: range, ignoreCreeps: false, reusePath: 10, intentType: intentType || 'combat' };
-  if (MovementManager && typeof MovementManager.request === 'function') {
-    var requestResult = MovementManager.request(creep, target, null, opts);
-
-    // Request contract:
-    // - OK: manager accepted/replaced intent; no direct fallback.
-    // - numeric > OK: manager kept existing higher/equal-priority intent; no fallback.
-    // - ERR_INVALID_ARGS: malformed request; guarded fail-open fallback only for usable target.
-    // - any other value: no fallback.
-    if (isManagerRequestHandled(requestResult)) return requestResult;
-
-    if (requestResult === ERR_INVALID_ARGS) {
-      if (creep && typeof creep.travelTo === 'function' && hasUsableTravelTarget(target)) {
-        return creep.travelTo(target, { range: range, ignoreCreeps: false });
-      }
-    }
-    return requestResult;
-  }
-  // Manager unavailable: do not direct-fallback here; preserve manager arbitration discipline.
-  return ERR_INVALID_ARGS;
-}
-
 function _selectHealTarget(creep, context) {
   if (!context) return null;
   if (creep.hits < creep.hitsMax) return creep;
@@ -216,26 +125,23 @@ function _selectHealTarget(creep, context) {
 }
 
 function _applyHealing(creep, target) {
-  if (!target) return false;
+  if (!target) return;
   if (target.id === creep.id) {
     creep.heal(creep);
-    return true;
   } else if (creep.pos.inRangeTo(target, 1)) {
     creep.heal(target);
-    return true;
   } else if (creep.pos.inRangeTo(target, 3)) {
     creep.rangedHeal(target);
-    return true;
   }
-  return false;
 }
 
 function _pickMoveTarget(creep, context, healTarget) {
   if (!context) return null;
-  var waitingInitialSync = context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady;
 
   if (context.state === 'RETREAT' && context.rallyPos) return context.rallyPos;
-  if ((context.state !== 'ENGAGE' || waitingInitialSync) && context.rallyPos) return context.rallyPos;
+  if (context.state !== 'ENGAGE' && context.rallyPos) return context.rallyPos;
+
+  if (context.state === 'ENGAGE' && context.attackPos) return context.attackPos;
 
   if (context.leader && creep.pos.getRangeTo(context.leader) > 2) return context.leader;
 
@@ -249,8 +155,6 @@ function _pickMoveTarget(creep, context, healTarget) {
 
   if (context.buddy && creep.pos.getRangeTo(context.buddy) > 2) return context.buddy;
 
-  if (context.state === 'ENGAGE' && !waitingInitialSync && context.attackPos) return context.attackPos;
-
   if (context.rallyPos) return context.rallyPos;
   return null;
 }
@@ -263,36 +167,13 @@ module.exports = {
 
     var context = _buildMedicContext(creep);
     if (!context) return;
-    context.readiness = CombatAPI.getSquadReadiness ? CombatAPI.getSquadReadiness(context.flagName) : null;
 
     var healTarget = _selectHealTarget(creep, context);
-    var didHeal = _applyHealing(creep, healTarget);
-    if (didHeal) {
-      _debugSay(creep, 'HEAL');
-      _debugLog(creep, 'HEAL', 'target=' + (healTarget ? healTarget.id : 'null'));
-    }
-
-    if (context.readiness && context.readiness.needsRegroup && context.leader) {
-      _debugSay(creep, 'REGROUP');
-      _debugLog(creep, 'REGROUP', 'flag=' + context.flagName + ' leader=' + context.leader.id);
-      _requestMove(creep, context.leader, 1, 'combat');
-      return;
-    }
-
-    var holdToken = 'HOLD';
-    if (context.state === 'RETREAT') holdToken = 'RETREAT';
-    else if (context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady) holdToken = 'WAIT_SYNC';
-    else if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
-    else if (context.readiness && !context.readiness.hasCoreRoles) holdToken = 'WAIT_MED';
-    else if (context.readiness && !context.readiness.gatheredEnough) holdToken = 'WAIT_FORM';
-    _debugSay(creep, holdToken);
-    _debugLog(creep, holdToken, 'flag=' + context.flagName + ' state=' + context.state);
+    _applyHealing(creep, healTarget);
 
     var moveTarget = _pickMoveTarget(creep, context, healTarget);
     if (moveTarget) {
-      _debugSay(creep, 'PATH');
-      _debugLog(creep, 'PATH', 'toward=' + (moveTarget.id || (moveTarget.roomName + ':' + moveTarget.x + ',' + moveTarget.y)));
-      _requestMove(creep, moveTarget, 1, 'combat');
+      creep.travelTo(moveTarget, { range: 1, ignoreCreeps: false });
     }
   }
 };

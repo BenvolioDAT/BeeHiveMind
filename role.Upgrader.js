@@ -1,88 +1,108 @@
 'use strict';
-var BeeRoleVisuals = require('BeeRoleVisuals');
-var BeeRoles = require('BeeRoles');
 
-
-// Role-specific debug and visual settings.
+// Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
+  // --- Debug toggles (shared) ---
   DEBUG_SAY: false,
   DEBUG_DRAW: true,
+
+  // --- Visual styles (shared) ---
   DRAW: {
-    CTRL:     "#8ab6ff",
-    LINK:     "#6ec1ff",
-    STORE:    "#6effa1",
-    CONT:     "#ffe66e",
-    DROP:     "#ffb0e0",
+    // BaseHarvest-style visuals
+    TRAVEL:   "#8ab6ff",
+    SOURCE:   "#ffd16e",
+    SEAT:     "#6effa1",
+    QUEUE:    "#ffe66e",
+    YIELD:    "#ff6e6e",
+    OFFLOAD:  "#6ee7ff",
+    IDLE:     "#bfbfbf",
+    // Courier-style visuals
+    WD_COLOR:    "#6ec1ff",  // withdraw lines
+    FILL_COLOR:  "#6effa1",  // delivery lines
+    DROP_COLOR:  "#ffe66e",  // dropped energy
+    GRAVE_COLOR: "#ffb0e0",  // tombstones/ruins
+    IDLE_COLOR:  "#bfbfbf",
+    // Shared
     WIDTH:   0.12,
     OPACITY: 0.45,
     FONT:    0.6
   },
+
+  // --- Towers (Courier) ---
+  TOWER_REFILL_AT_OR_BELOW: 0.70,
+
+  //Upgrader role Behavior
   SIGN_TEXT: "BeeNice Please.",
-  SKIP_RCL8_IF_SAFE: false,
-  RCL8_SAFE_TTL: 150000,
-  PATH_REUSE: 40
+  //Trucker role Behavior
+  PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
+  MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
+  SEARCH_RADIUS: 50,               // how far from flag to look
+  PATH_REUSE: 20,                  // reusePath hint
+  // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
+  ALLOW_NON_ENERGY: true,
+  // Fallback park if no flag & no home (harmless; rarely used)
+  PARK_POS: { x:25, y:25, roomName:"W0N0" },
+
+  //--- Pathing (used by Queen)----
+  STUCK_TICKS: 6,
+  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, idle: 5 },
+
+  // --- Pathing (used by Courier & any others that want it) ---
+  PATH_REUSE: 40,
+  MAX_OPS_MOVE: 2000,
+  TRAVEL_MAX_OPS: 4000,
+  // --- Targeting cadences (Courier) ---
+  RETARGET_COOLDOWN: 10,
+  GRAVE_SCAN_COOLDOWN: 20,
+  BETTER_CONTAINER_DELTA: 150,
+  // --- Thresholds / radii (Courier) ---
+  CONTAINER_MIN: 50,
+  DROPPED_BIG_MIN: 150,
+  DROPPED_NEAR_CONTAINER_R: 2,
+  DROPPED_ALONG_ROUTE_R: 2,
 });
 
 // -------------------------
 // Shared tiny helpers (copied for role self-containment)
 // -------------------------
 function debugSay(creep, msg) {
-  BeeRoleVisuals.debugSay(CFG.DEBUG_SAY, creep, msg);
+  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+}
+
+// Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
+function getTargetPosition(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
 }
 
 function debugDrawLine(creep, target, color, label) {
+  if (!CFG.DEBUG_DRAW || !creep || !target) return;
+  var room = creep.room; if (!room || !room.visual) return;
+  var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
   try {
-    BeeRoleVisuals.drawLine(CFG.DEBUG_DRAW, creep, target, color, label, CFG.DRAW);
-  } catch (e) {
-    upgraderLog.warnEvery('upgrader.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
-  }
+    room.visual.line(creep.pos, tpos, {
+      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
+        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
+      });
+    }
+  } catch (e) {}
 }
 
 function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
   try {
-    BeeRoleVisuals.drawRing(CFG.DEBUG_DRAW, room, pos, color, text, CFG.DRAW);
-  } catch (e) {
-    upgraderLog.warnEvery('upgrader.debugRing.visual', 250, 'debugRing failed for room', room && room.name, describeError(e));
-  }
+    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
+  } catch (e) {}
 }
 
 // Dependencies used by the upgrader role
 const BeeToolbox = require('BeeToolbox');
-var MovementManager = require('Movement.Manager');
-const CoreLogger = require('core.logger');
-const upgraderLog = CoreLogger.createLogger('Upgrader', CoreLogger.LOG_LEVEL.BASIC);
-
-function describeError(e) {
-  return e && (e.stack || e.message || String(e));
-}
-
-function hasUsableTravelTarget(target) {
-  var pos = target && (target.pos || target);
-  return !!(pos && typeof pos.x === 'number' && typeof pos.y === 'number' && pos.roomName);
-}
-
-function isManagerRequestHandled(result) {
-  return result === OK || (typeof result === 'number' && result > OK);
-}
-
-function requestUpgraderMove(creep, target, range, opts, reason) {
-  // Use MovementManager.request for Upgrader movement arbitration.
-  // OK = accepted/replaced.
-  // numeric > OK = existing higher/equal intent kept.
-  // ERR_INVALID_ARGS or manager unavailable = no direct fallback in this phase.
-  if (!creep || !target) return ERR_INVALID_ARGS;
-  if (!hasUsableTravelTarget(target)) return ERR_INVALID_ARGS;
-  if (!MovementManager || typeof MovementManager.request !== 'function') return ERR_INVALID_ARGS;
-
-  var requestOpts = opts ? Object.assign({}, opts) : {};
-  requestOpts.range = range;
-  if (!requestOpts.intentType) requestOpts.intentType = 'upgrader';
-
-  var requestResult = MovementManager.request(creep, target, null, requestOpts);
-  if (isManagerRequestHandled(requestResult)) return requestResult;
-  if (requestResult === ERR_INVALID_ARGS) return ERR_INVALID_ARGS;
-  return requestResult;
-}
 
 // Upgrader role implementation
   // -----------------------------
@@ -110,7 +130,7 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
     } else {
       debugSay(creep, "📝");
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "CTRL");
-      requestUpgraderMove(creep, controller, 1, { reusePath: CFG.PATH_REUSE }, 'upgrader.sign.approach');
+      creep.travelTo(controller, { range: 1, reusePath: CFG.PATH_REUSE });
     }
   }
 
@@ -133,7 +153,7 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
       debugDrawLine(creep, droppedResource, CFG.DRAW.DROP, 'DROP');
       var pr = creep.pickup(droppedResource);
       if (pr === ERR_NOT_IN_RANGE) {
-        requestUpgraderMove(creep, droppedResource, 1, { reusePath: CFG.PATH_REUSE }, 'upgrader.pickup.drop');
+        creep.travelTo(droppedResource, { range: 1, reusePath: CFG.PATH_REUSE });
       } else if (pr === OK) {
         debugSay(creep, "📦");
         creep.memory.targetDroppedEnergyId = null;
@@ -165,7 +185,7 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
 
   function ensureUpgraderIdentity(creep) {
     if (!creep || !creep.memory) return;
-    creep.memory.role = BeeRoles.ROLE_NAMES.UPGRADER;
+    creep.memory.role = 'Upgrader';
     if (!creep.memory.task) creep.memory.task = 'upgrader';
   }
 
@@ -203,7 +223,7 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
     var ur = creep.upgradeController(controller);
     if (ur === ERR_NOT_IN_RANGE) {
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "CTRL");
-      requestUpgraderMove(creep, controller, 3, { reusePath: CFG.PATH_REUSE }, 'upgrader.upgrade.approach');
+      creep.travelTo(controller, { range: 3, reusePath: CFG.PATH_REUSE });
     } else if (ur === OK) {
       debugRing(getRoomOfPos(controller.pos), controller.pos, CFG.DRAW.CTRL, "UP");
     }
@@ -222,7 +242,7 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
   // -----------------------------
   function runRefuelPhase(creep) {
     if (tryLinkPull(creep)) return;
-    if (tryToolboxSweep(creep)) return;
+    tryToolboxSweep(creep);
     if (tryWithdrawStorage(creep)) return;
     if (tryWithdrawContainer(creep)) return;
     if (pickDroppedEnergy(creep)) return;
@@ -245,21 +265,17 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
     debugRing(linkRoom, linkNearController.pos, CFG.DRAW.LINK, "LINK");
     debugDrawLine(creep, linkNearController, CFG.DRAW.LINK, "LINK");
     if (lr === ERR_NOT_IN_RANGE) {
-      requestUpgraderMove(creep, linkNearController, 1, { reusePath: CFG.PATH_REUSE }, 'upgrader.link.pull');
+      creep.travelTo(linkNearController, { range: 1, reusePath: CFG.PATH_REUSE });
     }
     return true;
   }
 
   function tryToolboxSweep(creep) {
-    if (!creep) return false;
     try {
       if (BeeToolbox && typeof BeeToolbox.collectEnergy === 'function') {
-        return BeeToolbox.collectEnergy(creep) === true;
+        BeeToolbox.collectEnergy(creep);
       }
-    } catch (e) {
-      upgraderLog.warnEvery('upgrader.tryToolboxSweep.collectEnergy', 250, 'collectEnergy threw for', creep && creep.name, describeError(e));
-    }
-    return false;
+    } catch (e) {}
   }
 
   function tryWithdrawStorage(creep) {
@@ -269,7 +285,7 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
     debugDrawLine(creep, stor, CFG.DRAW.STORE, "STO");
     var sr = creep.withdraw(stor, RESOURCE_ENERGY);
     if (sr === ERR_NOT_IN_RANGE) {
-      requestUpgraderMove(creep, stor, 1, { reusePath: CFG.PATH_REUSE }, 'upgrader.storage.pull');
+      creep.travelTo(stor, { range: 1, reusePath: CFG.PATH_REUSE });
     }
     return true;
   }
@@ -286,7 +302,7 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
     debugDrawLine(creep, containerWithEnergy, CFG.DRAW.CONT, "CONT");
     var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY);
     if (cr === ERR_NOT_IN_RANGE) {
-      requestUpgraderMove(creep, containerWithEnergy, 1, { reusePath: CFG.PATH_REUSE }, 'upgrader.container.pull');
+      creep.travelTo(containerWithEnergy, { range: 1, reusePath: CFG.PATH_REUSE });
     }
     return true;
   }

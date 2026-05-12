@@ -3,56 +3,10 @@
 var Traveler = require('Traveler');
 var BeeCombatSquads = require('BeeCombatSquads');
 var CombatAPI = BeeCombatSquads.CombatAPI;
-var MovementManager = require('Movement.Manager');
 var CoreLogger = require('core.logger');
 
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var combatLog = CoreLogger.createLogger('CombatMelee', LOG_LEVEL.DEBUG);
-
-function describeError(e) {
-  return e && (e.stack || e.message || String(e));
-}
-
-function _combatDebugSettings() {
-  var cfg = (require('core.config').settings && require('core.config').settings.combat) || {};
-  return {
-    state: cfg.DEBUG_COMBAT_STATE === true,
-    say: cfg.DEBUG_COMBAT_SAY === true
-  };
-}
-
-function _debugSay(creep, token) {
-  if (!creep || !token) return;
-  var dbg = _combatDebugSettings();
-  if (!dbg.say) return;
-  if (!creep.memory) creep.memory = {};
-  if (creep.memory._combatSayTick === Game.time) return;
-  if (creep.memory._combatSay === token) return;
-  creep.memory._combatSay = token;
-  creep.memory._combatSayTick = Game.time;
-  creep.say(token, true);
-}
-
-function _debugLog(creep, branch, extra, interval) {
-  var dbg = _combatDebugSettings();
-  if (!dbg.state) return;
-  if (!creep || !creep.memory) return;
-  var every = typeof interval === 'number' ? interval : 5;
-  var sig = String(branch || 'NA') + '|' + String(extra || '');
-  if (creep.memory._combatLogSig !== sig) {
-    creep.memory._combatLogSig = sig;
-    creep.memory._combatLogTick = Game.time;
-  } else if ((Game.time - (creep.memory._combatLogTick || 0)) < every) {
-    return;
-  } else {
-    creep.memory._combatLogTick = Game.time;
-  }
-  try {
-    console.log('[CombatRole][Melee]', '[tick ' + Game.time + ']', creep.name, 'state=' + (creep.memory.state || 'n/a'), 'branch=' + branch, extra || '');
-  } catch (e) {
-    combatLog.warnEvery('combatMelee.debugLog.console', 250, 'debug combat log failed for', creep && creep.name, describeError(e));
-  }
-}
 
 function _resolveFlagName(creep) {
   if (!creep || !creep.memory) return null;
@@ -123,71 +77,8 @@ function _buildBaseContext(creep) {
 function _resolveFocusTarget(context) {
   if (!context) return null;
   var targetId = CombatAPI.focusFireTarget(context.flagName);
-  if (!targetId && context.state === 'ENGAGE' && CombatAPI.localFallbackTarget) {
-    targetId = CombatAPI.localFallbackTarget(context.flagName, context.creep);
-  }
   if (context.state === 'RETREAT') targetId = null;
   return targetId ? Game.getObjectById(targetId) : null;
-}
-
-function hasUsableTravelTarget(target) {
-  var pos = target && (target.pos || target);
-  return !!(pos && typeof pos.x === 'number' && typeof pos.y === 'number' && pos.roomName);
-}
-
-function isManagerRequestHandled(result) {
-  return result === OK || (typeof result === 'number' && result > OK);
-}
-
-function _requestMove(creep, target, range, intentType) {
-  if (!creep || !target) return;
-  var opts = { range: range, ignoreCreeps: false, reusePath: 10, intentType: intentType || 'combat' };
-  if (MovementManager && typeof MovementManager.request === 'function') {
-    var requestResult = MovementManager.request(creep, target, null, opts);
-
-    // Request contract:
-    // - OK: manager accepted/replaced intent; no direct fallback.
-    // - numeric > OK: manager kept existing higher/equal-priority intent; no fallback.
-    // - ERR_INVALID_ARGS: malformed request; guarded fail-open fallback only for usable target.
-    // - any other value: no fallback.
-    if (isManagerRequestHandled(requestResult)) return requestResult;
-
-    if (requestResult === ERR_INVALID_ARGS) {
-      if (creep && typeof creep.travelTo === 'function' && hasUsableTravelTarget(target)) {
-        return creep.travelTo(target, { range: range, ignoreCreeps: false });
-      }
-    }
-    return requestResult;
-  }
-  // Manager unavailable: do not direct-fallback here; preserve manager arbitration discipline.
-  return ERR_INVALID_ARGS;
-}
-
-function _regroupAnchor(creep, context) {
-  if (!context || !context.squad) return context && context.rallyPos ? context.rallyPos : null;
-  var members = context.squad.members || {};
-  var anchor = members.leader ? Game.getObjectById(members.leader) : null;
-  if (anchor && anchor.id === creep.id) anchor = null;
-  if (!anchor && members.buddy) {
-    anchor = Game.getObjectById(members.buddy);
-    if (anchor && anchor.id === creep.id) anchor = null;
-  }
-  if (!anchor && members.medic) {
-    anchor = Game.getObjectById(members.medic);
-    if (anchor && anchor.id === creep.id) anchor = null;
-  }
-  var list = context.squad.memberIds || [];
-  for (var i = 0; !anchor && i < list.length; i++) {
-    var m = Game.getObjectById(list[i]);
-    if (m && m.id !== creep.id) anchor = m;
-  }
-  return anchor || context.rallyPos || null;
-}
-
-function _hostileNearby(creep, range) {
-  if (!creep || !creep.room || !creep.room.find) return false;
-  var near = creep.pos.findInRange(FIND_HOSTILE_CREEPS, typeof range === 'number' ? range : 6);
-  return near && near.length > 0;
 }
 
 module.exports = {
@@ -198,9 +89,6 @@ module.exports = {
 
     var context = _buildBaseContext(creep);
     if (!context) return;
-    context.creep = creep;
-    context.readiness = CombatAPI.getSquadReadiness ? CombatAPI.getSquadReadiness(context.flagName) : null;
-    creep.memory.state = context.state;
 
     try {
       combatLog.debug(
@@ -209,56 +97,19 @@ module.exports = {
         'flag=', context.flagName,
         'room=', creep.room ? creep.room.name : '(no room)'
       );
-    } catch (e) {
-      combatLog.warnEvery('combatMelee.run.stateSnapshot', 250, 'state snapshot log failed for', creep && creep.name, describeError(e));
-    }
+    } catch (e) {}
 
     // Melee rally until ENGAGE, then advance + attack the shared focus target.
     if (context.state === 'RETREAT') {
-      _debugSay(creep, 'RETREAT');
-      _debugLog(creep, 'RETREAT', 'flag=' + context.flagName);
       if (context.rallyPos) {
-        _debugSay(creep, 'PATH');
-        _requestMove(creep, context.rallyPos, 1, 'combat');
+        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
       }
     } else if (context.state === 'ENGAGE') {
-      if (context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady) {
-        _debugSay(creep, 'WAIT_SYNC');
-        _debugLog(creep, 'WAIT_SYNC', 'flag=' + context.flagName);
-        var syncAnchor = _regroupAnchor(creep, context);
-        if (syncAnchor) _requestMove(creep, syncAnchor, 1, 'combat');
-        return;
-      }
-      if (context.readiness && context.readiness.needsRegroup) {
-        _debugSay(creep, 'REGROUP');
-        _debugLog(creep, 'REGROUP', 'flag=' + context.flagName + ' gathered=' + context.readiness.gathered + '/' + context.readiness.requiredGathered);
-        var regroup = _regroupAnchor(creep, context);
-        if (regroup) {
-          _debugSay(creep, 'PATH');
-          _requestMove(creep, regroup, 1, 'combat');
-        }
-        return;
-      }
       var target = _resolveFocusTarget(context);
       if (!target) {
-        var roomHostiles = creep.room && creep.room.find ? (creep.room.find(FIND_HOSTILE_CREEPS) || []) : [];
-        var sawSK = false;
-        for (var si = 0; si < roomHostiles.length; si++) {
-          var hc = roomHostiles[si];
-          if (hc && hc.owner && hc.owner.username && String(hc.owner.username).toLowerCase() === 'source keeper') {
-            sawSK = true;
-            break;
-          }
-        }
-        if (sawSK) _debugSay(creep, 'SEES_SK');
-        else if (roomHostiles.length > 0) _debugSay(creep, 'SKIP');
-        else _debugSay(creep, 'NO_TGT');
-        _debugLog(creep, 'NO_TGT', 'hostiles=' + roomHostiles.length + ' seesSK=' + (sawSK ? 1 : 0));
         try {
           combatLog.debug('Melee', creep.name, 'ENGAGE but no target', 'flag=', context.flagName);
-        } catch (e) {
-          combatLog.warnEvery('combatMelee.run.noTargetLog', 250, 'no-target debug log failed for', creep && creep.name, describeError(e));
-        }
+        } catch (e) {}
       } else {
         try {
           combatLog.debug(
@@ -266,47 +117,27 @@ module.exports = {
             'targetId=', target.id,
             'targetRoom=', target.pos.roomName
           );
-        } catch (e) {
-          combatLog.warnEvery('combatMelee.run.attackLog', 250, 'attack debug log failed for', creep && creep.name, describeError(e));
-        }
+        } catch (e) {}
       }
       if (target) {
         if (creep.pos.inRangeTo(target, 1)) {
-          _debugSay(creep, 'ATTACK');
-          _debugLog(creep, 'ATTACK', 'target=' + target.id);
           if (creep.getActiveBodyparts(ATTACK) > 0) creep.attack(target);
           if (creep.getActiveBodyparts(RANGED_ATTACK) > 0) creep.rangedAttack(target);
         } else {
-          _debugSay(creep, 'PUSH');
-          _debugLog(creep, 'PUSH', 'target=' + target.id);
-          _requestMove(creep, target, 1, 'combat');
+          creep.travelTo(target, { range: 1, ignoreCreeps: false });
         }
       } else if (context.attackPos) {
-        _debugSay(creep, 'PATH');
-        _debugLog(creep, 'PATH', 'attackPos=' + context.attackPos.roomName + ':' + context.attackPos.x + ',' + context.attackPos.y);
         // melee creeps advance on the stored attack position so they keep pressure on the hostile area
-        _requestMove(creep, context.attackPos, 1, 'combat');
+        creep.travelTo(
+          context.attackPos,
+          { range: 1, ignoreCreeps: false }
+        );
       } else if (context.rallyPos) {
-        _debugSay(creep, 'HOLD');
-        _debugLog(creep, 'HOLD', 'rallyOnly=1');
-        _requestMove(creep, context.rallyPos, 1, 'combat');
+        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
       }
     } else {
-      var holdToken = 'HOLD';
-      if (context.readiness && !context.readiness.hasEngagedOnce && !context.readiness.initialPushReady) holdToken = 'WAIT_SYNC';
-      else if (context.readiness && !context.readiness.waitElapsed) holdToken = 'WAIT_TIME';
-      else if (context.readiness && !context.readiness.hasCoreRoles) holdToken = 'WAIT_MED';
-      else if (context.readiness && !context.readiness.gatheredEnough) holdToken = 'WAIT_FORM';
-      _debugSay(creep, holdToken);
-      _debugLog(creep, holdToken, 'flag=' + context.flagName);
-      var holdAnchor = _regroupAnchor(creep, context);
-      if (holdAnchor) {
-        if (_hostileNearby(creep, 6)) {
-          _debugSay(creep, 'REGROUP');
-          _debugLog(creep, 'REGROUP', 'survival=1');
-        }
-        _debugSay(creep, 'PATH');
-        _requestMove(creep, holdAnchor, 1, 'combat');
+      if (context.rallyPos) {
+        creep.travelTo(context.rallyPos, { range: 1, ignoreCreeps: false });
       }
     }
 

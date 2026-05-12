@@ -1,24 +1,67 @@
 'use strict';
 
 const BeeCombatSquads = require('BeeCombatSquads');
-const CombatDiplomacy = require('CombatDiplomacy');
-var MovementOwnership = require('Movement.Ownership');
-var CoreLogger = require('core.logger');
-var scoutLog = CoreLogger.createLogger('Scout', CoreLogger.LOG_LEVEL.BASIC);
 
-function describeError(e) {
-  return e && (e.stack || e.message || String(e));
-}
-
-// Scout-only debug and visual settings.
+// Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
+  // --- Debug toggles (shared) ---
+  DEBUG_SAY: false,
   DEBUG_DRAW: true,
+
+  // --- Visual styles (shared) ---
   DRAW: {
-    TEXT:    "#e6e6e6",
+    // BaseHarvest-style visuals
+    TRAVEL:   "#8ab6ff",
+    SOURCE:   "#ffd16e",
+    SEAT:     "#6effa1",
+    QUEUE:    "#ffe66e",
+    YIELD:    "#ff6e6e",
+    OFFLOAD:  "#6ee7ff",
+    IDLE:     "#bfbfbf",
+    // Courier-style visuals
+    WD_COLOR:    "#6ec1ff",  // withdraw lines
+    FILL_COLOR:  "#6effa1",  // delivery lines
+    DROP_COLOR:  "#ffe66e",  // dropped energy
+    GRAVE_COLOR: "#ffb0e0",  // tombstones/ruins
+    IDLE_COLOR:  "#bfbfbf",
+    // Shared
     WIDTH:   0.12,
     OPACITY: 0.45,
     FONT:    0.6
-  }
+  },
+
+  // --- Towers (Courier) ---
+  TOWER_REFILL_AT_OR_BELOW: 0.70,
+
+  //Upgrader role Behavior
+  SIGN_TEXT: "BeeNice Please.",
+  //Trucker role Behavior
+  PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
+  MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
+  SEARCH_RADIUS: 50,               // how far from flag to look
+  PATH_REUSE: 20,                  // reusePath hint
+  // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
+  ALLOW_NON_ENERGY: true,
+  // Fallback park if no flag & no home (harmless; rarely used)
+  PARK_POS: { x:25, y:25, roomName:"W0N0" },
+
+  //--- Pathing (used by Queen)----
+  STUCK_TICKS: 6,
+  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, idle: 5 },
+
+  // --- Pathing (used by Courier & any others that want it) ---
+  PATH_REUSE: 40,
+  MAX_OPS_MOVE: 2000,
+  TRAVEL_MAX_OPS: 4000,
+  // --- Targeting cadences (Courier) ---
+  RETARGET_COOLDOWN: 10,
+  GRAVE_SCAN_COOLDOWN: 20,
+  BETTER_CONTAINER_DELTA: 150,
+  // --- Thresholds / radii (Courier) ---
+  CONTAINER_MIN: 50,
+  DROPPED_BIG_MIN: 150,
+  DROPPED_NEAR_CONTAINER_R: 2,
+  DROPPED_ALONG_ROUTE_R: 2,
 });
 
 var REMOTE_DEFENSE_MAX_DISTANCE = 2;
@@ -34,9 +77,7 @@ function debugLabel(room, pos, text, color) {
       color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
       backgroundColor: "#000000", backgroundOpacity: 0.25
     });
-  } catch (e) {
-    scoutLog.warnEvery('scout.debugLabel.visual', 250, 'debugLabel failed for room', room && room.name, describeError(e));
-  }
+  } catch (e) {}
 }
 
 //=========================
@@ -127,16 +168,12 @@ function computeThreatBundle(room) {
     try {
       var data = BeeCombatSquads.getLiveThreatForRoom(room);
       if (data) return data;
-    } catch (e) {
-      scoutLog.warnEvery('scout.computeThreatBundle.getLiveThreatForRoom', 250, 'getLiveThreatForRoom failed in', room && room.name, describeError(e));
-    }
+    } catch (e) {}
   }
   var hostiles = [];
   try {
     hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
-  } catch (err) {
-    scoutLog.warnEvery('scout.computeThreatBundle.findHostiles', 250, 'hostile scan failed in', room && room.name, describeError(err));
-  }
+  } catch (err) {}
   var bestId = hostiles.length ? hostiles[0].id : null;
   return { score: hostiles.length * 5, hasThreat: hostiles.length > 0, bestId: bestId };
 }
@@ -245,10 +282,6 @@ var ROOM_STAY_TICKS = 75;
 var REVISIT_TICKS = 750;
 var INTEL_INTERVAL = 150;
 var PATH_REUSE = 30;
-// Prevents first-tick room-entry ping-pong. Scouts still retreat immediately
-// from severe danger, but not from every transient "hostile seen" signal.
-var ROOM_ENTRY_GRACE_TICKS = 3;
-var HARD_RETREAT_THREAT_SCORE = 20;
 
 function stampVisit(roomName) {
   if (!roomName) return;
@@ -409,11 +442,6 @@ function logRoomIntel(room) {
 
   evaluateRoomThreat(room, 'Scout');
 
-  // Feed observed ownership/intel into centralized diplomacy watch logic.
-  if (CombatDiplomacy && typeof CombatDiplomacy.observeRoomIntel === 'function') {
-    CombatDiplomacy.observeRoomIntel(room, intel, 'Scout');
-  }
-
   if (CFG.DEBUG_DRAW) {
     var tag = (intel.owner ? ('👑 ' + intel.owner) : (intel.reservation ? ('📌 ' + intel.reservation) : 'free'));
     var extras = [];
@@ -459,23 +487,7 @@ function ensureScoutMem(creep) {
   if (m.targetRoom == null && creep.memory.targetRoom) m.targetRoom = creep.memory.targetRoom;
   if (!m.state) m.state = STATE_IDLE;
   if (typeof m.exitIndex !== 'number') m.exitIndex = 0;
-  if (typeof m.enteredRoomTick !== 'number') m.enteredRoomTick = Game.time;
-  if (!m.lastEnteredRoom) m.lastEnteredRoom = creep.pos.roomName;
   return m;
-}
-
-function trackRoomEntry(creep, mem) {
-  if (!creep || !mem) return;
-  if (mem.lastEnteredRoom !== creep.pos.roomName) {
-    mem.lastEnteredRoom = creep.pos.roomName;
-    mem.enteredRoomTick = Game.time;
-  }
-}
-
-function inRoomEntryGrace(creep, mem) {
-  if (!creep || !mem) return false;
-  if (typeof mem.enteredRoomTick !== 'number') return false;
-  return (Game.time - mem.enteredRoomTick) < ROOM_ENTRY_GRACE_TICKS;
 }
 
 function getIntelAge(roomName) {
@@ -549,81 +561,31 @@ function updateIntel(creep) {
   if (shouldLogIntel(room)) logRoomIntel(room);
   seedSourcesFromVision(room);
   var threatInfo = evaluateRoomThreat(room, 'Scout');
-  if (CombatDiplomacy && typeof CombatDiplomacy.observeRoomIntel === 'function') {
-    CombatDiplomacy.observeRoomIntel(room, getRoomIntel(room.name), 'ScoutTick');
-  }
   if (threatInfo && threatInfo.threat && threatInfo.threat.hasThreat && threatInfo.canEscalate) {
     ensureRemoteDefensePlan(room, threatInfo.threat, threatInfo.distance);
   }
   return threatInfo;
 }
 
-function shouldRetreat(creep, threatInfo, inEntryGrace) {
-  var score = (threatInfo && threatInfo.threat && typeof threatInfo.threat.score === 'number')
-    ? threatInfo.threat.score
-    : 0;
-  var hasThreat = !!(threatInfo && threatInfo.threat && threatInfo.threat.hasThreat);
-  if (hasThreat) {
-    if (inEntryGrace && score < HARD_RETREAT_THREAT_SCORE && creep.hits === creep.hitsMax) return false;
-    return score > 0;
-  }
+function shouldRetreat(creep, threatInfo) {
+  if (threatInfo && threatInfo.threat && threatInfo.threat.hasThreat && threatInfo.threat.score > 0) return true;
   var hostiles = (creep.room && creep.room.find) ? creep.room.find(FIND_HOSTILE_CREEPS) : [];
-  if (hostiles.length > 0 && creep.hits < creep.hitsMax) return true;
-  if (inEntryGrace && creep.hits === creep.hitsMax && hostiles.length <= 1) return false;
-  return hostiles.length > 0;
-}
-
-function isOnBorder(pos) {
-  return pos && (pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49);
-}
-
-// Movement discipline helper:
-// - guarantees this role issues at most ONE move intent per tick
-// - keeps movement boring/stable and prevents same-tick branch thrash
-function issueScoutMove(creep, target, opts) {
-  if (!creep || !target) return ERR_INVALID_TARGET;
-  if (creep.memory._scoutMoveTick === Game.time) return ERR_BUSY;
-  creep.memory._scoutMoveTick = Game.time;
-  return creep.travelTo(target, opts || {});
-}
-
-function stabilizeBorderOnEntry(creep, mem) {
-  if (!creep || !mem || !mem.targetRoom) return false;
-  if (creep.pos.roomName !== mem.targetRoom) return false;
-  if (!inRoomEntryGrace(creep, mem)) return false;
-  if (!isOnBorder(creep.pos)) return false;
-  if (creep.memory._scoutMoveTick === Game.time) return true;
-  var dir = null;
-  if (creep.pos.x === 0) dir = RIGHT;
-  else if (creep.pos.x === 49) dir = LEFT;
-  else if (creep.pos.y === 0) dir = BOTTOM;
-  else if (creep.pos.y === 49) dir = TOP;
-  if (!dir) return false;
-
-  var rc = MovementOwnership.move(creep, dir, "role.Scout.js/directStep", "role.Scout");
-  // Lock should only be consumed when move intent was accepted/already present.
-  // If the nudge fails, allow issueScoutMove -> Traveler fallback this tick so
-  // border entry does not stall and bounce back out.
-  if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
-    creep.memory._scoutMoveTick = Game.time;
-    return true;
-  }
-  return false;
+  return hostiles.length > 0 && creep.hits < creep.hitsMax;
 }
 
 function wanderRoom(creep) {
   if (creep.room && creep.room.controller) {
-    issueScoutMove(creep, creep.room.controller, { range: 3, reusePath: 10 });
+    creep.travelTo(creep.room.controller, { range: 3, reusePath: 10 });
     return;
   }
   var center = new RoomPosition(25, 25, creep.pos.roomName);
-  issueScoutMove(creep, center, { range: 10, reusePath: 10 });
+  creep.travelTo(center, { range: 10, reusePath: 10 });
 }
 
 function returnHome(creep, mem) {
   var homeRoom = mem.home || creep.pos.roomName;
   var anchor = new RoomPosition(25, 25, homeRoom);
-  issueScoutMove(creep, anchor, { range: 20, reusePath: PATH_REUSE });
+  creep.travelTo(anchor, { range: 20, reusePath: PATH_REUSE });
   if (creep.pos.roomName === homeRoom) {
     mem.state = STATE_IDLE;
     mem.targetRoom = null;
@@ -637,8 +599,6 @@ var roleScout = {
   role: 'Scout',
   run: function (creep) {
     var mem = ensureScoutMem(creep);
-    if (creep.memory._scoutMoveTick !== Game.time) delete creep.memory._scoutMoveTick;
-    trackRoomEntry(creep, mem);
 
     if (!mem.targetRoom) chooseTargetRoom(creep, mem);
     var state = refreshState(creep, mem);
@@ -654,16 +614,14 @@ var roleScout = {
         creep.memory.state = mem.state;
         return;
       }
-      issueScoutMove(creep, new RoomPosition(25, 25, mem.targetRoom), { range: 20, reusePath: PATH_REUSE });
+      creep.travelTo(new RoomPosition(25, 25, mem.targetRoom), { range: 20, reusePath: PATH_REUSE });
       return;
     }
 
     if (state === STATE_SCOUT) {
       if (!mem.arrivedAt) mem.arrivedAt = Game.time;
-      if (stabilizeBorderOnEntry(creep, mem)) return;
       var threatInfo = updateIntel(creep);
-      var entryGrace = inRoomEntryGrace(creep, mem) && mem.targetRoom && creep.pos.roomName === mem.targetRoom;
-      if (shouldRetreat(creep, threatInfo, entryGrace)) {
+      if (shouldRetreat(creep, threatInfo)) {
         mem.state = STATE_RETURN;
         creep.memory.state = mem.state;
         returnHome(creep, mem);

@@ -1,16 +1,4 @@
 
-'use strict';
-
-/**
- * Main loop orchestrator for BeeHiveMind.
- *
- * Beginner map:
- * 1) Refresh low-cost intel and maintenance caches.
- * 2) Run diplomacy so combat modules share one policy source.
- * 3) Run economy/combat/structure gameplay systems.
- * 4) Draw visuals and optional cosmetic pixel generation.
- */
-
 // Core utilities and shared config
 const CoreConfig = require('core.config');
 const Logger = require('core.logger');
@@ -22,7 +10,6 @@ const BeeHiveMind = require('BeeHiveMind');
 var BeeStructureLogic = require('BeeStructureLogic');
 const BeeToolbox = require('BeeToolbox');
 const BeeCombatSquads = require('BeeCombatSquads');
-const CombatDiplomacy = require('CombatDiplomacy');
 require('Traveler');
 
 const LOG_LEVEL = CoreConfig.LOG_LEVEL;
@@ -75,9 +62,6 @@ function maintainRepairTargets() {
     if (!Memory.rooms) Memory.rooms = {};
 
     for (const room of Object.values(Game.rooms)) {
-        // Only track repair targets for owned rooms. Caching every visible
-        // room (highway/remotes/hostile) grows Memory.rooms and wastes CPU.
-        if (!room.controller || !room.controller.my) continue;
         if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
         Memory.rooms[room.name].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
     }
@@ -88,7 +72,6 @@ function refreshSourceIntel() {
     if (Game.time % 3 !== 0) return;
 
     for (const room of Object.values(Game.rooms)) {
-        if (!BeeToolbox.isApprovedRemoteIntelRoom(room.name)) continue;
         BeeToolbox.logSourceContainersInRoom(room);
     }
 }
@@ -101,7 +84,7 @@ function maybeGeneratePixel() {
     if (!Game.cpu || typeof Game.cpu.generatePixel !== 'function') {
         return;
     }
-    // 2) Explicitly skip in SIM shard.
+    // 2) Explicityly skip in SIM shard.
     if (Game.shard && Game.shard.name === 'sim') {
         return;
     }
@@ -115,22 +98,10 @@ function maybeGeneratePixel() {
     if (Game.cpu.bucket < pixelCfg.bucketThreshold) return;
     if (pixelCfg.tickModulo > 1 && (Game.time % pixelCfg.tickModulo) !== 0) return;
     //--- Pixel Generation ---
-    const result = Game.cpu.generatePixel();
+    var result = Game.cpu.generatePixel();
     if (result === OK) {
         mainLog.info('Pixel generated successfully.');
     }
-}
-
-function shouldRunVisuals() {
-    var visualsCfg = (CoreConfig.settings && CoreConfig.settings.visuals) || {};
-    if (visualsCfg.enabled === false) return false;
-    // Visuals are optional; CPU bucket guard keeps gameplay systems safe.
-    if (Game.cpu && typeof Game.cpu.bucket === 'number') {
-        var minBucket = (typeof visualsCfg.minBucket === 'number') ? visualsCfg.minBucket : 0;
-        if (Game.cpu.bucket < minBucket) return false;
-    }
-    // Private/sim shards may not expose bucket; allow visuals in that case.
-    return true;
 }
 
 module.exports.loop = function () {
@@ -140,10 +111,6 @@ module.exports.loop = function () {
     maintainRepairTargets();
     ensureFirstSpawnMemory();
 
-    // Run diplomacy ledger before combat decisions so towers/squads share the
-    // latest watch/retaliation/manual-target policy context this tick.
-    CombatDiplomacy.runTick();
-
     // --- Primary AI behaviors ---
     BeeHiveMind.run();
     BeeStructureLogic.runTowerLogic();
@@ -151,11 +118,9 @@ module.exports.loop = function () {
     BeeCombatSquads.ensureSquadFlags();
 
     // --- Visual aids for quick debugging ---
-    if (shouldRunVisuals()) {
-        BeeVisuals.drawVisuals();
-        BeeVisuals.drawEnergyBar();
-        BeeVisuals.drawWorkerBeeTaskTable();
-    }
+    BeeVisuals.drawVisuals();
+    BeeVisuals.drawEnergyBar();
+    BeeVisuals.drawWorkerBeeTaskTable();
 
     // --- Less frequent maintenance ---
     if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {
@@ -164,3 +129,4 @@ module.exports.loop = function () {
 
     maybeGeneratePixel();
 };
+

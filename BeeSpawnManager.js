@@ -12,21 +12,8 @@
 var CoreLogger  = require('core.logger');
 var LOG_LEVEL   = CoreLogger.LOG_LEVEL;
 var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
-var CoreConfig  = require('core.config');
 
 var spawnLogic  = require('spawn.logic');
-var SpawnConstants = require('Spawn.Constants');
-var SpawnDebug = require('Spawn.Debug');
-var SpawnQueue = require('Spawn.Queue');
-var SpawnCounts = require('Spawn.Counts');
-var SpawnRoles = require('Spawn.Roles');
-var SpawnEconomy = require('Spawn.Economy');
-var SpawnBodyGuidance = require('Spawn.BodyGuidance');
-var SpawnFeedback = require('Spawn.Feedback');
-var SpawnStability = require('Spawn.Stability');
-var SpawnArbitration = require('Spawn.Arbitration');
-var SpawnQuotas = require('Spawn.Quotas');
-var RoomStagePolicy = require('Room.StagePolicy');
 var roleLuna    = require('role.Luna');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -37,35 +24,78 @@ var QUEUE_HARD_LIMIT      = 20;
 var DEBUG_SPAWN_QUEUE     = true;
 var DBG_EVERY             = 5;
 var INVADER_LOCK_TTL      = 1500;
-var DYING_SOON_TTL        = 60;
-var STABILITY_HISTORY_WINDOW = 150;
-var RECOVERY_MIN_HOLD_TICKS = 25;
-var RECOVERY_CLEAR_STABLE_TICKS = 15;
-var COMBAT_RELAX_AFTER_TICKS = 250;
-var BAND_BUDGET_MIN_SAMPLES = 5;
-var FEEDBACK_ALPHA = 0.20;
-var FEEDBACK_WINDOW_TICKS = 200;
-var SCOUT_STARVATION_TICKS = 20;
-var BUILDER_STARVATION_TICKS = 20;
 
-var RECOVERY_BAND_BUDGET_CAPS = {
-  COMBAT: 0.20,
-  GROWTH: 0.25,
-  SUPPORT: 0.20,
-  SITUATIONAL: 0.10
+var ROLE_PRIORITY = {
+  Baseharvest: 100,
+  Courier:      95,
+  Queen:        90,
+  Upgrader:     80,
+  Builder:      75,
+  Luna:         70,
+  Repair:       60,
+  Claimer:      55,
+  Scout:        40,
+  Trucker:      35,
+  Dismantler:   30,
+  CombatArcher: 25,
+  CombatMelee:  25,
+  CombatMedic:  25
 };
 
-var ROLE_PRIORITY = SpawnConstants.ROLE_PRIORITY;
-var ROLE_MIN_ENERGY = SpawnConstants.ROLE_MIN_ENERGY;
+var ROLE_MIN_ENERGY = {
+  Baseharvest: 200,
+  Courier:     150,
+  Queen:       200,
+  Upgrader:    200,
+  Builder:     200,
+  Luna:        250,
+  Repair:      200,
+  Claimer:     650,
+  Scout:       50,
+  Trucker:     200,
+  Dismantler:  150,
+  CombatArcher:200,
+  CombatMelee: 200,
+  CombatMedic: 200
+};
 
-var ROLE_BAND = SpawnConstants.ROLE_BAND;
-var BAND_PRIORITY_BONUS = SpawnConstants.BAND_PRIORITY_BONUS;
-var PROTECTED_ROLE_FLOORS = SpawnConstants.PROTECTED_ROLE_FLOORS;
-var FLOOR_ROLE_SET = SpawnConstants.FLOOR_ROLE_SET;
+var ROLE_ALIAS_MAP = (function () {
+  var map = Object.create(null);
+  var canon = [
+    'BaseHarvest',
+    'Builder',
+    'Courier',
+    'Repair',
+    'Upgrader',
+    'Dismantler',
+    'Luna',
+    'Scout',
+    'Queen',
+    'Trucker',
+    'Claimer',
+    'CombatArcher',
+    'CombatMedic',
+    'CombatMelee'
+  ];
+  for (var i = 0; i < canon.length; i++) {
+    var name = canon[i];
+    map[name] = name;
+    map[name.toLowerCase()] = name;
+  }
+  map.remoteharvest = 'Luna';
+  return map;
+})();
 
-var canonicalRole = SpawnRoles.canonicalRole;
-var roleBand = SpawnRoles.roleBand;
-var rolePriority = SpawnRoles.rolePriority;
+function canonicalRole(role) {
+  if (!role) return null;
+  var key = String(role);
+  if (ROLE_ALIAS_MAP[key]) return ROLE_ALIAS_MAP[key];
+  var lower = key.toLowerCase();
+  if (ROLE_ALIAS_MAP[lower]) return ROLE_ALIAS_MAP[lower];
+  var fallback = key.charAt(0).toUpperCase() + key.slice(1);
+  if (ROLE_ALIAS_MAP[fallback]) return ROLE_ALIAS_MAP[fallback];
+  return key;
+}
 
 // ------------------------------ Debug utils ------------------------------
 function tickEvery(n) {
@@ -101,651 +131,25 @@ function minEnergyFor(role) {
   return ROLE_MIN_ENERGY[role] || 200;
 }
 
-
-
-
-
-
-function plannerConfig() { return SpawnEconomy.plannerConfig(CoreConfig); }
-function classifyRoomMaturity(room) { return SpawnEconomy.classifyRoomMaturity(room); }
-function classifyEconomyState(room, maturity) { return SpawnEconomy.classifyEconomyState(room, maturity, CoreConfig); }
-
-function clampInt(n, min, max) {
-  if (n < min) return min;
-  if (n > max) return max;
-  return n;
-}
-
-function buildBacklogBucket(totalSites, criticalSites) {
-  if (criticalSites > 0 || totalSites >= 30) return 'CRITICAL';
-  if (totalSites >= 15) return 'HIGH';
-  if (totalSites >= 5) return 'MEDIUM';
-  if (totalSites > 0) return 'LOW';
-  return 'NONE';
-}
-
-function repairBacklogBucket(totalRepairs, criticalRepairs) {
-  return SpawnQuotas.repairBacklogBucket(totalRepairs, criticalRepairs);
-}
-
-function roleBodyGuidance(role, planner) {
-  return SpawnBodyGuidance.roleBodyGuidance(role, planner, canonicalRole);
-}
-
-function bodyCapIndexForRole(role, planner) {
-  return SpawnBodyGuidance.bodyCapIndexForRole(role, planner, canonicalRole);
-}
-
-function ensureSpawnDebug(roomName) {
-  return SpawnDebug.ensureSpawnDebug(roomName);
-}
-
-function compactEnergy(room) {
-  return {
-    energyAvailable: room ? (room.energyAvailable || 0) : 0,
-    energyCapacityAvailable: room ? (room.energyCapacityAvailable || 0) : 0
-  };
-}
-
-function emaUpdate(prev, sample, alpha) {
-  return SpawnFeedback.emaUpdate(prev, sample, alpha);
-}
-
-function ensureFeedbackState(debug) {
-  return SpawnFeedback.ensureFeedbackState(debug, FEEDBACK_WINDOW_TICKS, FEEDBACK_ALPHA);
-}
-
-function computeLunaRemoteROI(room, lunaSignal, economy, lunaFeedback) {
-  return SpawnFeedback.computeLunaRemoteROI(room, lunaSignal, economy, lunaFeedback);
-}
-
-function collectRoleActionCounts(C, room) {
-  return SpawnFeedback.collectRoleActionCounts(C, room, canonicalRole);
-}
-
-function ensureStabilityState(debug) {
-  return SpawnStability.ensureStabilityState(debug);
-}
-
-function pruneSpawnHistory(debug) {
-  return SpawnStability.pruneSpawnHistory(debug, STABILITY_HISTORY_WINDOW);
-}
-
-function pushSpawnHistory(debug, role, band, source, reason) {
-  return SpawnStability.pushSpawnHistory(debug, role, band, source, reason, STABILITY_HISTORY_WINDOW);
-}
-
-function computeBandUsage(debug) {
-  return SpawnStability.computeBandUsage(debug, STABILITY_HISTORY_WINDOW);
-}
-
-function computeUrgentBacklogSignals(room, plannerSignals) {
-  return SpawnQuotas.computeUrgentBacklogSignals(room, plannerSignals, {
-    countCriticalBuildBacklog: countCriticalBuildBacklog,
-    countCriticalRepairBacklog: countCriticalRepairBacklog
-  });
-}
-
-function budgetBlocksRole(arb, role, band, hasUrgentException) {
-  return SpawnArbitration.budgetBlocksRole(arb, role, band, hasUrgentException, { BAND_BUDGET_MIN_SAMPLES: BAND_BUDGET_MIN_SAMPLES, FLOOR_ROLE_SET: FLOOR_ROLE_SET });
-}
-
-function isUpgraderSafetyRequired(room) {
-  if (!room || !room.controller || !room.controller.my) return false;
-  var lvl = room.controller.level || 0;
-  if (lvl <= 2) return true;
-  var downgrade = room.controller.ticksToDowngrade || 0;
-  return downgrade > 0 && downgrade < 4000;
-}
-
-function countRoleWithQueue(C, roomName, role) {
-  var canonical = canonicalRole(role);
-  var live = getRoomLocalLiveCount(C, roomName, canonical);
-  var queued = queuedCount(roomName, canonical);
-  return { live: live, queued: queued, total: live + queued };
-}
-
-function getRoomLocalLiveCount(C, roomName, role) {
-  var canonical = canonicalRole(role);
-  if (!canonical) return 0;
-  if (canonical === 'Luna') {
-    return ((C && C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0);
-  }
-  if (canonical === 'Scout') {
-    return countScoutByHome(C, roomName);
-  }
-  // Planner quotas are computed per room, so default to room-local live counts
-  // for every non-combat role in that room.  This prevents one room's creeps
-  // from masking deficits in another room.
-  return countRoleInRoom(C, roomName, canonical);
-}
-
-function suppressedBandsForState(economyState, recoveryMode) {
-  return SpawnArbitration.suppressedBandsForState(economyState, recoveryMode);
-}
-
-function buildArbitrationState(C, room, roomName, quotas) {
-  var debug = ensureSpawnDebug(roomName);
-  var stability = ensureStabilityState(debug);
-  var planner = debug.planner || {};
-  var economy = planner.economyState || classifyEconomyState(room, classifyRoomMaturity(room));
-
-  var floors = {};
-  floors.BaseHarvest = (quotas.BaseHarvest > 0) ? PROTECTED_ROLE_FLOORS.BaseHarvest : 0;
-  floors.Courier = (quotas.Courier > 0) ? PROTECTED_ROLE_FLOORS.Courier : 0;
-  floors.Queen = (quotas.Queen > 0) ? PROTECTED_ROLE_FLOORS.Queen : 0;
-  floors.UpgraderSafety = isUpgraderSafetyRequired(room) ? 1 : 0;
-
-  var unmet = [];
-  var unmetSurvival = [];
-  var unmetEconomy = [];
-  var rolesToCheck = ['BaseHarvest', 'Courier', 'Queen'];
-  for (var i = 0; i < rolesToCheck.length; i++) {
-    var role = rolesToCheck[i];
-    var floor = floors[role] || 0;
-    if (floor <= 0) continue;
-    var counts = countRoleWithQueue(C, roomName, role);
-    if (counts.total < floor) {
-      unmet.push(role);
-      unmetSurvival.push(role);
-    }
-  }
-  if (floors.UpgraderSafety > 0) {
-    var upCounts = countRoleWithQueue(C, roomName, 'Upgrader');
-    if (upCounts.total < floors.UpgraderSafety) {
-      unmet.push('Upgrader');
-      unmetEconomy.push('Upgrader');
-    }
-  }
-
-  var queue = ensureRoomQueue(roomName);
-  var rawRecovery = false;
-  if (economy === 'CRITICAL') rawRecovery = true;
-  if (unmet.length > 0) rawRecovery = true;
-  if (queue.length >= 8 && unmet.length > 0) rawRecovery = true;
-
-  // Stage-3 hysteresis:
-  // - enter recovery immediately when raw trigger is true
-  // - once active, require a minimum hold duration and a stable clear window
-  //   before exiting, to prevent rapid on/off flapping.
-  var rec = stability.recovery;
-  if (rawRecovery) {
-    if (!rec.active) {
-      rec.active = true;
-      rec.enteredAt = Game.time;
-    }
-    rec.clearSince = null;
-    rec.reason = 'RECOVERY_TRIGGER';
-  } else if (rec.active) {
-    var held = rec.enteredAt != null ? (Game.time - rec.enteredAt) : 0;
-    if (held < RECOVERY_MIN_HOLD_TICKS) {
-      rec.reason = 'HOLD_MIN_TICKS';
-    } else {
-      if (rec.clearSince == null) rec.clearSince = Game.time;
-      var clearFor = Game.time - rec.clearSince;
-      if (clearFor >= RECOVERY_CLEAR_STABLE_TICKS) {
-        rec.active = false;
-        rec.enteredAt = null;
-        rec.clearSince = null;
-        rec.reason = 'CLEARED_STABLE';
-      } else {
-        rec.reason = 'HOLD_CLEAR_WINDOW';
-      }
-    }
-  } else {
-    rec.reason = 'STABLE';
-  }
-  var recoveryMode = rec.active;
-  var recoveryActiveDuration = rec.active && rec.enteredAt != null ? (Game.time - rec.enteredAt) : 0;
-  var clearStableTicks = rec.clearSince != null ? (Game.time - rec.clearSince) : 0;
-  rec.activeDuration = recoveryActiveDuration;
-  rec.clearStableTicks = clearStableTicks;
-  rec.minHoldTicks = RECOVERY_MIN_HOLD_TICKS;
-  rec.clearStableTarget = RECOVERY_CLEAR_STABLE_TICKS;
-  rec.lastRawTrigger = rawRecovery;
-
-  // Starvation duration tracking for critical floor roles + optional Builder/Repair.
-  var starvation = stability.starvation;
-  var trackedRoles = ['BaseHarvest', 'Courier', 'Queen', 'Builder', 'Repair'];
-  for (var sr = 0; sr < trackedRoles.length; sr++) {
-    var trackedRole = trackedRoles[sr];
-    var isUnmet = false;
-    if (trackedRole === 'Builder') {
-      isUnmet = ((quotas.Builder || 0) > 0) && (countRoleWithQueue(C, roomName, 'Builder').total <= 0);
-    } else if (trackedRole === 'Repair') {
-      isUnmet = ((quotas.Repair || 0) > 0) && (countRoleWithQueue(C, roomName, 'Repair').total <= 0);
-    } else {
-      for (var um = 0; um < unmetSurvival.length; um++) {
-        if (unmetSurvival[um] === trackedRole) { isUnmet = true; break; }
-      }
-    }
-    if (isUnmet) {
-      if (starvation[trackedRole].since == null) starvation[trackedRole].since = Game.time;
-      starvation[trackedRole].duration = Game.time - starvation[trackedRole].since;
-      starvation[trackedRole].unmet = true;
-      starvation[trackedRole].lastTick = Game.time;
-    } else {
-      starvation[trackedRole].since = null;
-      starvation[trackedRole].duration = 0;
-      starvation[trackedRole].unmet = false;
-      starvation[trackedRole].lastTick = Game.time;
-    }
-  }
-
-  var suppressedBands = suppressedBandsForState(economy, recoveryMode);
-  var bandUsage = computeBandUsage(debug);
-
-  var urgentBacklog = computeUrgentBacklogSignals(room, planner.signals || null);
-  var roleTotals = {
-    Builder: countRoleWithQueue(C, roomName, 'Builder').total,
-    Scout: countRoleWithQueue(C, roomName, 'Scout').total,
-    Repair: countRoleWithQueue(C, roomName, 'Repair').total
-  };
-
-  var arbitrationState = {
-    tick: Game.time,
-    economyState: economy,
-    rawRecovery: rawRecovery,
-    recoveryMode: recoveryMode,
-    recoveryHoldReason: rec.reason,
-    recoveryEnterTick: rec.enteredAt,
-    recoveryActiveDuration: recoveryActiveDuration,
-    recoveryMinHoldTicks: RECOVERY_MIN_HOLD_TICKS,
-    recoveryClearStableTarget: RECOVERY_CLEAR_STABLE_TICKS,
-    recoveryClearStableTicks: clearStableTicks,
-    floors: floors,
-    unmetFloors: unmet,
-    unmetSurvivalFloors: unmetSurvival,
-    unmetEconomyFloors: unmetEconomy,
-    starvationDuration: {
-      BaseHarvest: starvation.BaseHarvest.duration,
-      Courier: starvation.Courier.duration,
-      Queen: starvation.Queen.duration,
-      Builder: starvation.Builder.duration,
-      Repair: starvation.Repair.duration
-    },
-    starvationState: starvation,
-    suppressedBands: suppressedBands,
-    urgentBacklog: urgentBacklog,
-    roleTotals: roleTotals,
-    bandUsageWindow: STABILITY_HISTORY_WINDOW,
-    bandUsage: bandUsage,
-    bandBudgetWindow: {
-      ticks: STABILITY_HISTORY_WINDOW,
-      samples: bandUsage.total,
-      counts: bandUsage.counts,
-      shares: bandUsage.shares,
-      caps: RECOVERY_BAND_BUDGET_CAPS,
-      overCap: {
-        SURVIVAL: false,
-        ECONOMY: false,
-        GROWTH: bandUsage.shares.GROWTH > RECOVERY_BAND_BUDGET_CAPS.GROWTH,
-        SUPPORT: bandUsage.shares.SUPPORT > RECOVERY_BAND_BUDGET_CAPS.SUPPORT,
-        SITUATIONAL: bandUsage.shares.SITUATIONAL > RECOVERY_BAND_BUDGET_CAPS.SITUATIONAL,
-        COMBAT: bandUsage.shares.COMBAT > RECOVERY_BAND_BUDGET_CAPS.COMBAT
-      }
-    },
-    budgetCaps: RECOVERY_BAND_BUDGET_CAPS,
-    blockedRoleReasons: {}
-  };
-  arbitrationState.energyAvailable = room && typeof room.energyAvailable === 'number' ? room.energyAvailable : 0;
-  debug.arbitration = arbitrationState;
-  return arbitrationState;
-}
-
-function isEmergencyDefenseNeeded(roomName) {
-  return SpawnArbitration.isEmergencyDefenseNeeded(roomName, { SquadFlagIntel: SquadFlagIntel });
-}
-
-function recordBlockedRoleReason(debug, role, reason) {
-  return SpawnArbitration.recordBlockedRoleReason(debug, role, reason);
-}
-
-function canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas) {
-  return SpawnArbitration.canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas, {
-    canonicalRole: canonicalRole,
-    minEnergyFor: minEnergyFor,
-    PROTECTED_ROLE_FLOORS: PROTECTED_ROLE_FLOORS,
-    FLOOR_ROLE_SET: FLOOR_ROLE_SET,
-    getRoomLocalLiveCount: getRoomLocalLiveCount
-  });
-}
-
-function queueItemAllowed(item, arb) {
-  return SpawnArbitration.queueItemAllowed(item, arb, {
-    canonicalRole: canonicalRole,
-    roleBand: roleBand,
-    FLOOR_ROLE_SET: FLOOR_ROLE_SET,
-    BUILDER_STARVATION_TICKS: BUILDER_STARVATION_TICKS,
-    SCOUT_STARVATION_TICKS: SCOUT_STARVATION_TICKS,
-    minEnergyFor: minEnergyFor,
-    canSpawnQueuedRoleSimple: canSpawnQueuedRoleSimple
-  });
-}
-
+// ------------------------------ Spawn Queue ------------------------------
 function ensureRoomQueue(roomName) {
-  return SpawnQueue.ensureRoomQueue(roomName);
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  if (!Array.isArray(Memory.rooms[roomName].spawnQueue)) {
+    Memory.rooms[roomName].spawnQueue = [];
+  }
+  return Memory.rooms[roomName].spawnQueue;
 }
 
 function queuedCount(roomName, role) {
-  return SpawnQueue.queuedCount(roomName, role);
-}
-
-function spawningRoleCount(roomName, role) {
-  var canonical = canonicalRole(role);
-  if (!canonical) return 0;
-  var room = Game.rooms[roomName];
-  if (!room || typeof room.find !== 'function') return 0;
-  var spawns = room.find(FIND_MY_SPAWNS) || [];
-  var count = 0;
-  for (var i = 0; i < spawns.length; i++) {
-    var spawning = spawns[i].spawning;
-    if (!spawning) continue;
-    var c = Game.creeps[spawning.name];
-    if (!c || !c.memory) continue;
-    var spawnRole = canonicalRole(c.memory.role || c.memory.task);
-    if (spawnRole === canonical) count += 1;
-  }
-  return count;
-}
-
-function plannedRoleCount(C, roomName, role) {
-  var canonical = canonicalRole(role);
-  if (!canonical) return 0;
-  var live = getRoomLocalLiveCount(C, roomName, canonical);
-  var queued = queuedCount(roomName, canonical);
-  var spawning = spawningRoleCount(roomName, canonical);
-  return live + queued + spawning;
-}
-
-function roleCapForRoom(C, room, roomName, role, quotas) {
-  var canonical = canonicalRole(role);
-  if (!canonical) return 0;
-  var q = quotas || {};
-  if (canonical === 'BaseHarvest') {
-    var sourceCount = 0;
-    if (room && typeof room.find === 'function') sourceCount = (room.find(FIND_SOURCES) || []).length;
-    return Math.max(0, (typeof q.BaseHarvest === 'number') ? q.BaseHarvest : sourceCount);
-  }
-  if (canonical === 'Queen') return 1;
-  if (canonical === 'Scout') return 1;
-  if (canonical === 'Builder') {
-    var builderQuota = Math.max(0, q.Builder || 0);
-    if (builderQuota > 0) return builderQuota;
-    var builderQueued = queuedCount(roomName, 'Builder');
-    var builderLive = getRoomLocalLiveCount(C, roomName, 'Builder');
-    if (builderQueued > 0 && builderLive <= 0) return 1;
-    return 0;
-  }
-  if (canonical === 'Upgrader') {
-    var base = Math.max(0, q.Upgrader || 0);
-    return Math.max(base, isUpgraderSafetyRequired(room) ? 1 : 0);
-  }
-  if (canonical === 'Courier' || canonical === 'Repair' || canonical === 'Luna' ||
-      canonical === 'Trucker' || canonical === 'Claimer' || canonical === 'Dismantler') {
-    return Math.max(0, q[canonical] || 0);
-  }
-  return Math.max(0, q[canonical] || 0);
-}
-
-function getQueuedRoleItems(roomName, roleName) {
-  var q = ensureRoomQueue(roomName);
-  var target = canonicalRole(roleName);
-  var items = [];
-  for (var i = 0; i < q.length; i++) {
-    var it = q[i];
-    if (!it || !it.role) continue;
-    if (canonicalRole(it.role) !== target) continue;
-    items.push(it);
-  }
-  return items;
-}
-
-function countRoleInRoom(C, roomName, roleName) {
-  return SpawnCounts.countRoleInRoom(C, roomName, roleName, canonicalRole, DYING_SOON_TTL);
-}
-
-function getScoutHomeFromMemory(memory) {
-  if (!memory) return null;
-  if (memory.home) return memory.home;
-  if (memory._home) return memory._home;
-  if (memory.scout && memory.scout.home) return memory.scout.home;
-  return null;
-}
-
-function countScoutByHome(C, roomName) {
-  // Scout counting remains HOME_AWARE so remote-traveling scouts are counted
-  // against their owning home room rather than current room location.
-  return SpawnCounts.countScoutByHome(C, roomName, canonicalRole, DYING_SOON_TTL);
-}
-
-function countWorkParts(body) {
-  if (!body || !body.length) return 0;
-  var work = 0;
-  for (var i = 0; i < body.length; i++) {
-    var part = body[i];
-    var partType = part && part.type ? part.type : part;
-    if (partType === WORK) work += 1;
-  }
-  return work;
-}
-
-function creepWorkParts(creep) {
-  if (!creep) return 0;
-  if (typeof creep.getActiveBodyparts === 'function') {
-    return creep.getActiveBodyparts(WORK);
-  }
-  return countWorkParts(creep.body || []);
-}
-
-function getBaseHarvestLiveWork(C, roomName) {
-  if (!C || !C.creeps || !roomName) return 0;
-  var total = 0;
-  for (var i = 0; i < C.creeps.length; i++) {
-    var creep = C.creeps[i];
-    if (!creep || !creep.my || !creep.room || creep.room.name !== roomName) continue;
-    var ttl = creep.ticksToLive;
-    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
-    var role = creep.memory && (creep.memory.role || creep.memory.task);
-    if (canonicalRole(role) !== 'BaseHarvest') continue;
-    total += creepWorkParts(creep);
-  }
-  return total;
-}
-
-function getPlannedBaseHarvestBody(roomName) {
-  var room = Game.rooms[roomName];
-  var energy = room ? (room.energyAvailable || 0) : 0;
-  var body = null;
-  if (spawnLogic && typeof spawnLogic.getBodyForRole === 'function') {
-    body = spawnLogic.getBodyForRole('BaseHarvest', energy);
-  }
-  if (!body || !body.length) {
-    var cfg = spawnLogic && spawnLogic.ROLE_CONFIGS && spawnLogic.ROLE_CONFIGS.BaseHarvest;
-    if (cfg && cfg.length) body = cfg[cfg.length - 1];
-  }
-  return body || [];
-}
-
-function getBaseHarvestQueuedWork(roomName) {
-  var items = getQueuedRoleItems(roomName, 'BaseHarvest');
-  if (!items.length) return 0;
-  var body = getPlannedBaseHarvestBody(roomName);
-  var perCreepWork = Math.max(1, countWorkParts(body));
-  return items.length * perCreepWork;
-}
-
-function countCoveredSourcesByMiner(C, room) {
-  if (!C || !C.creeps || !room) return 0;
-  var covered = Object.create(null);
-  for (var i = 0; i < C.creeps.length; i++) {
-    var creep = C.creeps[i];
-    if (!creep || !creep.my || !creep.room || creep.room.name !== room.name) continue;
-    var ttl = creep.ticksToLive;
-    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
-    var role = creep.memory && (creep.memory.role || creep.memory.task);
-    if (canonicalRole(role) !== 'BaseHarvest') continue;
-    var sid = creep.memory && creep.memory.assignedSource;
-    if (!sid) continue;
-    covered[sid] = true;
-  }
-  return Object.keys(covered).length;
-}
-
-function computeBaseHarvestWorkTarget(room, C) {
-  if (!room) return 0;
-  var sources = room.find(FIND_SOURCES);
-  var sourceCount = sources ? sources.length : 0;
-  if (sourceCount <= 0) return 0;
-
-  // Baseline saturation math for normal home sources: 5 WORK each.
-  var target = sourceCount * 5;
-
-  // Simple, stable uptime buffer:
-  // without collectors, miners lose time offloading instead of pure harvesting.
-  var collectorCount = countRoleInRoom(C, room.name, 'Courier') + countRoleInRoom(C, room.name, 'Queen');
-  if (collectorCount <= 0) {
-    target += sourceCount;
-  }
-
-  // If source containers are not built yet, add a tiny buffer for movement churn.
-  var missingContainers = 0;
-  for (var i = 0; i < sourceCount; i++) {
-    var containers = sources[i].pos.findInRange(FIND_STRUCTURES, 1, {
-      filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
-    });
-    if (!containers || !containers.length) {
-      missingContainers += 1;
-    }
-  }
-  target += missingContainers;
-
-  return target;
-}
-
-
-function collectBaseHarvestSourceState(C, roomName, sources) {
-  var state = { liveBySource: Object.create(null), lowTtlBySource: Object.create(null), unassignedLive: 0, sourceIds: [] };
-  for (var i = 0; i < sources.length; i++) {
-    var sid = sources[i] && sources[i].id;
-    if (sid) state.sourceIds.push(sid);
-  }
-  if (!C || !C.creeps) return state;
-  for (var j = 0; j < C.creeps.length; j++) {
-    var creep = C.creeps[j];
-    if (!creep || !creep.my || !creep.room || creep.room.name !== roomName) continue;
-    var role = creep.memory && (creep.memory.role || creep.memory.task);
-    if (canonicalRole(role) !== 'BaseHarvest') continue;
-    var sidLive = creep.memory && creep.memory.assignedSource;
-    if (sidLive) {
-      state.liveBySource[sidLive] = (state.liveBySource[sidLive] || 0) + 1;
-      var ttl = typeof creep.ticksToLive === 'number' ? creep.ticksToLive : null;
-      if (ttl !== null && ttl > 0 && ttl <= DYING_SOON_TTL) state.lowTtlBySource[sidLive] = true;
-    } else {
-      state.unassignedLive += 1;
-    }
-  }
-  return state;
-}
-
-function countQueuedOrSpawningSourceReplacement(roomName, sourceId) {
   var q = ensureRoomQueue(roomName);
   var count = 0;
   for (var i = 0; i < q.length; i++) {
-    var it = q[i];
-    if (!it || canonicalRole(it.role) !== 'BaseHarvest') continue;
-    if ((it.assignedSource || null) === sourceId) count += 1;
-  }
-  var room = Game.rooms[roomName];
-  if (room) {
-    var spawns = room.find(FIND_MY_SPAWNS) || [];
-    for (var s = 0; s < spawns.length; s++) {
-      var spawning = spawns[s].spawning;
-      if (!spawning) continue;
-      var c = Game.creeps[spawning.name];
-      if (!c || !c.memory) continue;
-      if (canonicalRole(c.memory.role || c.memory.task) !== 'BaseHarvest') continue;
-      if ((c.memory.assignedSource || null) === sourceId) count += 1;
+    if (q[i] && q[i].role === role) {
+      count++;
     }
   }
   return count;
-}
-
-function summarizeBaseHarvestQueueState(roomName) {
-  var q = ensureRoomQueue(roomName);
-  var queuedTotal = 0;
-  var queuedBySource = Object.create(null);
-  for (var i = 0; i < q.length; i++) {
-    var it = q[i];
-    if (!it || canonicalRole(it.role) !== 'BaseHarvest') continue;
-    queuedTotal += 1;
-    if (!it.assignedSource) continue;
-    queuedBySource[it.assignedSource] = (queuedBySource[it.assignedSource] || 0) + 1;
-  }
-  var spawningTotal = 0;
-  var spawningBySource = Object.create(null);
-  var room = Game.rooms[roomName];
-  if (room) {
-    var spawns = room.find(FIND_MY_SPAWNS) || [];
-    for (var s = 0; s < spawns.length; s++) {
-      var spawning = spawns[s].spawning;
-      if (!spawning) continue;
-      var c = Game.creeps[spawning.name];
-      if (!c || canonicalRole(c.memory && (c.memory.role || c.memory.task)) !== 'BaseHarvest') continue;
-      spawningTotal += 1;
-      if (!c.memory || !c.memory.assignedSource) continue;
-      spawningBySource[c.memory.assignedSource] = (spawningBySource[c.memory.assignedSource] || 0) + 1;
-    }
-  }
-  return { queuedTotal: queuedTotal, spawningTotal: spawningTotal, queuedBySource: queuedBySource, spawningBySource: spawningBySource };
-}
-
-function computeBaseHarvestQuotaDynamic(C, room) {
-  if (!room) return 0;
-  var sources = room.find(FIND_SOURCES);
-  var sourceCount = sources ? sources.length : 0;
-  if (sourceCount <= 0) return 0;
-
-  var state = collectBaseHarvestSourceState(C, room.name, sources);
-  var replacementNeeded = 0;
-  for (var i = 0; i < state.sourceIds.length; i++) {
-    var sid = state.sourceIds[i];
-    if (!state.lowTtlBySource[sid]) continue;
-    if (countQueuedOrSpawningSourceReplacement(room.name, sid) > 0) continue;
-    replacementNeeded += 1;
-  }
-
-  var quota = sourceCount + Math.min(1, replacementNeeded);
-  var maxWithOverlap = sourceCount + 1;
-  if (quota > maxWithOverlap) quota = maxWithOverlap;
-
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-  if (!Memory.rooms[room.name].spawnDebug) Memory.rooms[room.name].spawnDebug = {};
-  var queueSummary = summarizeBaseHarvestQueueState(room.name);
-  var liveTotal = getRoomLocalLiveCount(C, room.name, 'BaseHarvest');
-  var plannedTotal = liveTotal + queueSummary.queuedTotal + queueSummary.spawningTotal;
-  Memory.rooms[room.name].spawnDebug.baseHarvest = {
-    sourceCount: sourceCount,
-    sourceIds: state.sourceIds.slice(),
-    perSourceLive: state.liveBySource,
-    unassignedLive: state.unassignedLive,
-    lowTtlSources: Object.keys(state.lowTtlBySource),
-    liveTotal: liveTotal,
-    queuedTotal: queueSummary.queuedTotal,
-    spawningTotal: queueSummary.spawningTotal,
-    plannedTotal: plannedTotal,
-    allowedCap: quota,
-    overCap: plannedTotal > quota,
-    suppressedReasons: [],
-    queuedBySource: queueSummary.queuedBySource,
-    spawningBySource: queueSummary.spawningBySource,
-    queuedReasons: [],
-    replacementNeeded: replacementNeeded,
-    quota: quota
-  };
-
-  return Math.max(0, quota);
 }
 
 function enqueue(roomName, role, opts) {
@@ -758,26 +162,18 @@ function enqueue(roomName, role, opts) {
   // Teaching habit: build objects in a single literal so it is obvious which
   // metadata we persist for each queued role.
   var item = {
-    role: canonicalRole(role),
+    role: role,
     home: roomName,
     created: Game.time,
-    priority: rolePriority(role),
+    priority: ROLE_PRIORITY[role] || 0,
     retryAt: 0
   };
-  var seq = Memory.__spawnQueueSeq || 0;
-  item.id = item.id || (String(Game.time) + ':' + String(item.role) + ':' + String(seq));
-  Memory.__spawnQueueSeq = seq + 1;
   if (opts) {
     for (var key in opts) {
       if (Object.prototype.hasOwnProperty.call(opts, key)) {
         item[key] = opts[key];
       }
     }
-  }
-  if (item.role === 'Scout') {
-    item.home = roomName;
-    if (!item.scout || typeof item.scout !== 'object') item.scout = {};
-    item.scout.home = roomName;
   }
 
   q.push(item);
@@ -801,62 +197,25 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   // waste CPU dequeuing later.
   var remaining = {};
   var quotaRoles = Object.keys(quotas);
-  var room = Game.rooms[roomName];
   for (var i = 0; i < quotaRoles.length; i++) {
     var role = quotaRoles[i];
     var canonical = canonicalRole(role);
-    if (canonical === 'CombatArcher' || canonical === 'CombatMelee' || canonical === 'CombatMedic') continue;
-    var active = getRoomLocalLiveCount(C, roomName, canonical);
-    var spawning = spawningRoleCount(roomName, canonical);
-    var cap = roleCapForRoom(C, room, roomName, canonical, quotas);
-    remaining[canonical] = Math.max(0, cap - active - spawning);
+    var active = (canonical === 'Luna')
+      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
+      : (C.roleCounts[canonical] || 0);
+    remaining[role] = Math.max(0, (quotas[role] || 0) - active);
   }
-  var sourceCount = 0;
-  if (room && typeof room.find === 'function') sourceCount = (room.find(FIND_SOURCES) || []).length;
-  var baseHarvestCap = quotas && typeof quotas.BaseHarvest === 'number' ? quotas.BaseHarvest : sourceCount;
-  var baseHarvestLive = getRoomLocalLiveCount(C, roomName, 'BaseHarvest');
-  var baseHarvestSpawning = summarizeBaseHarvestQueueState(roomName).spawningTotal || 0;
+
   var kept = [];
   var used = Object.create(null);
-  var keptBaseHarvest = 0;
   for (var j = 0; j < q.length; j++) {
     var it = q[j];
     if (!it) continue;
-    if (!it.role) continue;
-    var canonicalItemRole = canonicalRole(it.role);
-    if (!canonicalItemRole) continue;
-    it.role = canonicalItemRole;
-    var left = Object.prototype.hasOwnProperty.call(remaining, canonicalItemRole) ? remaining[canonicalItemRole] : Infinity;
-    var usedSoFar = used[canonicalItemRole] || 0;
-    if (canonicalItemRole === "BaseHarvest" && (baseHarvestLive + baseHarvestSpawning + keptBaseHarvest) >= baseHarvestCap) continue;
-    if (canonicalItemRole === "BaseHarvest" && it.assignedSource) {
-      var liveForSource = 0;
-      var lowTtlIncumbent = false;
-      if (C && C.creeps) {
-        for (var ci = 0; ci < C.creeps.length; ci++) {
-          var c = C.creeps[ci];
-          if (!c || !c.my || !c.room || c.room.name !== roomName) continue;
-          if (canonicalRole(c.memory && (c.memory.role || c.memory.task)) !== "BaseHarvest") continue;
-          if ((c.memory && c.memory.assignedSource) === it.assignedSource) {
-            liveForSource += 1;
-            var ttl = typeof c.ticksToLive === 'number' ? c.ticksToLive : null;
-            if (ttl !== null && ttl > 0 && ttl <= DYING_SOON_TTL) lowTtlIncumbent = true;
-          }
-        }
-      }
-      var allowHandoff = liveForSource > 0;
-      if (!allowHandoff || !lowTtlIncumbent) continue;
-      if (countQueuedOrSpawningSourceReplacement(roomName, it.assignedSource) > 1) continue;
-      if (usedSoFar >= Math.max(left, 1)) continue;
-      kept.push(it);
-      keptBaseHarvest += 1;
-      used[canonicalItemRole] = usedSoFar + 1;
-      continue;
-    }
+    var left = remaining[it.role] || 0;
+    var usedSoFar = used[it.role] || 0;
     if (usedSoFar < left) {
       kept.push(it);
-      if (canonicalItemRole === "BaseHarvest") keptBaseHarvest += 1;
-      used[canonicalItemRole] = usedSoFar + 1;
+      used[it.role] = usedSoFar + 1;
     }
   }
   Memory.rooms[roomName].spawnQueue = kept;
@@ -887,486 +246,10 @@ function getBuilderNeed(C, room) {
   return need;
 }
 
-function getRepairBacklog(room) {
-  if (!room || !Memory.rooms || !Memory.rooms[room.name]) return 0;
-  var list = Memory.rooms[room.name].repairTargets;
-  if (!Array.isArray(list)) return 0;
-  return list.length;
-}
-
-function getRepairWorkloadSummary(room) {
-  if (!room || !Memory.rooms || !Memory.rooms[room.name]) return null;
-  var maint = Memory.rooms[room.name]._maint;
-  if (!maint || !maint.repairWorkload) return null;
-  return maint.repairWorkload;
-}
-
-function countCriticalBuildBacklog(room) {
-  return SpawnQuotas.countCriticalBuildBacklog(room);
-}
-
-function countCriticalRepairBacklog(room) {
-  return SpawnQuotas.countCriticalRepairBacklog(room);
-}
-
-function summarizeCriticalRepairCount(workload, fallbackCriticalCount) {
-  if (!workload || !workload.categories) return fallbackCriticalCount || 0;
-  var critical = (workload.categories.critical && workload.categories.critical.count) || 0;
-  var emergency = workload.emergencyCriticalCount || 0;
-  return critical + emergency;
-}
-
-function computeNonCombatPlan(C, room, debug) {
-  var maturity = classifyRoomMaturity(room);
-  var economy = classifyEconomyState(room, maturity);
-  var localSites = C.roomSiteCounts[room.name] || 0;
-  var remotes = C.remotesByHome[room.name] || [];
-  var remoteCount = remotes.length;
-  var remoteSites = 0;
-  for (var i = 0; i < remotes.length; i++) {
-    remoteSites += (C.roomSiteCounts[remotes[i]] || 0);
-  }
-  var totalSites = localSites + remoteSites;
-  var repairBacklogRaw = getRepairBacklog(room);
-  var repairWorkload = getRepairWorkloadSummary(room);
-  var repairBacklog = repairWorkload && typeof repairWorkload.totalCount === 'number'
-    ? repairWorkload.totalCount
-    : repairBacklogRaw;
-  var criticalBuildBacklog = countCriticalBuildBacklog(room);
-  var criticalRepairBacklogRaw = countCriticalRepairBacklog(room);
-  var criticalRepairBacklog = summarizeCriticalRepairCount(repairWorkload, criticalRepairBacklogRaw);
-  var repairMeaningfulScore = repairWorkload && typeof repairWorkload.meaningfulScore === 'number'
-    ? repairWorkload.meaningfulScore
-    : repairBacklog;
-  var repairRoadNetwork = repairWorkload && repairWorkload.roadNetwork
-    ? repairWorkload.roadNetwork
-    : null;
-  var lunaSignal = determineLunaQuota(C, room);
-  var lunaDesired = lunaSignal.desired;
-  var buildBucket = buildBacklogBucket(totalSites, criticalBuildBacklog);
-  var repairBucket = repairBacklogBucket(repairBacklog, criticalRepairBacklog);
-  var repairDemandReason = 'REPAIR_BUCKET_' + repairBucket;
-  if (repairWorkload && repairWorkload.emergencyCriticalCount > 0) {
-    repairDemandReason = 'REPAIR_EMERGENCY_CRITICAL';
-  } else if (repairMeaningfulScore >= 4) {
-    repairDemandReason = 'REPAIR_MEANINGFUL_PRESSURE_HIGH';
-  } else if (repairMeaningfulScore >= 2) {
-    repairDemandReason = 'REPAIR_MEANINGFUL_PRESSURE_MED';
-  } else if (repairMeaningfulScore > 0) {
-    repairDemandReason = 'REPAIR_MEANINGFUL_PRESSURE_LOW';
-  }
-  var recoveryBias = (economy === 'CRITICAL') ||
-    ((economy === 'STRAINED') && (criticalBuildBacklog > 0 || criticalRepairBacklog > 0));
-
-  var desired = {
-    Courier: 2,
-    Queen: 1,
-    Upgrader: 1,
-    Builder: 0,
-    Scout: 1,
-    Luna: lunaDesired,
-    Repair: 0,
-    Trucker: 0,
-    Claimer: 0
-  };
-
-  var demandClampReasons = {};
-  var plannerAdjustments = {
-    demand: { Courier: 0, Builder: 0, Repair: 0, Luna: 0, Upgrader: 0 },
-    bodyBias: { Courier: 0, Builder: 0, Repair: 0, Luna: 0, Upgrader: 0 },
-    basis: { Courier: 'NONE', Builder: 'NONE', Repair: 'NONE', Luna: 'NONE', Upgrader: 'NONE' },
-    reasons: []
-  };
-
-  if (economy === 'CRITICAL') {
-    desired.Courier = (remoteCount > 0) ? 2 : 1;
-    desired.Upgrader = 0;
-    // Keep at least one upgrader before mature economy infrastructure exists.
-    // Without this guard, rooms that classify as CRITICAL pre-storage can
-    // become permanently stuck with zero upgrade throughput.
-    if (!room.storage && !room.terminal) {
-      desired.Upgrader = 1;
-      demandClampReasons.UpgraderBootstrap = 'CRITICAL_BOOTSTRAP_KEEP_ONE';
-    }
-    desired.Builder = (buildBucket === 'CRITICAL' || buildBucket === 'HIGH' || buildBucket === 'MEDIUM') ? 1 : 0;
-    desired.Repair = (repairBucket === 'CRITICAL') ? 1 : 0;
-    desired.Luna = Math.min(lunaDesired, remoteCount > 0 ? 1 : 0);
-    demandClampReasons.Courier = 'CRITICAL_KEEP_SMALL_FAST';
-    demandClampReasons.Upgrader = 'CRITICAL_CONSERVE';
-    demandClampReasons.Builder = 'CRITICAL_BUILD_BOUND';
-    demandClampReasons.Repair = 'CRITICAL_REPAIR_ONLY';
-    demandClampReasons.Luna = 'CRITICAL_REMOTE_BOUND';
-  } else if (economy === 'STRAINED') {
-    desired.Courier = (maturity === 'EARLY') ? 1 : 2;
-    if (remoteCount >= 2) desired.Courier += 1;
-    desired.Courier = clampInt(desired.Courier, 1, 3);
-    desired.Upgrader = 1;
-    if (buildBucket === 'CRITICAL' || buildBucket === 'HIGH') desired.Builder = 2;
-    else if (buildBucket === 'MEDIUM') desired.Builder = 1;
-    else desired.Builder = 0;
-    desired.Repair = (repairBucket === 'CRITICAL' || repairBucket === 'HIGH') ? 1 : 0;
-    desired.Luna = Math.min(lunaDesired, Math.max(1, remoteCount));
-    demandClampReasons.Courier = 'STRAINED_REMOTE_AWARE';
-    demandClampReasons.Builder = 'STRAINED_BUILD_BOUND';
-    demandClampReasons.Repair = 'STRAINED_REPAIR_BOUND';
-    demandClampReasons.Upgrader = 'STRAINED_KEEP_ONE';
-    demandClampReasons.Luna = 'STRAINED_REMOTE_CLAMP';
-  } else if (economy === 'HEALTHY') {
-    desired.Courier = (maturity === 'LATE' || maturity === 'ENDGAME') ? 3 : 2;
-    if (remoteCount >= 2) desired.Courier += 1;
-    desired.Courier = clampInt(desired.Courier, 2, 4);
-    desired.Upgrader = (maturity === 'EARLY') ? 1 : 2;
-    if (buildBucket === 'CRITICAL') desired.Builder = 3;
-    else if (buildBucket === 'HIGH') desired.Builder = 2;
-    else if (buildBucket === 'MEDIUM') desired.Builder = 1;
-    else desired.Builder = 0;
-    if (repairBucket === 'CRITICAL') desired.Repair = 2;
-    else if (repairBucket === 'HIGH' || repairBucket === 'MEDIUM') desired.Repair = 1;
-    else desired.Repair = 0;
-    desired.Luna = Math.min(lunaDesired, Math.max(1, remoteCount * 2));
-    demandClampReasons.Courier = 'HEALTHY_REMOTE_SCALE';
-    demandClampReasons.Builder = 'HEALTHY_BACKLOG_SCALE';
-    demandClampReasons.Repair = 'HEALTHY_REPAIR_SCALE';
-    demandClampReasons.Upgrader = 'HEALTHY_PROGRESS';
-    demandClampReasons.Luna = 'HEALTHY_REMOTE_SCALE';
-  } else {
-    desired.Courier = (maturity === 'LATE' || maturity === 'ENDGAME') ? 4 : 3;
-    if (remoteCount >= 2) desired.Courier += 1;
-    desired.Courier = clampInt(desired.Courier, 2, 5);
-    desired.Upgrader = (maturity === 'ENDGAME') ? 2 : 3;
-    if (buildBucket === 'CRITICAL') desired.Builder = 3;
-    else if (buildBucket === 'HIGH') desired.Builder = 2;
-    else if (buildBucket === 'MEDIUM') desired.Builder = 1;
-    else desired.Builder = 0;
-    if (repairBucket === 'CRITICAL') desired.Repair = 2;
-    else if (repairBucket === 'HIGH' || repairBucket === 'MEDIUM') desired.Repair = 1;
-    else desired.Repair = 0;
-    desired.Luna = Math.min(lunaDesired, Math.max(1, remoteCount * 2));
-    demandClampReasons.Courier = 'RICH_FULLER_LOGISTICS';
-    demandClampReasons.Builder = 'RICH_BACKLOG_SCALE';
-    demandClampReasons.Repair = 'RICH_REPAIR_SCALE';
-    demandClampReasons.Upgrader = 'RICH_PROGRESS';
-    demandClampReasons.Luna = 'RICH_REMOTE_SCALE';
-  }
-
-  if (repairWorkload && repairWorkload.emergencyCriticalCount > 0) {
-    desired.Repair = Math.max(desired.Repair, 1);
-    demandClampReasons.RepairEmergency = 'REPAIR_EMERGENCY_FLOOR';
-  }
-
-  // Recovery-bias guardrail: keep optional non-protected growth roles bounded.
-  if (recoveryBias) {
-    desired.Builder = Math.min(desired.Builder, criticalBuildBacklog > 0 ? 1 : 0);
-    desired.Repair = Math.min(desired.Repair, criticalRepairBacklog > 0 ? 1 : 0);
-    desired.Upgrader = Math.min(desired.Upgrader, 1);
-    desired.Courier = Math.max(1, Math.min(desired.Courier, 2));
-    desired.Luna = Math.min(desired.Luna, remoteCount > 0 ? 1 : 0);
-    demandClampReasons.recoveryBias = 'RECOVERY_BIAS_CLAMP';
-  }
-
-  // Stage-5 bounded feedback loop:
-  // observe simple per-role proxy output and apply tiny clamped nudges.
-  var feedback = ensureFeedbackState(debug || ensureSpawnDebug(room.name));
-  var prev = feedback.lastSignals;
-  var cap = room.energyCapacityAvailable || 0;
-  var avail = room.energyAvailable || 0;
-  var missingEnergy = Math.max(0, cap - avail);
-  var controllerLevel = room.controller && room.controller.level ? room.controller.level : 0;
-  var controllerProgress = room.controller && typeof room.controller.progress === 'number' ? room.controller.progress : 0;
-  var currentSignals = {
-    tick: Game.time,
-    totalSites: totalSites,
-    repairBacklog: repairBacklog,
-    repairBacklogRaw: repairBacklogRaw,
-    repairMeaningfulScore: repairMeaningfulScore,
-    repairDemandReason: repairDemandReason,
-    repairRoadsSeen: repairRoadNetwork ? (repairRoadNetwork.damagedSeen || 0) : 0,
-    repairRoadsPlannedAccepted: repairRoadNetwork ? (repairRoadNetwork.plannedAccepted || 0) : 0,
-    repairRoadsUnplannedRejected: repairRoadNetwork ? (repairRoadNetwork.unplannedRejected || 0) : 0,
-    missingEnergy: missingEnergy,
-    controllerLevel: controllerLevel,
-    controllerProgress: controllerProgress
-  };
-
-  var courierOutput = 0;
-  var builderOutput = 0;
-  var repairOutput = 0;
-  var upgraderOutput = 0;
-  if (prev) {
-    courierOutput = Math.max(0, (prev.missingEnergy || 0) - missingEnergy);
-    builderOutput = Math.max(0, (prev.totalSites || 0) - totalSites);
-    repairOutput = Math.max(0, (prev.repairBacklog || 0) - repairBacklog);
-    if (prev.controllerLevel === controllerLevel) {
-      upgraderOutput = Math.max(0, controllerProgress - (prev.controllerProgress || 0));
-    } else if (controllerLevel > prev.controllerLevel) {
-      upgraderOutput = 1000; // bounded proxy reward for level-up tick.
-    }
-  }
-  var courierCount = C.roleCounts.Courier || 0;
-  var builderCount = C.roleCounts.Builder || 0;
-  var repairCount = C.roleCounts.Repair || 0;
-  var upgraderCount = C.roleCounts.Upgrader || 0;
-  var lunaCount = (C.lunaCountsByHome && C.lunaCountsByHome[room.name]) || 0;
-  var actionCounts = collectRoleActionCounts(C, room);
-
-  var fr = feedback.roles;
-  fr.Courier.emaOutput = emaUpdate(fr.Courier.emaOutput, courierOutput, FEEDBACK_ALPHA);
-  fr.Builder.emaOutput = emaUpdate(fr.Builder.emaOutput, builderOutput, FEEDBACK_ALPHA);
-  fr.Repair.emaOutput = emaUpdate(fr.Repair.emaOutput, repairOutput, FEEDBACK_ALPHA);
-  fr.Upgrader.emaOutput = emaUpdate(fr.Upgrader.emaOutput, upgraderOutput, FEEDBACK_ALPHA);
-  fr.Luna.emaOutput = emaUpdate(fr.Luna.emaOutput, lunaSignal.totalSources > 0 ? lunaSignal.activeAssignments / lunaSignal.totalSources : 0, FEEDBACK_ALPHA);
-  fr.Courier.emaAction = emaUpdate(fr.Courier.emaAction, actionCounts.Courier, FEEDBACK_ALPHA);
-  fr.Builder.emaAction = emaUpdate(fr.Builder.emaAction, actionCounts.Builder, FEEDBACK_ALPHA);
-  fr.Repair.emaAction = emaUpdate(fr.Repair.emaAction, actionCounts.Repair, FEEDBACK_ALPHA);
-  fr.Upgrader.emaAction = emaUpdate(fr.Upgrader.emaAction, actionCounts.Upgrader, FEEDBACK_ALPHA);
-  fr.Luna.emaAction = emaUpdate(fr.Luna.emaAction, actionCounts.Luna, FEEDBACK_ALPHA);
-
-  fr.Courier.emaCount = emaUpdate(fr.Courier.emaCount, courierCount, FEEDBACK_ALPHA);
-  fr.Builder.emaCount = emaUpdate(fr.Builder.emaCount, builderCount, FEEDBACK_ALPHA);
-  fr.Repair.emaCount = emaUpdate(fr.Repair.emaCount, repairCount, FEEDBACK_ALPHA);
-  fr.Upgrader.emaCount = emaUpdate(fr.Upgrader.emaCount, upgraderCount, FEEDBACK_ALPHA);
-  fr.Luna.emaCount = emaUpdate(fr.Luna.emaCount, lunaCount, FEEDBACK_ALPHA);
-
-  fr.Courier.emaPerCreep = fr.Courier.emaOutput / Math.max(1, fr.Courier.emaCount);
-  fr.Builder.emaPerCreep = fr.Builder.emaOutput / Math.max(1, fr.Builder.emaCount);
-  fr.Repair.emaPerCreep = fr.Repair.emaOutput / Math.max(1, fr.Repair.emaCount);
-  fr.Upgrader.emaPerCreep = fr.Upgrader.emaOutput / Math.max(1, fr.Upgrader.emaCount);
-  fr.Luna.emaPerCreep = fr.Luna.emaOutput / Math.max(1, fr.Luna.emaCount);
-
-  fr.Courier.status = fr.Courier.emaPerCreep < 25 ? 'UNDERPERFORMING' : 'HEALTHY';
-  fr.Builder.status = (buildBucket === 'HIGH' || buildBucket === 'CRITICAL') && fr.Builder.emaPerCreep < 0.25
-    ? 'UNDERPERFORMING'
-    : (buildBucket === 'NONE' && builderCount > 0 ? 'SATURATED' : 'HEALTHY');
-  fr.Repair.status = (repairBucket === 'HIGH' || repairBucket === 'CRITICAL') && fr.Repair.emaPerCreep < 0.20
-    ? 'UNDERPERFORMING'
-    : (repairBucket === 'LOW' && repairCount > 1 ? 'SATURATED' : 'HEALTHY');
-  fr.Upgrader.status = (economy === 'CRITICAL' || economy === 'STRAINED') && fr.Upgrader.emaPerCreep < 15
-    ? 'UNDERPERFORMING'
-    : 'HEALTHY';
-  fr.Luna.status = fr.Luna.emaPerCreep < 0.15 ? 'UNDERPERFORMING' : 'HEALTHY';
-
-  function refreshSignalQuality(role, minAction) {
-    var rec = fr[role];
-    if (!actionCounts.available || actionCounts.samples < 2) {
-      rec.signalQuality = 'LOW_SAMPLE';
-      rec.signalSource = 'PROXY_ONLY';
-      return;
-    }
-    if (rec.emaAction >= minAction) {
-      rec.signalQuality = 'ACTION_CONFIRMED';
-      rec.signalSource = 'PROXY_PLUS_ACTION';
-      return;
-    }
-    if (rec.emaPerCreep <= 0) {
-      rec.signalQuality = 'WEAK_NOISY';
-      rec.signalSource = 'ACTION_WEAK';
-      return;
-    }
-    rec.signalQuality = 'PROXY_DOMINANT';
-    rec.signalSource = 'PROXY_PLUS_ACTION';
-  }
-  refreshSignalQuality('Courier', 0.8);
-  refreshSignalQuality('Builder', 0.3);
-  refreshSignalQuality('Repair', 0.3);
-  refreshSignalQuality('Upgrader', 0.3);
-  refreshSignalQuality('Luna', 0.3);
-
-  function markChronic(role, condition) {
-    var rec = fr[role];
-    rec.chronic = condition ? Math.min(8, (rec.chronic || 0) + 1) : Math.max(0, (rec.chronic || 0) - 1);
-    return rec.chronic >= 3;
-  }
-
-  var chronicCourier = markChronic('Courier', desired.Courier >= 2 && courierCount >= 1 && fr.Courier.emaPerCreep < 25 &&
-    missingEnergy > (cap * 0.35) && fr.Courier.signalQuality !== 'ACTION_CONFIRMED');
-  var chronicBuilder = markChronic('Builder', (buildBucket === 'HIGH' || buildBucket === 'CRITICAL') && builderCount > 0 &&
-    fr.Builder.emaPerCreep < 0.25 && fr.Builder.signalQuality !== 'ACTION_CONFIRMED');
-  var chronicRepair = markChronic('Repair', (repairBucket === 'HIGH' || repairBucket === 'CRITICAL') && repairCount > 0 &&
-    fr.Repair.emaPerCreep < 0.20 && fr.Repair.signalQuality !== 'ACTION_CONFIRMED');
-  var chronicUpgrader = markChronic('Upgrader', (economy === 'CRITICAL' || economy === 'STRAINED') && upgraderCount > 0 &&
-    fr.Upgrader.emaPerCreep < 15 && fr.Upgrader.signalQuality !== 'ACTION_CONFIRMED');
-  var lunaROI = computeLunaRemoteROI(room, lunaSignal, economy, fr.Luna);
-  var chronicLuna = markChronic('Luna', lunaSignal.desired > 0 && lunaCount > 0 &&
-    (lunaROI.bucket === 'POOR' || fr.Luna.emaPerCreep < 0.15) && fr.Luna.signalQuality !== 'ACTION_CONFIRMED');
-
-  var tuningHints = [];
-  if (!actionCounts.available || actionCounts.samples < 2) {
-    tuningHints.push('Action signal low-sample; planner currently proxy-dominant.');
-  }
-  if (chronicCourier) {
-    desired.Courier = clampInt(desired.Courier + 1, 1, 5);
-    plannerAdjustments.demand.Courier = 1;
-    plannerAdjustments.bodyBias.Courier = -1;
-    plannerAdjustments.basis.Courier = fr.Courier.signalSource;
-    plannerAdjustments.reasons.push('COURIER_CHRONIC_THROUGHPUT');
-    tuningHints.push('Courier appears underperforming; nudging count +1 and fuller body tier.');
-  }
-  if (chronicBuilder && !recoveryBias && economy !== 'CRITICAL') {
-    desired.Builder = clampInt(desired.Builder + 1, 0, 3);
-    plannerAdjustments.demand.Builder = 1;
-    plannerAdjustments.bodyBias.Builder = -1;
-    plannerAdjustments.basis.Builder = fr.Builder.signalSource;
-    plannerAdjustments.reasons.push('BUILDER_BACKLOG_PERSIST');
-    tuningHints.push('Builder backlog not clearing; nudging builder demand/body up within cap.');
-  }
-  if (chronicRepair && !recoveryBias && economy !== 'CRITICAL') {
-    desired.Repair = clampInt(desired.Repair + 1, 0, 2);
-    plannerAdjustments.demand.Repair = 1;
-    plannerAdjustments.bodyBias.Repair = -1;
-    plannerAdjustments.basis.Repair = fr.Repair.signalSource;
-    plannerAdjustments.reasons.push('REPAIR_BACKLOG_PERSIST');
-    tuningHints.push('Repair backlog remains high; nudging repair demand/body up within cap.');
-  }
-  if (chronicUpgrader && (economy === 'CRITICAL' || economy === 'STRAINED')) {
-    desired.Upgrader = clampInt(desired.Upgrader - 1, 0, 3);
-    plannerAdjustments.demand.Upgrader = -1;
-    plannerAdjustments.bodyBias.Upgrader = 1;
-    plannerAdjustments.basis.Upgrader = fr.Upgrader.signalSource;
-    plannerAdjustments.reasons.push('UPGRADER_WEAK_ROI');
-    tuningHints.push('Upgrader ROI weak in low economy; nudging demand/body down.');
-  }
-  if (lunaROI.bucket === 'POOR' || chronicLuna) {
-    desired.Luna = clampInt(desired.Luna - 1, 0, Math.max(0, lunaSignal.desired));
-    plannerAdjustments.demand.Luna = -1;
-    plannerAdjustments.bodyBias.Luna = 1;
-    plannerAdjustments.basis.Luna = fr.Luna.signalSource;
-    plannerAdjustments.reasons.push('LUNA_POOR_REMOTE_ROI');
-    tuningHints.push('Remote ROI poor; reducing Luna enthusiasm slightly.');
-  } else if (lunaROI.bucket === 'GOOD' && !recoveryBias && (economy === 'HEALTHY' || economy === 'RICH')) {
-    desired.Luna = clampInt(desired.Luna + 1, 0, Math.max(0, lunaSignal.desired + 1));
-    plannerAdjustments.demand.Luna = 1;
-    plannerAdjustments.bodyBias.Luna = -1;
-    plannerAdjustments.basis.Luna = fr.Luna.signalSource;
-    plannerAdjustments.reasons.push('LUNA_GOOD_REMOTE_ROI');
-    tuningHints.push('Remote ROI good; allowing slight Luna boost.');
-  }
-
-  // Re-apply hard safety clamps after feedback nudge.
-  if (recoveryBias) {
-    desired.Builder = Math.min(desired.Builder, criticalBuildBacklog > 0 ? 1 : 0);
-    desired.Repair = Math.min(desired.Repair, criticalRepairBacklog > 0 ? 1 : 0);
-    desired.Upgrader = Math.min(desired.Upgrader, 1);
-    desired.Courier = Math.max(1, Math.min(desired.Courier, 2));
-    desired.Luna = Math.min(desired.Luna, remoteCount > 0 ? 1 : 0);
-  }
-
-  feedback.lastSignals = currentSignals;
-  feedback.chronic = {
-    Courier: chronicCourier,
-    Builder: chronicBuilder,
-    Repair: chronicRepair,
-    Upgrader: chronicUpgrader,
-    Luna: chronicLuna
-  };
-  fr.Courier.bias = plannerAdjustments.demand.Courier;
-  fr.Builder.bias = plannerAdjustments.demand.Builder;
-  fr.Repair.bias = plannerAdjustments.demand.Repair;
-  fr.Upgrader.bias = plannerAdjustments.demand.Upgrader;
-  fr.Luna.bias = plannerAdjustments.demand.Luna;
-  feedback.adjustments = plannerAdjustments;
-  feedback.tuningHints = tuningHints;
-  feedback.lunaROI = lunaROI;
-
-  // Queen stays simple by design; very light-touch efficiency bump in rich mature rooms.
-  if (economy === 'RICH' && (maturity === 'LATE' || maturity === 'ENDGAME') && remoteCount >= 2) {
-    desired.Queen = 2;
-    demandClampReasons.Queen = 'RICH_REMOTE_BUFFER';
-  } else {
-    desired.Queen = 1;
-    demandClampReasons.Queen = 'QUEEN_BASELINE';
-  }
-
-  // Keep Scout intentionally simple for Stage-1 (lightweight visibility role).
-  desired.Scout = 1;
-
-  var reasons = {
-    Builder: buildBucket === 'NONE' ? 'NO_BACKLOG' : ('BUILD_' + buildBucket + '_' + totalSites),
-    Repair: repairBucket === 'NONE' ? 'REPAIR_LOW_PRIORITY' : ('REPAIR_' + repairBucket + '_' + repairBacklog + '_' + repairDemandReason),
-    Upgrader: 'ECON_' + economy,
-    Luna: lunaDesired > 0 ? ('REMOTE_' + lunaDesired) : 'REMOTE_DISABLED',
-    Courier: 'REMOTE_' + remoteCount + '_ECON_' + economy,
-    Queen: demandClampReasons.Queen || 'QUEEN_BASELINE'
-  };
-
-  var bodyGuidance = {};
-  var tunedRoles = ['Courier', 'Builder', 'Repair', 'Upgrader', 'Luna', 'Queen'];
-  for (var r = 0; r < tunedRoles.length; r++) {
-    var role = tunedRoles[r];
-    var guided = roleBodyGuidance(role, {
-      maturity: maturity,
-      economyState: economy,
-      recoveryBias: recoveryBias,
-      signals: {
-        remoteCount: remoteCount,
-        buildBacklogBucket: buildBucket,
-        repairBacklogBucket: repairBucket
-      }
-    });
-    var bodyBias = plannerAdjustments && plannerAdjustments.bodyBias && typeof plannerAdjustments.bodyBias[role] === 'number'
-      ? plannerAdjustments.bodyBias[role]
-      : 0;
-    var adjustedCap = clampInt(guided.capIndex + bodyBias, 0, 5);
-    bodyGuidance[role] = {
-      capIndex: adjustedCap,
-      reason: guided.reason + (bodyBias !== 0 ? ('|FEEDBACK_BIAS_' + bodyBias) : '|FEEDBACK_BIAS_0')
-    };
-  };
-
-  return {
-    desired: desired,
-    economyState: economy,
-    maturity: maturity,
-    signals: {
-      localSites: localSites,
-      remoteSites: remoteSites,
-      remoteCount: remoteCount,
-      lunaDesiredRaw: lunaSignal.rawDesired,
-      lunaSources: lunaSignal.totalSources,
-      lunaActiveAssignments: lunaSignal.activeAssignments,
-      repairBacklog: repairBacklog,
-      criticalBuildBacklog: criticalBuildBacklog,
-      criticalRepairBacklog: criticalRepairBacklog,
-      criticalRepairBacklogRaw: criticalRepairBacklogRaw,
-      buildBacklogBucket: buildBucket,
-      repairBacklogBucket: repairBucket,
-      repairWorkload: repairWorkload,
-      repairMeaningfulScore: repairMeaningfulScore,
-      repairDemandReason: repairDemandReason,
-      repairRoadNetwork: repairRoadNetwork ? {
-        damagedSeen: repairRoadNetwork.damagedSeen || 0,
-        plannedAccepted: repairRoadNetwork.plannedAccepted || 0,
-        unplannedRejected: repairRoadNetwork.unplannedRejected || 0,
-        remotePlannedAccepted: repairRoadNetwork.remotePlannedAccepted || 0,
-        remoteUnplannedRejected: repairRoadNetwork.remoteUnplannedRejected || 0,
-        excludedReasons: repairRoadNetwork.excludedReasons || {}
-      } : null
-    },
-    recoveryBias: recoveryBias,
-    demandClampReasons: demandClampReasons,
-    plannerAdjustments: plannerAdjustments,
-    feedbackSummary: {
-      roles: feedback.roles,
-      chronic: feedback.chronic,
-      actionMetrics: {
-        Courier: 'EVENT_TRANSFER_AMOUNT_PROXY',
-        Builder: 'EVENT_BUILD_COUNT',
-        Repair: 'EVENT_REPAIR_COUNT',
-        Luna: 'EVENT_HARVEST_OR_TRANSFER_COUNT',
-        Upgrader: 'EVENT_UPGRADE_COUNT'
-      },
-      actionSamples: actionCounts.samples,
-      lunaROI: feedback.lunaROI,
-      tuningHints: feedback.tuningHints
-    },
-    bodyGuidance: bodyGuidance,
-    reasons: reasons
-  };
-}
-
 function determineLunaQuota(C, room) {
-  if (!room) return { desired: 0, rawDesired: 0, remoteCount: 0, totalSources: 0, activeAssignments: 0 };
+  if (!room) return 0;
   var remotes = C.remotesByHome[room.name] || [];
-  if (!remotes.length) return { desired: 0, rawDesired: 0, remoteCount: 0, totalSources: 0, activeAssignments: 0 };
+  if (!remotes.length) return 0;
 
   var remoteSet = Object.create(null);
   for (var i = 0; i < remotes.length; i++) {
@@ -1428,51 +311,23 @@ function determineLunaQuota(C, room) {
     dlog('🌙 [Signal] lunaQuota', fmt(room), 'remotes=', remotes.length,
       'sources=', totalSources, 'active=', active, '->', desired);
   }
-  return {
-    desired: desired,
-    rawDesired: desired,
-    remoteCount: remotes.length,
-    totalSources: totalSources,
-    activeAssignments: active
-  };
+  return desired;
 }
 
 function computeRoomQuotas(C, room) {
-  // Stage-1 planner layer:
-  // BaseHarvest remains protected/specialized and keeps its current authority.
-  var debug = ensureSpawnDebug(room.name);
-  var baseHarvestQuota = computeBaseHarvestQuotaDynamic(C, room);
-  var nonCombatPlan = computeNonCombatPlan(C, room, debug);
-  var desired = nonCombatPlan.desired;
-
+  // Teaching habit: start with conservative defaults, then patch in signals
+  // (builder need, remote miners, etc.) so every change is a single diff.
   var quotas = {
-    BaseHarvest: baseHarvestQuota,
-    Courier: desired.Courier,
-    Queen: desired.Queen,
-    Upgrader: desired.Upgrader,
-    Builder: desired.Builder,
-    Scout: desired.Scout,
-    Luna: desired.Luna,
-    Repair: desired.Repair,
-    Trucker: desired.Trucker,
-    Claimer: desired.Claimer
-  };
-
-  debug.planner = {
-    tick: Game.time,
-    economyState: nonCombatPlan.economyState,
-    maturity: nonCombatPlan.maturity,
-    combatPressure: (SquadFlagIntel && typeof SquadFlagIntel.threatScoreForRoom === 'function')
-      ? (SquadFlagIntel.threatScoreForRoom(room.name) || 0)
-      : 0,
-    signals: nonCombatPlan.signals,
-    recoveryBias: nonCombatPlan.recoveryBias,
-    demandClampReasons: nonCombatPlan.demandClampReasons,
-    plannerAdjustments: nonCombatPlan.plannerAdjustments,
-    feedbackSummary: nonCombatPlan.feedbackSummary,
-    bodyGuidance: nonCombatPlan.bodyGuidance,
-    reasons: nonCombatPlan.reasons,
-    quotas: quotas
+    Baseharvest:  2,
+    Courier:      2,
+    Queen:        1,
+    Upgrader:     1,
+    Builder:      getBuilderNeed(C, room),
+    Scout:        1,
+    Luna:         4,
+    Repair:       0,
+    Trucker:      0,
+    Claimer:      0,
   };
   if (tickEvery(DBG_EVERY)) {
     dlog('🎯 [Quotas]', fmt(room), JSON.stringify(quotas));
@@ -1483,231 +338,28 @@ function computeRoomQuotas(C, room) {
 function fillQueueForRoom(C, room) {
   var quotas = computeRoomQuotas(C, room);
   var roomName = room.name;
-  var debug = ensureSpawnDebug(roomName);
-  var arbitration = buildArbitrationState(C, room, roomName, quotas);
-  var roleStats = {};
-  var roleCapsDebug = {};
 
   pruneOverfilledQueue(roomName, quotas, C);
-  var bhDebug = debug.baseHarvest || {};
-  var bhQueuedReasons = [];
-  var bhSuppressedReasons = [];
-  var baseHarvestSourceMode = false;
-  if (room && typeof room.find === 'function') {
-    var sources = room.find(FIND_SOURCES) || [];
-    if (sources.length > 0) {
-      baseHarvestSourceMode = true;
-      var sourceCount = sources.length;
-      var sourceState = collectBaseHarvestSourceState(C, roomName, sources);
-      var queueSummary = summarizeBaseHarvestQueueState(roomName);
-      var liveTotal = getRoomLocalLiveCount(C, roomName, 'BaseHarvest');
-      var unassignedLive = sourceState.unassignedLive || 0;
-      var queuedTotal = queueSummary.queuedTotal || 0;
-      var spawningTotal = queueSummary.spawningTotal || 0;
-      var plannedTotal = liveTotal + queuedTotal + spawningTotal;
-      var allowedCap = sourceCount;
-      if ((bhDebug.lowTtlSources && bhDebug.lowTtlSources.length > 0) || ((bhDebug.replacementNeeded || 0) > 0)) {
-        allowedCap = sourceCount + 1;
-      }
-      for (var si = 0; si < sources.length; si++) {
-        var source = sources[si];
-        var sourceId = source.id;
-        var liveForSource = sourceState.liveBySource[sourceId] || 0;
-        var lowTtl = !!sourceState.lowTtlBySource[sourceId];
-        var queuedOrSpawning = countQueuedOrSpawningSourceReplacement(roomName, sourceId);
-        if (liveForSource <= 0 && queuedOrSpawning <= 0) {
-          if (liveTotal >= sourceCount && unassignedLive > 0) {
-            bhSuppressedReasons.push({ sourceId: sourceId, reason: 'SOURCE_MISSING_BUT_UNASSIGNED_LIVE_EXISTS' });
-            continue;
-          }
-          if (plannedTotal >= allowedCap) {
-            bhSuppressedReasons.push({ sourceId: sourceId, reason: 'BASEHARVEST_ROOM_CAP_SUPPRESS' });
-            continue;
-          }
-          enqueue(roomName, 'BaseHarvest', { assignedSource: sourceId, plannerReason: 'SOURCE_MISSING_INCUMBENT' });
-          bhQueuedReasons.push({ sourceId: sourceId, reason: 'SOURCE_MISSING_INCUMBENT' });
-          queuedTotal += 1;
-          plannedTotal += 1;
-          continue;
-        }
-        if (liveForSource > 0 && lowTtl && queuedOrSpawning <= 0) {
-          if (plannedTotal >= allowedCap) {
-            bhSuppressedReasons.push({ sourceId: sourceId, reason: 'BASEHARVEST_ROOM_CAP_SUPPRESS' });
-            continue;
-          }
-          enqueue(roomName, 'BaseHarvest', { assignedSource: sourceId, plannerReason: 'SOURCE_REPLACEMENT_HANDOFF' });
-          bhQueuedReasons.push({ sourceId: sourceId, reason: 'SOURCE_REPLACEMENT_HANDOFF' });
-          queuedTotal += 1;
-          plannedTotal += 1;
-        }
-      }
-      bhDebug.sourceCount = sourceCount;
-      bhDebug.perSourceLive = sourceState.liveBySource;
-      bhDebug.liveTotal = liveTotal;
-      bhDebug.unassignedLive = unassignedLive;
-      bhDebug.queuedTotal = queuedTotal;
-      bhDebug.spawningTotal = spawningTotal;
-      bhDebug.plannedTotal = plannedTotal;
-      bhDebug.allowedCap = allowedCap;
-      bhDebug.overCap = plannedTotal > allowedCap;
-      bhDebug.queuedBySource = queueSummary.queuedBySource;
-      bhDebug.spawningBySource = queueSummary.spawningBySource;
-    } else {
-      bhQueuedReasons.push({ reason: 'FALLBACK_NO_SOURCES_FOUND' });
-    }
-  } else {
-    bhQueuedReasons.push({ reason: 'FALLBACK_NO_SAFE_ROOM_SOURCE_DATA' });
-  }
 
   // Iterate quotas in plain English order so future maintainers can eyeball
   // which roles will be enqueued before touching the code.
   var roles = Object.keys(quotas);
   for (var i = 0; i < roles.length; i++) {
     var role = roles[i];
-    if (canonicalRole(role) === 'BaseHarvest' && baseHarvestSourceMode) {
-      roleStats.BaseHarvest = roleStats.BaseHarvest || {};
-      roleStats.BaseHarvest.reason = 'SOURCE_SPECIFIC_QUEUE_MODE';
-      continue;
-    }
     var limit = quotas[role] || 0;
     var canonical = canonicalRole(role);
-    var active = getRoomLocalLiveCount(C, roomName, canonical);
-    var queued = queuedCount(roomName, canonical);
-    var spawning = spawningRoleCount(roomName, canonical);
-    var cap = roleCapForRoom(C, room, roomName, canonical, quotas);
-    var planned = active + queued + spawning;
+    var active = canonical === 'Luna'
+      ? ((C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0)
+      : (C.roleCounts[canonical] || 0);
+    var queued = queuedCount(roomName, role);
     var deficit = Math.max(0, limit - active - queued);
-    var surplus = Math.max(0, active + queued - limit);
-    roleStats[canonical] = {
-      band: roleBand(canonical),
-      desired: limit,
-      live: active,
-      localLive: active,
-      queued: queued,
-      spawning: spawning,
-      cap: cap,
-      planned: planned,
-      deficit: deficit,
-      surplus: surplus
-    };
-    roleCapsDebug[canonical] = {
-      live: active,
-      queued: queued,
-      spawning: spawning,
-      planned: planned,
-      cap: cap,
-      overCap: planned > cap
-    };
-
-    if (deficit <= 0 && !surplus) {
-      roleStats[canonical].reason = 'ROLE_AT_TARGET';
-    } else if (deficit <= 0 && surplus > 0) {
-      roleStats[canonical].reason = 'SURPLUS';
-    }
-
     if (deficit > 0 && tickEvery(DBG_EVERY)) {
       dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit,
         'active=', active, 'queued=', queued, 'deficit=', deficit);
     }
     for (var j = 0; j < deficit; j++) {
-      var capCheck = plannedRoleCount(C, roomName, canonical);
-      var roleCap = roleCapForRoom(C, room, roomName, canonical, quotas);
-      if (canonical !== 'CombatArcher' && canonical !== 'CombatMelee' && canonical !== 'CombatMedic' &&
-          capCheck >= roleCap) {
-        roleStats[canonical].reason = 'ROLE_CAP_REACHED';
-        debug.lastCapBlockedRole = canonical;
-        debug.lastCapBlockedReason = 'ROLE_CAP_REACHED';
-        break;
-      }
-      var guidance = null;
-      var guidanceSource = 'RECOMPUTED';
-      var plannerBodyGuidance = debug && debug.planner && debug.planner.bodyGuidance
-        ? debug.planner.bodyGuidance
-        : null;
-      if (plannerBodyGuidance &&
-          plannerBodyGuidance[canonical] &&
-          typeof plannerBodyGuidance[canonical].capIndex === 'number') {
-        guidance = plannerBodyGuidance[canonical];
-        guidanceSource = 'PLANNER_ADJUSTED';
-      } else {
-        guidance = roleBodyGuidance(canonical, debug.planner || {});
-      }
-      var plannerCap = guidance && typeof guidance.capIndex === 'number'
-        ? guidance.capIndex
-        : 0;
-      var capIndex = plannerCap;
-      if (arbitration && arbitration.recoveryMode) {
-        // Stage-2 recovery bias:
-        // favor faster-to-field utility/economy creeps while recovering.
-        if (canonical === 'Courier' || canonical === 'Queen' || canonical === 'Upgrader') {
-          if (capIndex < 2) capIndex = 2;
-        }
-      }
-      var enqueueReason = null;
-      if (debug.planner && debug.planner.reasons && debug.planner.reasons[canonical]) {
-        enqueueReason = debug.planner.reasons[canonical];
-      } else if (canonical === 'Upgrader' && debug.planner && debug.planner.economyState === 'CRITICAL') {
-        enqueueReason = 'ECON_CRITICAL';
-      } else if (canonical === 'Luna' && limit <= 0) {
-        enqueueReason = 'REMOTE_DISABLED';
-      } else if (canonical === 'Repair' && limit <= 0) {
-        enqueueReason = 'REPAIR_LOW_PRIORITY';
-      } else {
-        enqueueReason = 'NEEDS_' + canonical;
-      }
-      roleStats[canonical].bodyCapIndex = capIndex;
-      roleStats[canonical].bodyGuidanceReason = guidance.reason || 'UNSPECIFIED';
-      roleStats[canonical].bodyGuidanceSource = guidanceSource;
-      roleStats[canonical].plannerBodyCapIndex = plannerCap;
-      roleStats[canonical].enqueuedBodyCapIndex = capIndex;
-      roleStats[canonical].demandClampReason = (debug.planner && debug.planner.demandClampReasons)
-        ? (debug.planner.demandClampReasons[canonical] || debug.planner.demandClampReasons.recoveryBias || null)
-        : null;
-      enqueue(roomName, canonical, {
-        bodyCatalogStartIndex: capIndex,
-        plannerBodyCapIndex: plannerCap,
-        enqueuedBodyCapIndex: capIndex,
-        bodyGuidanceSource: guidanceSource,
-        plannerReason: enqueueReason,
-        bodyGuidanceReason: guidance.reason || null,
-        demandClampReason: roleStats[canonical].demandClampReason,
-        roleBand: roleBand(canonical)
-      });
-      var updatedLive = getRoomLocalLiveCount(C, roomName, canonical);
-      var updatedQueued = queuedCount(roomName, canonical);
-      var updatedSpawning = spawningRoleCount(roomName, canonical);
-      roleCapsDebug[canonical] = {
-        live: updatedLive,
-        queued: updatedQueued,
-        spawning: updatedSpawning,
-        planned: updatedLive + updatedQueued + updatedSpawning,
-        cap: roleCap,
-        overCap: (updatedLive + updatedQueued + updatedSpawning) > roleCap,
-        countMode: (canonical === 'Scout') ? 'HOME_AWARE' : 'ROOM_LOCAL'
-      };
+      enqueue(roomName, role);
     }
-  }
-
-  debug.roleStats = roleStats;
-  debug.roleCaps = roleCapsDebug;
-  if (!debug.baseHarvest) debug.baseHarvest = {};
-  debug.baseHarvest.queuedReasons = bhQueuedReasons;
-  debug.baseHarvest.suppressedReasons = bhSuppressedReasons;
-  var bhQueueSummary = summarizeBaseHarvestQueueState(roomName);
-  debug.baseHarvest.queuedTotal = bhQueueSummary.queuedTotal;
-  debug.baseHarvest.spawningTotal = bhQueueSummary.spawningTotal;
-  debug.baseHarvest.queuedBySource = bhQueueSummary.queuedBySource;
-  debug.baseHarvest.spawningBySource = bhQueueSummary.spawningBySource;
-  debug.lastQueueTick = Game.time;
-}
-
-function pushSpawnDecisionHistory(roomName, entry) {
-  if (!roomName || !entry) return;
-  var debug = ensureSpawnDebug(roomName);
-  if (!Array.isArray(debug.decisionHistory)) debug.decisionHistory = [];
-  debug.decisionHistory.push(entry);
-  if (debug.decisionHistory.length > 20) {
-    debug.decisionHistory = debug.decisionHistory.slice(debug.decisionHistory.length - 20);
   }
 }
 
@@ -1715,120 +367,44 @@ function dequeueAndSpawn(spawner) {
   if (!spawner || spawner.spawning) return false;
   var room = spawner.room;
   var roomName = room.name;
-  var C = global.__BHM || {};
   var q = ensureRoomQueue(roomName);
-  var debug = ensureSpawnDebug(roomName);
-  var quotas = (debug && debug.planner && debug.planner.quotas) ? debug.planner.quotas : computeRoomQuotas(C, room);
-  var arb = buildArbitrationState(C, room, roomName, quotas);
-  arb.C = C;
-  arb.room = room;
-  arb.roomName = roomName;
-  arb.quotas = quotas;
-  debug.supportGate = null;
   if (!q.length) {
-    var emptyEnergy = compactEnergy(room);
-    debug.lastDecision = {
-      tick: Game.time,
-      spawn: spawner.name,
-      selectedRole: null,
-      action: 'WAIT',
-      reason: 'queue_empty',
-      queueLength: q.length,
-      energyAvailable: emptyEnergy.energyAvailable,
-      energyCapacityAvailable: emptyEnergy.energyCapacityAvailable
-    };
     if (tickEvery(DBG_EVERY)) {
       dlog('🕳️ [Queue]', roomName, 'empty (energy', energyStatus(room) + ')');
     }
-    pushSpawnDecisionHistory(roomName, { time: Game.time, room: roomName, spawn: spawner.name, energyAvailable: emptyEnergy.energyAvailable, energyCapacityAvailable: emptyEnergy.energyCapacityAvailable, spawning: spawner.spawning ? spawner.spawning.name : null, queueLength: q.length, selected: null, considered: [], reason: "queue empty" });
     return false;
   }
 
   q.sort(compareQueueItems);
 
+  var headPriority = q[0].priority;
   var pickIndex = -1;
-  var pickReason = null;
-  var considered = [];
   for (var i = 0; i < q.length; i++) {
     var it = q[i];
-    if (!it || !it.role) { considered.push({ role: null, allowed: false, reason: "malformed queue item" }); continue; }
-    var canonical = canonicalRole(it.role);
-    if (!canonical) { considered.push({ role: it.role, allowed: false, reason: "invalid role" }); continue; }
-    var minReq = minEnergyFor(canonical);
-    if (it.retryAt && Game.time < it.retryAt) { considered.push({ role: it.role, canonicalRole: canonical, priority: it.priority || 0, queueAge: Game.time - (it.created || Game.time), retryAt: it.retryAt, allowed: false, reason: "retry cooldown", minEnergyRequired: minReq }); continue; }
-    var gate = queueItemAllowed(it, arb);
-    if (canonical === 'Builder' || canonical === 'Scout') {
-      debug.supportGate = gate.reason;
-      if (gate.allowed) {
-        debug.lastAllowedQueuedRole = canonical;
-      } else {
-        debug.lastBlockedQueuedRole = canonical;
-      }
+    if (!it) continue;
+    if (it.priority !== headPriority) {
+      break;
     }
-    if (!gate.allowed) {
-      recordBlockedRoleReason(debug, canonical, gate.reason);
-      considered.push({ role: it.role, canonicalRole: canonical, priority: it.priority || 0, queueAge: Game.time - (it.created || Game.time), retryAt: it.retryAt || 0, allowed: false, reason: gate.reason === "WAITING_ON_SURVIVAL" ? "blocked by survival floor" : (gate.reason.indexOf("RECOVERY")===0 ? "blocked by recovery mode" : gate.reason), minEnergyRequired: minReq });
+    if (it.retryAt && Game.time < it.retryAt) {
       continue;
     }
-    considered.push({ role: it.role, canonicalRole: canonical, priority: it.priority || 0, queueAge: Game.time - (it.created || Game.time), retryAt: it.retryAt || 0, allowed: true, reason: "allowed", minEnergyRequired: minReq });
     pickIndex = i;
-    pickReason = gate.reason;
     break;
   }
   if (pickIndex === -1) {
-    var blockedEnergy = compactEnergy(room);
-    debug.lastDecision = {
-      tick: Game.time,
-      spawn: spawner.name,
-      selectedRole: null,
-      action: 'WAIT',
-      reason: (debug.arbitration && debug.arbitration.unmetFloors && debug.arbitration.unmetFloors.length)
-        ? 'blocked_by_recovery'
-        : 'blocked_by_retry_cooldown',
-      queueLength: q.length,
-      energyAvailable: blockedEnergy.energyAvailable,
-      energyCapacityAvailable: blockedEnergy.energyCapacityAvailable
-    };
     if (tickEvery(DBG_EVERY)) {
       dlog('⏸️ [Queue]', roomName, 'head priority cooling down');
     }
-    pushSpawnDecisionHistory(roomName, { time: Game.time, room: roomName, spawn: spawner.name, energyAvailable: blockedEnergy.energyAvailable, energyCapacityAvailable: blockedEnergy.energyCapacityAvailable, spawning: spawner.spawning ? spawner.spawning.name : null, queueLength: q.length, selected: null, considered: considered, reason: debug.lastDecision.reason });
     return false;
   }
 
   var item = q[pickIndex];
-  var itemCanonical = canonicalRole(item.role);
-  if (itemCanonical !== 'CombatArcher' && itemCanonical !== 'CombatMelee' && itemCanonical !== 'CombatMedic') {
-    var finalCap = roleCapForRoom(C, room, roomName, itemCanonical, quotas);
-    var finalPlanned = plannedRoleCount(C, roomName, itemCanonical);
-    var effectivePlanned = Math.max(0, finalPlanned - 1); // current queue item is being consumed now
-    if (effectivePlanned >= finalCap) {
-      debug.lastCapBlockedRole = itemCanonical;
-      debug.lastCapBlockedReason = 'FINAL_CAP_REACHED';
-      q.splice(pickIndex, 1);
-      return false;
-    }
-  }
   var needed = minEnergyFor(item.role);
   if ((room.energyAvailable || 0) < needed) {
-    var lowEnergy = compactEnergy(room);
-    debug.lastDecision = {
-      tick: Game.time,
-      spawn: spawner.name,
-      selectedRole: item.role,
-      action: 'WAIT',
-      reason: 'blocked_by_min_energy',
-      queueLength: q.length,
-      need: needed,
-      have: room.energyAvailable || 0,
-      energyAvailable: lowEnergy.energyAvailable,
-      energyCapacityAvailable: lowEnergy.energyCapacityAvailable
-    };
     if (tickEvery(DBG_EVERY)) {
       dlog('⛽ [QueueHold]', roomName, 'prio', item.priority, 'role', item.role,
         'need', needed, 'have', room.energyAvailable);
     }
-    pushSpawnDecisionHistory(roomName, { time: Game.time, room: roomName, spawn: spawner.name, energyAvailable: lowEnergy.energyAvailable, energyCapacityAvailable: lowEnergy.energyCapacityAvailable, spawning: spawner.spawning ? spawner.spawning.name : null, queueLength: q.length, selected: { role: item.role }, considered: considered, reason: "waiting for energy" });
     return false;
   }
 
@@ -1842,68 +418,18 @@ function dequeueAndSpawn(spawner) {
     spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
   }
 
-  var spawnResult = null;
+  var ok = false;
   if (spawnLogic && typeof spawnLogic.spawnRole === 'function') {
-    spawnResult = spawnLogic.spawnRole(spawner, item.role, spawnResource, item);
+    ok = spawnLogic.spawnRole(spawner, item.role, spawnResource, item);
   }
-  var ok = !!(spawnResult && spawnResult.ok);
 
   if (ok) {
-    pushSpawnHistory(debug, item.role, item.roleBand || roleBand(item.role), 'queue', item.plannerReason || 'SPAWN_OK');
-    debug.lastDecision = {
-      tick: Game.time,
-      spawn: spawner.name,
-      selectedRole: item.role,
-      action: 'SPAWNED',
-      reason: item.plannerReason || 'spawn_ok',
-      queueLength: q.length,
-      plannerBodyCapIndex: (typeof item.plannerBodyCapIndex === 'number') ? item.plannerBodyCapIndex : null,
-      enqueuedBodyCapIndex: (typeof item.enqueuedBodyCapIndex === 'number') ? item.enqueuedBodyCapIndex : null,
-      bodyCatalogStartIndex: (typeof item.bodyCatalogStartIndex === 'number') ? item.bodyCatalogStartIndex : null,
-      bodyGuidanceSource: item.bodyGuidanceSource || null,
-      bodyGuidanceReason: item.bodyGuidanceReason || null,
-      demandClampReason: item.demandClampReason || null,
-      selectedRoleReason: pickReason || 'ALLOWED',
-      band: item.roleBand || roleBand(item.role),
-      age: Game.time - item.created,
-      energyAvailable: (spawnResult && typeof spawnResult.energyAvailable === 'number') ? spawnResult.energyAvailable : (room.energyAvailable || 0),
-      energyCapacityAvailable: (spawnResult && typeof spawnResult.energyCapacityAvailable === 'number') ? spawnResult.energyCapacityAvailable : (room.energyCapacityAvailable || 0)
-    };
     dlog('✅ [SpawnOK]', roomName, 'spawned', item.role, 'at', spawner.name);
     q.splice(pickIndex, 1);
-    pushSpawnDecisionHistory(roomName, { time: Game.time, room: roomName, spawn: spawner.name, energyAvailable: debug.lastDecision.energyAvailable, energyCapacityAvailable: debug.lastDecision.energyCapacityAvailable, spawning: spawner.spawning ? spawner.spawning.name : null, queueLength: q.length, selected: { role: item.role, canonicalRole: canonicalRole(item.role), bodyCost: spawnResult.bodyCost || 0, body: spawnResult.body || [] }, considered: considered, reason: "spawned" });
     return true;
   }
 
   item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
-  var failEnergy = compactEnergy(room);
-  debug.lastSpawnFailure = {
-    tick: Game.time,
-    spawn: spawner.name,
-    room: roomName,
-    requestedRole: item.role,
-    canonicalRole: spawnResult ? spawnResult.canonicalRole : canonicalRole(item.role),
-    queueItemId: item.id || null,
-    body: (spawnResult && spawnResult.body) ? spawnResult.body : [],
-    bodyCost: (spawnResult && typeof spawnResult.bodyCost === 'number') ? spawnResult.bodyCost : 0,
-    energyAvailable: (spawnResult && typeof spawnResult.energyAvailable === 'number') ? spawnResult.energyAvailable : failEnergy.energyAvailable,
-    energyCapacityAvailable: (spawnResult && typeof spawnResult.energyCapacityAvailable === 'number') ? spawnResult.energyCapacityAvailable : failEnergy.energyCapacityAvailable,
-    code: (spawnResult && typeof spawnResult.code === 'number') ? spawnResult.code : null,
-    reason: (spawnResult && spawnResult.reason) ? spawnResult.reason : 'spawn_failed',
-    retryAt: item.retryAt
-  };
-  debug.lastDecision = {
-    tick: Game.time,
-    spawn: spawner.name,
-    selectedRole: item.role,
-    action: 'WAIT',
-    reason: (spawnResult && spawnResult.reason) ? spawnResult.reason : 'spawn_failed_retry',
-    queueLength: q.length,
-    retryAt: item.retryAt,
-    energyAvailable: failEnergy.energyAvailable,
-    energyCapacityAvailable: failEnergy.energyCapacityAvailable
-  };
-  pushSpawnDecisionHistory(roomName, { time: Game.time, room: roomName, spawn: spawner.name, energyAvailable: failEnergy.energyAvailable, energyCapacityAvailable: failEnergy.energyCapacityAvailable, spawning: spawner.spawning ? spawner.spawning.name : null, queueLength: q.length, selected: { role: item.role, canonicalRole: canonicalRole(item.role), bodyCost: (spawnResult && spawnResult.bodyCost) || 0, body: (spawnResult && spawnResult.body) || [] }, considered: considered, reason: debug.lastDecision.reason || "other clear reason" });
   dlog('⏳ [SpawnWait]', roomName, item.role, 'backoff to', item.retryAt,
     '(energy', energyStatus(room) + ')');
   return false;
@@ -1917,21 +443,6 @@ function prepareRoomQueues(C) {
     var room = rooms[i];
     if (!room.find(FIND_MY_SPAWNS).length) continue;
     ensureRoomQueue(room.name);
-
-    var roomStage = RoomStagePolicy.getRoomStage(room);
-    var roomStagePolicy = RoomStagePolicy.getRoomStagePolicy(room);
-    var roomDebug = ensureSpawnDebug(room.name);
-    roomDebug.roomStagePolicy = {
-      tick: Game.time,
-      rcl: roomStage.rcl,
-      id: roomStage.id,
-      name: roomStage.name,
-      primaryGoal: roomStagePolicy.primaryGoal,
-      structureFocus: roomStagePolicy.structureFocus,
-      spawnStrategyHint: roomStagePolicy.spawnStrategyHint,
-      behaviorActive: false
-    };
-
     fillQueueForRoom(C, room);
   }
 }
@@ -1998,71 +509,6 @@ function gatherSpawnableSquads() {
 function trySpawnSquad(spawner, squadState) {
   if (!spawnLogic || typeof spawnLogic.Spawn_Squad !== 'function') return false;
   if (squadState.handled) return false;
-  var roomName = spawner && spawner.room ? spawner.room.name : null;
-  var debug = roomName ? ensureSpawnDebug(roomName) : null;
-  var quotas = (debug && debug.planner && debug.planner.quotas) ? debug.planner.quotas : null;
-  var arb = (roomName && quotas) ? buildArbitrationState(global.__BHM || {}, spawner.room, roomName, quotas) : null;
-  var emergencyDefense = isEmergencyDefenseNeeded(roomName);
-  var canRelaxCombat = false;
-  if (arb) {
-    canRelaxCombat = arb.recoveryMode &&
-      !emergencyDefense &&
-      (!arb.unmetSurvivalFloors || !arb.unmetSurvivalFloors.length) &&
-      (!arb.unmetEconomyFloors || !arb.unmetEconomyFloors.length) &&
-      (arb.recoveryActiveDuration >= COMBAT_RELAX_AFTER_TICKS);
-  }
-
-  if (arb && arb.recoveryMode && !emergencyDefense && !canRelaxCombat) {
-    var combatBlockReason = 'COMBAT_POLICY_RECOVERY_BLOCK';
-    if (arb.unmetSurvivalFloors && arb.unmetSurvivalFloors.length) {
-      combatBlockReason = 'SURVIVAL_FLOOR_BLOCK';
-    } else if (arb.unmetEconomyFloors && arb.unmetEconomyFloors.length) {
-      combatBlockReason = 'ECON_FLOOR_BLOCK';
-    } else if (arb.economyState === 'CRITICAL') {
-      combatBlockReason = 'COMBAT_DENIED_RECOVERY';
-    } else if (arb.recoveryActiveDuration < COMBAT_RELAX_AFTER_TICKS) {
-      combatBlockReason = 'COMBAT_POLICY_RECOVERY_COOLDOWN';
-    }
-    if (debug) {
-      debug.lastCombatDecision = {
-        tick: Game.time,
-        spawn: spawner.name,
-        allowed: false,
-        reason: combatBlockReason
-      };
-    }
-    return false;
-  }
-
-  if (arb && canRelaxCombat && debug) {
-    var combatShare = arb.bandUsage && arb.bandUsage.shares ? (arb.bandUsage.shares.COMBAT || 0) : 0;
-    var combatCap = RECOVERY_BAND_BUDGET_CAPS.COMBAT;
-    if (arb.bandUsage && arb.bandUsage.total >= BAND_BUDGET_MIN_SAMPLES && combatShare > combatCap) {
-      debug.lastCombatDecision = {
-        tick: Game.time,
-        spawn: spawner.name,
-        allowed: false,
-        reason: 'COMBAT_BUDGET_BLOCK'
-      };
-      return false;
-    }
-    debug.lastCombatDecision = {
-      tick: Game.time,
-      spawn: spawner.name,
-      allowed: true,
-      reason: 'COMBAT_ALLOWED_RECOVERY_STABLE'
-    };
-  }
-
-  if (debug && emergencyDefense) {
-    debug.lastCombatDecision = {
-      tick: Game.time,
-      spawn: spawner.name,
-      allowed: true,
-      reason: 'COMBAT_ALLOWED_EMERGENCY'
-    };
-  }
-
   var squads = gatherSpawnableSquads();
   for (var i = 0; i < squads.length; i++) {
     var name = squads[i];
@@ -2090,14 +536,6 @@ function runSpawnPass(C) {
     var spawner = spawns[i];
     if (!spawner || spawner.spawning) continue;
     if (trySpawnSquad(spawner, squadState)) {
-      var dbg = ensureSpawnDebug(spawner.room.name);
-      pushSpawnHistory(dbg, 'Combat', 'COMBAT', 'combat', 'COMBAT_PREEMPT');
-      dbg.lastDecision = {
-        tick: Game.time,
-        spawn: spawner.name,
-        action: 'WAIT',
-        reason: 'COMBAT_PREEMPT'
-      };
       continue;
     }
     dequeueAndSpawn(spawner);
@@ -2116,6 +554,5 @@ var BeeSpawnManager = {
     runSpawnPass(C);
   }
 };
-
 
 module.exports = BeeSpawnManager;

@@ -1,12 +1,6 @@
 'use strict';
-var CoreLogger = require('core.logger');
-var claimerLog = CoreLogger.createLogger('Claimer', CoreLogger.LOG_LEVEL.BASIC);
 
-function describeError(e) {
-  return e && (e.stack || e.message || String(e));
-}
-
-// Shared debug + tuning config used by this role.
+// Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
   // --- Debug toggles (shared) ---
   DEBUG_SAY: false,
@@ -86,11 +80,8 @@ var CFG = Object.freeze({
 
   function debugDrawLine(creep, target, color, label) {
     if (!CFG.DEBUG_DRAW || !creep || !target) return;
-    var room = creep.room;
-    if (!room || !room.visual) return;
-
-    var tpos = getTargetPosition(target);
-    if (!tpos || tpos.roomName !== room.name) return;
+    var room = creep.room; if (!room || !room.visual) return;
+    var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
     try {
       room.visual.line(creep.pos, tpos, {
         color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
@@ -100,9 +91,7 @@ var CFG = Object.freeze({
           color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
         });
       }
-    } catch (e) {
-      claimerLog.warnEvery('claimer.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
-    }
+    } catch (e) {}
   }
 
   function debugRing(room, pos, color, text) {
@@ -110,9 +99,7 @@ var CFG = Object.freeze({
     try {
       room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
       if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-    } catch (e) {
-      claimerLog.warnEvery('claimer.debugRing.visual', 250, 'debugRing failed for room', room && room.name, describeError(e));
-    }
+    } catch (e) {}
   }
 
   function debugLabel(room, pos, text, color) {
@@ -122,9 +109,7 @@ var CFG = Object.freeze({
         color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
         backgroundColor: "#000000", backgroundOpacity: 0.25
       });
-    } catch (e) {
-      claimerLog.warnEvery('claimer.debugLabel.visual', 250, 'debugLabel failed for room', room && room.name, describeError(e));
-    }
+    } catch (e) {}
   }
 
   // =========================
@@ -527,7 +512,6 @@ var CFG = Object.freeze({
       debugSay(creep, '📌');
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "+RES");
       creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
-      return;
     } else if (res === OK) {
       debugSay(creep, '📌');
     } else {

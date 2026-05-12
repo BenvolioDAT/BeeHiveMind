@@ -1,62 +1,104 @@
 'use strict';
-var BeeSelectors = require('BeeSelectors');
-var MovementOwnership = require('Movement.Ownership');
-var CoreLogger = require('core.logger');
-var BeeRoleVisuals = require('BeeRoleVisuals');
-var BeeRoles = require('BeeRoles');
-var builderLog = CoreLogger.createLogger('Builder', CoreLogger.LOG_LEVEL.BASIC);
 
-function describeError(e) {
-  return e && (e.stack || e.message || String(e));
-}
-
-// Role-specific debug and visual settings.
+// Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
+  // --- Debug toggles (shared) ---
   DEBUG_SAY: false,
   DEBUG_DRAW: true,
+
+  // --- Visual styles (shared) ---
   DRAW: {
+    // BaseHarvest-style visuals
+    TRAVEL:   "#8ab6ff",
     SOURCE:   "#ffd16e",
+    SEAT:     "#6effa1",
+    QUEUE:    "#ffe66e",
+    YIELD:    "#ff6e6e",
+    OFFLOAD:  "#6ee7ff",
+    IDLE:     "#bfbfbf",
+    // Courier-style visuals
+    WD_COLOR:    "#6ec1ff",  // withdraw lines
     FILL_COLOR:  "#6effa1",  // delivery lines
     DROP_COLOR:  "#ffe66e",  // dropped energy
     GRAVE_COLOR: "#ffb0e0",  // tombstones/ruins
     IDLE_COLOR:  "#bfbfbf",
+    // Shared
     WIDTH:   0.12,
     OPACITY: 0.45,
     FONT:    0.6
-  }
+  },
+
+  // --- Towers (Courier) ---
+  TOWER_REFILL_AT_OR_BELOW: 0.70,
+
+  //Upgrader role Behavior
+  SIGN_TEXT: "BeeNice Please.",
+  //Trucker role Behavior
+  PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
+  MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
+  SEARCH_RADIUS: 50,               // how far from flag to look
+  PATH_REUSE: 20,                  // reusePath hint
+  // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
+  ALLOW_NON_ENERGY: true,
+  // Fallback park if no flag & no home (harmless; rarely used)
+  PARK_POS: { x:25, y:25, roomName:"W0N0" },
+
+  //--- Pathing (used by Queen)----
+  STUCK_TICKS: 6,
+  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, idle: 5 },
+
+  // --- Pathing (used by Courier & any others that want it) ---
+  PATH_REUSE: 40,
+  MAX_OPS_MOVE: 2000,
+  TRAVEL_MAX_OPS: 4000,
+  // --- Targeting cadences (Courier) ---
+  RETARGET_COOLDOWN: 10,
+  GRAVE_SCAN_COOLDOWN: 20,
+  BETTER_CONTAINER_DELTA: 150,
+  // --- Thresholds / radii (Courier) ---
+  CONTAINER_MIN: 50,
+  DROPPED_BIG_MIN: 150,
+  DROPPED_NEAR_CONTAINER_R: 2,
+  DROPPED_ALONG_ROUTE_R: 2,
 });
 
 // -------------------------
 // Shared tiny helpers (copied for role self-containment)
 // -------------------------
 function debugSay(creep, msg) {
-  BeeRoleVisuals.debugSay(CFG.DEBUG_SAY, creep, msg);
+  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+}
+
+// Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
+function getTargetPosition(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
 }
 
 function debugDrawLine(creep, target, color, label) {
+  if (!CFG.DEBUG_DRAW || !creep || !target) return;
+  var room = creep.room; if (!room || !room.visual) return;
+  var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
   try {
-    BeeRoleVisuals.drawLine(CFG.DEBUG_DRAW, creep, target, color, label, CFG.DRAW);
-  } catch (e) {
-    builderLog.warnEvery('builder.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
-  }
+    room.visual.line(creep.pos, tpos, {
+      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
+        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
+      });
+    }
+  } catch (e) {}
 }
 
 function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
   try {
-    BeeRoleVisuals.drawRing(CFG.DEBUG_DRAW, room, pos, color, text, CFG.DRAW);
-  } catch (e) {
-    builderLog.warnEvery('builder.debugRing.visual', 250, 'debugRing failed for room', room && room.name, describeError(e));
-  }
-}
-
-// Movement discipline helper:
-// Ensures Builder issues at most one move command per tick, even when several
-// branches could request movement in the same run.
-function issueBuilderMove(creep, target, opts) {
-  if (!creep || !target) return ERR_INVALID_TARGET;
-  if (creep.memory._builderMoveTick === Game.time) return ERR_BUSY;
-  creep.memory._builderMoveTick = Game.time;
-  return creep.travelTo(target, opts || {});
+    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH});
+    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align:"center" });
+  } catch (e) {}
 }
 
   // -----------------------------
@@ -87,7 +129,7 @@ function issueBuilderMove(creep, target, opts) {
   // ==============================
   function ensureBuilderIdentity(creep) {
     if (!creep || !creep.memory) return;
-    creep.memory.role = BeeRoles.ROLE_NAMES.BUILDER;
+    creep.memory.role = 'Builder';
     if (!creep.memory.task) creep.memory.task = 'builder';
   }
 
@@ -113,57 +155,10 @@ function issueBuilderMove(creep, target, opts) {
     return creep.memory.builderState;
   }
 
-  function getActiveBuilderTarget(creep) {
-    if (!creep || !creep.memory || !creep.memory.builderTargetId) return null;
-    if (creep.memory.builderTargetType !== 'construction') return null;
-    return Game.constructionSites[creep.memory.builderTargetId] || null;
-  }
-
-  function shouldKeepTargetDuringRefuel(creep) {
-    var target = getActiveBuilderTarget(creep);
-    if (!target) return false;
-    var targetScore = (BeeSelectors && BeeSelectors.scoreConstructionSiteForBuilder)
-      ? BeeSelectors.scoreConstructionSiteForBuilder(creep, target)
-      : null;
-    var homeName = getHomeName(creep);
-    if (targetScore && targetScore.bucket <= 2) {
-      // Keep critical/support work sticky through refuel so builders resume core
-      // infrastructure instead of drifting to low-value convenience roads.
-      return true;
-    }
-    if (!homeName) return false;
-    // Legacy safety: still keep remote intent for low-priority sites so cross-room
-    // trips do not immediately bounce back on the first empty tick.
-    return target.pos && target.pos.roomName !== homeName;
-  }
-
-  function getRefuelLockDuration(creep) {
-    var target = getActiveBuilderTarget(creep);
-    if (!target) return 25;
-    var targetScore = (BeeSelectors && BeeSelectors.scoreConstructionSiteForBuilder)
-      ? BeeSelectors.scoreConstructionSiteForBuilder(creep, target)
-      : null;
-    if (!targetScore) return 25;
-    if (targetScore.bucket <= 1) return 80;
-    if (targetScore.bucket === 2) return 55;
-    return 25;
-  }
-
-  function refreshRefuelLock(creep) {
-    var lock = creep.memory.builderRefuelLock;
-    if (!lock) return false;
-    var target = getActiveBuilderTarget(creep);
-    if (!target) { delete creep.memory.builderRefuelLock; return false; }
-    if (lock.targetId !== target.id) { delete creep.memory.builderRefuelLock; return false; }
-    if (typeof lock.until !== 'number' || Game.time > lock.until) { delete creep.memory.builderRefuelLock; return false; }
-    return true;
-  }
-
   // -----------------------------
   // B) Energy collection helpers
   // -----------------------------
   function collectEnergy(creep) {
-    var keepRemoteIntent = refreshRefuelLock(creep);
     // Prefer grabbing energy from a rich home storage/terminal to speed up remote building.
     var homeName = (typeof getHomeName === 'function') ? getHomeName(creep) : null;
     var homeRoom = homeName ? Game.rooms[homeName] : null;
@@ -176,13 +171,13 @@ function issueBuilderMove(creep, target, opts) {
     var homeIsRich = homeEnergy >= HOME_RICH_ENERGY;
     var homeIsLow = homeEnergy <= HOME_LOW_ENERGY;
 
-    if (homeIsRich && homeName && !keepRemoteIntent) {
+    if (homeIsRich && homeName) {
       if (!homeRoom || creep.pos.roomName !== homeName) {
         var anchorPos = (typeof getAnchorPos === 'function') ? getAnchorPos(homeName) : null;
         if (anchorPos) {
           debugSay(creep, '🏠');
           debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME•ENERGY");
-          issueBuilderMove(creep, anchorPos, { range: 2, reusePath: 25 });
+          creep.travelTo(anchorPos, { range: 2, reusePath: 25 });
           return true; // commuting home to refuel from rich storage
         }
       } else {
@@ -198,7 +193,7 @@ function issueBuilderMove(creep, target, opts) {
           debugDrawLine(creep, withdrawTarget, CFG.DRAW.FILL_COLOR, "HOME•WITHDRAW");
           var homeWithdraw = creep.withdraw(withdrawTarget, RESOURCE_ENERGY);
           if (homeWithdraw === ERR_NOT_IN_RANGE) {
-            issueBuilderMove(creep, withdrawTarget, { range: 1, reusePath: 15 });
+            creep.travelTo(withdrawTarget, { range: 1, reusePath: 15 });
           }
           return true;
         }
@@ -217,7 +212,7 @@ function issueBuilderMove(creep, target, opts) {
       debugDrawLine(creep, tomb, CFG.DRAW.GRAVE_COLOR, "TOMB");
       var tr = creep.withdraw(tomb, RESOURCE_ENERGY);
       if (tr === ERR_NOT_IN_RANGE) {
-        issueBuilderMove(creep, tomb, { range: 1, reusePath: 20 });
+        creep.travelTo(tomb, { range: 1, reusePath: 20 });
       }
       return true;
     }
@@ -233,7 +228,7 @@ function issueBuilderMove(creep, target, opts) {
       debugDrawLine(creep, ruin, CFG.DRAW.GRAVE_COLOR, "RUIN");
       var rr = creep.withdraw(ruin, RESOURCE_ENERGY);
       if (rr === ERR_NOT_IN_RANGE) {
-        issueBuilderMove(creep, ruin, { range: 1, reusePath: 20 });
+        creep.travelTo(ruin, { range: 1, reusePath: 20 });
       }
       return true;
     }
@@ -249,7 +244,7 @@ function issueBuilderMove(creep, target, opts) {
       debugSay(creep, '🍪');
       debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP");
       if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-        issueBuilderMove(creep, dropped, { range: 1, reusePath: 15 });
+        creep.travelTo(dropped, { range: 1, reusePath: 15 });
       }
       return true;
     }
@@ -268,7 +263,7 @@ function issueBuilderMove(creep, target, opts) {
       debugDrawLine(creep, srcCont, CFG.DRAW.FILL_COLOR, "SRC•CONT");
       var cr = creep.withdraw(srcCont, RESOURCE_ENERGY);
       if (cr === ERR_NOT_IN_RANGE) {
-        issueBuilderMove(creep, srcCont, { range: 1, reusePath: 25 });
+        creep.travelTo(srcCont, { range: 1, reusePath: 25 });
       }
       return true;
     }
@@ -291,7 +286,7 @@ function issueBuilderMove(creep, target, opts) {
       debugDrawLine(creep, storeLike, CFG.DRAW.FILL_COLOR, "WITHDRAW");
       var sr = creep.withdraw(storeLike, RESOURCE_ENERGY);
       if (sr === ERR_NOT_IN_RANGE) {
-        issueBuilderMove(creep, storeLike, { range: 1, reusePath: 25 });
+        creep.travelTo(storeLike, { range: 1, reusePath: 25 });
       }
       return true;
     }
@@ -304,7 +299,7 @@ function issueBuilderMove(creep, target, opts) {
         debugDrawLine(creep, src, CFG.DRAW.SOURCE, "MINE");
         var hr = creep.harvest(src);
         if (hr === ERR_NOT_IN_RANGE) {
-          issueBuilderMove(creep, src, { range: 1, reusePath: 20 });
+          creep.travelTo(src, { range: 1, reusePath: 20 });
         }
         return true;
       }
@@ -318,7 +313,7 @@ function issueBuilderMove(creep, target, opts) {
         if (anchorPos) {
           debugSay(creep, '🏠');
           debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME");
-          issueBuilderMove(creep, anchorPos, { range: 2, reusePath: 25 });
+          creep.travelTo(anchorPos, { range: 2, reusePath: 25 });
           return true; // we are actively walking home to refuel
         }
       }
@@ -334,7 +329,7 @@ function issueBuilderMove(creep, target, opts) {
     if (anchor && anchor.pos) {
       debugSay(creep, '🧘');
       debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      issueBuilderMove(creep, anchor, { range: 2, reusePath: 20 });
+      creep.travelTo(anchor, { range: 2, reusePath: 20 });
     }
   }
 
@@ -359,7 +354,7 @@ function issueBuilderMove(creep, target, opts) {
     debugSay(creep, '➡️SINK');
     debugDrawLine(creep, sink, CFG.DRAW.SINK_COLOR, "SINK");
     if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-      issueBuilderMove(creep, sink, { range: 1, reusePath: 20 });
+      creep.travelTo(sink, { range: 1, reusePath: 20 });
     }
     return true;
   }
@@ -368,49 +363,64 @@ function issueBuilderMove(creep, target, opts) {
   // C) Target helpers (build only)
   // -----------------------------
   // Target selection priority:
-  // 1) Evaluate sticky target score; 2) evaluate all construction sites with one
-  // shared scorer (local + remote); 3) keep sticky if it is still competitive.
+  // 1) Sticky target from memory; 2) construction in current room; 3) nearest other room site.
   function getBuilderTarget(creep) {
     var cachedId = creep.memory.builderTargetId;
     var cachedType = creep.memory.builderTargetType;
-    var cachedSite = null;
-    var cachedScore = null;
 
-    // Re-read remembered site and score it with the same model used globally.
+    // Reuse a remembered site when it still exists.
     if (cachedId && cachedType === 'construction') {
-      cachedSite = Game.constructionSites[cachedId];
-      if (cachedSite && BeeSelectors && BeeSelectors.scoreConstructionSiteForBuilder) {
-        cachedScore = BeeSelectors.scoreConstructionSiteForBuilder(creep, cachedSite);
-      }
-      if (!cachedSite) {
-        creep.memory.builderTargetId = null;
-        creep.memory.builderTargetType = null;
-      }
-    }
-
-    // 2) Single shared scorer over ALL visible sites (local + remote).
-    var best = (BeeSelectors && BeeSelectors.selectBestConstructionSiteForBuilder)
-      ? BeeSelectors.selectBestConstructionSiteForBuilder(creep)
-      : null;
-
-    // 3) Sticky retention policy: keep high-priority targets unless there is a
-    // meaningfully better choice; allow low-priority roads to be replaced faster.
-    if (cachedSite && cachedScore && best && best.site) {
-      var keepDelta = 15;
-      if (cachedScore.bucket <= 1) keepDelta = 45; // strong stickiness for critical sites
-      else if (cachedScore.bucket === 2) keepDelta = 25;
-      // Convenience sites should be easier to replace by better work.
-      else keepDelta = 5;
-      if (best.score < (cachedScore.score + keepDelta)) {
+      var cachedSite = Game.constructionSites[cachedId];
+      if (cachedSite) {
         return { target: cachedSite, type: 'build' };
       }
+      creep.memory.builderTargetId = null;
+      creep.memory.builderTargetType = null;
     }
 
-    if (best && best.site) {
-      creep.memory.builderTargetId = best.site.id;
+    // 2) Prefer a nearby site with a small priority list so vital structures get finished first.
+    var localSites = creep.room.find(FIND_CONSTRUCTION_SITES);
+    if (localSites && localSites.length > 0) {
+      var prio = { 'spawn': 5, 'extension': 4, 'tower': 3, 'container': 2, 'road': 1 };
+      var bestLocal = null;
+      var bestScore = -1;
+      var bestRange = 1e9;
+      for (var i = 0; i < localSites.length; i++) {
+        var site = localSites[i];
+        var score = prio[site.structureType] || 0;
+        var range = creep.pos.getRangeTo(site.pos);
+        if (score > bestScore || (score === bestScore && range < bestRange)) {
+          bestLocal = site;
+          bestScore = score;
+          bestRange = range;
+        }
+      }
+      if (bestLocal) {
+        creep.memory.builderTargetId = bestLocal.id;
+        creep.memory.builderTargetType = 'construction';
+        debugRing(creep.room, bestLocal.pos, CFG.DRAW.BUILD_COLOR, 'BUILD');
+        return { target: bestLocal, type: 'build' };
+      }
+    }
+
+    // 3) Otherwise grab the nearest construction site in any visible room.
+    var nearestSite = null;
+    var bestDistance = 1e9;
+    for (var sid in Game.constructionSites) {
+      if (!Game.constructionSites.hasOwnProperty(sid)) continue;
+      var s2 = Game.constructionSites[sid];
+      var dist = Game.map.getRoomLinearDistance(creep.pos.roomName, s2.pos.roomName);
+      if (dist < bestDistance) {
+        bestDistance = dist;
+        nearestSite = s2;
+      }
+    }
+
+    if (nearestSite) {
+      creep.memory.builderTargetId = nearestSite.id;
       creep.memory.builderTargetType = 'construction';
-      debugRing(creep.room, best.site.pos, CFG.DRAW.BUILD_COLOR, 'BUILD');
-      return { target: best.site, type: 'build' };
+      debugRing(creep.room, nearestSite.pos, CFG.DRAW.BUILD_COLOR, 'REMOTE');
+      return { target: nearestSite, type: 'build' };
     }
 
     return null;
@@ -426,23 +436,10 @@ function issueBuilderMove(creep, target, opts) {
   // Step off the exit tiles so we do not bounce between rooms.
   function nudgeOffBorder(creep) {
     if (!isOnBorder(creep.pos)) return false;
-    if (creep.memory._builderMoveTick === Game.time) return true;
-    var dir = null;
-    if (creep.pos.x === 0) dir = RIGHT;
-    else if (creep.pos.x === 49) dir = LEFT;
-    else if (creep.pos.y === 0) dir = BOTTOM;
-    else if (creep.pos.y === 49) dir = TOP;
-    if (!dir) return false;
-
-    var rc = MovementOwnership.move(creep, dir, "role.Builder.js/directStep", "role.Builder");
-    // Consume the per-tick lock only when movement intent is accepted (OK),
-    // or already present this tick (ERR_BUSY/ERR_TIRED). If nudge fails,
-    // leave lock open so normal travelTo/Traveler can run this tick and avoid
-    // stalling on exit tiles.
-    if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
-      creep.memory._builderMoveTick = Game.time;
-      return true;
-    }
+    if (creep.pos.x === 0) return creep.move(RIGHT) === OK;
+    if (creep.pos.x === 49) return creep.move(LEFT) === OK;
+    if (creep.pos.y === 0) return creep.move(BOTTOM) === OK;
+    if (creep.pos.y === 49) return creep.move(TOP) === OK;
     return false;
   }
 
@@ -453,12 +450,16 @@ function issueBuilderMove(creep, target, opts) {
 
     if (nudgeOffBorder(creep)) return true;
 
-    // Prefer an interior room-center target so Traveler handles room crossing
-    // without explicitly parking on exit tiles.
-    var roomCenter = new RoomPosition(25, 25, targetRoomName);
-    debugDrawLine(creep, roomCenter, CFG.DRAW.TRAVEL, 'ROOM');
-    issueBuilderMove(creep, roomCenter, { range: 20, reusePath: 10 });
-    return true;
+    var exitDir = Game.map.findExit(creep.room, targetRoomName);
+    if (exitDir < 0) return false;
+
+    var exit = creep.pos.findClosestByRange(exitDir);
+    if (exit) {
+      debugDrawLine(creep, exit, CFG.DRAW.TRAVEL, 'EXIT');
+      creep.moveTo(exit, { reusePath: 10, maxRooms: 1 });
+      return true;
+    }
+    return false;
   }
 
   // -----------------------------
@@ -475,7 +476,7 @@ function issueBuilderMove(creep, target, opts) {
 
     if (!creep.pos.inRangeTo(target.pos, 3)) {
       debugDrawLine(creep, target, CFG.DRAW.TRAVEL, 'TO•SITE');
-      issueBuilderMove(creep, target, { range: 3, reusePath: 10 });
+      creep.moveTo(target, { range: 3, reusePath: 10 });
       return true;
     }
 
@@ -537,28 +538,13 @@ function issueBuilderMove(creep, target, opts) {
     role: 'Builder',
     run: function (creep) {
       ensureBuilderIdentity(creep);
-      if (creep.memory._builderMoveTick !== Game.time) delete creep.memory._builderMoveTick;
-      if (!needsEnergy(creep) && creep.memory.builderRefuelLock) {
-        delete creep.memory.builderRefuelLock;
-      }
 
       var state = getBuilderState(creep);
       if (needsEnergy(creep)) {
         setBuilderState(creep, BUILDER_STATES.HARVEST);
         state = BUILDER_STATES.HARVEST;
-        // Preserve remote target intent briefly so builders do not cross into a
-        // remote room then immediately reverse toward home on the first empty tick.
-        if (shouldKeepTargetDuringRefuel(creep)) {
-          var lockFor = getRefuelLockDuration(creep);
-          creep.memory.builderRefuelLock = {
-            targetId: creep.memory.builderTargetId,
-            until: Game.time + lockFor
-          };
-        } else {
-          creep.memory.builderTargetId = null;
-          creep.memory.builderTargetType = null;
-          delete creep.memory.builderRefuelLock;
-        }
+        creep.memory.builderTargetId = null;
+        creep.memory.builderTargetType = null;
       }
 
       if (state === BUILDER_STATES.HARVEST) {

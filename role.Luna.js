@@ -1,62 +1,111 @@
 'use strict';
 
 const BeeToolbox = require('BeeToolbox');
-var MovementOwnership = require('Movement.Ownership');
 const BeeCombatSquads = require('BeeCombatSquads');
-const CombatDiplomacy = require('CombatDiplomacy');
-var CoreLogger = require('core.logger');
-var BeeRoleVisuals = require('BeeRoleVisuals');
-var BeeRoles = require('BeeRoles');
-var lunaLog = CoreLogger.createLogger('Luna', CoreLogger.LOG_LEVEL.BASIC);
 
-function describeError(e) {
-  return e && (e.stack || e.message || String(e));
-}
-
-// Role-specific debug and visual settings.
+// Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
+  // --- Debug toggles (shared) ---
   DEBUG_SAY: false,
   DEBUG_DRAW: true,
+
+  // --- Visual styles (shared) ---
   DRAW: {
-    TRAVEL_COLOR:   "#8ab6ff",
-    SRC_COLOR:   "#ffd16e",
+    // BaseHarvest-style visuals
+    TRAVEL:   "#8ab6ff",
+    SOURCE:   "#ffd16e",
+    SEAT:     "#6effa1",
+    QUEUE:    "#ffe66e",
+    YIELD:    "#ff6e6e",
+    OFFLOAD:  "#6ee7ff",
+    IDLE:     "#bfbfbf",
+    // Courier-style visuals
+    WD_COLOR:    "#6ec1ff",  // withdraw lines
+    FILL_COLOR:  "#6effa1",  // delivery lines
+    DROP_COLOR:  "#ffe66e",  // dropped energy
+    GRAVE_COLOR: "#ffb0e0",  // tombstones/ruins
     IDLE_COLOR:  "#bfbfbf",
-    BUILD_COLOR: "#6effa1",
-    UPG_COLOR: "#8ab6ff",
-    PICK_COLOR: "#ffd16e",
-    DELIVER_COLOR: "#6effa1",
+    // Shared
     WIDTH:   0.12,
     OPACITY: 0.45,
     FONT:    0.6
   },
+
+  // --- Towers (Courier) ---
+  TOWER_REFILL_AT_OR_BELOW: 0.70,
+
+  //Upgrader role Behavior
+  SIGN_TEXT: "BeeNice Please.",
+  //Trucker role Behavior
+  PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
+  MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
+  SEARCH_RADIUS: 50,               // how far from flag to look
+  PATH_REUSE: 20,                  // reusePath hint
+  // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
+  ALLOW_NON_ENERGY: true,
+  // Fallback park if no flag & no home (harmless; rarely used)
+  PARK_POS: { x:25, y:25, roomName:"W0N0" },
+
+  //--- Pathing (used by Queen)----
+  STUCK_TICKS: 6,
+  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, idle: 5 },
+
+  // --- Pathing (used by Courier & any others that want it) ---
   PATH_REUSE: 40,
+  MAX_OPS_MOVE: 2000,
+  TRAVEL_MAX_OPS: 4000,
+  // --- Targeting cadences (Courier) ---
+  RETARGET_COOLDOWN: 10,
+  GRAVE_SCAN_COOLDOWN: 20,
+  BETTER_CONTAINER_DELTA: 150,
+  // --- Thresholds / radii (Courier) ---
+  CONTAINER_MIN: 50,
+  DROPPED_BIG_MIN: 150,
+  DROPPED_NEAR_CONTAINER_R: 2,
+  DROPPED_ALONG_ROUTE_R: 2,
 });
 
 // =========================
 // Debug helpers
 // =========================
 function debugSay(creep, msg) {
-  BeeRoleVisuals.debugSay(CFG.DEBUG_SAY, creep, msg);
+  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+}
+
+// Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
+function getTargetPosition(target) {
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
 }
 
 function debugDrawLine(creep, target, color, label) {
+  if (!CFG.DEBUG_DRAW || !creep || !target) return;
+  var room = creep.room; if (!room || !room.visual) return;
+  var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
   try {
-    BeeRoleVisuals.drawLine(CFG.DEBUG_DRAW, creep, target, color, label, CFG.DRAW);
-  } catch (e) {
-    lunaLog.warnEvery('luna.debugDrawLine.visual', 250, 'debugDrawLine failed for', creep && creep.name, describeError(e));
-  }
+    room.visual.line(creep.pos, tpos, {
+      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
+    });
+    if (label) {
+      room.visual.text(label, tpos.x, tpos.y - 0.3, {
+        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
+      });
+    }
+  } catch (e) {}
 }
 
 function debugRing(room, pos, color, text) {
+  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
   try {
-    BeeRoleVisuals.drawRing(CFG.DEBUG_DRAW, room, pos, color || '#fff', text, CFG.DRAW);
-  } catch (e) {
-    lunaLog.warnEvery('luna.debugRing.visual', 250, 'debugRing failed for room', room && room.name, describeError(e));
-  }
+    room.visual.circle(pos, { radius: 0.45, fill: 'transparent', stroke: color || '#fff', opacity: CFG.DRAW.OPACITY });
+    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color || '#fff', opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT });
+  } catch (e) {}
 }
 
 // =========================
-// Threat helpers shared with other combat-aware roles.
+// Threat helpers (copied from role.BeeWorker)
 // =========================
 var REMOTE_DEFENSE_MAX_DISTANCE = 2;
 var THREAT_DECAY_TICKS_COPY = 150;
@@ -146,16 +195,12 @@ function computeThreatBundle(room) {
     try {
       var data = BeeCombatSquads.getLiveThreatForRoom(room);
       if (data) return data;
-    } catch (e) {
-      lunaLog.warnEvery('luna.computeThreatBundle.getLiveThreatForRoom', 250, 'getLiveThreatForRoom failed in', room && room.name, describeError(e));
-    }
+    } catch (e) {}
   }
   var hostiles = [];
   try {
     hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
-  } catch (err) {
-    lunaLog.warnEvery('luna.computeThreatBundle.findHostiles', 250, 'hostile scan failed in', room && room.name, describeError(err));
-  }
+  } catch (err) {}
   var bestId = hostiles.length ? hostiles[0].id : null;
   return { score: hostiles.length * 5, hasThreat: hostiles.length > 0, bestId: bestId };
 }
@@ -276,11 +321,6 @@ function softenRemoteDefensePlan(roomName) {
 
   var AVOID_TTL = 30;
   var RETARGET_COOLDOWN = 5;
-  // Debounce windows prevent instant room-entry reversal from transient intel.
-  var LUNA_LOCK_CONFIRM_TICKS = 3;
-  var LUNA_HOSTILE_CONFIRM_TICKS = 4;
-  var LUNA_HOSTILE_FALLBACK_TTL = 250;
-  var LUNA_EXCLUSIVE_CONFIRM_TICKS = 2;
 
   // Small bias to keep the current owner briefly (soft preference only)
   var ASSIGN_STICKY_TTL = 50;
@@ -297,7 +337,7 @@ function softenRemoteDefensePlan(roomName) {
   // ============================
   function shortSid(id) {
     if (!id || typeof id !== 'string') return '??????';
-    var n = id.length; return id.slice(n - 6);
+    var n = id.length; return id.substr(n - 6);
   }
 
   // Returns the Memory.rooms[roomName] bucket, creating it if missing.
@@ -406,9 +446,7 @@ function softenRemoteDefensePlan(roomName) {
 
     var f = Game.flags[fname];
     if (f) {
-      try { f.remove(); } catch (e) {
-        lunaLog.warnEvery('luna.pruneSourceFlags.remove', 250, 'failed to remove source flag', f && f.name, describeError(e));
-      }
+      try { f.remove(); } catch (e) {}
     }
     delete rm.controllerFlagName;
   }
@@ -631,9 +669,7 @@ function softenRemoteDefensePlan(roomName) {
             var tileOk = srcObj ? (f.pos.x === srcObj.pos.x && f.pos.y === srcObj.pos.y && f.pos.roomName === srcObj.pos.roomName) : true;
 
             if (looksLikeOurs && (posMatches && tileOk)) {
-              try { f.remove(); } catch (e1) {
-                lunaLog.warnEvery('luna.pruneSourceFlags.foreignRemove', 250, 'failed to remove stale source flag', f && f.name, describeError(e1));
-              }
+              try { f.remove(); } catch (e1) {}
             }
           }
           delete srec.flagName;
@@ -730,7 +766,7 @@ function softenRemoteDefensePlan(roomName) {
     for (var i=0;i<rooms.length;i++){
       var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
       var rm = getRoomMemoryBucket(rn);
-      if (isRoomMarkedHostile(rn)) continue;
+      if (rm.hostile) continue;
       if (isRoomLockedByInvaderCore(rn)) continue;
 
       if (rm._lastValidFlagScan && (Game.time - rm._lastValidFlagScan) < 300) continue;
@@ -768,9 +804,7 @@ function softenRemoteDefensePlan(roomName) {
       if (!locked && room.controller && room.controller.reservation &&
           room.controller.reservation.username==='Invader'){ locked=true; }
       if (!locked && BeeToolbox && BeeToolbox.isRoomInvaderLocked){
-        try{ if (BeeToolbox.isRoomInvaderLocked(room)) locked=true; }catch(e){
-          lunaLog.warnEvery('luna.assignRoom.invaderLockCheck', 250, 'invader lock check failed in', room && room.name, describeError(e));
-        }
+        try{ if (BeeToolbox.isRoomInvaderLocked(room)) locked=true; }catch(e){}
       }
       rm._invaderLock = { locked: locked, t: now };
       return locked;
@@ -879,11 +913,9 @@ function softenRemoteDefensePlan(roomName) {
     return null;
   }
 
-  function releaseAssignment(creep, reason){
+  function releaseAssignment(creep){
     var memAssign = ensureAssignmentsMem();
     var sid = creep.memory.sourceId;
-    var targetRoom = creep.memory.targetRoom;
-    var releaseReason = reason || 'assignment_invalid';
 
     if (sid){
       maDec(memAssign, sid);
@@ -892,74 +924,12 @@ function softenRemoteDefensePlan(roomName) {
       markAvoid(creep, sid, AVOID_TTL);
     }
 
-    creep.memory._releaseReason = releaseReason;
-    creep.memory._releaseTick = Game.time;
-    creep.memory._releaseRoom = creep.pos.roomName;
-    creep.memory._releaseX = creep.pos.x;
-    creep.memory._releaseY = creep.pos.y;
-    creep.memory._releaseSourceId = sid || null;
-    creep.memory._releaseTargetRoom = targetRoom || null;
-
     creep.memory.sourceId   = null;
     creep.memory.targetRoom = null;
     creep.memory.assigned   = false;
     creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
-    delete creep.memory._lockSince;
-    delete creep.memory._hostileSince;
-    delete creep.memory._exclusiveSince;
-
-    // Proof-oriented trace: only log border/near-border releases happening in
-    // the target room context so we can identify bounce causes without spam.
-    var nearBorder = (creep.pos.x <= 1 || creep.pos.x >= 48 || creep.pos.y <= 1 || creep.pos.y >= 48);
-    var inOrJustEnteredTarget = false;
-    if (targetRoom && creep.pos.roomName === targetRoom) inOrJustEnteredTarget = true;
-    if (!inOrJustEnteredTarget && targetRoom && typeof creep.memory._roomEntryTick === 'number') {
-      if ((Game.time - creep.memory._roomEntryTick) <= 1 && creep.pos.roomName === targetRoom) inOrJustEnteredTarget = true;
-    }
-    if (nearBorder && inOrJustEnteredTarget) {
-      console.log(
-        '[LunaReleaseBorder] name=' + creep.name +
-        ' reason=' + releaseReason +
-        ' room=' + creep.pos.roomName +
-        ' pos=' + creep.pos.x + ',' + creep.pos.y +
-        ' targetRoom=' + (targetRoom || 'null') +
-        ' sourceId=' + (sid || 'null') +
-        ' tick=' + Game.time
-      );
-    }
 
     debugSay(creep, '🌓YIELD');
-  }
-
-  function shouldReleaseDebounced(creep, memKey, active, confirmTicks) {
-    if (!creep || !creep.memory) return !!active;
-    if (!active) {
-      delete creep.memory[memKey];
-      return false;
-    }
-    if (typeof creep.memory[memKey] !== 'number') creep.memory[memKey] = Game.time;
-    return (Game.time - creep.memory[memKey]) >= confirmTicks;
-  }
-
-  function isRoomMarkedHostile(roomName) {
-    if (!roomName) return false;
-    var rm = getRoomMemoryBucket(roomName);
-    if (!rm || !rm.hostile) return false;
-    var until = (typeof rm.hostileUntil === 'number') ? rm.hostileUntil : null;
-    var seenAt = (typeof rm.hostileSeenAt === 'number') ? rm.hostileSeenAt : null;
-
-    if (until != null && Game.time > until) {
-      rm.hostile = false;
-      delete rm.hostileUntil;
-      delete rm.hostileSeenAt;
-      return false;
-    }
-    if (until == null && seenAt != null && (Game.time - seenAt) > LUNA_HOSTILE_FALLBACK_TTL) {
-      rm.hostile = false;
-      delete rm.hostileSeenAt;
-      return false;
-    }
-    return true;
   }
 
   function validateExclusiveSource(creep){
@@ -970,13 +940,8 @@ function softenRemoteDefensePlan(roomName) {
     var owner = maOwner(memAssign, sid);
 
     if (owner && owner !== creep.name){
-      // Debounce brief ownership jitter so we do not instantly bounce on the
-      // first conflicting read right after entering a room.
-      if (shouldReleaseDebounced(creep, '_exclusiveSince', true, LUNA_EXCLUSIVE_CONFIRM_TICKS)) {
-        releaseAssignment(creep, 'exclusive_conflict');
-        return false;
-      }
-      return true;
+      releaseAssignment(creep);
+      return false;
     }
 
     var winners=[];
@@ -987,7 +952,6 @@ function softenRemoteDefensePlan(roomName) {
       }
     }
     if (winners.length <= MAX_LUNA_PER_SOURCE){
-      shouldReleaseDebounced(creep, '_exclusiveSince', false, LUNA_EXCLUSIVE_CONFIRM_TICKS);
       if (!owner) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
       return true;
     }
@@ -1002,14 +966,10 @@ function softenRemoteDefensePlan(roomName) {
     maSetOwner(memAssign, sid, win.name, win.memory.targetRoom||null);
 
     if (win.name !== creep.name){
-      if (shouldReleaseDebounced(creep, '_exclusiveSince', true, LUNA_EXCLUSIVE_CONFIRM_TICKS)) {
-        console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
-        releaseAssignment(creep, 'exclusive_conflict');
-        return false;
-      }
-      return true;
+      console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
+      releaseAssignment(creep);
+      return false;
     }
-    shouldReleaseDebounced(creep, '_exclusiveSince', false, LUNA_EXCLUSIVE_CONFIRM_TICKS);
     return true;
   }
 
@@ -1026,7 +986,7 @@ function softenRemoteDefensePlan(roomName) {
       debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, "BUILD");
       var br = creep.build(site);
       if (br === ERR_NOT_IN_RANGE) {
-        issueLunaMove(creep, site, { range: 3, reusePath: 15, });
+        creep.travelTo(site, { range: 3, reusePath: 15, });
       }
       return true;
     }
@@ -1037,7 +997,7 @@ function softenRemoteDefensePlan(roomName) {
       debugDrawLine(creep, ctrl, CFG.DRAW.UPG_COLOR, "UPG");
       var ur = creep.upgradeController(ctrl);
       if (ur === ERR_NOT_IN_RANGE) {
-        issueLunaMove(creep, ctrl, { range: 3, reusePath: 15, });
+        creep.travelTo(ctrl, { range: 3, reusePath: 15, });
       }
       return true;
     }
@@ -1050,7 +1010,7 @@ function softenRemoteDefensePlan(roomName) {
   // ============================
   function ensureLunaIdentity(creep) {
     if (!creep || !creep.memory) return;
-    creep.memory.role = BeeRoles.ROLE_NAMES.LUNA;
+    creep.memory.role = 'Luna';
     if (creep.memory.task === 'remoteharvest') {
       creep.memory.task = 'luna';
     } else if (!creep.memory.task) {
@@ -1069,94 +1029,16 @@ function softenRemoteDefensePlan(roomName) {
     creep.memory._lx = creep.pos.x; creep.memory._ly = creep.pos.y; creep.memory._lr = creep.pos.roomName;
   }
 
-  // Room transition breadcrumb for "just entered target room" checks.
-  function trackRoomEntryBreadcrumb(creep) {
-    if (!creep || !creep.memory) return;
-    var prev = creep.memory._lastRoom;
-    var curr = creep.pos.roomName;
-    if (prev && prev !== curr) creep.memory._roomEntryTick = Game.time;
-    creep.memory._lastRoom = curr;
-  }
-
-  function isOnBorder(pos) {
-    return pos && (pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49);
-  }
-
-  // Movement discipline helper:
-  // ensures Luna issues at most one movement command per tick.
-  function issueLunaMove(creep, target, opts) {
-    if (!creep || !target) return ERR_INVALID_TARGET;
-    if (creep.memory._lunaMoveTick === Game.time) return ERR_BUSY;
-    creep.memory._lunaMoveTick = Game.time;
-    var finalOpts = opts || {};
-    if (creep.name === 'Luna') {
-      var entryTick = typeof creep.memory._roomEntryTick === 'number' ? creep.memory._roomEntryTick : null;
-      var nearEntry = (entryTick != null) && ((Game.time - entryTick) >= 0) && ((Game.time - entryTick) <= 3);
-      if (nearEntry) {
-        finalOpts._lunaMode = (creep.pos.roomName === creep.memory.targetRoom) ? 'SOURCE_TRAVEL' : 'ROOM_TRAVEL';
-        var d = target.pos || target;
-        var trav = creep.memory._trav || {};
-        console.log(
-          '[LunaTrace] t=' + Game.time +
-          ' phase=issueMove' +
-          ' pos=' + creep.pos.roomName + ':' + creep.pos.x + ',' + creep.pos.y +
-          ' targetRoom=' + (creep.memory.targetRoom || 'null') +
-          ' sourceId=' + (creep.memory.sourceId || 'null') +
-          ' mode=' + finalOpts._lunaMode +
-          ' dest=' + (d.roomName || '?') + ':' + d.x + ',' + d.y +
-          ' range=' + ((finalOpts.range != null) ? finalOpts.range : 1) +
-          ' cachePath=' + (trav.path ? 'yes' : 'no')
-        );
-      }
-    }
-    return creep.travelTo(target, finalOpts);
-  }
-
-  function stabilizeLunaBorder(creep) {
-    if (!creep || !creep.memory || !creep.memory.targetRoom) return false;
-    if (creep.pos.roomName !== creep.memory.targetRoom) return false;
-    if (!isOnBorder(creep.pos)) return false;
-    if (creep.memory._lunaMoveTick === Game.time) return true;
-    if (creep.name === 'Luna') {
-      var entryTick = typeof creep.memory._roomEntryTick === 'number' ? creep.memory._roomEntryTick : null;
-      if (entryTick != null && (Game.time - entryTick) <= 3) {
-        console.log(
-          '[LunaTrace] t=' + Game.time +
-          ' phase=borderStabilize' +
-          ' pos=' + creep.pos.roomName + ':' + creep.pos.x + ',' + creep.pos.y +
-          ' targetRoom=' + (creep.memory.targetRoom || 'null') +
-          ' sourceId=' + (creep.memory.sourceId || 'null')
-        );
-      }
-    }
-    var dir = null;
-    if (creep.pos.x === 0) dir = RIGHT;
-    else if (creep.pos.x === 49) dir = LEFT;
-    else if (creep.pos.y === 0) dir = BOTTOM;
-    else if (creep.pos.y === 49) dir = TOP;
-    if (!dir) return false;
-
-    var rc = MovementOwnership.move(creep, dir, "role.Luna.js/directStep", "role.Luna");
-    // Consume per-tick move lock only if the nudge intent is accepted (or the
-    // creep already has a move intent this tick). If nudge fails, keep lock
-    // open so issueLunaMove/Traveler fallback can still run this tick.
-    if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
-      creep.memory._lunaMoveTick = Game.time;
-      return true;
-    }
-    return false;
-  }
-
   function idleAtAnchor(creep, label) {
     var anchor = getAnchorPos(getHomeName(creep));
     debugSay(creep, label || 'IDLE');
     debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, label || 'IDLE');
-    issueLunaMove(creep, anchor, { range: 2, reusePath: CFG.PATH_REUSE });
+    creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
   }
 
   function shouldReleaseForEndOfLife(creep) {
     if (creep.ticksToLive!==undefined && creep.ticksToLive<5 && creep.memory.assigned){
-      releaseAssignment(creep, 'eol_release');
+      releaseAssignment(creep);
       return true;
     }
     return false;
@@ -1164,29 +1046,6 @@ function softenRemoteDefensePlan(roomName) {
 
   function respectCooldown(creep) {
     if (creep.memory._retargetAt && Game.time < creep.memory._retargetAt){
-      // Prevent immediate border bounce only for non-critical release jitter.
-      var rr = creep.memory._releaseReason;
-      var nonCritical = (rr === 'exclusive_conflict' || rr === 'assignment_jitter');
-      var justEntered = (typeof creep.memory._roomEntryTick === 'number') && ((Game.time - creep.memory._roomEntryTick) <= 1);
-      var releasedTargetRoom = creep.memory._releaseTargetRoom;
-      var inReleasedTargetRoom = !!(releasedTargetRoom && creep.pos.roomName === releasedTargetRoom);
-      if (nonCritical && justEntered && inReleasedTargetRoom) {
-        if (isOnBorder(creep.pos) && creep.memory._lunaMoveTick !== Game.time) {
-          var dir = null;
-          if (creep.pos.x === 0) dir = RIGHT;
-          else if (creep.pos.x === 49) dir = LEFT;
-          else if (creep.pos.y === 0) dir = BOTTOM;
-          else if (creep.pos.y === 49) dir = TOP;
-          if (dir) {
-            var rc = MovementOwnership.move(creep, dir, "role.Luna.js/directStep", "role.Luna");
-            if (rc === OK || rc === ERR_BUSY || rc === ERR_TIRED) {
-              creep.memory._lunaMoveTick = Game.time;
-            }
-          }
-        }
-        debugSay(creep, '…hold');
-        return true;
-      }
       idleAtAnchor(creep, '…cd');
       return true;
     }
@@ -1196,7 +1055,7 @@ function softenRemoteDefensePlan(roomName) {
   function handleForcedYield(creep) {
     if (!creep.memory._forceYield) return false;
     delete creep.memory._forceYield;
-    releaseAssignment(creep, 'forced_yield');
+    releaseAssignment(creep);
     return true;
   }
 
@@ -1228,7 +1087,7 @@ function softenRemoteDefensePlan(roomName) {
     debugSay(creep, '➡️'+creep.memory.targetRoom);
     debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
 
-    issueLunaMove(creep, dest, {
+    creep.travelTo(dest, {
        range: 20,
         reusePath: 20,
         });
@@ -1240,9 +1099,7 @@ function softenRemoteDefensePlan(roomName) {
     ensureLunaIdentity(creep);
     auditOncePerTick();
     if (!creep.memory.home) getHomeName(creep);
-    if (creep.memory._lunaMoveTick !== Game.time) delete creep.memory._lunaMoveTick;
     trackMovementBreadcrumb(creep);
-    trackRoomEntryBreadcrumb(creep);
   }
 
   // Memory keys:
@@ -1279,9 +1136,6 @@ function softenRemoteDefensePlan(roomName) {
       if (handleForcedYield(creep)) return;
 
       if (!ensureActiveAssignment(creep)) return;
-      // Border stabilization for the first room-entry tile in assigned room:
-      // step inward once so we avoid immediate edge ping-pong.
-      if (stabilizeLunaBorder(creep)) return;
 
       state = determineLunaState(creep);
       if (state === 'UNASSIGNED') {
@@ -1289,24 +1143,13 @@ function softenRemoteDefensePlan(roomName) {
         return;
       }
 
-      var targetRoomName = creep.memory.targetRoom;
-      var roomLocked = targetRoomName && isRoomLockedByInvaderCore(targetRoomName);
-      if (roomLocked){
-        // Debounce lock-triggered releases so a single stale read on entry
-        // does not force an immediate turn-around at room borders.
-        var lockConfirmed = shouldReleaseDebounced(creep, '_lockSince', true, LUNA_LOCK_CONFIRM_TICKS);
-        if (lockConfirmed) {
-          debugSay(creep, '⛔LOCK');
-          var center = new RoomPosition(25,25,creep.memory.targetRoom);
-          debugDrawLine(creep, center, CFG.DRAW.TRAVEL_COLOR, "LOCK");
-          console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
-          releaseAssignment(creep, 'invader_lock');
-          return;
-        } else {
-          debugSay(creep, '⏳LOCK');
-        }
-      } else {
-        shouldReleaseDebounced(creep, '_lockSince', false, LUNA_LOCK_CONFIRM_TICKS);
+      if (creep.memory.targetRoom && isRoomLockedByInvaderCore(creep.memory.targetRoom)){
+        debugSay(creep, '⛔LOCK');
+        var center = new RoomPosition(25,25,creep.memory.targetRoom);
+        debugDrawLine(creep, center, CFG.DRAW.TRAVEL_COLOR, "LOCK");
+        console.log('⛔ '+creep.name+' skipping locked room '+creep.memory.targetRoom+' (Invader activity).');
+        releaseAssignment(creep);
+        return;
       }
 
       if (!validateExclusiveSource(creep)) return;
@@ -1325,17 +1168,10 @@ function softenRemoteDefensePlan(roomName) {
       }
 
       var targetRoomObj = Game.rooms[creep.memory.targetRoom];
-      if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ try { BeeToolbox.logSourcesInRoom(targetRoomObj); } catch (e) {
-        lunaLog.warnEvery('luna.logSourcesInRoom', 250, 'logSourcesInRoom failed in', targetRoomObj && targetRoomObj.name, describeError(e));
-      } }
+      if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ try { BeeToolbox.logSourcesInRoom(targetRoomObj); } catch (e) {} }
 
       if (targetRoomObj) {
         var lunaThreat = evaluateRoomThreat(targetRoomObj, 'Luna');
-        if (CombatDiplomacy && typeof CombatDiplomacy.observeRoomIntel === 'function') {
-          // Luna keeps nearby foreign ownership visible to the watch-list model
-          // even when Scout cadence is low.
-          CombatDiplomacy.observeRoomIntel(targetRoomObj, null, 'LunaTick');
-        }
         if (lunaThreat && lunaThreat.threat && lunaThreat.threat.hasThreat && lunaThreat.canEscalate) {
           ensureRemoteDefensePlan(targetRoomObj, lunaThreat.threat, lunaThreat.distance);
         } else if (targetRoomObj && (!lunaThreat || !lunaThreat.canEscalate || !lunaThreat.threat || !lunaThreat.threat.hasThreat)) {
@@ -1344,18 +1180,11 @@ function softenRemoteDefensePlan(roomName) {
       }
 
       var tmem = getRoomMemoryBucket(creep.memory.targetRoom);
-      if (isRoomMarkedHostile(creep.memory.targetRoom)){
-        // Similar debounce for hostile-room memory: require persistence for a few
-        // ticks before dropping the assignment and reversing.
-        var hostileConfirmed = shouldReleaseDebounced(creep, '_hostileSince', true, LUNA_HOSTILE_CONFIRM_TICKS);
-        if (hostileConfirmed) {
-          console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
-          debugSay(creep, '⚠️HOST');
-          releaseAssignment(creep, 'hostile_room');
-          return;
-        }
-      } else {
-        shouldReleaseDebounced(creep, '_hostileSince', false, LUNA_HOSTILE_CONFIRM_TICKS);
+      if (tmem && tmem.hostile){
+        console.log('⚠️ Forager '+creep.name+' avoiding hostile room '+creep.memory.targetRoom);
+        debugSay(creep, '⚠️HOST');
+        releaseAssignment(creep);
+        return;
       }
       if (!tmem || !tmem.sources) return;
 
@@ -1387,7 +1216,7 @@ function softenRemoteDefensePlan(roomName) {
         var rm = Memory.rooms[roomName];
         if (!rm || !rm.sources) return false;
         if (!inRadius[roomName]) return false;
-        if (isRoomMarkedHostile(roomName)) return false;
+        if (rm.hostile) return false;
         if (isRoomLockedByInvaderCore(roomName)) return false;
         return roomName !== Memory.firstSpawnRoom;
       });
@@ -1496,7 +1325,7 @@ function softenRemoteDefensePlan(roomName) {
         var destHome = new RoomPosition(25, 25, homeName);
         debugSay(creep, '🏠');
         debugDrawLine(creep, destHome, CFG.DRAW.TRAVEL_COLOR, "HOME");
-        issueLunaMove(creep, destHome, { range: 20, reusePath: 20 });
+        creep.travelTo(destHome, { range: 20, reusePath: 20 });
         return;
       }
 
@@ -1518,7 +1347,7 @@ function softenRemoteDefensePlan(roomName) {
           debugDrawLine(creep, a, CFG.DRAW.DELIVER_COLOR, lbl);
           var rc = creep.transfer(a, RESOURCE_ENERGY);
           if (rc === ERR_NOT_IN_RANGE) {
-            issueLunaMove(creep, a, { reusePath: CFG.PATH_REUSE });
+            creep.travelTo(a, { reusePath: CFG.PATH_REUSE });
           }
           return;
         }
@@ -1531,7 +1360,7 @@ function softenRemoteDefensePlan(roomName) {
         debugDrawLine(creep, stor, CFG.DRAW.DELIVER_COLOR, "STO");
         var rc2 = creep.transfer(stor, RESOURCE_ENERGY);
         if (rc2 === ERR_NOT_IN_RANGE) {
-          issueLunaMove(creep, stor, { reusePath: CFG.PATH_REUSE });
+          creep.travelTo(stor, { reusePath: CFG.PATH_REUSE });
         }
         return;
       }
@@ -1550,7 +1379,7 @@ function softenRemoteDefensePlan(roomName) {
           debugDrawLine(creep, b, CFG.DRAW.DELIVER_COLOR, "CON");
           var rc3 = creep.transfer(b, RESOURCE_ENERGY);
           if (rc3 === ERR_NOT_IN_RANGE) {
-            issueLunaMove(creep, b, { reusePath: CFG.PATH_REUSE });
+            creep.travelTo(b, { reusePath: CFG.PATH_REUSE });
           }
           return;
         }
@@ -1563,7 +1392,7 @@ function softenRemoteDefensePlan(roomName) {
       var anchor = getAnchorPos(homeName);
       debugSay(creep, 'IDLE');
       debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      issueLunaMove(creep, anchor, { range: 2, reusePath: CFG.PATH_REUSE });
+      creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
     },
 
     harvestSource: function(creep){
@@ -1575,19 +1404,19 @@ function softenRemoteDefensePlan(roomName) {
         var dest = new RoomPosition(25,25,creep.memory.targetRoom);
         debugSay(creep, '➡️'+creep.memory.targetRoom);
         debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-        issueLunaMove(creep, dest, { range: 20, reusePath: 20});
+        creep.travelTo(dest, { range: 20, reusePath: 20});
         return;
       }
 
       if (isRoomLockedByInvaderCore(creep.room.name)){
         debugSay(creep, '⛔LOCK');
         console.log('⛔ '+creep.name+' bailing from locked room '+creep.room.name+'.');
-        releaseAssignment(creep, 'invader_lock'); return;
+        releaseAssignment(creep); return;
       }
 
       var sid = creep.memory.sourceId;
       var src = Game.getObjectById(sid);
-      if (!src){ if (Game.time%25===0) console.log('Source not found for '+creep.name); releaseAssignment(creep, 'assignment_invalid'); return; }
+      if (!src){ if (Game.time%25===0) console.log('Source not found for '+creep.name); releaseAssignment(creep); return; }
 
       ensureSourceFlag(src);
       var srec = getSourceMemory(creep.room.name, sid); srec.x = src.pos.x; srec.y = src.pos.y;
@@ -1603,7 +1432,7 @@ function softenRemoteDefensePlan(roomName) {
 
       var stuckTicks = typeof creep.memory._stuck === 'number' ? creep.memory._stuck : 0;
       if (stuckTicks >= STUCK_WINDOW){
-        issueLunaMove(creep, src, { range: 1, reusePath: 3,  });
+        creep.travelTo(src, { range: 1, reusePath: 3,  });
         debugSay(creep, '🚧');
       }
 
@@ -1611,7 +1440,7 @@ function softenRemoteDefensePlan(roomName) {
       debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
       var rc = creep.harvest(src);
       if (rc===ERR_NOT_IN_RANGE) {
-        issueLunaMove(creep, src, { range: 1, reusePath: 15, });
+        creep.travelTo(src, { range: 1, reusePath: 15, });
       }
       else if (rc===OK){
         touchSourceActive(creep.room.name, sid);

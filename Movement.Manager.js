@@ -15,10 +15,6 @@
 //   MovementManager.request() to queue movement.
 // -----------------------------------------------------------------------------
 'use strict';
-var MovementOwnership = require('Movement.Ownership');
-var MovementVerify = require('Movement.Verify');
-var MovementIntent = require('Movement.Intent');
-var MovementBorder = require('Movement.Border');
 
 /**
  * What changed & why:
@@ -34,53 +30,35 @@ var MovementBorder = require('Movement.Border');
  * - Only creep.travelTo is used; intents targeting other shards or stale rooms are skipped without side effects.
  */
 
-
-function getCreepName(creep) {
-  return (creep && creep.name) ? creep.name : null;
+function compareIntents(a, b) {
+  if (b.priority !== a.priority) return b.priority - a.priority;
+  if (a.order !== b.order) return a.order - b.order;
+  var aId = a.creepId || a.creepName;
+  var bId = b.creepId || b.creepName;
+  if (aId < bId) return -1;
+  if (aId > bId) return 1;
+  if (a.creepName < b.creepName) return -1;
+  if (a.creepName > b.creepName) return 1;
+  return 0;
 }
-
-function getCreepRole(creep) {
-  return (creep && creep.memory && creep.memory.role) ? creep.memory.role : null;
-}
-
-function getPosFields(pos, prefix) {
-  var out = {};
-  if (!pos) return out;
-  var p = prefix || '';
-  if (pos.roomName != null) out[p + 'rm'] = pos.roomName;
-  if (pos.x != null) out[p + 'x'] = pos.x;
-  if (pos.y != null) out[p + 'y'] = pos.y;
-  return out;
-}
-
-function buildVerifyBase(creep, src) {
-  var base = {
-    c: getCreepName(creep),
-    r: getCreepRole(creep),
-    src: src || 'MovementManager'
-  };
-  if (creep && creep.pos) {
-    var p = getPosFields(creep.pos);
-    if (p.rm != null) base.rm = p.rm;
-    if (p.x != null) base.x = p.x;
-    if (p.y != null) base.y = p.y;
-  }
-  return base;
-}
-
-function recordMoveVerify(type, data) {
-  try {
-    if (!MovementVerify || typeof MovementVerify.event !== 'function') return;
-    if (MovementVerify.isEnabled && !MovementVerify.isEnabled()) return;
-    MovementVerify.event(type, data || {});
-  } catch (e) {
-    // verifier is strictly side-channel and must never affect movement behavior
-  }
-}
-
 
 var MovementManager = {
-  PRIORITIES: MovementIntent.PRIORITIES,
+  PRIORITIES: {
+    emergency: 100,
+    combat: 90,
+    pickup: 80,
+    withdraw: 70,
+    deliver: 60,
+    harvest: 55,
+    build: 50,
+    repair: 45,
+    upgrade: 40,
+    reserve: 35,
+    claim: 35,
+    scout: 30,
+    idle: 5,
+    default: 0
+  },
 
   _intents: [],
   _indexByCreep: {},
@@ -121,33 +99,18 @@ var MovementManager = {
   // Notes: Each creep keeps only one active intent; newer requests overwrite if
   //        they are same or higher priority.
   request: function (creep, dest, priority, opts) {
-    if (!creep || !creep.name) {
-      recordMoveVerify('mv.req.invalid', { src: 'MovementManager.request', reason: 'invalidCreep', priority: priority });
-      return ERR_INVALID_ARGS;
-    }
-    if (!dest) {
-      var missingDestBase = buildVerifyBase(creep, 'MovementManager.request');
-      missingDestBase.priority = priority;
-      missingDestBase.reason = 'missingDest';
-      recordMoveVerify('mv.req.invalid', missingDestBase);
-      return ERR_INVALID_ARGS;
-    }
+    if (!creep || !creep.name) return ERR_INVALID_ARGS;
+    if (!dest) return ERR_INVALID_ARGS;
 
     // Normalise destination so we always have coordinates, shard, and target ID
     // recorded on the intent. This keeps validation inside resolveAndMove
     // straightforward and visible.
     var pos = dest.pos || dest;
-    if (!pos || pos.x == null || pos.y == null || !pos.roomName) {
-      var badPosBase = buildVerifyBase(creep, 'MovementManager.request');
-      badPosBase.priority = priority;
-      badPosBase.reason = 'invalidDestination';
-      recordMoveVerify('mv.req.invalid', badPosBase);
-      return ERR_INVALID_ARGS;
-    }
+    if (!pos || pos.x == null || pos.y == null || !pos.roomName) return ERR_INVALID_ARGS;
     var shard = (dest.shard && typeof dest.shard === 'string') ? dest.shard : (pos.shard || null);
     var targetId = dest.id || null;
 
-    var pr = (typeof priority === 'number') ? priority : MovementIntent.priorityFromOpts(opts);
+    var pr = (typeof priority === 'number') ? priority : this._priorityFromOpts(opts);
     var key = creep.name;
     var idx = this._indexByCreep[key];
 
@@ -177,37 +140,12 @@ var MovementManager = {
       };
       this._indexByCreep[key] = this._intents.length;
       this._intents.push(newIntent);
-      var reqBase = buildVerifyBase(creep, 'MovementManager.request');
-      var reqDest = getPosFields(pos, 'd');
-      reqBase.priority = pr;
-      reqBase.meta = 'acceptedNew';
-      if (reqDest.drm != null) reqBase.drm = reqDest.drm;
-      if (reqDest.dx != null) reqBase.dx = reqDest.dx;
-      if (reqDest.dy != null) reqBase.dy = reqDest.dy;
-      recordMoveVerify('mv.req', reqBase);
       return OK;
     }
 
     var intent = this._intents[idx];
-    if (!intent) {
-      var missingIntentBase = buildVerifyBase(creep, 'MovementManager.request');
-      missingIntentBase.priority = pr;
-      missingIntentBase.reason = 'missingIntentRecord';
-      recordMoveVerify('mv.req.invalid', missingIntentBase);
-      return ERR_INVALID_ARGS;
-    }
-    if (pr < intent.priority) {
-      var downgradeBase = buildVerifyBase(creep, 'MovementManager.request');
-      var downgradeDest = getPosFields(pos, 'd');
-      downgradeBase.priority = pr;
-      downgradeBase.existingPriority = intent.priority;
-      downgradeBase.meta = 'keptExistingHigher';
-      if (downgradeDest.drm != null) downgradeBase.drm = downgradeDest.drm;
-      if (downgradeDest.dx != null) downgradeBase.dx = downgradeDest.dx;
-      if (downgradeDest.dy != null) downgradeBase.dy = downgradeDest.dy;
-      recordMoveVerify('mv.req.downgrade', downgradeBase);
-      return intent.priority;
-    }
+    if (!intent) return ERR_INVALID_ARGS;
+    if (pr < intent.priority) return intent.priority;
 
     // Higher or equal priority replaces destination/opts; retains earliest
     // startRoom to avoid executing after portal jumps.
@@ -227,36 +165,17 @@ var MovementManager = {
     intent.shard = shard;
     intent.targetId = targetId;
     intent.updatedTick = Game.time;
-    var replaceBase = buildVerifyBase(creep, 'MovementManager.request');
-    var replaceDest = getPosFields(pos, 'd');
-    replaceBase.priority = pr;
-    replaceBase.existingPriority = intent.priority;
-    replaceBase.meta = 'replacedExisting';
-    if (replaceDest.drm != null) replaceBase.drm = replaceDest.drm;
-    if (replaceDest.dx != null) replaceBase.dx = replaceDest.dx;
-    if (replaceDest.dy != null) replaceBase.dy = replaceDest.dy;
-    recordMoveVerify('mv.req', replaceBase);
     return OK;
   },
 
   // Function header: _priorityFromOpts(opts)
   // Inputs: options object (may include intentType).
   // Output: numeric priority; defaults to PRIORITIES.default.
-  _isExitPosition: MovementBorder.isExitPosition,
-
-  _tryMoveOffExit: function (creep, reason, destination, travelOpts) {
-    var moved = MovementBorder.tryMoveOffExit(creep, destination, travelOpts);
-    if (!moved) return null;
-    var result = moved.result;
-    var borderBase = buildVerifyBase(creep, 'MovementManager._tryMoveOffExit');
-    var borderDest = getPosFields(destination, 'd');
-    borderBase.meta = reason || 'offExit';
-    borderBase.rc = result;
-    if (borderDest.drm != null) borderBase.drm = borderDest.drm;
-    if (borderDest.dx != null) borderBase.dx = borderDest.dx;
-    if (borderDest.dy != null) borderBase.dy = borderDest.dy;
-    recordMoveVerify('mv.border.recover', borderBase);
-    return { result: result, data: moved.data, reason: reason };
+  _priorityFromOpts: function (opts) {
+    if (!opts || !opts.intentType) return this.PRIORITIES.default;
+    var key = opts.intentType;
+    if (this.PRIORITIES.hasOwnProperty(key)) return this.PRIORITIES[key];
+    return this.PRIORITIES.default;
   },
 
   /**
@@ -269,75 +188,21 @@ var MovementManager = {
   // Side-effects: issues move intents to creeps, clears internal intent list.
   // Failure modes: silently skips creeps with fatigue or invalid targets.
   resolveAndMove: function () {
-    var hadIntentByCreep = {};
-    var intents = this._intents || [];
-    for (var h = 0; h < intents.length; h++) {
-      var hi = intents[h];
-      if (hi && hi.creepName) hadIntentByCreep[hi.creepName] = true;
-    }
-    if (intents.length) this._intents.sort(MovementIntent.compareIntents);
+    if (!this._intents || !this._intents.length) return;
+    this._intents.sort(compareIntents);
     for (var i = 0; i < this._intents.length; i++) {
       var intent = this._intents[i];
       if (!intent) continue;
       var creep = Game.creeps[intent.creepName];
       // Skip intents that can never execute this tick so we avoid wasted CPU.
-      if (!creep) {
-        recordMoveVerify('mv.resolve.skip.missing', { src: 'MovementManager.resolveAndMove', reason: 'missingCreep', c: intent.creepName, priority: intent.priority });
-        continue;
-      }
-      if (MovementOwnership.has(creep)) {
-        var ownedBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        ownedBase.priority = intent.priority;
-        ownedBase.reason = 'alreadyOwned';
-        recordMoveVerify('mv.resolve.skip.owned', ownedBase);
-        MovementOwnership.logSkip(creep, 'MovementManager', 'alreadyMoved');
-        continue;
-      }
-      if (creep.fatigue > 0) {
-        var skipBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        skipBase.priority = intent.priority;
-        skipBase.reason = 'fatigued';
-        recordMoveVerify('mv.resolve.skip.missing', skipBase);
-        continue;
-      }
-      if (intent.startRoom && creep.room && creep.room.name !== intent.startRoom) {
-        var skipBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        skipBase.priority = intent.priority;
-        skipBase.reason = 'startRoomMismatch';
-        recordMoveVerify('mv.resolve.skip.missing', skipBase);
-        continue;
-      }
-      if (!intent.roomName || intent.x == null || intent.y == null) {
-        var skipBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        skipBase.priority = intent.priority;
-        skipBase.reason = 'invalidIntentPos';
-        recordMoveVerify('mv.resolve.skip.missing', skipBase);
-        continue;
-      }
-      if (intent.shard && Game.shard && Game.shard.name !== intent.shard) {
-        var skipBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        skipBase.priority = intent.priority;
-        skipBase.reason = 'shardMismatch';
-        recordMoveVerify('mv.resolve.skip.missing', skipBase);
-        continue;
-      }
-      if (intent.targetId && Game.rooms[intent.roomName] && !Game.getObjectById(intent.targetId)) {
-        var skipBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        skipBase.priority = intent.priority;
-        skipBase.reason = 'missingTarget';
-        recordMoveVerify('mv.resolve.skip.missing', skipBase);
-        continue;
-      }
+      if (!creep) continue;
+      if (creep.fatigue > 0) continue;
+      if (intent.startRoom && creep.room && creep.room.name !== intent.startRoom) continue;
+      if (!intent.roomName || intent.x == null || intent.y == null) continue;
+      if (intent.shard && Game.shard && Game.shard.name !== intent.shard) continue;
+      if (intent.targetId && Game.rooms[intent.roomName] && !Game.getObjectById(intent.targetId)) continue;
       var pos = new RoomPosition(intent.x, intent.y, intent.roomName);
-      var inRange = creep.pos.getRangeTo(pos) <= intent.range;
-      var onExit = this._isExitPosition(creep.pos);
-      if (inRange && !onExit) {
-        var rangeSkipBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        rangeSkipBase.priority = intent.priority;
-        rangeSkipBase.reason = 'alreadyInRange';
-        recordMoveVerify('mv.resolve.skip.missing', rangeSkipBase);
-        continue;
-      } // Already within desired range and not on a transfer border.
+      if (creep.pos.getRangeTo(pos) <= intent.range) continue; // Already within desired range; no move issued to avoid thrashing.
       var travelOpts = {
         range: intent.range,
         reusePath: (intent.reusePath != null) ? intent.reusePath : 20,
@@ -345,66 +210,16 @@ var MovementManager = {
         maxOps: (intent.maxOps != null) ? intent.maxOps : 4000,
         plainCost: intent.plainCost,
         swampCost: intent.swampCost,
-        flee: intent.flee || false,
-        _hadIntentThisTick: true
+        flee: intent.flee || false
       };
-      if (inRange && onExit) {
-        var rangeExitBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        var rangeExitDest = getPosFields(pos, 'd');
-        rangeExitBase.priority = intent.priority;
-        rangeExitBase.reason = 'inRangeOnExit';
-        if (rangeExitDest.drm != null) rangeExitBase.drm = rangeExitDest.drm;
-        if (rangeExitDest.dx != null) rangeExitBase.dx = rangeExitDest.dx;
-        if (rangeExitDest.dy != null) rangeExitBase.dy = rangeExitDest.dy;
-        recordMoveVerify('mv.border.recover', rangeExitBase);
-        this._tryMoveOffExit(creep, 'rangeSkipOnExit', pos, travelOpts);
-        continue;
-      }
       if (typeof creep.travelTo === 'function') {
         // Traveler (Traveler.js) handles caching/stuck detection internally and
         // respects reusePath/maxOps options provided.
-        var execBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        var execDest = getPosFields(pos, 'd');
-        execBase.priority = intent.priority;
-        execBase.reason = 'execTravelTo';
-        if (execDest.drm != null) execBase.drm = execDest.drm;
-        if (execDest.dx != null) execBase.dx = execDest.dx;
-        if (execDest.dy != null) execBase.dy = execDest.dy;
-        recordMoveVerify('mv.resolve.exec', execBase);
-        var rc = creep.travelTo(pos, travelOpts);
-        execBase.rc = rc;
-        recordMoveVerify('mv.resolve.result', execBase);
+        creep.travelTo(pos, travelOpts);
       } else {
         // When Traveler is not mixed in, we skip issuing a move to avoid
         // inconsistent behaviour; callers should provide travelTo globally.
-        var noTravelBase = buildVerifyBase(creep, 'MovementManager.resolveAndMove');
-        noTravelBase.priority = intent.priority;
-        noTravelBase.reason = 'travelToMissing';
-        recordMoveVerify('mv.resolve.skip.missing', noTravelBase);
       }
-    }
-    // Post-resolve, per-creep safety fallback: even when queue had other intents,
-    // a creep with no intent can still be stranded on an exit tile and bounce.
-    for (var name in Game.creeps) {
-      var idleCreep = Game.creeps[name];
-      if (!idleCreep || idleCreep.spawning || idleCreep.fatigue > 0) continue;
-      if (hadIntentByCreep[name]) continue;
-      if (MovementOwnership.has(idleCreep)) {
-        MovementOwnership.logSkip(idleCreep, 'MovementManager', 'alreadyMoved');
-        continue;
-      }
-      if (!this._isExitPosition(idleCreep.pos)) continue;
-      var fallbackDest = new RoomPosition(
-        Math.max(1, Math.min(48, idleCreep.pos.x)),
-        Math.max(1, Math.min(48, idleCreep.pos.y)),
-        idleCreep.pos.roomName
-      );
-      this._tryMoveOffExit(idleCreep, 'postResolveIdleOnExitFallback', fallbackDest, {
-        reusePath: 0,
-        ignoreCreeps: false,
-        maxOps: 800,
-        _hadIntentThisTick: false
-      });
     }
     this._intents = [];
     this._indexByCreep = {};

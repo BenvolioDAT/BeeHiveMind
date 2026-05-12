@@ -1,73 +1,9 @@
 
 var Traveler = require('Traveler');
-var MovementOwnership = require('Movement.Ownership');
 var Logger = require('core.logger');
 var CoreConfig = require('core.config');
-var MovementVerify = require('Movement.Verify');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
-var HOSTILE_ROOM_TTL = 250;
-
-function describeError(e) {
-  return e && (e.stack || e.message || String(e));
-}
-
-
-function getCreepName(creep) {
-  return (creep && creep.name) ? creep.name : null;
-}
-
-function getCreepRole(creep) {
-  return (creep && creep.memory && creep.memory.role) ? creep.memory.role : null;
-}
-
-function getPosFields(pos, prefix) {
-  var out = {};
-  if (!pos) return out;
-  var p = prefix || '';
-  if (pos.roomName != null) out[p + 'rm'] = pos.roomName;
-  if (pos.x != null) out[p + 'x'] = pos.x;
-  if (pos.y != null) out[p + 'y'] = pos.y;
-  return out;
-}
-
-function getDestFields(target) {
-  if (!target) return {};
-  var pos = target.pos || target;
-  return getPosFields(pos, 'd');
-}
-
-function isBorderPos(pos) {
-  if (!pos) return false;
-  return pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49;
-}
-
-function buildVerifyBase(creep, src, op) {
-  var base = {
-    c: getCreepName(creep),
-    r: getCreepRole(creep),
-    src: src || 'BeeToolbox',
-    op: op || 'BeeTravel'
-  };
-  if (creep && creep.pos) {
-    var p = getPosFields(creep.pos, '');
-    if (p.rm != null) base.rm = p.rm;
-    if (p.x != null) base.x = p.x;
-    if (p.y != null) base.y = p.y;
-  }
-  return base;
-}
-
-function recordMoveVerify(type, data) {
-  try {
-    if (!MovementVerify || typeof MovementVerify.event !== 'function') return;
-    if (MovementVerify.isEnabled && !MovementVerify.isEnabled()) return;
-    MovementVerify.event(type, data || {});
-  } catch (e) {
-    // verifier is side-channel only
-  }
-}
-
 
 // This utility file gets touched by nearly every role.  The more we can keep the
 // helpers flat and well-named, the easier it is for a new contributor to spot a
@@ -250,14 +186,6 @@ function _canEngageTarget(attacker, target) {
 function BeeTravel(creep, target, a3, a4, a5) {
   if (!creep || !target) return ERR_INVALID_TARGET;
 
-  var verifyBase = buildVerifyBase(creep, 'BeeToolbox.BeeTravel', 'BeeTravel');
-  var verifyDest = getDestFields(target);
-  verifyBase.border = isBorderPos(creep && creep.pos ? creep.pos : null);
-  if (verifyDest.drm != null) verifyBase.drm = verifyDest.drm;
-  if (verifyDest.dx != null) verifyBase.dx = verifyDest.dx;
-  if (verifyDest.dy != null) verifyBase.dy = verifyDest.dy;
-  recordMoveVerify('mv.toolbox.call', verifyBase);
-
   // Normalize destination
   var destination = (target && target.pos) ? target.pos : target;
 
@@ -286,76 +214,15 @@ function BeeTravel(creep, target, a3, a4, a5) {
   };
   for (var k in opts) { if (opts.hasOwnProperty(k)) options[k] = opts[k]; }
 
-  var borderNudge = nudgeOffExitIfNeeded(creep, destination, options);
-  if (borderNudge.didMove) {
-    verifyBase.rc = borderNudge.code;
-    recordMoveVerify('mv.toolbox.result', verifyBase);
-    return borderNudge.code;
-  }
-
   try {
-    var travelRc = Traveler.travelTo(creep, destination, options);
-    verifyBase.rc = travelRc;
-    recordMoveVerify('mv.toolbox.result', verifyBase);
-    return travelRc;
+    return Traveler.travelTo(creep, destination, options);
   } catch (e) {
-    toolboxLog.warnEvery('toolbox.beeTravel.exception', 100, 'BeeTravel exception for', creep && creep.name, describeError(e));
     // Fallback to vanilla moveTo if something odd happens
     if (creep.pos && destination) {
-      var destPos = destination.pos || destination;
-      if (!destPos || destPos.x == null || destPos.y == null || !destPos.roomName) {
-        return ERR_INVALID_TARGET;
-      }
-      var rp = (destination.x != null) ? destination : new RoomPosition(destPos.x, destPos.y, destPos.roomName);
-      var moveToResult = MovementOwnership.moveTo(creep, rp, { reusePath: 20, maxOps: 2000 }, 'BeeToolbox/BeeTravelFallback', 'BeeToolbox');
-      var fallbackEvt = buildVerifyBase(creep, 'BeeToolbox.BeeTravelFallback', 'BeeTravel');
-      var fallbackDest = getDestFields(rp);
-      fallbackEvt.reason = 'travelToExceptionFallback';
-      fallbackEvt.rc = moveToResult;
-      if (fallbackDest.drm != null) fallbackEvt.drm = fallbackDest.drm;
-      if (fallbackDest.dx != null) fallbackEvt.dx = fallbackDest.dx;
-      if (fallbackDest.dy != null) fallbackEvt.dy = fallbackDest.dy;
-      recordMoveVerify('mv.toolbox.fallback', fallbackEvt);
-      if (creep.memory && creep.memory._move) {
-        delete creep.memory._move;
-      }
-      return moveToResult;
+      var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
+      return creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
     }
   }
-}
-
-function nudgeOffExitIfNeeded(creep, destination, options) {
-  if (!creep || !creep.pos || !destination) return { didMove: false, code: ERR_INVALID_TARGET };
-  if (options && options.flee) return { didMove: false, code: OK };
-
-  var d = (destination && destination.pos) ? destination.pos : destination;
-  if (!d || !d.roomName) return { didMove: false, code: ERR_INVALID_TARGET };
-  if (creep.pos.roomName !== d.roomName) return { didMove: false, code: OK };
-
-  var onBorder = (creep.pos.x === 0 || creep.pos.x === 49 || creep.pos.y === 0 || creep.pos.y === 49);
-  if (!onBorder) return { didMove: false, code: OK };
-
-  var dir = null;
-  if (creep.pos.x === 0) dir = RIGHT;
-  else if (creep.pos.x === 49) dir = LEFT;
-  else if (creep.pos.y === 0) dir = BOTTOM;
-  else if (creep.pos.y === 49) dir = TOP;
-  if (!dir) return { didMove: false, code: OK };
-
-  var rc = MovementOwnership.move(creep, dir, 'BeeToolbox/nudgeOffExitIfNeeded', 'BeeToolbox');
-  var nudgeEvt = buildVerifyBase(creep, 'BeeToolbox.nudgeOffExitIfNeeded', 'nudge');
-  var nudgeDest = getDestFields(d);
-  nudgeEvt.border = true;
-  nudgeEvt.reason = 'offExitNudge';
-  nudgeEvt.rc = rc;
-  if (nudgeDest.drm != null) nudgeEvt.drm = nudgeDest.drm;
-  if (nudgeDest.dx != null) nudgeEvt.dx = nudgeDest.dx;
-  if (nudgeDest.dy != null) nudgeEvt.dy = nudgeDest.dy;
-  recordMoveVerify('mv.border.recover', nudgeEvt);
-  if (rc === OK || rc === ERR_TIRED) {
-    return { didMove: true, code: rc };
-  }
-  return { didMove: false, code: rc };
 }
 
 // Interval (in ticks) before we rescan containers adjacent to sources.
@@ -488,7 +355,7 @@ function withdrawOrPickup(creep, targets, action) {
   if (result === ERR_NOT_IN_RANGE) {
     BeeTravel(creep, target, { range: 1, ignoreCreeps: true });
   }
-  return result === OK || result === ERR_NOT_IN_RANGE;
+  return result === OK;
 }
 
 // Helper used by collectEnergy: gives us a single line per category, which is
@@ -527,46 +394,6 @@ var BeeToolbox = {
   isForeignPlayerRoom: function (room) { return _isForeignPlayerRoom(room); },
   canEngageTarget: function (attacker, target) { return _canEngageTarget(attacker, target); },
   myUsername: function () { return _myUsername(); },
-  isApprovedRemoteIntelRoom: function (roomName) {
-    if (!roomName) return false;
-
-    var room = Game.rooms && Game.rooms[roomName];
-    if (room && room.controller && room.controller.my) return true;
-
-    var remotesByHome = Memory.__BHM && Memory.__BHM.remotesByHome;
-    if (remotesByHome && typeof remotesByHome === 'object') {
-      for (var home in remotesByHome) {
-        if (!Object.prototype.hasOwnProperty.call(remotesByHome, home)) continue;
-        var remotes = remotesByHome[home];
-        if (!Array.isArray(remotes)) continue;
-        for (var i = 0; i < remotes.length; i++) {
-          if (remotes[i] === roomName) return true;
-        }
-      }
-    }
-
-    if (Array.isArray(Memory.sourceIntelApprovedRooms)) {
-      for (var j = 0; j < Memory.sourceIntelApprovedRooms.length; j++) {
-        if (Memory.sourceIntelApprovedRooms[j] === roomName) return true;
-      }
-    }
-
-    // Active Luna assignment entries imply this room is currently in-use.
-    var assignments = Memory.remoteAssignments;
-    if (assignments && typeof assignments === 'object') {
-      for (var sid in assignments) {
-        if (!Object.prototype.hasOwnProperty.call(assignments, sid)) continue;
-        var entry = assignments[sid];
-        if (!entry || typeof entry !== 'object') continue;
-        if (entry.roomName !== roomName) continue;
-        var hasCount = (typeof entry.count === 'number' && entry.count > 0);
-        var hasOwner = !!(entry.owner && Game.creeps && Game.creeps[entry.owner]);
-        if (hasCount || hasOwner) return true;
-      }
-    }
-
-    return false;
-  },
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL
@@ -599,16 +426,13 @@ var BeeToolbox = {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       try {
         toolboxLog.debug('Final sources in', room.name + ':', JSON.stringify(Memory.rooms[room.name].sources));
-      } catch (e) {
-        toolboxLog.warnEvery('beeToolbox.logSourcesInRoom.debugSerialize', 250, 'debug source serialization failed in', room && room.name, describeError(e));
-      }
+      } catch (e) {}
     }
   },
 
   // Logs containers that are within 1 tile of any source.
   logSourceContainersInRoom: function (room) {
     if (!room) return;
-    if (!BeeToolbox.isApprovedRemoteIntelRoom(room.name)) return;
     if (!Memory.rooms) Memory.rooms = {};
     if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
     if (!Memory.rooms[room.name].sourceContainers) Memory.rooms[room.name].sourceContainers = {};
@@ -685,33 +509,15 @@ var BeeToolbox = {
   // Mark room hostile if it contains an Invader Core.
   logHostileStructures: function (room) {
     if (!room) return;
-    if (!Memory.rooms) Memory.rooms = {};
-    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-    var roomMem = Memory.rooms[room.name];
     var invaderCore = room.find(FIND_HOSTILE_STRUCTURES, {
       filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; }
     });
     if (invaderCore.length > 0) {
-      roomMem.hostile = true;
-      roomMem.hostileSeenAt = Game.time;
-      roomMem.hostileUntil = Game.time + HOSTILE_ROOM_TTL;
+      if (!Memory.rooms) Memory.rooms = {};
+      if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+      Memory.rooms[room.name].hostile = true;
       if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
         toolboxLog.warn('Marked', room.name, 'as hostile due to Invader Core.');
-      }
-      return;
-    }
-
-    // Hostility decays unless it is refreshed by fresh Invader Core sightings.
-    if (roomMem.hostile) {
-      var until = (typeof roomMem.hostileUntil === 'number') ? roomMem.hostileUntil : null;
-      var seenAt = (typeof roomMem.hostileSeenAt === 'number') ? roomMem.hostileSeenAt : null;
-      var expired = false;
-      if (until != null) expired = Game.time > until;
-      else if (seenAt != null) expired = (Game.time - seenAt) > HOSTILE_ROOM_TTL;
-      if (expired) {
-        roomMem.hostile = false;
-        delete roomMem.hostileUntil;
-        delete roomMem.hostileSeenAt;
       }
     }
   },
@@ -777,28 +583,28 @@ var BeeToolbox = {
   _getEnergyTargetsFromCache: getEnergyTargetsFromCache,
 
   collectEnergy: function (creep) {
-    if (!creep) return false;
+    if (!creep) return;
     var room = creep.room;
-    if (!room) return false;
+    if (!room) return;
 
     // Learner tip: when you have a waterfall of similar attempts, hide the
     // repeated logic in a helper (gatherEnergyFromCategory) so the high level
     // tells a clear story of "check ruins → tombstones → dropped → containers".
     if (gatherEnergyFromCategory(creep, room, 'ruins', function (target) {
       return target.store && target.store[RESOURCE_ENERGY] > 0;
-    }, 'withdraw')) return true;
+    }, 'withdraw')) return;
 
     if (gatherEnergyFromCategory(creep, room, 'tombstones', function (target) {
       return target.store && target.store[RESOURCE_ENERGY] > 0;
-    }, 'withdraw')) return true;
+    }, 'withdraw')) return;
 
     if (gatherEnergyFromCategory(creep, room, 'dropped', function (target) {
       return target.resourceType === RESOURCE_ENERGY && target.amount > 0;
-    }, 'pickup')) return true;
+    }, 'pickup')) return;
 
     if (gatherEnergyFromCategory(creep, room, 'containers', function (target) {
       return target.structureType === STRUCTURE_CONTAINER && target.store && target.store[RESOURCE_ENERGY] > 0;
-    }, 'withdraw')) return true;
+    }, 'withdraw')) return;
 
     var storage = creep.room.storage;
     if (storage && storage.store && storage.store[RESOURCE_ENERGY] > 0) {
@@ -806,9 +612,7 @@ var BeeToolbox = {
       if (res === ERR_NOT_IN_RANGE) {
         BeeTravel(creep, storage, { range: 1 });
       }
-      return res === OK || res === ERR_NOT_IN_RANGE;
     }
-    return false;
   },
 
   deliverEnergy: function (creep, structureTypes) {
@@ -1004,8 +808,7 @@ var BeeToolbox = {
   // 🚚 MOVEMENT: Traveler wrapper
   // ---------------------------------------------------------------------------
 
-  BeeTravel: BeeTravel,
-  nudgeOffExitIfNeeded: nudgeOffExitIfNeeded
+  BeeTravel: BeeTravel
 
 }; // end BeeToolbox
 

@@ -29,7 +29,6 @@ var BeeVisualsSpawnPanel = require('BeeVisuals.SpawnPanel'); // UI overlay for s
 var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
-var MovementVerify       = require('Movement.Verify');
 var BeeSpawnManager      = require('BeeSpawnManager');
 var BaseHarvest          = require('role.BaseHarvest');
 var Builder              = require('role.Builder');
@@ -45,7 +44,8 @@ var CombatMedic          = require('role.CombatMedic');
 var CombatMelee          = require('role.CombatMelee');
 var roleRepair           = require('role.Repair');
 var roleDismantler       = require('role.Dismantler');
-var Planner              = require('Planner');
+var RoomPlanner          = require('Planner.Room');
+var RoadPlanner          = require('Planner.Road');
 var TradeEnergy          = require('Trade.Energy');
 
 // Keep references to the role modules so validation can check the intended
@@ -294,11 +294,11 @@ function prepareTickCaches() {
 
   // Remote rooms: always keep together with room data so it's easy to spot.
   var remotesByHome = Object.create(null);
-  var hasHelper = Planner && typeof Planner.getActiveRemoteRooms === 'function';
+  var hasHelper = RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function';
   if (hasHelper) {
     for (var m = 0; m < ownedRooms.length; m++) {
       var home = ownedRooms[m];
-      remotesByHome[home.name] = Planner.getActiveRemoteRooms(home) || [];
+      remotesByHome[home.name] = RoadPlanner.getActiveRemoteRooms(home) || [];
     }
   }
 
@@ -364,9 +364,6 @@ var BeeHiveMind = {
       // Reset movement queue before any role enqueues requests.
       MovementManager.startTick();
     }
-    if (MovementVerify && typeof MovementVerify.startTick === 'function') {
-      MovementVerify.startTick();
-    }
 
     // Visual overlays (spawn HUD + queue)
     if (BeeVisualsSpawnPanel && typeof BeeVisualsSpawnPanel.drawVisuals === 'function') {
@@ -401,14 +398,6 @@ var BeeHiveMind = {
       // if (Game.time % 3 === 0) TradeEnergy.runAll();
       TradeEnergy.runAll();
     }
-
-    if (MovementVerify && typeof MovementVerify.flushSummary === 'function') {
-      try {
-        MovementVerify.flushSummary();
-      } catch (e) {
-        hiveLog.warnEvery('hiveMind.movementVerify.flushSummary', 250, 'MovementVerify.flushSummary failed', e && (e.stack || e.message || String(e)));
-      }
-    }
   },
 
   /** Room loop – keep lean. */
@@ -418,13 +407,13 @@ var BeeHiveMind = {
   manageRoom: function manageRoom(room) {
     if (!room) return;
 
-    if (Planner && typeof Planner.ensureSites === 'function') {
+    if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
       // Encourage small, single-purpose helpers: ensureSites focuses purely
       // on layout decisions so this coordinator stays readable.
-      Planner.ensureSites(room);
+      RoomPlanner.ensureSites(room);
     }
-    if (Planner && typeof Planner.ensureRemoteRoads === 'function') {
-      Planner.ensureRemoteRoads(room);
+    if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
+      RoadPlanner.ensureRemoteRoads(room);
     }
   },
 
