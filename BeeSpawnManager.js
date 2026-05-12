@@ -383,7 +383,7 @@ function computeRoomQuotas(C, room) {
     Luna:         4,
     Repair:       0,
     Trucker:      0,
-    Claimer:      2,
+    Claimer:      0,
   };
   if (tickEvery(DBG_EVERY)) {
     dlog('🎯 [Quotas]', fmt(room), JSON.stringify(quotas));
