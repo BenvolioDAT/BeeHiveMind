@@ -10,6 +10,7 @@
  */
 
 var BeeVisualsSpawnPanel = {};
+var CoreConfig = require('core.config');
 
 // ------------------------------- Settings ---------------------------------
 var CFG = {
@@ -26,7 +27,16 @@ var CFG = {
 
 /** Cheap cadence gate so the HUD can be throttled by simply raising CFG.modulo. */
 function shouldDrawSpawnPanels() {
-  var cadence = CFG.modulo;
+  var visualsCfg = (CoreConfig.settings && CoreConfig.settings.visuals) || {};
+  if (visualsCfg.enabled === false || visualsCfg.spawnPanelEnabled === false) return false;
+
+  // Visuals are optional; skip this panel when bucket is low if bucket exists.
+  if (Game.cpu && typeof Game.cpu.bucket === 'number') {
+    var minBucket = (typeof visualsCfg.minBucket === 'number') ? visualsCfg.minBucket : 0;
+    if (Game.cpu.bucket < minBucket) return false;
+  }
+
+  var cadence = (typeof visualsCfg.spawnPanelModulo === 'number') ? visualsCfg.spawnPanelModulo : CFG.modulo;
   if (typeof cadence !== 'number' || cadence < 1) cadence = 1;
   return cadence <= 1 || (Game.time % cadence) === 0;
 }

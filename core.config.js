@@ -44,6 +44,10 @@ CoreConfig.settings = Object.freeze({
     throttleInterval: 25,
     /** Soft cap for in-memory throttled-log key records (global cache, not Memory). */
     throttleMaxKeys: 200,
+    /** Minimum ticks between identical Queen terminal lifecycle logs per room+event. */
+    terminalJobLogInterval: 75,
+    /** Minimum ticks between repeated Traveler warning logs of the same kind. */
+    travelerWarningInterval: 75,
   }),
   combat: Object.freeze({
     /** Allow combat creeps to engage non-ally players. */
@@ -105,6 +109,21 @@ CoreConfig.settings = Object.freeze({
     bucketThreshold: 9950,
     /** Optional modulus so pixels are generated every N ticks. */
     tickModulo: 5,
+  }),
+  visuals: Object.freeze({
+    /** Visuals are helpful for debugging, but they are optional. */
+    enabled: true,
+    /** Skip optional visuals when bucket is low to protect core gameplay CPU. */
+    minBucket: 1000,
+    /** Spawn panel overlay toggle and cadence. */
+    spawnPanelEnabled: true,
+    spawnPanelModulo: 1,
+    /** World map overlay toggle and cadence. */
+    worldOverlayEnabled: true,
+    worldOverlayModulo: 5,
+    /** Planned-road debug overlay toggle and cadence. */
+    plannedRoadsEnabled: true,
+    plannedRoadsModulo: 5,
   }),
   maintenance: Object.freeze({
     /** How often to rescan repair targets inside BeeMaintenance. */
