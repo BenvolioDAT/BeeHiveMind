@@ -625,6 +625,9 @@ function getRoomLocalLiveCount(C, roomName, role) {
   if (canonical === 'Luna') {
     return ((C && C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0);
   }
+  if (canonical === 'Scout') {
+    return countScoutByHome(C, roomName);
+  }
   // Planner quotas are computed per room, so default to room-local live counts
   // for every non-combat role in that room.  This prevents one room's creeps
   // from masking deficits in another room.
@@ -1052,6 +1055,31 @@ function countRoleInRoom(C, roomName, roleName) {
   return count;
 }
 
+function getScoutHomeFromMemory(memory) {
+  if (!memory) return null;
+  if (memory.home) return memory.home;
+  if (memory._home) return memory._home;
+  if (memory.scout && memory.scout.home) return memory.scout.home;
+  return null;
+}
+
+function countScoutByHome(C, roomName) {
+  if (!C || !C.creeps || !roomName) return 0;
+  var count = 0;
+  for (var i = 0; i < C.creeps.length; i++) {
+    var creep = C.creeps[i];
+    if (!creep || !creep.my) continue;
+    var ttl = creep.ticksToLive;
+    if (typeof ttl === 'number' && ttl <= DYING_SOON_TTL) continue;
+    var role = creep.memory && (creep.memory.role || creep.memory.task);
+    if (canonicalRole(role) !== 'Scout') continue;
+    var home = getScoutHomeFromMemory(creep.memory);
+    if (!home && creep.room && creep.room.name) home = creep.room.name; // legacy fallback
+    if (home === roomName) count += 1;
+  }
+  return count;
+}
+
 function countWorkParts(body) {
   if (!body || !body.length) return 0;
   var work = 0;
@@ -1306,6 +1334,11 @@ function enqueue(roomName, role, opts) {
         item[key] = opts[key];
       }
     }
+  }
+  if (item.role === 'Scout') {
+    item.home = roomName;
+    if (!item.scout || typeof item.scout !== 'object') item.scout = {};
+    item.scout.home = roomName;
   }
 
   q.push(item);
@@ -2221,7 +2254,8 @@ function fillQueueForRoom(C, room) {
         spawning: updatedSpawning,
         planned: updatedLive + updatedQueued + updatedSpawning,
         cap: roleCap,
-        overCap: (updatedLive + updatedQueued + updatedSpawning) > roleCap
+        overCap: (updatedLive + updatedQueued + updatedSpawning) > roleCap,
+        countMode: (canonical === 'Scout') ? 'HOME_AWARE' : 'ROOM_LOCAL'
       };
     }
   }
@@ -2639,5 +2673,6 @@ var BeeSpawnManager = {
     runSpawnPass(C);
   }
 };
+
 
 module.exports = BeeSpawnManager;
