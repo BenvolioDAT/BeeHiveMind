@@ -10,6 +10,7 @@ var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var CoreConfig = require('core.config');
+// Body definitions now live in Spawn.BodyConfig.js (registry of role body lists).
 var BodyConfig = require('Spawn.BodyConfig');
 
 function combatDebugEnabled() {
@@ -29,6 +30,8 @@ function combatSpawnLog() {
 // -----------------------------------------------------------------------------
 // Role configuration (canonical names only)
 // -----------------------------------------------------------------------------
+// getBodyForRole() still picks the first affordable body from each largest→smallest list.
+// This keeps spawn behavior the same while making body tuning easier to maintain.
 var ROLE_CONFIGS = BodyConfig.ROLE_CONFIGS;
 
 var ROLE_CANONICAL = [
