@@ -12,6 +12,7 @@
 var CoreLogger  = require('core.logger');
 var LOG_LEVEL   = CoreLogger.LOG_LEVEL;
 var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
+var CoreConfig  = require('core.config');
 
 var spawnLogic  = require('spawn.logic');
 var roleLuna    = require('role.Luna');
@@ -129,6 +130,15 @@ function minEnergyFor(role) {
     }
   }
   return ROLE_MIN_ENERGY[role] || 200;
+}
+
+function squadSpawningEnabled() {
+  return Boolean(
+    CoreConfig &&
+    CoreConfig.settings &&
+    CoreConfig.settings.combat &&
+    CoreConfig.settings.combat.ENABLE_SQUAD_SPAWNING === true
+  );
 }
 
 // ------------------------------ Spawn Queue ------------------------------
@@ -591,7 +601,7 @@ function runSpawnPass(C) {
   for (var i = 0; i < spawns.length; i++) {
     var spawner = spawns[i];
     if (!spawner || spawner.spawning) continue;
-    if (trySpawnSquad(spawner, squadState)) {
+    if (squadSpawningEnabled() && trySpawnSquad(spawner, squadState)) {
       continue;
     }
     dequeueAndSpawn(spawner);
