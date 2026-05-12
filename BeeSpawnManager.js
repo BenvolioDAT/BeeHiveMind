@@ -1092,13 +1092,16 @@ function countQueuedOrSpawningSourceReplacement(roomName, sourceId) {
 
 function summarizeBaseHarvestQueueState(roomName) {
   var q = ensureRoomQueue(roomName);
+  var queuedTotal = 0;
   var queuedBySource = Object.create(null);
   for (var i = 0; i < q.length; i++) {
     var it = q[i];
     if (!it || canonicalRole(it.role) !== 'BaseHarvest') continue;
+    queuedTotal += 1;
     if (!it.assignedSource) continue;
     queuedBySource[it.assignedSource] = (queuedBySource[it.assignedSource] || 0) + 1;
   }
+  var spawningTotal = 0;
   var spawningBySource = Object.create(null);
   var room = Game.rooms[roomName];
   if (room) {
@@ -1108,11 +1111,12 @@ function summarizeBaseHarvestQueueState(roomName) {
       if (!spawning) continue;
       var c = Game.creeps[spawning.name];
       if (!c || canonicalRole(c.memory && (c.memory.role || c.memory.task)) !== 'BaseHarvest') continue;
+      spawningTotal += 1;
       if (!c.memory || !c.memory.assignedSource) continue;
       spawningBySource[c.memory.assignedSource] = (spawningBySource[c.memory.assignedSource] || 0) + 1;
     }
   }
-  return { queuedBySource: queuedBySource, spawningBySource: spawningBySource };
+  return { queuedTotal: queuedTotal, spawningTotal: spawningTotal, queuedBySource: queuedBySource, spawningBySource: spawningBySource };
 }
 
 function computeBaseHarvestQuotaDynamic(C, room) {
@@ -1137,14 +1141,24 @@ function computeBaseHarvestQuotaDynamic(C, room) {
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
   if (!Memory.rooms[room.name].spawnDebug) Memory.rooms[room.name].spawnDebug = {};
+  var queueSummary = summarizeBaseHarvestQueueState(room.name);
+  var liveTotal = getRoomLocalLiveCount(C, room.name, 'BaseHarvest');
+  var plannedTotal = liveTotal + queueSummary.queuedTotal + queueSummary.spawningTotal;
   Memory.rooms[room.name].spawnDebug.baseHarvest = {
     sourceCount: sourceCount,
     sourceIds: state.sourceIds.slice(),
     perSourceLive: state.liveBySource,
     unassignedLive: state.unassignedLive,
     lowTtlSources: Object.keys(state.lowTtlBySource),
-    queuedBySource: summarizeBaseHarvestQueueState(room.name).queuedBySource,
-    spawningBySource: summarizeBaseHarvestQueueState(room.name).spawningBySource,
+    liveTotal: liveTotal,
+    queuedTotal: queueSummary.queuedTotal,
+    spawningTotal: queueSummary.spawningTotal,
+    plannedTotal: plannedTotal,
+    allowedCap: quota,
+    overCap: plannedTotal > quota,
+    suppressedReasons: [],
+    queuedBySource: queueSummary.queuedBySource,
+    spawningBySource: queueSummary.spawningBySource,
     queuedReasons: [],
     replacementNeeded: replacementNeeded,
     quota: quota
@@ -1208,8 +1222,15 @@ function pruneOverfilledQueue(roomName, quotas, C) {
     remaining[canonical] = Math.max(0, (quotas[role] || 0) - active);
   }
 
+  var room = Game.rooms[roomName];
+  var sourceCount = 0;
+  if (room && typeof room.find === 'function') sourceCount = (room.find(FIND_SOURCES) || []).length;
+  var baseHarvestCap = quotas && typeof quotas.BaseHarvest === 'number' ? quotas.BaseHarvest : sourceCount;
+  var baseHarvestLive = getRoomLocalLiveCount(C, roomName, 'BaseHarvest');
+  var baseHarvestSpawning = summarizeBaseHarvestQueueState(roomName).spawningTotal || 0;
   var kept = [];
   var used = Object.create(null);
+  var keptBaseHarvest = 0;
   for (var j = 0; j < q.length; j++) {
     var it = q[j];
     if (!it) continue;
@@ -1219,6 +1240,7 @@ function pruneOverfilledQueue(roomName, quotas, C) {
     it.role = canonicalItemRole;
     var left = remaining[canonicalItemRole] || 0;
     var usedSoFar = used[canonicalItemRole] || 0;
+    if (canonicalItemRole === "BaseHarvest" && (baseHarvestLive + baseHarvestSpawning + keptBaseHarvest) >= baseHarvestCap) continue;
     if (canonicalItemRole === "BaseHarvest" && it.assignedSource) {
       var liveForSource = 0;
       var lowTtlIncumbent = false;
@@ -1239,11 +1261,13 @@ function pruneOverfilledQueue(roomName, quotas, C) {
       if (countQueuedOrSpawningSourceReplacement(roomName, it.assignedSource) > 1) continue;
       if (usedSoFar >= Math.max(left, 1)) continue;
       kept.push(it);
+      keptBaseHarvest += 1;
       used[canonicalItemRole] = usedSoFar + 1;
       continue;
     }
     if (usedSoFar < left) {
       kept.push(it);
+      if (canonicalItemRole === "BaseHarvest") keptBaseHarvest += 1;
       used[canonicalItemRole] = usedSoFar + 1;
     }
   }
@@ -1889,38 +1913,67 @@ function fillQueueForRoom(C, room) {
   pruneOverfilledQueue(roomName, quotas, C);
   var bhDebug = debug.baseHarvest || {};
   var bhQueuedReasons = [];
+  var bhSuppressedReasons = [];
   var baseHarvestSourceMode = false;
   if (room && typeof room.find === 'function') {
     var sources = room.find(FIND_SOURCES) || [];
     if (sources.length > 0) {
       baseHarvestSourceMode = true;
+      var sourceCount = sources.length;
+      var sourceState = collectBaseHarvestSourceState(C, roomName, sources);
+      var queueSummary = summarizeBaseHarvestQueueState(roomName);
+      var liveTotal = getRoomLocalLiveCount(C, roomName, 'BaseHarvest');
+      var unassignedLive = sourceState.unassignedLive || 0;
+      var queuedTotal = queueSummary.queuedTotal || 0;
+      var spawningTotal = queueSummary.spawningTotal || 0;
+      var plannedTotal = liveTotal + queuedTotal + spawningTotal;
+      var allowedCap = sourceCount;
+      if ((bhDebug.lowTtlSources && bhDebug.lowTtlSources.length > 0) || ((bhDebug.replacementNeeded || 0) > 0)) {
+        allowedCap = sourceCount + 1;
+      }
       for (var si = 0; si < sources.length; si++) {
         var source = sources[si];
         var sourceId = source.id;
-        var liveForSource = 0;
-        var lowTtl = false;
-        if (C && C.creeps) {
-          for (var ci = 0; ci < C.creeps.length; ci++) {
-            var c = C.creeps[ci];
-            if (!c || !c.my || !c.room || c.room.name !== roomName) continue;
-            if (canonicalRole(c.memory && (c.memory.role || c.memory.task)) !== 'BaseHarvest') continue;
-            if (!c.memory || c.memory.assignedSource !== sourceId) continue;
-            liveForSource += 1;
-            var ttl = typeof c.ticksToLive === 'number' ? c.ticksToLive : null;
-            if (ttl !== null && ttl > 0 && ttl <= DYING_SOON_TTL) lowTtl = true;
-          }
-        }
+        var liveForSource = sourceState.liveBySource[sourceId] || 0;
+        var lowTtl = !!sourceState.lowTtlBySource[sourceId];
         var queuedOrSpawning = countQueuedOrSpawningSourceReplacement(roomName, sourceId);
         if (liveForSource <= 0 && queuedOrSpawning <= 0) {
+          if (liveTotal >= sourceCount && unassignedLive > 0) {
+            bhSuppressedReasons.push({ sourceId: sourceId, reason: 'SOURCE_MISSING_BUT_UNASSIGNED_LIVE_EXISTS' });
+            continue;
+          }
+          if (plannedTotal >= allowedCap) {
+            bhSuppressedReasons.push({ sourceId: sourceId, reason: 'BASEHARVEST_ROOM_CAP_SUPPRESS' });
+            continue;
+          }
           enqueue(roomName, 'BaseHarvest', { assignedSource: sourceId, plannerReason: 'SOURCE_MISSING_INCUMBENT' });
           bhQueuedReasons.push({ sourceId: sourceId, reason: 'SOURCE_MISSING_INCUMBENT' });
+          queuedTotal += 1;
+          plannedTotal += 1;
           continue;
         }
         if (liveForSource > 0 && lowTtl && queuedOrSpawning <= 0) {
+          if (plannedTotal >= allowedCap) {
+            bhSuppressedReasons.push({ sourceId: sourceId, reason: 'BASEHARVEST_ROOM_CAP_SUPPRESS' });
+            continue;
+          }
           enqueue(roomName, 'BaseHarvest', { assignedSource: sourceId, plannerReason: 'SOURCE_REPLACEMENT_HANDOFF' });
           bhQueuedReasons.push({ sourceId: sourceId, reason: 'SOURCE_REPLACEMENT_HANDOFF' });
+          queuedTotal += 1;
+          plannedTotal += 1;
         }
       }
+      bhDebug.sourceCount = sourceCount;
+      bhDebug.perSourceLive = sourceState.liveBySource;
+      bhDebug.liveTotal = liveTotal;
+      bhDebug.unassignedLive = unassignedLive;
+      bhDebug.queuedTotal = queuedTotal;
+      bhDebug.spawningTotal = spawningTotal;
+      bhDebug.plannedTotal = plannedTotal;
+      bhDebug.allowedCap = allowedCap;
+      bhDebug.overCap = plannedTotal > allowedCap;
+      bhDebug.queuedBySource = queueSummary.queuedBySource;
+      bhDebug.spawningBySource = queueSummary.spawningBySource;
     } else {
       bhQueuedReasons.push({ reason: 'FALLBACK_NO_SOURCES_FOUND' });
     }
@@ -2025,7 +2078,10 @@ function fillQueueForRoom(C, room) {
   debug.roleStats = roleStats;
   if (!debug.baseHarvest) debug.baseHarvest = {};
   debug.baseHarvest.queuedReasons = bhQueuedReasons;
+  debug.baseHarvest.suppressedReasons = bhSuppressedReasons;
   var bhQueueSummary = summarizeBaseHarvestQueueState(roomName);
+  debug.baseHarvest.queuedTotal = bhQueueSummary.queuedTotal;
+  debug.baseHarvest.spawningTotal = bhQueueSummary.spawningTotal;
   debug.baseHarvest.queuedBySource = bhQueueSummary.queuedBySource;
   debug.baseHarvest.spawningBySource = bhQueueSummary.spawningBySource;
   debug.lastQueueTick = Game.time;
