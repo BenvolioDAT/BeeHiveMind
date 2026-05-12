@@ -7,6 +7,13 @@ const BeeRoleVisuals = require('BeeRoleVisuals');
 var CoreLogger = require('core.logger');
 var queenLog = CoreLogger.createLogger('Queen', CoreLogger.LOG_LEVEL.BASIC);
 
+var QUEEN_STATE = Object.freeze({
+  WITHDRAW: 'WITHDRAW',
+  PICKUP: 'PICKUP',
+  DELIVER: 'DELIVER',
+  IDLE: 'IDLE'
+});
+
 function describeError(e) {
   return e && (e.stack || e.message || String(e));
 }
@@ -72,7 +79,7 @@ function drawLine(creep, target, color, label) {
   function determineQueenState(creep) {
     ensureQueenIdentity(creep);
     var task = ensureActiveTask(creep);
-    var type = (task && task.type) ? String(task.type).toUpperCase() : 'IDLE';
+    var type = (task && task.type) ? String(task.type).toUpperCase() : QUEEN_STATE.IDLE;
     creep.memory.state = type;
     return type;
   }
@@ -471,6 +478,8 @@ function drawLine(creep, target, color, label) {
   }
 
   function chooseNextTask(creep) {
+    // Decision order (behavior preserved):
+    // spawn/extension -> tower -> link -> terminal job -> storage/terminal -> pickup -> idle
     if ((creep.store[RESOURCE_ENERGY] || 0) === 0) {
       var withdrawTask = pickWithdrawTask(creep);
       if (withdrawTask) return withdrawTask;
@@ -591,9 +600,11 @@ function drawLine(creep, target, color, label) {
       updateTerminalEnergyJob(creep.room);
       var state = determineQueenState(creep);
 
-      if (state === 'WITHDRAW') { runQueenWithdrawState(creep); return; }
-      if (state === 'PICKUP')   { runQueenPickupState(creep);   return; }
-      if (state === 'DELIVER')  { runQueenDeliverState(creep);  return; }
+      // Story step 1: prepare room memory (terminal job).
+      // Story step 2: decide current state/task.
+      if (state === QUEEN_STATE.WITHDRAW) { runQueenWithdrawState(creep); return; }
+      if (state === QUEEN_STATE.PICKUP)   { runQueenPickupState(creep);   return; }
+      if (state === QUEEN_STATE.DELIVER)  { runQueenDeliverState(creep);  return; }
       runQueenIdleState(creep);
     }
   };
