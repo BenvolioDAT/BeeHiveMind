@@ -657,7 +657,7 @@ class Traveler {
             },
         });
         if (!_.isArray(ret)) {
-            console.log(`couldn't findRoute to ${destination}`);
+            CoreLogger.warnEvery(`traveler.findRoute.failure.${origin.roomName || "unknown"}->${destination.roomName || "unknown"}`, travelerWarningInterval(), `TRAVELER: couldn't findRoute to ${destination}`);
             return;
         }
         for (let value of ret) {
