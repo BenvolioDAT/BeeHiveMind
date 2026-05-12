@@ -45,8 +45,7 @@ var CombatMedic          = require('role.CombatMedic');
 var CombatMelee          = require('role.CombatMelee');
 var roleRepair           = require('role.Repair');
 var roleDismantler       = require('role.Dismantler');
-var RoomPlanner          = require('Planner.Room');
-var RoadPlanner          = require('Planner.Road');
+var Planner              = require('Planner');
 var TradeEnergy          = require('Trade.Energy');
 
 // Keep references to the role modules so validation can check the intended
@@ -295,11 +294,11 @@ function prepareTickCaches() {
 
   // Remote rooms: always keep together with room data so it's easy to spot.
   var remotesByHome = Object.create(null);
-  var hasHelper = RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function';
+  var hasHelper = Planner && typeof Planner.getActiveRemoteRooms === 'function';
   if (hasHelper) {
     for (var m = 0; m < ownedRooms.length; m++) {
       var home = ownedRooms[m];
-      remotesByHome[home.name] = RoadPlanner.getActiveRemoteRooms(home) || [];
+      remotesByHome[home.name] = Planner.getActiveRemoteRooms(home) || [];
     }
   }
 
@@ -419,13 +418,13 @@ var BeeHiveMind = {
   manageRoom: function manageRoom(room) {
     if (!room) return;
 
-    if (RoomPlanner && typeof RoomPlanner.ensureSites === 'function') {
+    if (Planner && typeof Planner.ensureSites === 'function') {
       // Encourage small, single-purpose helpers: ensureSites focuses purely
       // on layout decisions so this coordinator stays readable.
-      RoomPlanner.ensureSites(room);
+      Planner.ensureSites(room);
     }
-    if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
-      RoadPlanner.ensureRemoteRoads(room);
+    if (Planner && typeof Planner.ensureRemoteRoads === 'function') {
+      Planner.ensureRemoteRoads(room);
     }
   },
 
