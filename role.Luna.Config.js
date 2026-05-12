@@ -1,0 +1,51 @@
+'use strict';
+
+// Safe tuning knobs for Luna remote-mining behavior and diagnostics.
+module.exports = Object.freeze({
+  DEBUG_SAY: false,
+  DEBUG_DRAW: true,
+
+  DRAW: Object.freeze({
+    TRAVEL: "#8ab6ff",
+    SOURCE: "#ffd16e",
+    SEAT: "#6effa1",
+    QUEUE: "#ffe66e",
+    YIELD: "#ff6e6e",
+    OFFLOAD: "#6ee7ff",
+    IDLE: "#bfbfbf",
+    WD_COLOR: "#6ec1ff",
+    FILL_COLOR: "#6effa1",
+    DROP_COLOR: "#ffe66e",
+    GRAVE_COLOR: "#ffb0e0",
+    IDLE_COLOR: "#bfbfbf",
+    PICK_COLOR: "#6effa1",
+    TRAVEL_COLOR: "#8ab6ff",
+    BUILD_COLOR: "#2ad1c9",
+    UPG_COLOR: "#8ab6ff",
+    DELIVER_COLOR: "#6ee7ff",
+    SRC_COLOR: "#ffd16e",
+    WIDTH: 0.12,
+    OPACITY: 0.45,
+    FONT: 0.6
+  }),
+
+  REMOTE_DEFENSE_MAX_DISTANCE: 2,
+  THREAT_DECAY_TICKS_COPY: 150,
+  REMOTE_RADIUS: 3,
+  MAX_PF_OPS: 3000,
+  PLAIN_COST: 2,
+  SWAMP_COST: 10,
+  MAX_LUNA_PER_SOURCE: 1,
+  PF_CACHE_TTL: 150,
+  INVADER_LOCK_MEMO_TTL: 1500,
+  AVOID_TTL: 30,
+  RETARGET_COOLDOWN: 5,
+  ASSIGN_STICKY_TTL: 50,
+  STUCK_WINDOW: 4,
+  FLAG_PRUNE_PERIOD: 25,
+  FLAG_RETENTION_TTL: 200,
+
+  PATH_REUSE: 40,
+  MAX_OPS_MOVE: 2000,
+  TRAVEL_MAX_OPS: 4000
+});
