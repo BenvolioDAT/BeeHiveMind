@@ -16,6 +16,11 @@ var CFG = Object.freeze({
     YIELD:    "#ff6e6e",
     OFFLOAD:  "#6ee7ff",
     IDLE:     "#bfbfbf",
+    CTRL:     "#8ab6ff",
+    LINK:     "#6ec1ff",
+    STORE:    "#6effa1",
+    CONT:     "#ffe66e",
+    DROP:     "#ffb0e0",
     // Courier-style visuals
     WD_COLOR:    "#6ec1ff",  // withdraw lines
     FILL_COLOR:  "#6effa1",  // delivery lines
@@ -33,11 +38,12 @@ var CFG = Object.freeze({
 
   //Upgrader role Behavior
   SIGN_TEXT: "BeeNice Please.",
+  SKIP_RCL8_IF_SAFE: false,
+  RCL8_SAFE_TTL: 150000,
   //Trucker role Behavior
   PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
   MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
   SEARCH_RADIUS: 50,               // how far from flag to look
-  PATH_REUSE: 20,                  // reusePath hint
   // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
   ALLOW_NON_ENERGY: true,
   // Fallback park if no flag & no home (harmless; rarely used)

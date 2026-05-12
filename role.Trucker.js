@@ -16,6 +16,10 @@ var CFG = Object.freeze({
     YIELD:    "#ff6e6e",
     OFFLOAD:  "#6ee7ff",
     IDLE:     "#bfbfbf",
+    FLAG:     "#ff9ff3",
+    LOOT:     "#ffe66e",
+    RETURN:   "#8ab6ff",
+    DEPOSIT:  "#6effa1",
     // Courier-style visuals
     WD_COLOR:    "#6ec1ff",  // withdraw lines
     FILL_COLOR:  "#6effa1",  // delivery lines
@@ -37,7 +41,6 @@ var CFG = Object.freeze({
   PICKUP_FLAG_DEFAULT: "E-Pickup", // default flag name to route to
   MIN_DROPPED: 50,                 // ignore tiny crumbs (energy or other)
   SEARCH_RADIUS: 50,               // how far from flag to look
-  PATH_REUSE: 20,                  // reusePath hint
   // Optional: allow non-energy resource pickups (POWER, minerals, etc.)
   ALLOW_NON_ENERGY: true,
   // Fallback park if no flag & no home (harmless; rarely used)
