@@ -56,7 +56,7 @@ function debugRing(room, pos, color, text) {
 }
 
 // =========================
-// Threat helpers (copied from role.BeeWorker)
+// Threat helpers shared with other combat-aware roles.
 // =========================
 var REMOTE_DEFENSE_MAX_DISTANCE = 2;
 var THREAT_DECAY_TICKS_COPY = 150;

@@ -1,6 +1,6 @@
 'use strict';
 
-// Shared debug + tuning config (copied from role.BeeWorker for consistency)
+// Shared debug + tuning config used by this role.
 var CFG = Object.freeze({
   // --- Debug toggles (shared) ---
   DEBUG_SAY: false,
@@ -386,4 +386,3 @@ var BeeToolbox = require('BeeToolbox');
       creep.memory.returning = true;
     }
   }
-
