@@ -843,7 +843,14 @@ function canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas) {
   var minEnergy = minEnergyFor(canonical);
   if (energyAvailable < minEnergy) return { allowed: false, reason: 'BLOCKED_LOW_ENERGY' };
 
-  var baseHarvestFloor = Math.min((quotas && quotas.BaseHarvest) || 0, maxBaseHarvestBySource(roomName));
+  var sourceCount = 0;
+  if (room && typeof room.find === 'function') {
+    sourceCount = (room.find(FIND_SOURCES) || []).length;
+  }
+  var quotaBaseHarvest = (quotas && typeof quotas.BaseHarvest === 'number') ? quotas.BaseHarvest : sourceCount;
+  var baseHarvestFloor = sourceCount > 0
+    ? Math.min(quotaBaseHarvest, sourceCount)
+    : Math.max(0, quotaBaseHarvest);
   var survivalFloors = {
     BaseHarvest: Math.max(0, baseHarvestFloor),
     Courier: Math.max(0, Math.min((quotas && quotas.Courier) || 0, PROTECTED_ROLE_FLOORS.Courier)),
