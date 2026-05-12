@@ -314,6 +314,62 @@ function determineLunaQuota(C, room) {
   return desired;
 }
 
+
+function computeEarlyUpgraderQuota(room) {
+  if (!room) {
+    return 1;
+  }
+
+  var energyAvailable = room.energyAvailable || 0;
+  var energyCapacity = room.energyCapacityAvailable || 0;
+  var spawnExtensionFillRatio = energyCapacity > 0 ? (energyAvailable / energyCapacity) : 0;
+  if (spawnExtensionFillRatio < 0.80) {
+    return 1;
+  }
+
+  var sourceContainerEnergy = 0;
+  var sourceContainerCapacity = 0;
+  var sources = room.find(FIND_SOURCES);
+  for (var i = 0; i < sources.length; i++) {
+    var source = sources[i];
+    var nearby = source.pos.findInRange(FIND_STRUCTURES, 1);
+    for (var j = 0; j < nearby.length; j++) {
+      var structure = nearby[j];
+      if (structure.structureType !== STRUCTURE_CONTAINER) continue;
+      if (!structure.store) continue;
+      sourceContainerEnergy += structure.store[RESOURCE_ENERGY] || 0;
+      sourceContainerCapacity += structure.store.getCapacity(RESOURCE_ENERGY) || 0;
+    }
+  }
+
+  var sourceContainerFillRatio = 0;
+  if (sourceContainerCapacity > 0) {
+    sourceContainerFillRatio = sourceContainerEnergy / sourceContainerCapacity;
+  }
+
+  var droppedEnergy = 0;
+  var drops = room.find(FIND_DROPPED_RESOURCES);
+  for (var k = 0; k < drops.length; k++) {
+    var drop = drops[k];
+    if (drop.resourceType === RESOURCE_ENERGY) {
+      droppedEnergy += drop.amount || 0;
+    }
+  }
+
+  var quota = 1;
+  if (sourceContainerFillRatio >= 0.75 || droppedEnergy >= 300) quota = 2;
+  if (sourceContainerFillRatio >= 0.90 || droppedEnergy >= 700) quota = 3;
+  if (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 1000) quota = 4;
+  if (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 2000) quota = 5;
+  if (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 3500) quota = 6;
+
+  if (quota > 6) {
+    quota = 6;
+  }
+
+  return quota;
+}
+
 function computeRoomQuotas(C, room) {
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
@@ -321,7 +377,7 @@ function computeRoomQuotas(C, room) {
     Baseharvest:  2,
     Courier:      2,
     Queen:        1,
-    Upgrader:     3,
+    Upgrader:     computeEarlyUpgraderQuota(room),
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
     Luna:         4,
