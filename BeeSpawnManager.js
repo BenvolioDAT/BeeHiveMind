@@ -321,7 +321,7 @@ function computeRoomQuotas(C, room) {
     Baseharvest:  2,
     Courier:      2,
     Queen:        1,
-    Upgrader:     1,
+    Upgrader:     3,
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
     Luna:         4,

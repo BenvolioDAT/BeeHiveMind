@@ -251,7 +251,7 @@ function drawLine(creep, target, color, label) {
     job.lastUpdate = Game.time;
 
     if (!room.storage || !room.terminal) {
-      if (job.active || job.paused) logTerminalJob(room, 'paused: missing storage or terminal');
+      if (job.active || job.paused); //logTerminalJob(room, 'paused: missing storage or terminal');
       job.active = false;
       job.paused = true;
       job.pauseReason = 'missing_structures';
