@@ -253,6 +253,7 @@ function prepareTickCaches() {
   // Creeps: single pass to keep counts near the data source.
   var creeps = [];
   var roleCounts = Object.create(null);
+  var roleCountsByRoom = Object.create(null);
   var lunaCountsByHome = Object.create(null);
   var creepNames = Object.keys(Game.creeps);
   for (var j = 0; j < creepNames.length; j++) {
@@ -267,6 +268,15 @@ function prepareTickCaches() {
 
     var roleName = ensureCreepRole(creep);
     roleCounts[roleName] = (roleCounts[roleName] || 0) + 1;
+
+    var homeRoom = (creep.memory && creep.memory.home) || null;
+    if (!homeRoom && creep.memory && creep.memory._home) homeRoom = creep.memory._home;
+    if (!homeRoom && creep.memory && creep.memory.targetRoom) homeRoom = creep.memory.targetRoom;
+    if (!homeRoom && creep.room) homeRoom = creep.room.name;
+    if (homeRoom) {
+      if (!roleCountsByRoom[homeRoom]) roleCountsByRoom[homeRoom] = Object.create(null);
+      roleCountsByRoom[homeRoom][roleName] = (roleCountsByRoom[homeRoom][roleName] || 0) + 1;
+    }
 
     if (roleName === 'Luna') {
       var home = (creep.memory && creep.memory.home) || null;
@@ -325,6 +335,7 @@ function prepareTickCaches() {
   C.spawns          = spawns;
   C.creeps          = creeps;
   C.roleCounts      = roleCounts;
+  C.roleCountsByRoom = roleCountsByRoom;
   C.lunaCountsByHome = lunaCountsByHome;
   C.roomSiteCounts  = byRoom;
   C.totalSites      = totalSites;
