@@ -2,6 +2,8 @@
 var BeeSelectors = require('BeeSelectors');
 var MovementOwnership = require('Movement.Ownership');
 var CoreLogger = require('core.logger');
+var BeeRoleVisuals = require('BeeRoleVisuals');
+var BeeRoles = require('BeeRoles');
 var builderLog = CoreLogger.createLogger('Builder', CoreLogger.LOG_LEVEL.BASIC);
 
 function describeError(e) {
@@ -74,15 +76,12 @@ var CFG = Object.freeze({
 // Shared tiny helpers (copied for role self-containment)
 // -------------------------
 function debugSay(creep, msg) {
-  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+  BeeRoleVisuals.debugSay(CFG.DEBUG_SAY, creep, msg);
 }
 
 // Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
 function getTargetPosition(target) {
-  if (!target) return null;
-  if (target.pos) return target.pos;
-  if (target.x != null && target.y != null && target.roomName) return target;
-  return null;
+  return BeeRoleVisuals.getTargetPosition(target);
 }
 
 function debugDrawLine(creep, target, color, label) {
@@ -151,7 +150,7 @@ function issueBuilderMove(creep, target, opts) {
   // ==============================
   function ensureBuilderIdentity(creep) {
     if (!creep || !creep.memory) return;
-    creep.memory.role = 'Builder';
+    creep.memory.role = BeeRoles.ROLE_NAMES.BUILDER;
     if (!creep.memory.task) creep.memory.task = 'builder';
   }
 

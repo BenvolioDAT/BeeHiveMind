@@ -1,4 +1,7 @@
 'use strict';
+var BeeRoleVisuals = require('BeeRoleVisuals');
+var BeeRoles = require('BeeRoles');
+
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -72,15 +75,12 @@ var CFG = Object.freeze({
 // Shared tiny helpers (copied for role self-containment)
 // -------------------------
 function debugSay(creep, msg) {
-  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+  BeeRoleVisuals.debugSay(CFG.DEBUG_SAY, creep, msg);
 }
 
 // Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
 function getTargetPosition(target) {
-  if (!target) return null;
-  if (target.pos) return target.pos;
-  if (target.x != null && target.y != null && target.roomName) return target;
-  return null;
+  return BeeRoleVisuals.getTargetPosition(target);
 }
 
 function debugDrawLine(creep, target, color, label) {
@@ -230,7 +230,7 @@ function requestUpgraderMove(creep, target, range, opts, reason) {
 
   function ensureUpgraderIdentity(creep) {
     if (!creep || !creep.memory) return;
-    creep.memory.role = 'Upgrader';
+    creep.memory.role = BeeRoles.ROLE_NAMES.UPGRADER;
     if (!creep.memory.task) creep.memory.task = 'upgrader';
   }
 
