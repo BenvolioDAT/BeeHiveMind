@@ -1,0 +1,32 @@
+'use strict';
+
+var COURIER_STATE = Object.freeze({
+  COLLECT: 'COLLECT',
+  DELIVER: 'DELIVER'
+});
+
+var CFG = Object.freeze({
+  DEBUG_SAY: false,
+  DEBUG_DRAW: true,
+  DRAW: {
+    WD_COLOR: '#6ec1ff',
+    FILL_COLOR: '#6effa1',
+    DROP_COLOR: '#ffe66e',
+    GRAVE_COLOR: '#ffb0e0',
+    IDLE_COLOR: '#bfbfbf',
+    WIDTH: 0.12,
+    OPACITY: 0.45,
+    FONT: 0.6
+  },
+  TOWER_REFILL_AT_OR_BELOW: 0.70,
+  PATH_REUSE: 40,
+  RETARGET_COOLDOWN: 10,
+  GRAVE_SCAN_COOLDOWN: 20,
+  BETTER_CONTAINER_DELTA: 150,
+  CONTAINER_MIN: 50,
+  DROPPED_BIG_MIN: 150,
+  DROPPED_NEAR_CONTAINER_R: 2,
+  DROPPED_ALONG_ROUTE_R: 2
+});
+
+module.exports = { COURIER_STATE: COURIER_STATE, CFG: CFG };

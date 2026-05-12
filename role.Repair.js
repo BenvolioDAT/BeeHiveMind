@@ -34,35 +34,35 @@ var LOG_LEVEL = { NONE: 0, BASIC: 1, DEBUG: 2 };
 var currentLogLevel = LOG_LEVEL.NONE;
 
 // =============== Tiny Debug Helpers ===============
-function _posOf(t){ return t && t.pos ? t.pos : t; }
-function _roomOf(p){ return p && Game.rooms[p.roomName]; }
+function _posOf(target){ return target && target.pos ? target.pos : target; }
+function _roomOf(position){ return position && Game.rooms[position.roomName]; }
 
 function debugSay(creep, msg){
   if (CFG.DEBUG_SAY && creep && typeof creep.say === 'function') creep.say(msg, true);
 }
 function debugLine(from, to, color, label){
   if (!CFG.DEBUG_DRAW || !from || !to) return;
-  var f=_posOf(from), t=_posOf(to); if(!f||!t||f.roomName!==t.roomName) return;
-  var R=_roomOf(f); if(!R||!R.visual) return;
-  R.visual.line(f, t, { color: color, width: CFG.WIDTH, opacity: CFG.OPAC });
+  var fromPos=_posOf(from), toPos=_posOf(to); if(!fromPos||!toPos||fromPos.roomName!==toPos.roomName) return;
+  var room=_roomOf(fromPos); if(!room||!room.visual) return;
+  room.visual.line(fromPos, toPos, { color: color, width: CFG.WIDTH, opacity: CFG.OPAC });
   if (label){
-    var mx=(f.x+t.x)/2, my=(f.y+t.y)/2;
-    R.visual.text(label, mx, my-0.25,
+    var midX=(fromPos.x+toPos.x)/2, midY=(fromPos.y+toPos.y)/2;
+    room.visual.text(label, midX, midY-0.25,
       { color: color, opacity: 0.95, font: CFG.FONT, align:"center",
         backgroundColor:"#000", backgroundOpacity:0.25 });
   }
 }
 function debugRing(target, color, text){
   if (!CFG.DEBUG_DRAW || !target) return;
-  var p=_posOf(target); if(!p) return;
-  var R=_roomOf(p); if(!R||!R.visual) return;
-  R.visual.circle(p, { radius: 0.6, fill:"transparent", stroke: color, opacity: CFG.OPAC, width: CFG.WIDTH });
-  if (text) R.visual.text(text, p.x, p.y-0.8, { color: color, font: CFG.FONT, opacity: 0.95, align:"center" });
+  var position=_posOf(target); if(!position) return;
+  var room=_roomOf(position); if(!room||!room.visual) return;
+  room.visual.circle(position, { radius: 0.6, fill:"transparent", stroke: color, opacity: CFG.OPAC, width: CFG.WIDTH });
+  if (text) room.visual.text(text, position.x, position.y-0.8, { color: color, font: CFG.FONT, opacity: 0.95, align:"center" });
 }
 function hud(creep, text){
   if (!CFG.DEBUG_DRAW) return;
-  var R=creep.room; if(!R||!R.visual) return;
-  R.visual.text(text, creep.pos.x, creep.pos.y-1.2, {
+  var room=creep.room; if(!room||!room.visual) return;
+  room.visual.text(text, creep.pos.x, creep.pos.y-1.2, {
     color: CFG.COLORS.TEXT, font: CFG.FONT, opacity: 0.95, align: "center",
     backgroundColor:"#000", backgroundOpacity:0.25
   });
@@ -70,12 +70,12 @@ function hud(creep, text){
 
 // =============== Travel Wrapper ===============
 function go(creep, dest, range){
-  var R = (range != null) ? range : 1;
+  var travelRange = (range != null) ? range : 1;
   var dpos = _posOf(dest) || dest;
-  if (creep.pos.roomName === dpos.roomName && creep.pos.getRangeTo(dpos) > R){
+  if (creep.pos.roomName === dpos.roomName && creep.pos.getRangeTo(dpos) > travelRange){
     debugLine(creep.pos, dpos, CFG.COLORS.PATH, "→");
   }
-  if (creep.pos.getRangeTo(dpos) <= R) return OK;
+  if (creep.pos.getRangeTo(dpos) <= travelRange) return OK;
   try {
     if (BeeToolbox && typeof BeeToolbox.BeeTravel === 'function'){
       return BeeToolbox.BeeTravel(creep, dpos, { range: R, reusePath: CFG.TRAVEL_REUSE });
@@ -294,17 +294,17 @@ function handleRetirementFlow(creep, reason){
     var lastTry = mem.repairLastRecycleAttempt || 0;
     if ((Game.time - lastTry) >= CFG.RECYCLE_RETRY_INTERVAL || creep.pos.isNearTo(spawn)) {
       mem.repairLastRecycleAttempt = Game.time;
-      var rc = spawn.recycleCreep(creep);
-      if (rc === ERR_NOT_IN_RANGE) {
+      var recycleResult = spawn.recycleCreep(creep);
+      if (recycleResult === ERR_NOT_IN_RANGE) {
         mem.repairRetireFallbackReason = 'RECYCLE_MOVE_IN_RANGE';
         go(creep, spawn, 1);
         return true;
       }
-      if (rc === OK) {
+      if (recycleResult === OK) {
         mem.repairRetireFallbackReason = 'RECYCLE_OK';
         return true;
       }
-      mem.repairRetireFallbackReason = 'RECYCLE_ERR_' + rc;
+      mem.repairRetireFallbackReason = 'RECYCLE_ERR_' + recycleResult;
     }
   } else {
     mem.repairRetireFallbackReason = 'NO_HOME_SPAWN_FOR_RECYCLE';
@@ -335,7 +335,9 @@ function chooseRepairAssignment(creep){
     var lockedPick = selectRoomHeadTarget(lockedRoom);
     if (lockedPick) {
       lockedPick.reason = 'LOCKED_ROOM_STICKY';
-      lockedPick.mode = (lockedRoom === creep.room.name) ? 'local' : (lockedRoom === getHomeName(creep) ? 'home' : 'remote');
+      if (lockedRoom === creep.room.name) lockedPick.mode = 'local';
+      else if (lockedRoom === getHomeName(creep)) lockedPick.mode = 'home';
+      else lockedPick.mode = 'remote';
       return lockedPick;
     }
   }
@@ -414,9 +416,9 @@ module.exports = {
       if (source){
         debugRing(source, CFG.COLORS.ENERGY, "ENERGY");
         debugLine(creep, source, CFG.COLORS.ENERGY, "withdraw");
-        var wr = creep.withdraw(source, RESOURCE_ENERGY);
-        if (wr === ERR_NOT_IN_RANGE) go(creep, source, 1);
-        else if (wr === OK) debugSay(creep, "⛽");
+        var withdrawResult = creep.withdraw(source, RESOURCE_ENERGY);
+        if (withdrawResult === ERR_NOT_IN_RANGE) go(creep, source, 1);
+        else if (withdrawResult === OK) debugSay(creep, "⛽");
         return;
       }
 
@@ -458,8 +460,8 @@ module.exports = {
     debugRing(target, CFG.COLORS.REPAIR, "fix");
 
     // Attempt repair
-    var rr = creep.repair(target);
-    if (rr === OK){
+    var repairResult = creep.repair(target);
+    if (repairResult === OK){
       if (currentLogLevel >= LOG_LEVEL.DEBUG){
         console.log("Creep "+creep.name+" repairing "+target.structureType+" @("+target.pos.x+","+target.pos.y+")");
       }
@@ -471,7 +473,7 @@ module.exports = {
       }
       return;
     }
-    if (rr === ERR_NOT_IN_RANGE){
+    if (repairResult === ERR_NOT_IN_RANGE){
       debugLine(creep, target, CFG.COLORS.REPAIR, "to repair");
       go(creep, target, 3);
       return;
@@ -479,7 +481,7 @@ module.exports = {
 
     // Other errors → log & skip this target
     if (currentLogLevel >= LOG_LEVEL.DEBUG){
-      console.log("Repair error for "+creep.name+": "+rr);
+      console.log("Repair error for "+creep.name+": "+repairResult);
     }
     queue.shift();
   }

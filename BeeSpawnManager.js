@@ -21,6 +21,11 @@ var SpawnQueue = require('Spawn.Queue');
 var SpawnCounts = require('Spawn.Counts');
 var SpawnRoles = require('Spawn.Roles');
 var SpawnEconomy = require('Spawn.Economy');
+var SpawnBodyGuidance = require('Spawn.BodyGuidance');
+var SpawnFeedback = require('Spawn.Feedback');
+var SpawnStability = require('Spawn.Stability');
+var SpawnArbitration = require('Spawn.Arbitration');
+var SpawnQuotas = require('Spawn.Quotas');
 var roleLuna    = require('role.Luna');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -119,92 +124,15 @@ function buildBacklogBucket(totalSites, criticalSites) {
 }
 
 function repairBacklogBucket(totalRepairs, criticalRepairs) {
-  if (criticalRepairs > 0 || totalRepairs >= 30) return 'CRITICAL';
-  if (totalRepairs >= 15) return 'HIGH';
-  if (totalRepairs >= 6) return 'MEDIUM';
-  if (totalRepairs > 0) return 'LOW';
-  return 'NONE';
+  return SpawnQuotas.repairBacklogBucket(totalRepairs, criticalRepairs);
 }
 
 function roleBodyGuidance(role, planner) {
-  var canonical = canonicalRole(role);
-  if (!canonical || canonical === 'BaseHarvest') return 0;
-  if (canonical === 'Scout') return { capIndex: 0, reason: 'SCOUT_FIXED' };
-  var p = planner || {};
-  var maturity = p.maturity || 'EARLY';
-  var economyState = p.economyState || 'CRITICAL';
-  var signals = p.signals || {};
-  var recoveryBias = !!p.recoveryBias;
-  var cap = 0;
-  var reason = ['BASE'];
-
-  if (economyState === 'CRITICAL') { cap = 3; reason.push('ECON_CRITICAL'); }
-  else if (economyState === 'STRAINED') { cap = 2; reason.push('ECON_STRAINED'); }
-  else if (economyState === 'HEALTHY') { cap = 1; reason.push('ECON_HEALTHY'); }
-  else { cap = 0; reason.push('ECON_RICH'); }
-
-  if (recoveryBias) { cap += 1; reason.push('RECOVERY_BIAS'); }
-
-  if (canonical === 'Courier') {
-    if ((signals.remoteCount || 0) >= 2 && economyState !== 'CRITICAL') {
-      cap -= 1;
-      reason.push('REMOTE_LOAD');
-    }
-    if ((signals.remoteCount || 0) === 0 && maturity === 'EARLY') {
-      cap += 1;
-      reason.push('EARLY_LOCAL_ONLY');
-    }
-  } else if (canonical === 'Builder') {
-    if (signals.buildBacklogBucket === 'CRITICAL') { cap -= 1; reason.push('BUILD_CRITICAL'); }
-    else if (signals.buildBacklogBucket === 'HIGH') { reason.push('BUILD_HIGH'); }
-    else if (signals.buildBacklogBucket === 'LOW' || signals.buildBacklogBucket === 'NONE') {
-      cap += 1;
-      reason.push('BUILD_LIGHT');
-    }
-  } else if (canonical === 'Repair') {
-    if (signals.repairBacklogBucket === 'CRITICAL') { cap -= 1; reason.push('REPAIR_CRITICAL'); }
-    else if (signals.repairBacklogBucket === 'LOW' || signals.repairBacklogBucket === 'NONE') {
-      cap += 1;
-      reason.push('REPAIR_LIGHT');
-    }
-  } else if (canonical === 'Upgrader') {
-    if (economyState === 'RICH' && maturity !== 'EARLY') {
-      cap -= 1;
-      reason.push('UPGRADE_RICH');
-    }
-    if (economyState === 'CRITICAL' || economyState === 'STRAINED') {
-      cap += 1;
-      reason.push('UPGRADE_CONSERVE');
-    }
-  } else if (canonical === 'Luna') {
-    if ((signals.remoteCount || 0) >= 2 && (economyState === 'HEALTHY' || economyState === 'RICH')) {
-      cap -= 1;
-      reason.push('REMOTE_BREADTH');
-    }
-    if (economyState === 'CRITICAL' || economyState === 'STRAINED') {
-      cap += 1;
-      reason.push('REMOTE_CONSERVE');
-    }
-  } else if (canonical === 'Queen') {
-    // Stage-4 light touch only: keep queen stable, only soften body in weak states.
-    if (economyState === 'CRITICAL' || recoveryBias) {
-      cap = Math.max(cap, 1);
-      reason.push('QUEEN_RECOVERY_FRIENDLY');
-    } else {
-      cap = 0;
-      reason.push('QUEEN_FULL');
-    }
-  }
-
-  if (maturity === 'EARLY') { cap = Math.max(cap, 2); reason.push('MAT_EARLY_CAP'); }
-  else if (maturity === 'MID') { cap = Math.max(cap, 1); reason.push('MAT_MID_CAP'); }
-
-  cap = clampInt(cap, 0, 5);
-  return { capIndex: cap, reason: reason.join('|') };
+  return SpawnBodyGuidance.roleBodyGuidance(role, planner, canonicalRole);
 }
 
 function bodyCapIndexForRole(role, planner) {
-  return roleBodyGuidance(role, planner).capIndex;
+  return SpawnBodyGuidance.bodyCapIndexForRole(role, planner, canonicalRole);
 }
 
 function ensureSpawnDebug(roomName) {
@@ -219,240 +147,46 @@ function compactEnergy(room) {
 }
 
 function emaUpdate(prev, sample, alpha) {
-  if (typeof prev !== 'number') return sample;
-  return (prev * (1 - alpha)) + (sample * alpha);
+  return SpawnFeedback.emaUpdate(prev, sample, alpha);
 }
 
 function ensureFeedbackState(debug) {
-  if (!debug.feedback) {
-    debug.feedback = {
-      windowTicks: FEEDBACK_WINDOW_TICKS,
-      alpha: FEEDBACK_ALPHA,
-      lastSignals: null,
-      roles: {
-        Courier: { emaOutput: 0, emaAction: 0, emaCount: 0, emaPerCreep: 0, status: 'INIT', chronic: 0, bias: 0, signalQuality: 'LOW_SAMPLE', signalSource: 'PROXY_ONLY' },
-        Builder: { emaOutput: 0, emaAction: 0, emaCount: 0, emaPerCreep: 0, status: 'INIT', chronic: 0, bias: 0, signalQuality: 'LOW_SAMPLE', signalSource: 'PROXY_ONLY' },
-        Repair: { emaOutput: 0, emaAction: 0, emaCount: 0, emaPerCreep: 0, status: 'INIT', chronic: 0, bias: 0, signalQuality: 'LOW_SAMPLE', signalSource: 'PROXY_ONLY' },
-        Luna: { emaOutput: 0, emaAction: 0, emaCount: 0, emaPerCreep: 0, status: 'INIT', chronic: 0, bias: 0, signalQuality: 'LOW_SAMPLE', signalSource: 'PROXY_ONLY' },
-        Upgrader: { emaOutput: 0, emaAction: 0, emaCount: 0, emaPerCreep: 0, status: 'INIT', chronic: 0, bias: 0, signalQuality: 'LOW_SAMPLE', signalSource: 'PROXY_ONLY' }
-      },
-      chronic: {},
-      adjustments: {},
-      tuningHints: [],
-      lunaROI: null
-    };
-  }
-  return debug.feedback;
+  return SpawnFeedback.ensureFeedbackState(debug, FEEDBACK_WINDOW_TICKS, FEEDBACK_ALPHA);
 }
 
 function computeLunaRemoteROI(room, lunaSignal, economy, lunaFeedback) {
-  var remotes = lunaSignal && typeof lunaSignal.remoteCount === 'number' ? lunaSignal.remoteCount : 0;
-  var sources = lunaSignal && typeof lunaSignal.totalSources === 'number' ? lunaSignal.totalSources : 0;
-  if (remotes <= 0) {
-    return {
-      score: 0,
-      bucket: 'DISABLED',
-      reasons: ['NO_REMOTES'],
-      hostileRatio: 0,
-      sourcesPerRemote: 0
-    };
-  }
-
-  var hostileLocked = 0;
-  var remoteNames = (global.__BHM && global.__BHM.remotesByHome && room && global.__BHM.remotesByHome[room.name])
-    ? global.__BHM.remotesByHome[room.name]
-    : [];
-  var roomsMem = Memory.rooms || {};
-  for (var i = 0; i < remoteNames.length; i++) {
-    var rn = remoteNames[i];
-    var mem = roomsMem[rn] || {};
-    if (mem.hostile) hostileLocked += 1;
-    if (mem._invaderLock && mem._invaderLock.locked) hostileLocked += 1;
-  }
-  if (hostileLocked > remotes) hostileLocked = remotes;
-  var hostileRatio = remotes > 0 ? (hostileLocked / remotes) : 0;
-  var sourcesPerRemote = remotes > 0 ? (sources / remotes) : 0;
-  var score = 0.55;
-  var reasons = [];
-
-  score += Math.min(0.20, sourcesPerRemote * 0.08);
-  if (sourcesPerRemote >= 1.5) reasons.push('GOOD_SOURCE_DENSITY');
-  score -= Math.min(0.30, hostileRatio * 0.45);
-  if (hostileRatio > 0.35) reasons.push('HOSTILE_PRESSURE');
-  if (economy === 'CRITICAL') { score -= 0.15; reasons.push('ECON_CRITICAL'); }
-  else if (economy === 'STRAINED') { score -= 0.08; reasons.push('ECON_STRAINED'); }
-  if (lunaFeedback && lunaFeedback.emaPerCreep < 0.20) {
-    score -= 0.08;
-    reasons.push('LOW_LUNA_FEEDBACK');
-  }
-  if (lunaFeedback && lunaFeedback.emaPerCreep > 0.60) {
-    score += 0.05;
-    reasons.push('STRONG_LUNA_FEEDBACK');
-  }
-  score = Math.max(0, Math.min(1, score));
-
-  var bucket = 'FAIR';
-  if (score < 0.35) bucket = 'POOR';
-  else if (score > 0.70) bucket = 'GOOD';
-
-  return {
-    score: score,
-    bucket: bucket,
-    reasons: reasons,
-    hostileRatio: hostileRatio,
-    sourcesPerRemote: sourcesPerRemote
-  };
+  return SpawnFeedback.computeLunaRemoteROI(room, lunaSignal, economy, lunaFeedback);
 }
 
 function collectRoleActionCounts(C, room) {
-  var empty = { Courier: 0, Builder: 0, Repair: 0, Luna: 0, Upgrader: 0, samples: 0, available: false };
-  if (!room || typeof room.getEventLog !== 'function') return empty;
-  var events = room.getEventLog();
-  if (!events || !events.length) return empty;
-  var byId = Object.create(null);
-  if (C && C.creeps && C.creeps.length) {
-    for (var i = 0; i < C.creeps.length; i++) {
-      var cr = C.creeps[i];
-      if (!cr || !cr.id || !cr.memory) continue;
-      var rr = canonicalRole(cr.memory.role || cr.memory.task);
-      if (!rr) continue;
-      byId[cr.id] = rr;
-    }
-  }
-  var out = { Courier: 0, Builder: 0, Repair: 0, Luna: 0, Upgrader: 0, samples: 0, available: true };
-  for (var e = 0; e < events.length; e++) {
-    var ev = events[e];
-    if (!ev || !ev.objectId) continue;
-    var role = byId[ev.objectId];
-    if (!role) continue;
-    out.samples += 1;
-    if (ev.event === EVENT_TRANSFER && role === 'Courier') {
-      var amount = ev.data && typeof ev.data.amount === 'number' ? ev.data.amount : 0;
-      out.Courier += amount > 0 ? Math.max(1, Math.floor(amount / 100)) : 1;
-    } else if (ev.event === EVENT_BUILD && role === 'Builder') {
-      out.Builder += 1;
-    } else if (ev.event === EVENT_REPAIR && role === 'Repair') {
-      out.Repair += 1;
-    } else if (ev.event === EVENT_UPGRADE_CONTROLLER && role === 'Upgrader') {
-      out.Upgrader += 1;
-    } else if ((ev.event === EVENT_HARVEST || ev.event === EVENT_TRANSFER) && role === 'Luna') {
-      out.Luna += 1;
-    }
-  }
-  return out;
+  return SpawnFeedback.collectRoleActionCounts(C, room, canonicalRole);
 }
 
 function ensureStabilityState(debug) {
-  if (!debug.stability) {
-    debug.stability = {
-      recovery: {
-        active: false,
-        enteredAt: null,
-        clearSince: null,
-        reason: 'INIT'
-      },
-      starvation: {
-        BaseHarvest: { since: null, duration: 0, unmet: false, lastTick: null },
-        Courier: { since: null, duration: 0, unmet: false, lastTick: null },
-        Queen: { since: null, duration: 0, unmet: false, lastTick: null },
-        Builder: { since: null, duration: 0, unmet: false, lastTick: null },
-        Repair: { since: null, duration: 0, unmet: false, lastTick: null }
-      }
-    };
-  }
-  if (!Array.isArray(debug.spawnHistory)) debug.spawnHistory = [];
-  return debug.stability;
+  return SpawnStability.ensureStabilityState(debug);
 }
 
 function pruneSpawnHistory(debug) {
-  if (!debug || !Array.isArray(debug.spawnHistory)) return;
-  var cutoff = Game.time - STABILITY_HISTORY_WINDOW;
-  var kept = [];
-  for (var i = 0; i < debug.spawnHistory.length; i++) {
-    var rec = debug.spawnHistory[i];
-    if (!rec || typeof rec.t !== 'number') continue;
-    if (rec.t < cutoff) continue;
-    kept.push(rec);
-  }
-  debug.spawnHistory = kept;
+  return SpawnStability.pruneSpawnHistory(debug, STABILITY_HISTORY_WINDOW);
 }
 
 function pushSpawnHistory(debug, role, band, source, reason) {
-  if (!debug) return;
-  if (!Array.isArray(debug.spawnHistory)) debug.spawnHistory = [];
-  debug.spawnHistory.push({
-    t: Game.time,
-    role: role || 'Unknown',
-    band: band || 'SITUATIONAL',
-    source: source || 'queue',
-    reason: reason || null
-  });
-  pruneSpawnHistory(debug);
+  return SpawnStability.pushSpawnHistory(debug, role, band, source, reason, STABILITY_HISTORY_WINDOW);
 }
 
 function computeBandUsage(debug) {
-  pruneSpawnHistory(debug);
-  var counts = {
-    SURVIVAL: 0,
-    ECONOMY: 0,
-    GROWTH: 0,
-    SUPPORT: 0,
-    SITUATIONAL: 0,
-    COMBAT: 0
-  };
-  var total = 0;
-  if (!debug || !Array.isArray(debug.spawnHistory)) {
-    return {
-      total: 0,
-      counts: counts,
-      shares: {
-        SURVIVAL: 0,
-        ECONOMY: 0,
-        GROWTH: 0,
-        SUPPORT: 0,
-        SITUATIONAL: 0,
-        COMBAT: 0
-      }
-    };
-  }
-  for (var i = 0; i < debug.spawnHistory.length; i++) {
-    var rec = debug.spawnHistory[i];
-    if (!rec || !rec.band) continue;
-    var b = rec.band;
-    if (!Object.prototype.hasOwnProperty.call(counts, b)) continue;
-    counts[b] += 1;
-    total += 1;
-  }
-  var shares = {};
-  var keys = Object.keys(counts);
-  for (var j = 0; j < keys.length; j++) {
-    var key = keys[j];
-    shares[key] = total > 0 ? (counts[key] / total) : 0;
-  }
-  return { total: total, counts: counts, shares: shares };
+  return SpawnStability.computeBandUsage(debug, STABILITY_HISTORY_WINDOW);
 }
 
 function computeUrgentBacklogSignals(room, plannerSignals) {
-  var build = plannerSignals && plannerSignals.criticalBuildBacklog > 0;
-  var repair = plannerSignals && plannerSignals.criticalRepairBacklog > 0;
-  if (room) {
-    if (!build && countCriticalBuildBacklog(room) > 0) build = true;
-    if (!repair && countCriticalRepairBacklog(room) > 0) repair = true;
-  }
-  return { builder: build, repair: repair };
+  return SpawnQuotas.computeUrgentBacklogSignals(room, plannerSignals, {
+    countCriticalBuildBacklog: countCriticalBuildBacklog,
+    countCriticalRepairBacklog: countCriticalRepairBacklog
+  });
 }
 
 function budgetBlocksRole(arb, role, band, hasUrgentException) {
-  if (!arb || !arb.recoveryMode) return false;
-  if (!arb.bandUsage || arb.bandUsage.total < BAND_BUDGET_MIN_SAMPLES) return false;
-  if (FLOOR_ROLE_SET[role]) return false;
-  if (hasUrgentException) return false;
-  var cap = arb.budgetCaps && arb.budgetCaps[band];
-  if (typeof cap !== 'number') return false;
-  var share = arb.bandUsage.shares && typeof arb.bandUsage.shares[band] === 'number'
-    ? arb.bandUsage.shares[band]
-    : 0;
-  return share > cap;
+  return SpawnArbitration.budgetBlocksRole(arb, role, band, hasUrgentException, { BAND_BUDGET_MIN_SAMPLES: BAND_BUDGET_MIN_SAMPLES, FLOOR_ROLE_SET: FLOOR_ROLE_SET });
 }
 
 function isUpgraderSafetyRequired(room) {
@@ -486,20 +220,7 @@ function getRoomLocalLiveCount(C, roomName, role) {
 }
 
 function suppressedBandsForState(economyState, recoveryMode) {
-  var map = {};
-  if (economyState === 'CRITICAL') {
-    map.GROWTH = true;
-    map.SUPPORT = true;
-    map.SITUATIONAL = true;
-  } else if (economyState === 'STRAINED') {
-    map.SITUATIONAL = true;
-  }
-  if (recoveryMode) {
-    map.GROWTH = true;
-    map.SUPPORT = true;
-    map.SITUATIONAL = true;
-  }
-  return map;
+  return SpawnArbitration.suppressedBandsForState(economyState, recoveryMode);
 }
 
 function buildArbitrationState(C, room, roomName, quotas) {
@@ -620,7 +341,7 @@ function buildArbitrationState(C, room, roomName, quotas) {
     Repair: countRoleWithQueue(C, roomName, 'Repair').total
   };
 
-  var st = {
+  var arbitrationState = {
     tick: Game.time,
     economyState: economy,
     rawRecovery: rawRecovery,
@@ -666,140 +387,41 @@ function buildArbitrationState(C, room, roomName, quotas) {
     budgetCaps: RECOVERY_BAND_BUDGET_CAPS,
     blockedRoleReasons: {}
   };
-  st.energyAvailable = room && typeof room.energyAvailable === 'number' ? room.energyAvailable : 0;
-  debug.arbitration = st;
-  return st;
+  arbitrationState.energyAvailable = room && typeof room.energyAvailable === 'number' ? room.energyAvailable : 0;
+  debug.arbitration = arbitrationState;
+  return arbitrationState;
 }
 
 function isEmergencyDefenseNeeded(roomName) {
-  if (!roomName) return false;
-  var score = SquadFlagIntel && typeof SquadFlagIntel.threatScoreForRoom === 'function'
-    ? (SquadFlagIntel.threatScoreForRoom(roomName) || 0)
-    : 0;
-  if (score > 0) return true;
-  var room = Game.rooms[roomName];
-  if (!room || typeof room.find !== 'function') return false;
-  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
-  return hostiles.length > 0;
+  return SpawnArbitration.isEmergencyDefenseNeeded(roomName, { SquadFlagIntel: SquadFlagIntel });
 }
 
 function recordBlockedRoleReason(debug, role, reason) {
-  if (!debug || !role || !reason) return;
-  if (!debug.arbitration) debug.arbitration = {};
-  if (!debug.arbitration.blockedRoleReasons) debug.arbitration.blockedRoleReasons = {};
-  debug.arbitration.blockedRoleReasons[role] = reason;
+  return SpawnArbitration.recordBlockedRoleReason(debug, role, reason);
 }
 
 function canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas) {
-  var canonical = canonicalRole(role);
-  if (!canonical) return { allowed: false, reason: 'INVALID_ROLE' };
-  var energyAvailable = room && typeof room.energyAvailable === 'number' ? room.energyAvailable : 0;
-  var minEnergy = minEnergyFor(canonical);
-  if (energyAvailable < minEnergy) return { allowed: false, reason: 'BLOCKED_LOW_ENERGY' };
-
-  var sourceCount = 0;
-  if (room && typeof room.find === 'function') {
-    sourceCount = (room.find(FIND_SOURCES) || []).length;
-  }
-  var quotaBaseHarvest = (quotas && typeof quotas.BaseHarvest === 'number') ? quotas.BaseHarvest : sourceCount;
-  var baseHarvestFloor = sourceCount > 0
-    ? Math.min(quotaBaseHarvest, sourceCount)
-    : Math.max(0, quotaBaseHarvest);
-  var survivalFloors = {
-    BaseHarvest: Math.max(0, baseHarvestFloor),
-    Courier: Math.max(0, Math.min((quotas && quotas.Courier) || 0, PROTECTED_ROLE_FLOORS.Courier)),
-    Queen: Math.max(0, Math.min((quotas && quotas.Queen) || 0, PROTECTED_ROLE_FLOORS.Queen))
-  };
-  var survivalRoles = ['BaseHarvest', 'Courier', 'Queen'];
-  var unmetSurvival = [];
-  for (var i = 0; i < survivalRoles.length; i++) {
-    var sRole = survivalRoles[i];
-    var floor = survivalFloors[sRole] || 0;
-    if (floor <= 0) continue;
-    var live = getRoomLocalLiveCount(C, roomName, sRole);
-    if (live < floor) unmetSurvival.push(sRole);
-  }
-
-  if (FLOOR_ROLE_SET[canonical]) {
-    var required = survivalFloors[canonical] || 0;
-    if (required > 0 && getRoomLocalLiveCount(C, roomName, canonical) < required) {
-      return { allowed: true, reason: 'SURVIVAL_FLOOR_NEEDED' };
-    }
-  }
-
-  if (unmetSurvival.length > 0 && !FLOOR_ROLE_SET[canonical]) {
-    return { allowed: false, reason: 'BLOCKED_SURVIVAL_FLOOR_UNMET', unmetSurvival: unmetSurvival };
-  }
-
-  if (canonical === 'Builder' || canonical === 'Scout') {
-    var quota = Math.max(0, (quotas && quotas[canonical]) || 0);
-    var liveCount = getRoomLocalLiveCount(C, roomName, canonical);
-    if (quota <= 0) {
-      if (liveCount <= 0) return { allowed: true, reason: 'SIMPLE_SUPPORT_ALLOWED' };
-      return { allowed: false, reason: 'BLOCKED_LIVE_AT_OR_ABOVE_QUOTA' };
-    }
-    if (liveCount >= quota) return { allowed: false, reason: 'BLOCKED_LIVE_AT_OR_ABOVE_QUOTA' };
-    return { allowed: true, reason: 'SIMPLE_SUPPORT_ALLOWED' };
-  }
-  return { allowed: true, reason: 'ALLOWED' };
+  return SpawnArbitration.canSpawnQueuedRoleSimple(C, room, roomName, role, item, quotas, {
+    canonicalRole: canonicalRole,
+    minEnergyFor: minEnergyFor,
+    PROTECTED_ROLE_FLOORS: PROTECTED_ROLE_FLOORS,
+    FLOOR_ROLE_SET: FLOOR_ROLE_SET,
+    getRoomLocalLiveCount: getRoomLocalLiveCount
+  });
 }
 
 function queueItemAllowed(item, arb) {
-  if (!item || !arb) return { allowed: true, reason: 'NO_ARB' };
-  var role = canonicalRole(item.role);
-  if (role === 'Builder' || role === 'Scout') {
-    return canSpawnQueuedRoleSimple(arb.C, arb.room, arb.roomName, role, item, arb.quotas || {});
-  }
-  var band = roleBand(role);
-  var builderException = role === 'Builder' && arb.urgentBacklog && arb.urgentBacklog.builder &&
-    arb.recoveryMode && ((arb.roleTotals && arb.roleTotals.Builder) || 0) < 1;
-  var repairException = role === 'Repair' && arb.urgentBacklog && arb.urgentBacklog.repair &&
-    arb.recoveryMode && ((arb.roleTotals && arb.roleTotals.Repair) || 0) < 1;
-  var hasUrgentException = builderException || repairException;
-
-  if (arb.suppressedBands && arb.suppressedBands[band]) {
-    if (builderException) return { allowed: true, reason: 'EXCEPTION_CRITICAL_BUILD' };
-    if (repairException) return { allowed: true, reason: 'EXCEPTION_CRITICAL_REPAIR' };
-    return { allowed: false, reason: 'BAND_SUPPRESSED_' + band };
-  }
-  if (arb.unmetSurvivalFloors && arb.unmetSurvivalFloors.length > 0 && !FLOOR_ROLE_SET[role]) {
-    if (hasUrgentException) {
-      return builderException
-        ? { allowed: true, reason: 'EXCEPTION_CRITICAL_BUILD' }
-        : { allowed: true, reason: 'EXCEPTION_CRITICAL_REPAIR' };
-    }
-    return { allowed: false, reason: 'WAITING_ON_SURVIVAL' };
-  }
-  if (arb.unmetEconomyFloors && arb.unmetEconomyFloors.length > 0) {
-    if (role !== 'Upgrader' && !FLOOR_ROLE_SET[role]) {
-      return { allowed: false, reason: 'WAITING_ON_ECONOMY' };
-    }
-  }
-  if (arb.recoveryMode && (band === 'SITUATIONAL' || band === 'SUPPORT' || band === 'GROWTH')) {
-    if ((role === 'Builder' || role === 'Scout') && (!arb.unmetSurvivalFloors || !arb.unmetSurvivalFloors.length)) {
-      var age = Math.max(0, Game.time - (item.created || Game.time));
-      var threshold = role === 'Builder' ? BUILDER_STARVATION_TICKS : SCOUT_STARVATION_TICKS;
-      var total = (arb.roleTotals && typeof arb.roleTotals[role] === 'number') ? arb.roleTotals[role] : 0;
-      if (total <= 0 && age >= threshold && (arb.energyAvailable || 0) >= minEnergyFor(role)) {
-        return { allowed: true, reason: 'EXCEPTION_SUPPORT_ANTI_STARVATION' };
-      }
-    }
-    if (hasUrgentException) {
-      return builderException
-        ? { allowed: true, reason: 'EXCEPTION_CRITICAL_BUILD' }
-        : { allowed: true, reason: 'EXCEPTION_CRITICAL_REPAIR' };
-    }
-    return { allowed: false, reason: 'RECOVERY_SUPPRESS_' + band };
-  }
-  // Stage-3 budget guardrails: prevent lower bands from monopolizing
-  // recent spawn history during recovery.
-  if (budgetBlocksRole(arb, role, band, hasUrgentException)) {
-    return { allowed: false, reason: 'BUDGET_BLOCK_' + band };
-  }
-  return { allowed: true, reason: 'ALLOWED' };
+  return SpawnArbitration.queueItemAllowed(item, arb, {
+    canonicalRole: canonicalRole,
+    roleBand: roleBand,
+    FLOOR_ROLE_SET: FLOOR_ROLE_SET,
+    BUILDER_STARVATION_TICKS: BUILDER_STARVATION_TICKS,
+    SCOUT_STARVATION_TICKS: SCOUT_STARVATION_TICKS,
+    minEnergyFor: minEnergyFor,
+    canSpawnQueuedRoleSimple: canSpawnQueuedRoleSimple
+  });
 }
 
-// ------------------------------ Spawn Queue ------------------------------
 function ensureRoomQueue(roomName) {
   return SpawnQueue.ensureRoomQueue(roomName);
 }
@@ -1279,34 +901,11 @@ function getRepairWorkloadSummary(room) {
 }
 
 function countCriticalBuildBacklog(room) {
-  if (!room || typeof room.find !== 'function') return 0;
-  var sites = room.find(FIND_CONSTRUCTION_SITES) || [];
-  var count = 0;
-  for (var i = 0; i < sites.length; i++) {
-    var t = sites[i].structureType;
-    if (t === STRUCTURE_SPAWN || t === STRUCTURE_EXTENSION || t === STRUCTURE_TOWER) {
-      count += 1;
-    }
-  }
-  return count;
+  return SpawnQuotas.countCriticalBuildBacklog(room);
 }
 
 function countCriticalRepairBacklog(room) {
-  if (!room || !Memory.rooms || !Memory.rooms[room.name]) return 0;
-  var list = Memory.rooms[room.name].repairTargets;
-  if (!Array.isArray(list)) return 0;
-  var count = 0;
-  for (var i = 0; i < list.length; i++) {
-    var entry = list[i];
-    if (!entry || !entry.type) continue;
-    if (entry.type === STRUCTURE_SPAWN ||
-        entry.type === STRUCTURE_EXTENSION ||
-        entry.type === STRUCTURE_TOWER ||
-        entry.type === STRUCTURE_CONTAINER) {
-      count += 1;
-    }
-  }
-  return count;
+  return SpawnQuotas.countCriticalRepairBacklog(room);
 }
 
 function summarizeCriticalRepairCount(workload, fallbackCriticalCount) {
@@ -1401,7 +1000,9 @@ function computeNonCombatPlan(C, room, debug) {
     if (remoteCount >= 2) desired.Courier += 1;
     desired.Courier = clampInt(desired.Courier, 1, 3);
     desired.Upgrader = 1;
-    desired.Builder = (buildBucket === 'CRITICAL' || buildBucket === 'HIGH') ? 2 : (buildBucket === 'MEDIUM' ? 1 : 0);
+    if (buildBucket === 'CRITICAL' || buildBucket === 'HIGH') desired.Builder = 2;
+    else if (buildBucket === 'MEDIUM') desired.Builder = 1;
+    else desired.Builder = 0;
     desired.Repair = (repairBucket === 'CRITICAL' || repairBucket === 'HIGH') ? 1 : 0;
     desired.Luna = Math.min(lunaDesired, Math.max(1, remoteCount));
     demandClampReasons.Courier = 'STRAINED_REMOTE_AWARE';
@@ -1414,8 +1015,13 @@ function computeNonCombatPlan(C, room, debug) {
     if (remoteCount >= 2) desired.Courier += 1;
     desired.Courier = clampInt(desired.Courier, 2, 4);
     desired.Upgrader = (maturity === 'EARLY') ? 1 : 2;
-    desired.Builder = (buildBucket === 'CRITICAL') ? 3 : (buildBucket === 'HIGH' ? 2 : (buildBucket === 'MEDIUM' ? 1 : 0));
-    desired.Repair = (repairBucket === 'CRITICAL') ? 2 : (repairBucket === 'HIGH' || repairBucket === 'MEDIUM' ? 1 : 0);
+    if (buildBucket === 'CRITICAL') desired.Builder = 3;
+    else if (buildBucket === 'HIGH') desired.Builder = 2;
+    else if (buildBucket === 'MEDIUM') desired.Builder = 1;
+    else desired.Builder = 0;
+    if (repairBucket === 'CRITICAL') desired.Repair = 2;
+    else if (repairBucket === 'HIGH' || repairBucket === 'MEDIUM') desired.Repair = 1;
+    else desired.Repair = 0;
     desired.Luna = Math.min(lunaDesired, Math.max(1, remoteCount * 2));
     demandClampReasons.Courier = 'HEALTHY_REMOTE_SCALE';
     demandClampReasons.Builder = 'HEALTHY_BACKLOG_SCALE';
@@ -1427,8 +1033,13 @@ function computeNonCombatPlan(C, room, debug) {
     if (remoteCount >= 2) desired.Courier += 1;
     desired.Courier = clampInt(desired.Courier, 2, 5);
     desired.Upgrader = (maturity === 'ENDGAME') ? 2 : 3;
-    desired.Builder = (buildBucket === 'CRITICAL') ? 3 : (buildBucket === 'HIGH' ? 2 : (buildBucket === 'MEDIUM' ? 1 : 0));
-    desired.Repair = (repairBucket === 'CRITICAL') ? 2 : (repairBucket === 'HIGH' || repairBucket === 'MEDIUM' ? 1 : 0);
+    if (buildBucket === 'CRITICAL') desired.Builder = 3;
+    else if (buildBucket === 'HIGH') desired.Builder = 2;
+    else if (buildBucket === 'MEDIUM') desired.Builder = 1;
+    else desired.Builder = 0;
+    if (repairBucket === 'CRITICAL') desired.Repair = 2;
+    else if (repairBucket === 'HIGH' || repairBucket === 'MEDIUM') desired.Repair = 1;
+    else desired.Repair = 0;
     desired.Luna = Math.min(lunaDesired, Math.max(1, remoteCount * 2));
     demandClampReasons.Courier = 'RICH_FULLER_LOGISTICS';
     demandClampReasons.Builder = 'RICH_BACKLOG_SCALE';
