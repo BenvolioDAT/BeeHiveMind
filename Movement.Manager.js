@@ -17,6 +17,8 @@
 'use strict';
 var MovementOwnership = require('Movement.Ownership');
 var MovementVerify = require('Movement.Verify');
+var MovementIntent = require('Movement.Intent');
+var MovementBorder = require('Movement.Border');
 
 /**
  * What changed & why:
@@ -76,39 +78,9 @@ function recordMoveVerify(type, data) {
   }
 }
 
-function compareIntents(a, b) {
-  if (b.priority !== a.priority) return b.priority - a.priority;
-  if (a.order !== b.order) return a.order - b.order;
-  var aId = a.creepId || a.creepName;
-  var bId = b.creepId || b.creepName;
-  if (aId < bId) return -1;
-  if (aId > bId) return 1;
-  if (a.creepName < b.creepName) return -1;
-  if (a.creepName > b.creepName) return 1;
-  return 0;
-}
 
 var MovementManager = {
-  PRIORITIES: {
-    emergency: 100,
-    combat: 90,
-    attack: 90,
-    rangedAttack: 90,
-    heal: 90,
-    rangedHeal: 90,
-    pickup: 80,
-    withdraw: 70,
-    deliver: 60,
-    harvest: 55,
-    build: 50,
-    repair: 45,
-    upgrade: 40,
-    reserve: 35,
-    claim: 35,
-    scout: 30,
-    idle: 5,
-    default: 0
-  },
+  PRIORITIES: MovementIntent.PRIORITIES,
 
   _intents: [],
   _indexByCreep: {},
@@ -175,7 +147,7 @@ var MovementManager = {
     var shard = (dest.shard && typeof dest.shard === 'string') ? dest.shard : (pos.shard || null);
     var targetId = dest.id || null;
 
-    var pr = (typeof priority === 'number') ? priority : this._priorityFromOpts(opts);
+    var pr = (typeof priority === 'number') ? priority : MovementIntent.priorityFromOpts(opts);
     var key = creep.name;
     var idx = this._indexByCreep[key];
 
@@ -270,24 +242,12 @@ var MovementManager = {
   // Function header: _priorityFromOpts(opts)
   // Inputs: options object (may include intentType).
   // Output: numeric priority; defaults to PRIORITIES.default.
-  _priorityFromOpts: function (opts) {
-    if (!opts || !opts.intentType) return this.PRIORITIES.default;
-    var key = opts.intentType;
-    if (this.PRIORITIES.hasOwnProperty(key)) return this.PRIORITIES[key];
-    return this.PRIORITIES.default;
-  },
-
-  _isExitPosition: function (pos) {
-    if (!pos) return false;
-    return pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49;
-  },
+  _isExitPosition: MovementBorder.isExitPosition,
 
   _tryMoveOffExit: function (creep, reason, destination, travelOpts) {
-    if (!creep || creep.fatigue > 0 || !this._isExitPosition(creep.pos)) return null;
-    if (typeof creep.travelTo !== 'function') return null;
-    var resultData = {};
-    var opts = Object.assign({}, travelOpts || {}, { range: 0, returnData: resultData });
-    var result = creep.travelTo(destination, opts);
+    var moved = MovementBorder.tryMoveOffExit(creep, destination, travelOpts);
+    if (!moved) return null;
+    var result = moved.result;
     var borderBase = buildVerifyBase(creep, 'MovementManager._tryMoveOffExit');
     var borderDest = getPosFields(destination, 'd');
     borderBase.meta = reason || 'offExit';
@@ -315,7 +275,7 @@ var MovementManager = {
       var hi = intents[h];
       if (hi && hi.creepName) hadIntentByCreep[hi.creepName] = true;
     }
-    if (intents.length) this._intents.sort(compareIntents);
+    if (intents.length) this._intents.sort(MovementIntent.compareIntents);
     for (var i = 0; i < this._intents.length; i++) {
       var intent = this._intents[i];
       if (!intent) continue;
