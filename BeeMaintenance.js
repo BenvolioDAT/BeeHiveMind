@@ -294,34 +294,43 @@ function _removeDeadCreepMemory() {
 // Source assignment bookkeeping toggles between arrays (ordered creep lists)
 // and objects (per-role slots).  Walk both forms carefully so we do not throw
 // away valid claims just because a different role wrote the data.
-function _pruneSourceAssignments(roomMemory) {
+function _pruneSourceAssignments(roomName, roomMemory) {
   if (!_isObject(roomMemory.sources)) return;
+  var hasVision = !!(Game.rooms && Game.rooms[roomName]);
+  var liveSourcesById = null;
+  if (hasVision) {
+    liveSourcesById = Object.create(null);
+    var liveSources = Game.rooms[roomName].find(FIND_SOURCES);
+    for (var li = 0; li < liveSources.length; li++) {
+      liveSourcesById[liveSources[li].id] = true;
+    }
+  }
+
   for (var sourceId in roomMemory.sources) {
     if (!roomMemory.sources.hasOwnProperty(sourceId)) continue;
-    var assignedCreeps = roomMemory.sources[sourceId];
-    if (Array.isArray(assignedCreeps)) {
-      // Array form: keep only live creep names so miners do not reserve slots forever.
-      var kept = [];
-      for (var i = 0; i < assignedCreeps.length; i++) {
-        if (Game.creeps[assignedCreeps[i]]) kept.push(assignedCreeps[i]);
-      }
-      if (kept.length) roomMemory.sources[sourceId] = kept;
-      else delete roomMemory.sources[sourceId];
+
+    if (hasVision && !liveSourcesById[sourceId]) {
+      delete roomMemory.sources[sourceId];
       continue;
     }
 
-    if (_isObject(assignedCreeps)) {
-      // Object form: drop role slots that point at dead creeps so reassignment can happen.
-      var keptSlots = {};
-      for (var role in assignedCreeps) {
-        if (!assignedCreeps.hasOwnProperty(role)) continue;
-        var creepName = assignedCreeps[role];
-        if (creepName && Game.creeps[creepName]) {
-          keptSlots[role] = creepName;
-        }
+    var sourceEntry = roomMemory.sources[sourceId];
+    if (Array.isArray(sourceEntry)) {
+      var kept = [];
+      for (var i = 0; i < sourceEntry.length; i++) {
+        if (Game.creeps[sourceEntry[i]]) kept.push(sourceEntry[i]);
       }
-      if (_isEmptyObject(keptSlots)) delete roomMemory.sources[sourceId];
-      else roomMemory.sources[sourceId] = keptSlots;
+      roomMemory.sources[sourceId] = kept;
+      continue;
+    }
+
+    if (_isObject(sourceEntry)) {
+      // Preserve all source intel fields by default.
+      // We intentionally do NOT prune string fields here because source intel
+      // may store non-creep metadata (flagName, roomName, sourceId, etc.).
+      // If assignment-slot names become explicit in the future, only those
+      // named slots should be pruned when their creep no longer exists.
+      continue;
     }
   }
 
@@ -362,10 +371,11 @@ function _pruneContainerAssignments(roomName, roomMemory) {
 // Each room sweep runs the same mini-playbook so a novice can trace the order:
 // 1) drop dead claims, 2) drop stale containers, 3) compact the leftover data.
 function _heavyRoomSweep(roomName, roomMemory) {
-  _pruneSourceAssignments(roomMemory);
+  _pruneSourceAssignments(roomName, roomMemory);
   _pruneContainerAssignments(roomName, roomMemory);
 
-  if (_compactRoomMem(roomName, roomMemory) && !Game.rooms[roomName]) {
+  var protectedRooms = _protectedRoomSet();
+  if (_compactRoomMem(roomName, roomMemory) && !Game.rooms[roomName] && !protectedRooms[roomName]) {
     delete Memory.rooms[roomName];
     _log('🧼 Deleted empty room mem (sweep): ' + roomName);
   }
