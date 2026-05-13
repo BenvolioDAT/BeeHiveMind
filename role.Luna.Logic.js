@@ -14,6 +14,7 @@ var SWAMP_COST = CFG.SWAMP_COST;
 var MAX_LUNA_PER_SOURCE = CFG.MAX_LUNA_PER_SOURCE;
 var PF_CACHE_TTL = CFG.PF_CACHE_TTL;
 var INVADER_LOCK_MEMO_TTL = CFG.INVADER_LOCK_MEMO_TTL;
+var UNSAFE_ROOM_TTL = CFG.UNSAFE_ROOM_TTL;
 var AVOID_TTL = CFG.AVOID_TTL;
 var RETARGET_COOLDOWN = CFG.RETARGET_COOLDOWN;
 var ASSIGN_STICKY_TTL = CFG.ASSIGN_STICKY_TTL;
@@ -721,7 +722,77 @@ function softenRemoteDefensePlan(roomName) {
     }
   }
 
-  // ============================
+  
+function getMyUsername() {
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (!spawn || !spawn.owner || !spawn.owner.username) continue;
+    return spawn.owner.username;
+  }
+  return null;
+}
+
+function markLunaRoomUnsafe(roomName, reason) {
+  if (!roomName) return;
+  Memory.rooms = Memory.rooms || {};
+  Memory.rooms[roomName] = Memory.rooms[roomName] || {};
+  Memory.rooms[roomName].lunaBlockedUntil = Game.time + (UNSAFE_ROOM_TTL || 1500);
+  Memory.rooms[roomName].lunaBlockedReason = reason || 'unsafe';
+  Memory.rooms[roomName].lunaBlockedAt = Game.time;
+}
+
+function isLunaRoomBlockedByMemory(roomName) {
+  if (!roomName) return false;
+  var mem = (Memory.rooms && Memory.rooms[roomName]) || {};
+  if (mem.hostile) return true;
+  if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
+  if (mem._invaderLock && mem._invaderLock.locked) {
+    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+    if (lockTick == null || (Game.time - lockTick) <= INVADER_LOCK_MEMO_TTL) return true;
+  }
+  var myName = getMyUsername();
+  var intel = mem.intel || {};
+  if (intel.owner && (!myName || intel.owner !== myName)) return true;
+  if (intel.reservation && (!myName || intel.reservation !== myName)) return true;
+  return false;
+}
+
+function isVisibleRoomUnsafeForLuna(room) {
+  if (!room) return false;
+  var myName = getMyUsername();
+  var controller = room.controller;
+  var owner = controller && controller.owner && controller.owner.username;
+  if (owner && (!myName || owner !== myName)) {
+    markLunaRoomUnsafe(room.name, 'ownedBy:' + owner);
+    return true;
+  }
+  var reservation = controller && controller.reservation && controller.reservation.username;
+  if (reservation && (!myName || reservation !== myName)) {
+    markLunaRoomUnsafe(room.name, 'reservedBy:' + reservation);
+    return true;
+  }
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+  if (hostiles.length > 0) {
+    markLunaRoomUnsafe(room.name, 'hostileCreeps');
+    return true;
+  }
+  if (isRoomLockedByInvaderCore(room.name)) {
+    markLunaRoomUnsafe(room.name, 'invaderLock');
+    return true;
+  }
+  return false;
+}
+
+function isLunaRoomUnsafe(roomName) {
+  if (!roomName) return false;
+  if (isLunaRoomBlockedByMemory(roomName)) return true;
+  var room = Game.rooms[roomName];
+  if (room && isVisibleRoomUnsafeForLuna(room)) return true;
+  return false;
+}
+
+// ============================
   // Invader lock detection
   // ============================
   function isRoomLockedByInvaderCore(roomName){
@@ -764,7 +835,7 @@ function softenRemoteDefensePlan(roomName) {
     // 1) With vision
     for (i=0;i<neighborRooms.length;i++){
       rn=neighborRooms[i];
-      if (isRoomLockedByInvaderCore(rn)) continue;
+      if (isLunaRoomUnsafe(rn)) continue;
       var room=Game.rooms[rn]; if (!room) continue;
 
       var sources = room.find(FIND_SOURCES);
@@ -786,7 +857,7 @@ function softenRemoteDefensePlan(roomName) {
     // 2) No vision → use Memory.rooms.*.sources
     if (!candidates.length){
       for (i=0;i<neighborRooms.length;i++){
-        rn=neighborRooms[i]; if (isRoomLockedByInvaderCore(rn)) continue;
+        rn=neighborRooms[i]; if (isLunaRoomUnsafe(rn)) continue;
         var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
         for (var sid in rm.sources){
           if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
@@ -1086,6 +1157,18 @@ function softenRemoteDefensePlan(roomName) {
 
       if (!validateExclusiveSource(creep)) return;
 
+      if (creep.memory.targetRoom && isLunaRoomUnsafe(creep.memory.targetRoom)) {
+        debugSay(creep, '🚫SAFE');
+        var roomMem = (Memory.rooms && Memory.rooms[creep.memory.targetRoom]) || {};
+        if (!creep.memory._lastUnsafeLog || (Game.time - creep.memory._lastUnsafeLog) >= 25) {
+          console.log('🚫 Luna ' + creep.name + ' releasing unsafe room ' + creep.memory.targetRoom + ' reason=' + (roomMem.lunaBlockedReason || 'unsafe'));
+          creep.memory._lastUnsafeLog = Game.time;
+        }
+        releaseAssignment(creep);
+        idleAtAnchor(creep, 'SAFE');
+        return;
+      }
+
       if (state === 'TRAVEL') {
         if (travelToAssignedRoom(creep)) return;
         state = determineLunaState(creep);
@@ -1330,6 +1413,17 @@ function softenRemoteDefensePlan(roomName) {
     harvestSource: function(creep){
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
         if (Game.time%25===0) console.log('Forager '+creep.name+' missing targetRoom/sourceId'); return;
+      }
+
+      if (creep.memory.targetRoom && isLunaRoomUnsafe(creep.memory.targetRoom)) {
+        debugSay(creep, '🚫SAFE');
+        var targetMem = (Memory.rooms && Memory.rooms[creep.memory.targetRoom]) || {};
+        if (!creep.memory._lastUnsafeLog || (Game.time - creep.memory._lastUnsafeLog) >= 25) {
+          console.log('🚫 Luna ' + creep.name + ' releasing unsafe room ' + creep.memory.targetRoom + ' reason=' + (targetMem.lunaBlockedReason || 'unsafe'));
+          creep.memory._lastUnsafeLog = Game.time;
+        }
+        releaseAssignment(creep);
+        return;
       }
 
       if (creep.room.name !== creep.memory.targetRoom){
