@@ -249,6 +249,49 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   }
 }
 
+
+function getMyUsernameForSpawnManager() {
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (!spawn || !spawn.owner || !spawn.owner.username) continue;
+    return spawn.owner.username;
+  }
+  return null;
+}
+
+function isLunaRemoteRoomUnsafe(remoteName) {
+  var mem = (Memory.rooms && Memory.rooms[remoteName]) || {};
+  if (mem.hostile) return true;
+  if (mem.lunaBlockedUntil && Game.time < mem.lunaBlockedUntil) return true;
+
+  if (mem._invaderLock && mem._invaderLock.locked) {
+    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+    if (lockTick == null || (Game.time - lockTick) <= INVADER_LOCK_TTL) return true;
+  }
+
+  var myName = getMyUsernameForSpawnManager();
+  var intel = mem.intel || {};
+  if (intel.owner && (!myName || intel.owner !== myName)) return true;
+  if (intel.reservation && (!myName || intel.reservation !== myName)) return true;
+
+  var visible = Game.rooms[remoteName];
+  if (visible && visible.controller) {
+    var owner = visible.controller.owner && visible.controller.owner.username;
+    if (owner && (!myName || owner !== myName)) return true;
+
+    var reservation = visible.controller.reservation && visible.controller.reservation.username;
+    if (reservation && (!myName || reservation !== myName)) return true;
+  }
+
+  if (visible) {
+    var hostiles = visible.find(FIND_HOSTILE_CREEPS) || [];
+    if (hostiles.length > 0) return true;
+  }
+
+  return false;
+}
+
 // Novice tip: keep state lookups tiny helpers so you can audit each role's math.
 // ------------------------------ Signals ---------------------------------
 function getBuilderNeed(C, room) {
@@ -272,25 +315,19 @@ function determineLunaQuota(C, room) {
   var remotes = C.remotesByHome[room.name] || [];
   if (!remotes.length) return 0;
 
-  var remoteSet = Object.create(null);
-  for (var i = 0; i < remotes.length; i++) {
-    remoteSet[remotes[i]] = true;
-  }
-
   var roomsMem = Memory.rooms || {};
   var perSource = (LunaConfig && LunaConfig.MAX_LUNA_PER_SOURCE) || 1;
 
+  var safeRemoteSet = Object.create(null);
+  var safeRemoteCount = 0;
   var totalSources = 0;
   for (var j = 0; j < remotes.length; j++) {
     var remoteName = remotes[j];
     var mem = roomsMem[remoteName] || {};
-    if (mem.hostile) continue;
-    if (mem._invaderLock && mem._invaderLock.locked) {
-      var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
-      if (lockTick == null || (Game.time - lockTick) <= INVADER_LOCK_TTL) {
-        continue;
-      }
-    }
+    if (isLunaRemoteRoomUnsafe(remoteName)) continue;
+
+    safeRemoteSet[remoteName] = true;
+    safeRemoteCount++;
 
     var srcCount = 0;
     var live = Game.rooms[remoteName];
@@ -310,8 +347,12 @@ function determineLunaQuota(C, room) {
     }
     totalSources += srcCount;
   }
-  if (totalSources <= 0 && remotes.length > 0) {
-    totalSources = remotes.length;
+  if (safeRemoteCount <= 0) {
+    return 0;
+  }
+
+  if (totalSources <= 0 && safeRemoteCount > 0) {
+    totalSources = safeRemoteCount;
   }
 
   var active = 0;
@@ -321,7 +362,7 @@ function determineLunaQuota(C, room) {
     var entry = assignments[aid];
     if (!entry) continue;
     var rName = entry.roomName || entry.room;
-    if (!rName || !remoteSet[rName]) continue;
+    if (!rName || !safeRemoteSet[rName]) continue;
     var count = entry.count || 0;
     if (!count && entry.owner) count = 1;
     if (count > 0) active += count;
