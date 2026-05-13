@@ -15,7 +15,7 @@ var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 var CoreConfig  = require('core.config');
 
 var spawnLogic  = require('spawn.logic');
-var roleLuna    = require('role.Luna');
+var LunaConfig  = require('role.Luna.Config');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 
@@ -278,7 +278,7 @@ function determineLunaQuota(C, room) {
   }
 
   var roomsMem = Memory.rooms || {};
-  var perSource = (roleLuna && roleLuna.MAX_LUNA_PER_SOURCE) || 1;
+  var perSource = (LunaConfig && LunaConfig.MAX_LUNA_PER_SOURCE) || 1;
 
   var totalSources = 0;
   for (var j = 0; j < remotes.length; j++) {
@@ -451,7 +451,7 @@ function computeRoomQuotas(C, room) {
     Upgrader:     computeEarlyUpgraderQuota(room),
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
-    Luna:         4,
+    Luna:         determineLunaQuota(C, room),
     Repair:       0,
     Trucker:      0,
     Claimer:      0,
