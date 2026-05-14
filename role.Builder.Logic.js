@@ -2,6 +2,7 @@
 
 // Builder behavior implementation only. Public role wiring stays in role.Builder.js.
 var CFG = require('role.Builder.Config');
+var Handoff = require('role.EnergyHandoff');
 
 function debugSay(creep, msg) { if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true); }
 function getTargetPosition(target) { if (!target) return null; if (target.pos) return target.pos; if (target.x != null && target.y != null && target.roomName) return target; return null; }
@@ -97,19 +98,39 @@ function handleTravel(creep, targetInfo) { if (!targetInfo || !targetInfo.target
 function getHomeName(creep){ if (creep.memory.home) return creep.memory.home; var spawns = Object.keys(Game.spawns).map(function(k){return Game.spawns[k];}); if (spawns.length){ var best = spawns[0], bestD = Game.map.getRoomLinearDistance(creep.pos.roomName, best.pos.roomName); for (var i=1;i<spawns.length;i++){ var s=spawns[i], d=Game.map.getRoomLinearDistance(creep.pos.roomName, s.pos.roomName); if (d<bestD){ best=s; bestD=d; } } creep.memory.home = best.pos.roomName; return creep.memory.home; } creep.memory.home = creep.pos.roomName; return creep.memory.home; }
 function getAnchorPos(homeName){ var r = Game.rooms[homeName]; if (r){ if (r.storage) return r.storage.pos; var spawns = r.find(FIND_MY_SPAWNS); if (spawns.length) return spawns[0].pos; if (r.controller && r.controller.my) return r.controller.pos; } return new RoomPosition(25,25,homeName); }
 
+function shouldBuilderRequestEnergy(creep, targetInfo) {
+  if (!CFG.HANDOFF_ENABLED) return false;
+  if (!targetInfo || !targetInfo.target) return false;
+  var free = creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+  return free >= CFG.HANDOFF_MIN_RECEIVER_FREE;
+}
+
+function maybePublishBuilderRequest(creep, targetInfo) {
+  if (!shouldBuilderRequestEnergy(creep, targetInfo)) { Handoff.clearEnergyHandoffRequest(creep); return false; }
+  var req = Handoff.publishEnergyHandoffRequest(creep, 'Builder', targetInfo.target, creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0);
+  if (!req) return false;
+  if (req.assignedCourierName) {
+    creep.memory.energyHandoffCourier = req.assignedCourierName;
+    return req.waitUntil && Game.time <= req.waitUntil;
+  }
+  return false;
+}
+
 function run(creep) {
   ensureBuilderIdentity(creep);
   var state = getBuilderState(creep);
-  if (needsEnergy(creep)) { setBuilderState(creep, CFG.BUILDER_STATES.HARVEST); state = CFG.BUILDER_STATES.HARVEST; creep.memory.builderTargetId = null; creep.memory.builderTargetType = null; }
+  if (needsEnergy(creep)) { setBuilderState(creep, CFG.BUILDER_STATES.HARVEST); state = CFG.BUILDER_STATES.HARVEST; }
 
   if (state === CFG.BUILDER_STATES.HARVEST) {
+    var lowTargetInfo = getBuilderTarget(creep);
+    if (lowTargetInfo && maybePublishBuilderRequest(creep, lowTargetInfo)) { debugSay(creep, '⏳'); return; }
     if (collectEnergy(creep) && creep.store.getFreeCapacity() > 0) return;
-    if (creep.store.getFreeCapacity() === 0) setBuilderState(creep, CFG.BUILDER_STATES.IDLE);
+    if (creep.store.getFreeCapacity() === 0) { Handoff.clearEnergyHandoffRequest(creep); setBuilderState(creep, CFG.BUILDER_STATES.IDLE); }
     return;
   }
 
   var targetInfo = getBuilderTarget(creep);
-  if (!targetInfo) { if (dumpEnergyToSink(creep)) return; setBuilderState(creep, CFG.BUILDER_STATES.IDLE); idleNearAnchor(creep); return; }
+  if (!targetInfo) { Handoff.clearEnergyHandoffRequest(creep); if (dumpEnergyToSink(creep)) return; setBuilderState(creep, CFG.BUILDER_STATES.IDLE); idleNearAnchor(creep); return; }
   if (state === CFG.BUILDER_STATES.IDLE) { setBuilderState(creep, CFG.BUILDER_STATES.TRAVEL); state = CFG.BUILDER_STATES.TRAVEL; }
   if (state === CFG.BUILDER_STATES.TRAVEL) { if (handleTravel(creep, targetInfo)) return; state = getBuilderState(creep); }
   if (state === CFG.BUILDER_STATES.BUILD) { if (handleBuild(creep, targetInfo.target)) return; return; }

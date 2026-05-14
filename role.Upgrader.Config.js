@@ -9,6 +9,13 @@ module.exports = Object.freeze({
   SKIP_RCL8_IF_SAFE: false,
   RCL8_SAFE_TTL: 0,
 
+  HANDOFF_ENABLED: true,
+  HANDOFF_REQUEST_TTL: 25,
+  HANDOFF_ASSIGN_TTL: 40,
+  HANDOFF_WAIT_TTL: 10,
+  HANDOFF_MIN_RECEIVER_FREE: 25,
+  HANDOFF_DEBUG_SAY: false,
+
   DRAW: Object.freeze({
     DROP: "#ffe66e",
     CTRL: "#8ab6ff",
