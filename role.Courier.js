@@ -620,12 +620,40 @@ function debugDrawLine(creep, target, color, label) {
     return best;
   }
 
+  function getCurrentAssignedRequest(courier) {
+    var targetName = courier.memory.energyHandoffTarget;
+    if (!targetName) return null;
+    var mem = Handoff.ensureHandoffMemory(courier.room);
+    if (!mem || !mem.requests) return null;
+    var req = mem.requests[targetName];
+    if (!req) return null;
+    if (req.assignedCourierName !== courier.name) return null;
+    var receiver = Game.creeps[req.receiverName];
+    if (!receiver || !receiver.my || receiver.spawning || receiver.pos.roomName !== courier.room.name) return null;
+    if ((receiver.store.getFreeCapacity(RESOURCE_ENERGY) || 0) < CFG.HANDOFF_MIN_RECEIVER_FREE) return null;
+    if (courier.pos.getRangeTo(receiver) > CFG.HANDOFF_MAX_RANGE) return null;
+    return req;
+  }
+
   function claimEnergyHandoffRequest(courier, req) {
     if (!req) return false;
     var mem = Handoff.ensureHandoffMemory(courier.room); if (!mem || !mem.requests[req.receiverName]) return false;
+    if (courier.memory.energyHandoffTarget && courier.memory.energyHandoffTarget !== req.receiverName) {
+      clearCourierHandoff(courier, courier.room);
+    }
     var live = mem.requests[req.receiverName];
     if (live.assignedCourierName && live.assignedCourierName !== courier.name) return false;
-    live.assignedCourierName = courier.name; live.assignedAt = Game.time; live.expiresAt = Game.time + CFG.HANDOFF_ASSIGN_TTL; live.waitUntil = Game.time + CFG.HANDOFF_WAIT_TTL;
+    var continuing = live.assignedCourierName === courier.name;
+    if (!continuing) {
+      live.assignedCourierName = courier.name;
+      live.assignedAt = Game.time;
+      live.expiresAt = Game.time + CFG.HANDOFF_ASSIGN_TTL;
+      live.waitUntil = Game.time + CFG.HANDOFF_WAIT_TTL;
+    } else {
+      if (!live.assignedAt) live.assignedAt = Game.time;
+      if (!live.expiresAt) live.expiresAt = live.assignedAt + CFG.HANDOFF_ASSIGN_TTL;
+      if (live.waitUntil == null) live.waitUntil = live.assignedAt + CFG.HANDOFF_WAIT_TTL;
+    }
     courier.memory.energyHandoffTarget = live.receiverName;
     var receiver = Game.creeps[live.receiverName]; if (receiver && receiver.memory) receiver.memory.energyHandoffCourier = courier.name;
     return true;
@@ -637,7 +665,8 @@ function debugDrawLine(creep, target, color, label) {
     if (carryAmt < CFG.HANDOFF_MIN_COURIER_ENERGY) { clearCourierHandoff(creep, creep.room); return false; }
 
     Handoff.cleanupEnergyHandoffRequests(creep.room);
-    var req = findClaimableEnergyHandoffRequest(creep);
+    var req = getCurrentAssignedRequest(creep);
+    if (!req) req = findClaimableEnergyHandoffRequest(creep);
     if (!req) { clearCourierHandoff(creep, creep.room); return false; }
     if (!claimEnergyHandoffRequest(creep, req)) return false;
 
