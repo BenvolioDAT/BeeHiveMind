@@ -16,7 +16,6 @@ var CoreConfig  = require('core.config');
 
 var spawnLogic  = require('spawn.logic');
 var LunaConfig  = require('role.Luna.Config');
-var BeeToolbox  = require('BeeToolbox');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 
@@ -523,14 +522,51 @@ function getSourceMaxSlotsForSpawn(sourceId, targetRoom) {
     return 0;
   }
 
-  var maxPerSource = (LunaConfig && LunaConfig.MAX_LUNA_PER_SOURCE) || 1;
+  var allowMulti = !(LunaConfig && LunaConfig.ALLOW_MULTI_LUNA_PER_SOURCE === false);
+  if (!allowMulti) return 1;
+  var maxPerSource = Math.max(1, ((LunaConfig && LunaConfig.MAX_LUNA_PER_SOURCE) || 1));
+  var minOpenForExtra = (LunaConfig && LunaConfig.MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA) || 2;
   var source = Game.getObjectById(sourceId);
   if (!source) return 1;
-  var openTiles = BeeToolbox && typeof BeeToolbox.countOpenTilesAround === 'function'
-    ? BeeToolbox.countOpenTilesAround(source.pos)
-    : 1;
-  var slots = Math.min(maxPerSource, openTiles || 0);
-  return Math.max(0, slots);
+  var openTiles = countOpenHarvestTilesForSpawn(source);
+  if (openTiles < minOpenForExtra) return 1;
+  return Math.min(maxPerSource, openTiles);
+}
+
+function countOpenHarvestTilesForSpawn(source) {
+  if (!source || !source.pos || !source.room) return 1;
+  var terrain = source.room.getTerrain();
+  var count = 0;
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var x = source.pos.x + dx;
+      var y = source.pos.y + dy;
+      if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+      if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
+
+      var look = source.room.lookAt(x, y);
+      var blocked = false;
+      for (var i = 0; i < look.length; i++) {
+        var item = look[i];
+        if (item.type === LOOK_STRUCTURES) {
+          var s = item.structure;
+          if (s.structureType === STRUCTURE_RAMPART && !s.my) { blocked = true; break; }
+          if (s.structureType !== STRUCTURE_ROAD && s.structureType !== STRUCTURE_CONTAINER && s.structureType !== STRUCTURE_RAMPART) {
+            blocked = true; break;
+          }
+        }
+        if (item.type === LOOK_CONSTRUCTION_SITES) {
+          var cs = item.constructionSite;
+          if (cs.structureType !== STRUCTURE_ROAD && cs.structureType !== STRUCTURE_CONTAINER) {
+            blocked = true; break;
+          }
+        }
+      }
+      if (!blocked) count++;
+    }
+  }
+  return count;
 }
 
 function buildLunaSourceSlotPlan(room, approvedSources) {
