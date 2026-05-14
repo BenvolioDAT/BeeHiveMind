@@ -310,68 +310,170 @@ function getBuilderNeed(C, room) {
   return need;
 }
 
+
+function getRouteDistanceBetweenRooms(homeName, remoteName) {
+  if (!homeName || !remoteName) return Infinity;
+  if (homeName === remoteName) return 0;
+
+  var route = null;
+  try {
+    route = Game.map.findRoute(homeName, remoteName);
+  } catch (e) {
+    route = ERR_NO_PATH;
+  }
+
+  if (route === ERR_NO_PATH || !route) return Infinity;
+  if (!Array.isArray(route)) return Infinity;
+  return route.length;
+}
+
+function countApprovedLunaSourcesForRemote(remoteName) {
+  var mem = Memory.rooms && Memory.rooms[remoteName];
+  if (!mem) return 0;
+
+  var live = Game.rooms[remoteName];
+  if (live) {
+    var found = live.find(FIND_SOURCES);
+    return found ? found.length : 0;
+  }
+
+  if (mem.sources) {
+    var count = 0;
+    for (var sid in mem.sources) {
+      if (Object.prototype.hasOwnProperty.call(mem.sources, sid)) count++;
+    }
+    return count;
+  }
+
+  if (mem.intel && typeof mem.intel.sources === 'number') {
+    return mem.intel.sources || 0;
+  }
+
+  return 0;
+}
+
+
+function getLunaRemoteIntelTick(remoteName) {
+  var mem = Memory.rooms && Memory.rooms[remoteName];
+  if (!mem) return null;
+
+  var best = null;
+
+  if (mem.intel) {
+    if (typeof mem.intel.lastScanAt === 'number') best = Math.max(best || 0, mem.intel.lastScanAt);
+    if (typeof mem.intel.lastVisited === 'number') best = Math.max(best || 0, mem.intel.lastVisited);
+    if (typeof mem.intel.t === 'number') best = Math.max(best || 0, mem.intel.t);
+  }
+
+  if (mem.scout && typeof mem.scout.lastVisited === 'number') {
+    best = Math.max(best || 0, mem.scout.lastVisited);
+  }
+
+  if (mem.sources) {
+    for (var sid in mem.sources) {
+      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
+      var srec = mem.sources[sid];
+      if (!srec) continue;
+      if (typeof srec.lastSeen === 'number') best = Math.max(best || 0, srec.lastSeen);
+      if (typeof srec.lastActive === 'number') best = Math.max(best || 0, srec.lastActive);
+    }
+  }
+
+  return best;
+}
+
+function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
+  if (!homeRoom || !remoteName) {
+    if (outMeta) outMeta.reason = 'missing-home-or-remote';
+    return false;
+  }
+
+  var maxRange = (LunaConfig && LunaConfig.REMOTE_RADIUS) || 3;
+  var routeDistance = getRouteDistanceBetweenRooms(homeRoom.name, remoteName);
+  if (outMeta) outMeta.routeDistance = routeDistance;
+
+  if (!isFinite(routeDistance)) {
+    if (outMeta) outMeta.reason = 'no-route';
+    return false;
+  }
+
+  if (routeDistance > maxRange) {
+    if (outMeta) outMeta.reason = 'route-too-far';
+    return false;
+  }
+
+  if (isLunaRemoteRoomUnsafe(remoteName)) {
+    if (outMeta) outMeta.reason = 'unsafe-or-hostile';
+    return false;
+  }
+
+  var mem = Memory.rooms && Memory.rooms[remoteName];
+  if (!mem) {
+    if (outMeta) outMeta.reason = 'missing-room-memory';
+    return false;
+  }
+
+  var hasSources = !!mem.sources || !!(mem.intel && typeof mem.intel.sources === 'number');
+  if (!hasSources) {
+    if (outMeta) outMeta.reason = 'missing-source-intel';
+    return false;
+  }
+
+  var intelTick = getLunaRemoteIntelTick(remoteName);
+  var intelTtl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
+  if (intelTick == null) {
+    if (!Game.rooms[remoteName]) {
+      if (outMeta) outMeta.reason = 'stale-source-intel';
+      return false;
+    }
+  } else if ((Game.time - intelTick) > intelTtl) {
+    if (outMeta) outMeta.reason = 'stale-source-intel';
+    return false;
+  }
+
+  if (outMeta) outMeta.reason = 'accepted';
+  return true;
+}
 function determineLunaQuota(C, room) {
   if (!room) return 0;
   var remotes = C.remotesByHome[room.name] || [];
   if (!remotes.length) return 0;
 
-  var roomsMem = Memory.rooms || {};
   var perSource = (LunaConfig && LunaConfig.MAX_LUNA_PER_SOURCE) || 1;
 
-  var safeRemoteSet = Object.create(null);
-  var safeRemoteCount = 0;
-  var totalSources = 0;
-  for (var j = 0; j < remotes.length; j++) {
-    var remoteName = remotes[j];
-    var mem = roomsMem[remoteName] || {};
-    if (isLunaRemoteRoomUnsafe(remoteName)) continue;
-
-    safeRemoteSet[remoteName] = true;
-    safeRemoteCount++;
-
-    var srcCount = 0;
-    var live = Game.rooms[remoteName];
-    if (live) {
-      var found = live.find(FIND_SOURCES);
-      srcCount = found ? found.length : 0;
+  var approvedRemotes = [];
+  var rejectedRemotes = [];
+  var approvedSourceCount = 0;
+  for (var i = 0; i < remotes.length; i++) {
+    var remoteName = remotes[i];
+    var meta = { room: remoteName, routeDistance: Infinity, reason: 'unknown' };
+    if (!isApprovedLunaRemoteForHome(room, remoteName, meta)) {
+      rejectedRemotes.push(meta);
+      continue;
     }
-    if (srcCount === 0 && mem.sources) {
-      for (var sid in mem.sources) {
-        if (Object.prototype.hasOwnProperty.call(mem.sources, sid)) {
-          srcCount++;
-        }
-      }
+
+    var sourceCount = countApprovedLunaSourcesForRemote(remoteName);
+    if (sourceCount <= 0) {
+      meta.reason = 'zero-sources';
+      rejectedRemotes.push(meta);
+      continue;
     }
-    if (srcCount === 0 && mem.intel && typeof mem.intel.sources === 'number') {
-      srcCount = mem.intel.sources || 0;
-    }
-    totalSources += srcCount;
-  }
-  if (safeRemoteCount <= 0) {
-    return 0;
+
+    approvedRemotes.push({ room: remoteName, routeDistance: meta.routeDistance, sources: sourceCount });
+    approvedSourceCount += sourceCount;
   }
 
-  if (totalSources <= 0 && safeRemoteCount > 0) {
-    totalSources = safeRemoteCount;
-  }
-
-  var active = 0;
-  var assignments = Memory.remoteAssignments || {};
-  for (var aid in assignments) {
-    if (!Object.prototype.hasOwnProperty.call(assignments, aid)) continue;
-    var entry = assignments[aid];
-    if (!entry) continue;
-    var rName = entry.roomName || entry.room;
-    if (!rName || !safeRemoteSet[rName]) continue;
-    var count = entry.count || 0;
-    if (!count && entry.owner) count = 1;
-    if (count > 0) active += count;
-  }
-
-  var desired = Math.max(active, totalSources * perSource);
+  var active = (C.lunaCountsByHome && C.lunaCountsByHome[room.name]) || 0;
+  var desired = approvedSourceCount * perSource;
   if (tickEvery(DBG_EVERY)) {
-    dlog('🌙 [Signal] lunaQuota', fmt(room), 'remotes=', remotes.length,
-      'sources=', totalSources, 'active=', active, '->', desired);
+    dlog('🌙 [Signal] lunaQuota', fmt(room),
+      'candidates=', JSON.stringify(remotes),
+      'accepted=', JSON.stringify(approvedRemotes),
+      'rejected=', JSON.stringify(rejectedRemotes),
+      'approvedSourceCount=', approvedSourceCount,
+      'perSource=', perSource,
+      'active=', active,
+      'desired=', desired);
   }
   return desired;
 }

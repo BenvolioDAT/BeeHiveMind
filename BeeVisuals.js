@@ -227,7 +227,7 @@ BeeVisuals.drawEnergyBar = function () {
 // Teach-by-example constants live at module scope so they are easy to tweak.
 var WORKER_MAX_TASKS = {
   BaseHarvest: 2, Builder: 1, Upgrader: 1, Repair: 0,
-  Courier: 1, Luna: 8, Scout: 1, Queen: 2,
+  Courier: 1, Luna: null, Scout: 1, Queen: 2,
   CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
   Dismantler: 0, Claimer: 2
 };
@@ -265,12 +265,17 @@ function collectWorkerStats() {
   var tasks = {};
   var totalCount = 0;
   var maxTotal = 0;
+  var hasDynamicMax = false;
   var key;
 
   for (key in WORKER_MAX_TASKS) {
     if (!WORKER_MAX_TASKS.hasOwnProperty(key)) continue;
     tasks[key] = 0;
-    maxTotal += Number(WORKER_MAX_TASKS[key]) || 0;
+    if (WORKER_MAX_TASKS[key] == null) {
+      hasDynamicMax = true;
+    } else {
+      maxTotal += Number(WORKER_MAX_TASKS[key]) || 0;
+    }
   }
 
   for (var name in Game.creeps) {
@@ -284,7 +289,7 @@ function collectWorkerStats() {
     }
   }
 
-  return { totalCount: totalCount, maxTotal: maxTotal, tasks: tasks };
+  return { totalCount: totalCount, maxTotal: maxTotal, tasks: tasks, hasDynamicMax: hasDynamicMax };
 }
 
 /** Pre-compute table geometry once so the draw loop reads like instructions. */
@@ -342,7 +347,8 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
     radius: 0.05
   });
   text(v, 'Workers', xLeft + 0.3, yTop + geom.cellH / 2 + 0.15, 0.5, 'left', 1);
-  text(v, stats.totalCount + '/' + stats.maxTotal, xLeft + geom.nameW + geom.valueW - 0.3,
+  var headerTotal = stats.hasDynamicMax ? (stats.totalCount + '/dynamic') : (stats.totalCount + '/' + stats.maxTotal);
+  text(v, headerTotal, xLeft + geom.nameW + geom.valueW - 0.3,
        yTop + geom.cellH / 2 + 0.15, 0.5, 'right', 1);
 
   // Each row repeats the same structure: label on the left, current/max on the right.
@@ -350,7 +356,7 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
   for (var k in WORKER_MAX_TASKS) {
     if (!WORKER_MAX_TASKS.hasOwnProperty(k)) continue;
     var y = yTop + row * geom.cellH;
-    var val = (stats.tasks[k] || 0) + '/' + (WORKER_MAX_TASKS[k] || 0);
+    var val = (WORKER_MAX_TASKS[k] == null) ? ((stats.tasks[k] || 0) + '/dynamic') : ((stats.tasks[k] || 0) + '/' + (WORKER_MAX_TASKS[k] || 0));
 
     v.rect(xLeft, y, geom.nameW, geom.cellH, {
       fill: CFG.colors.panelFill,
