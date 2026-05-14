@@ -1125,6 +1125,23 @@ function isLunaRoomUnsafe(roomName) {
     return true;
   }
 
+  function isLunaFallbackTargetAllowed(creep, src, target) {
+    if (!target || !target.pos || !src || !src.pos) return false;
+    var homeName = getHomeName(creep);
+    var targetRoom = target.pos.roomName;
+    var sourceRoom = src.pos.roomName;
+    if (targetRoom === sourceRoom) {
+      return target.pos.getRangeTo(src.pos) <= LUNA_FALLBACK_MAX_RANGE_FROM_SOURCE;
+    }
+    var roomDist = Game.map.getRoomLinearDistance(targetRoom, sourceRoom);
+    if (roomDist <= LUNA_FALLBACK_MAX_ROOM_DISTANCE_FROM_SOURCE) return true;
+    if (targetRoom === homeName) {
+      if (target.progressTotal != null && LUNA_FALLBACK_ALLOW_HOME_BUILD_IF_IN_HOME) return true;
+      if (target.structureType === STRUCTURE_CONTROLLER && LUNA_FALLBACK_ALLOW_HOME_UPGRADE_IF_IN_HOME) return true;
+    }
+    return false;
+  }
+
   function findLunaFallbackBuildTarget(creep, src) {
     if (!LUNA_FALLBACK_BUILD_ENABLED || !src) return null;
     function getLunaBuildPriority(target) {
@@ -1152,6 +1169,7 @@ function isLunaRoomUnsafe(roomName) {
     var candidates = [];
     if (localSites && localSites.length) {
       for (var i = 0; i < localSites.length; i++) {
+        if (!isLunaFallbackTargetAllowed(creep, src, localSites[i])) continue;
         candidates.push({ target: localSites[i], mode: 'build', priority: getLunaBuildPriority(localSites[i]) });
       }
     }
@@ -1160,6 +1178,7 @@ function isLunaRoomUnsafe(roomName) {
       return s.structureType === STRUCTURE_CONTAINER && s.hits < s.hitsMax;
     }});
     for (var j = 0; j < nearSrcContainers.length; j++) {
+      if (!isLunaFallbackTargetAllowed(creep, src, nearSrcContainers[j])) continue;
       candidates.push({ target: nearSrcContainers[j], mode: 'repair', priority: 75 });
     }
 
@@ -1167,6 +1186,7 @@ function isLunaRoomUnsafe(roomName) {
       return s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax;
     }});
     for (var k = 0; k < nearRoads.length; k++) {
+      if (!isLunaFallbackTargetAllowed(creep, src, nearRoads[k])) continue;
       candidates.push({ target: nearRoads[k], mode: 'repair', priority: 10 });
     }
 
@@ -1198,7 +1218,7 @@ function isLunaRoomUnsafe(roomName) {
     return rc === OK;
   }
 
-  function tryCachedLunaFallback(creep) {
+  function tryCachedLunaFallback(creep, src) {
     var targetId = creep.memory.lunaFallbackTargetId;
     var mode = creep.memory.lunaFallbackMode;
     if (!targetId || !mode) return false;
@@ -1206,6 +1226,12 @@ function isLunaRoomUnsafe(roomName) {
     if (!target) {
       clearLunaFallbackMemory(creep);
       return false;
+    }
+    if (mode === 'build' || mode === 'repair') {
+      if (!isLunaFallbackTargetAllowed(creep, src, target)) {
+        clearLunaFallbackMemory(creep);
+        return false;
+      }
     }
     if (mode === 'upgrade') return tryUpgradeLunaFallback(creep);
     if (mode === 'build' || mode === 'repair') {
@@ -1238,7 +1264,7 @@ function isLunaRoomUnsafe(roomName) {
   function tryLunaProductiveFallback(creep, src) {
     if (!shouldRunLunaProductiveFallback(creep, src)) return false;
     if (creep.memory.lunaFallbackCheckedAt && (Game.time - creep.memory.lunaFallbackCheckedAt) < LUNA_FALLBACK_RECHECK_TTL) {
-      if (tryCachedLunaFallback(creep)) return true;
+      if (tryCachedLunaFallback(creep, src)) return true;
     }
     clearLunaFallbackMemory(creep);
     creep.memory.lunaFallbackCheckedAt = Game.time;
