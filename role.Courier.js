@@ -34,11 +34,14 @@ var CFG = Object.freeze({
   // --- Towers (Courier) ---
   TOWER_REFILL_AT_OR_BELOW: 0.70,
   HANDOFF_ENABLED: true,
-  HANDOFF_REQUEST_TTL: 25,
-  HANDOFF_ASSIGN_TTL: 40,
+  // Authoritative handoff tuning lives in role.EnergyHandoff.js.
+  HANDOFF_REQUEST_TTL: Handoff.HANDOFF.HANDOFF_REQUEST_TTL,
+  HANDOFF_ASSIGN_TTL: Handoff.HANDOFF.HANDOFF_ASSIGN_TTL,
+  HANDOFF_WAIT_TTL: Handoff.HANDOFF.HANDOFF_WAIT_TTL,
   HANDOFF_MIN_COURIER_ENERGY: 25,
   HANDOFF_MIN_RECEIVER_FREE: 25,
   HANDOFF_MAX_RANGE: 30,
+  HANDOFF_MAX_FAILS: Handoff.HANDOFF.HANDOFF_MAX_FAILS,
   HANDOFF_DEBUG_SAY: false,
 
   //Upgrader role Behavior
@@ -562,14 +565,16 @@ function debugDrawLine(creep, target, color, label) {
     if (!target) target = pickLowTower(creep);
     if (!target) target = pickStorageSink(creep);
 
-    if (!target) {
-      var req = findClaimableEnergyHandoffRequest(creep);
-      if (req && claimEnergyHandoffRequest(creep, req)) return Game.creeps[req.receiverName] || null;
-    }
-
     if (!target) return null;
     creep.memory.dropoffId = target.id;
     return target;
+  }
+
+  function isCreepEnergyReceiver(target) {
+    if (!target || !target.pos || !target.store) return false;
+    if (!target.my || target.spawning) return false;
+    if (!target.name) return false;
+    return typeof target.store.getFreeCapacity === 'function';
   }
 
   function drawDeliveryIntent(creep, target) {
@@ -620,9 +625,41 @@ function debugDrawLine(creep, target, color, label) {
     var mem = Handoff.ensureHandoffMemory(courier.room); if (!mem || !mem.requests[req.receiverName]) return false;
     var live = mem.requests[req.receiverName];
     if (live.assignedCourierName && live.assignedCourierName !== courier.name) return false;
-    live.assignedCourierName = courier.name; live.assignedAt = Game.time; live.expiresAt = Game.time + CFG.HANDOFF_ASSIGN_TTL; live.waitUntil = Game.time + 8;
+    live.assignedCourierName = courier.name; live.assignedAt = Game.time; live.expiresAt = Game.time + CFG.HANDOFF_ASSIGN_TTL; live.waitUntil = Game.time + CFG.HANDOFF_WAIT_TTL;
     courier.memory.energyHandoffTarget = live.receiverName;
     var receiver = Game.creeps[live.receiverName]; if (receiver && receiver.memory) receiver.memory.energyHandoffCourier = courier.name;
+    return true;
+  }
+
+  function tryCourierEnergyHandoff(creep) {
+    if (!CFG.HANDOFF_ENABLED) return false;
+    var carryAmt = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
+    if (carryAmt < CFG.HANDOFF_MIN_COURIER_ENERGY) { clearCourierHandoff(creep, creep.room); return false; }
+
+    Handoff.cleanupEnergyHandoffRequests(creep.room);
+    var req = findClaimableEnergyHandoffRequest(creep);
+    if (!req) { clearCourierHandoff(creep, creep.room); return false; }
+    if (!claimEnergyHandoffRequest(creep, req)) return false;
+
+    var receiver = Game.creeps[req.receiverName];
+    if (!isCreepEnergyReceiver(receiver)) { clearCourierHandoff(creep, creep.room); return false; }
+    var free = receiver.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+    if (free < CFG.HANDOFF_MIN_RECEIVER_FREE) { clearCourierHandoff(creep, creep.room); return false; }
+
+    var amount = Math.min(carryAmt, free, req.amountWanted || free);
+    var trc = creep.transfer(receiver, RESOURCE_ENERGY, amount);
+    if (trc === ERR_NOT_IN_RANGE) {
+      if (MovementManager && typeof MovementManager.request === 'function') MovementManager.request(creep, receiver, CFG.MOVE_PRIORITIES.deliver, { range: 1, intentType: 'deliver' });
+      else creep.travelTo(receiver, { range: 1, reusePath: CFG.PATH_REUSE });
+      return true;
+    }
+    if (trc === OK) {
+      if ((creep.store[RESOURCE_ENERGY] || 0) === 0 || (receiver.store.getFreeCapacity(RESOURCE_ENERGY) || 0) === 0) clearCourierHandoff(creep, creep.room);
+      return true;
+    }
+    if (trc === ERR_FULL || trc === ERR_INVALID_TARGET || trc === ERR_NOT_ENOUGH_RESOURCES) { clearCourierHandoff(creep, creep.room); return true; }
+    creep.memory.energyHandoffFailCount = (creep.memory.energyHandoffFailCount || 0) + 1;
+    if (creep.memory.energyHandoffFailCount >= CFG.HANDOFF_MAX_FAILS) clearCourierHandoff(creep, creep.room);
     return true;
   }
 
@@ -668,28 +705,19 @@ function debugDrawLine(creep, target, color, label) {
       if (carryAmt <= 0) { creep.memory.transferring = false; creep.memory.dropoffId = null; return; }
 
       var target = ensureDropoffTarget(creep);
-      if (!target) { idleNearAnchor(creep); return; }
+      if (!target) {
+        if (tryCourierEnergyHandoff(creep)) return;
+        idleNearAnchor(creep);
+        return;
+      }
+
+      // Structure target available this tick: keep fallback-only guarantee.
+      clearCourierHandoff(creep, creep.room);
 
       var reserved = reserveFill(creep, target, carryAmt, RESOURCE_ENERGY);
       if (reserved <= 0) { creep.memory.dropoffId = null; return; }
 
       drawDeliveryIntent(creep, target);
-      if (target && target instanceof Creep) {
-        var free = target.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
-        if (free < CFG.HANDOFF_MIN_RECEIVER_FREE) { clearCourierHandoff(creep, creep.room); creep.memory.dropoffId = null; return; }
-        var amount = Math.min(carryAmt, free);
-        var trc = creep.transfer(target, RESOURCE_ENERGY, amount);
-        if (trc === ERR_NOT_IN_RANGE) {
-          if (MovementManager && typeof MovementManager.request === 'function') MovementManager.request(creep, target, CFG.MOVE_PRIORITIES.deliver, { range: 1, intentType: 'deliver' });
-          else creep.travelTo(target, { range: 1, reusePath: CFG.PATH_REUSE });
-          return;
-        }
-        if (trc === OK) { if ((creep.store[RESOURCE_ENERGY]||0)===0 || (target.store.getFreeCapacity(RESOURCE_ENERGY)||0)===0) clearCourierHandoff(creep, creep.room); return; }
-        if (trc === ERR_FULL || trc === ERR_INVALID_TARGET || trc === ERR_NOT_ENOUGH_RESOURCES) { clearCourierHandoff(creep, creep.room); return; }
-        creep.memory.energyHandoffFailCount = (creep.memory.energyHandoffFailCount||0)+1; if (creep.memory.energyHandoffFailCount>=3) clearCourierHandoff(creep, creep.room);
-        return;
-      }
-
       var tr = transferTo(creep, target, RESOURCE_ENERGY);
       if (tr === OK && (creep.store[RESOURCE_ENERGY] || 0) === 0) {
         creep.memory.transferring = false;
