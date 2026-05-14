@@ -12,6 +12,12 @@ var MAX_PF_OPS = CFG.MAX_PF_OPS;
 var PLAIN_COST = CFG.PLAIN_COST;
 var SWAMP_COST = CFG.SWAMP_COST;
 var MAX_LUNA_PER_SOURCE = CFG.MAX_LUNA_PER_SOURCE;
+var ALLOW_MULTI_LUNA_PER_SOURCE = CFG.ALLOW_MULTI_LUNA_PER_SOURCE !== false;
+var MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA = CFG.MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA || 2;
+var PREFER_EMPTY_SOURCES_BEFORE_STACKING = CFG.PREFER_EMPTY_SOURCES_BEFORE_STACKING !== false;
+var LUNA_SECONDARY_SOURCE_SCORE_PENALTY = CFG.LUNA_SECONDARY_SOURCE_SCORE_PENALTY || 150;
+var LUNA_UNDERHARVEST_ENERGY_THRESHOLD = CFG.LUNA_UNDERHARVEST_ENERGY_THRESHOLD || 800;
+var LUNA_RESERVED_SOURCE_SECOND_MIN_WORK = CFG.LUNA_RESERVED_SOURCE_SECOND_MIN_WORK || 4;
 var PF_CACHE_TTL = CFG.PF_CACHE_TTL;
 var INVADER_LOCK_MEMO_TTL = CFG.INVADER_LOCK_MEMO_TTL;
 var UNSAFE_ROOM_TTL = CFG.UNSAFE_ROOM_TTL;
@@ -423,6 +429,12 @@ function softenRemoteDefensePlan(roomName) {
     if (!('owner' in entry)) entry.owner = null;
     if (!('roomName' in entry)) entry.roomName = roomName||null;
     if (!('since' in entry)) entry.since = null;
+    if (!Array.isArray(entry.owners)) {
+      if (entry.owner) entry.owners = [entry.owner];
+      else entry.owners = [];
+    }
+    if (typeof entry.maxSlots !== 'number') entry.maxSlots = MAX_LUNA_PER_SOURCE;
+    if (typeof entry.lastAudit !== 'number') entry.lastAudit = 0;
     return entry;
   }
   function maCount(memAssign, sid){
@@ -436,15 +448,38 @@ function softenRemoteDefensePlan(roomName) {
     if (!e || typeof e === 'number') return null;
     return e.owner || null;
   }
+  function maOwners(memAssign, sid){
+    var e = ensureMiningAssignment(memAssign[sid], null);
+    return e.owners || [];
+  }
+  function getSourceMaxSlots(sid) {
+    if (!ALLOW_MULTI_LUNA_PER_SOURCE) return 1;
+    var maxSlots = Math.max(1, MAX_LUNA_PER_SOURCE);
+    var source = Game.getObjectById(sid);
+    if (!source || !source.pos || !source.room) return 1;
+    var openTiles = source.pos.getOpenPositionsIgnoreCreeps ? source.pos.getOpenPositionsIgnoreCreeps().length : 1;
+    if (openTiles < MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA) return 1;
+    return Math.min(maxSlots, openTiles);
+  }
+  function rankContenderForSource(a, sourcePos){
+    var assignTick = (a && a.memory && typeof a.memory._assignTick === 'number') ? a.memory._assignTick : 0;
+    var dist = sourcePos && a && a.pos ? a.pos.getRangeTo(sourcePos) : 999;
+    return { creep: a, assignTick: assignTick, dist: dist };
+  }
   function maSetOwner(memAssign, sid, owner, roomName){
     var e = ensureMiningAssignment(memAssign[sid], roomName);
+    if (owner && e.owners.indexOf(owner) === -1) e.owners.push(owner);
     e.owner = owner; e.roomName = roomName || e.roomName; e.since = Game.time;
+    e.maxSlots = getSourceMaxSlots(sid);
+    e.lastAudit = Game.time;
     memAssign[sid] = e;
     if (e.roomName) touchSourceActive(e.roomName, sid);
   }
   function maClearOwner(memAssign, sid){
     var e = ensureMiningAssignment(memAssign[sid], null);
     e.owner = null; e.since = null;
+    e.owners = [];
+    e.lastAudit = Game.time;
     memAssign[sid] = e;
   }
   function maInc(memAssign, sid, roomName){
@@ -481,18 +516,27 @@ function softenRemoteDefensePlan(roomName) {
       return null;
     }
 
-    contenders.sort(function(a,b){
-      var at = (a && a.memory && typeof a.memory._assignTick === 'number') ? a.memory._assignTick : 0;
-      var bt = (b && b.memory && typeof b.memory._assignTick === 'number') ? b.memory._assignTick : 0;
-      if (at!==bt) return at-bt;
-      return a.name<b.name?-1:1;
+    var src = Game.getObjectById(sid);
+    var srcPos = src && src.pos ? src.pos : null;
+    var maxSlots = getSourceMaxSlots(sid);
+    var ranked = contenders.map(function(c){ return rankContenderForSource(c, srcPos); });
+    ranked.sort(function(a,b){
+      if (a.assignTick !== b.assignTick) return a.assignTick - b.assignTick;
+      if (a.dist !== b.dist) return a.dist - b.dist;
+      return a.creep.name < b.creep.name ? -1 : 1;
     });
-    var winner = contenders[0];
+    var winners = ranked.slice(0, maxSlots).map(function(r){ return r.creep; });
+    var winner = winners[0];
+    var entry = ensureMiningAssignment(memAssign[sid], winner.memory.targetRoom||null);
+    entry.owners = winners.map(function(w){ return w.name; });
+    entry.owner = entry.owners[0] || null;
+    entry.count = contenders.length;
+    entry.maxSlots = maxSlots;
+    entry.lastAudit = Game.time;
+    memAssign[sid] = entry;
 
-    maSetOwner(memAssign, sid, winner.name, winner.memory.targetRoom||null);
-
-    for (var i=1; i<contenders.length; i++){
-      var loser = contenders[i];
+    for (var i=maxSlots; i<ranked.length; i++){
+      var loser = ranked[i].creep;
       if (loser && loser.memory && loser.memory.sourceId === sid){
         loser.memory._forceYield = true;
       }
@@ -845,12 +889,22 @@ function isLunaRoomUnsafe(roomName) {
         var lin = Game.map.getRoomLinearDistance(homeName, rn);
 
         if (shouldAvoid(creep, s.id)){ avoided.push({id:s.id,roomName:rn,cost:cost,lin:lin,left:avoidRemaining(creep,s.id)}); continue; }
-        var ownerNow = maOwner(memAssign, s.id);
-        if (ownerNow && ownerNow !== creep.name) continue;
-        if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
+        var assignedNow = maCount(memAssign, s.id);
+        var slotCapNow = getSourceMaxSlots(s.id);
+        if (assignedNow >= slotCapNow) continue;
+        var firstOpenBonus = assignedNow === 0 ? -1000 : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 200);
+        var stackPenalty = assignedNow > 0 ? LUNA_SECONDARY_SOURCE_SCORE_PENALTY : 0;
+        var underHarvestBonus = 0;
+        if (s.energy >= LUNA_UNDERHARVEST_ENERGY_THRESHOLD) underHarvestBonus -= 120;
+        if (s.energyCapacity >= 3000) {
+          var owners = maOwners(memAssign, s.id);
+          var primary = owners.length ? Game.creeps[owners[0]] : null;
+          var workParts = primary ? primary.getActiveBodyparts(WORK) : 0;
+          if (workParts < LUNA_RESERVED_SOURCE_SECOND_MIN_WORK) underHarvestBonus -= 100;
+        }
 
         var sticky = (creep.memory.sourceId===s.id) ? 1 : 0;
-        candidates.push({ id:s.id, roomName:rn, cost:cost, lin:lin, sticky:sticky });
+        candidates.push({ id:s.id, roomName:rn, cost:cost + stackPenalty + firstOpenBonus + underHarvestBonus, lin:lin, sticky:sticky, assigned: assignedNow });
       }
     }
 
@@ -861,14 +915,16 @@ function isLunaRoomUnsafe(roomName) {
         var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
         for (var sid in rm.sources){
           if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
-          var ownerNow2 = maOwner(memAssign, sid);
-          if (ownerNow2 && ownerNow2 !== creep.name) continue;
-          if (maCount(memAssign, sid) >= MAX_LUNA_PER_SOURCE) continue;
+          var cap2 = getSourceMaxSlots(sid);
+          var assigned2 = maCount(memAssign, sid);
+          if (assigned2 >= cap2) continue;
 
           var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
           var synth = (lin2*200)+800;
           var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
-          candidates.push({ id:sid, roomName:rn, cost:synth, lin:lin2, sticky:sticky2 });
+          var stackPenalty2 = assigned2 > 0 ? LUNA_SECONDARY_SOURCE_SCORE_PENALTY : 0;
+          var firstOpenBonus2 = assigned2 === 0 ? -1000 : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 200);
+          candidates.push({ id:sid, roomName:rn, cost:synth + stackPenalty2 + firstOpenBonus2, lin:lin2, sticky:sticky2, assigned: assigned2 });
         }
       }
     }
@@ -893,6 +949,7 @@ function isLunaRoomUnsafe(roomName) {
       // Reserve immediately
       maInc(memAssign, best.id, best.roomName);
       maSetOwner(memAssign, best.id, creep.name, best.roomName);
+      resolveOwnershipForSid(best.id);
 
       // Visuals + say:
       var srcObj = Game.getObjectById(best.id);
@@ -940,9 +997,8 @@ function isLunaRoomUnsafe(roomName) {
 
     var sid = creep.memory.sourceId;
     var memAssign = ensureAssignmentsMem();
-    var owner = maOwner(memAssign, sid);
-
-    if (owner && owner !== creep.name){
+    var owners = maOwners(memAssign, sid);
+    if (owners.length && owners.indexOf(creep.name) === -1){
       releaseAssignment(creep);
       return false;
     }
@@ -954,21 +1010,14 @@ function isLunaRoomUnsafe(roomName) {
         winners.push(c);
       }
     }
-    if (winners.length <= MAX_LUNA_PER_SOURCE){
-      if (!owner) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
+    var cap = getSourceMaxSlots(sid);
+    if (winners.length <= cap){
+      if (!owners.length) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
       return true;
     }
-
-    winners.sort(function(a,b){
-      var at = (a && a.memory && typeof a.memory._assignTick === 'number') ? a.memory._assignTick : 0;
-      var bt = (b && b.memory && typeof b.memory._assignTick === 'number') ? b.memory._assignTick : 0;
-      if (at!==bt) return at-bt;
-      return a.name<b.name?-1:1;
-    });
-    var win = winners[0];
-    maSetOwner(memAssign, sid, win.name, win.memory.targetRoom||null);
-
-    if (win.name !== creep.name){
+    resolveOwnershipForSid(sid);
+    var refreshed = maOwners(memAssign, sid);
+    if (refreshed.indexOf(creep.name) === -1){
       console.log('🚦 '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
       releaseAssignment(creep);
       return false;
@@ -1309,13 +1358,13 @@ function isLunaRoomUnsafe(roomName) {
       var free=[], sticky=[], rest=[];
       for (var i=0;i<sids.length;i++){
         var sid=sids[i];
-        var owner = maOwner(memAssign, sid);
+        var owners = maOwners(memAssign, sid);
         var cnt   = maCount(memAssign, sid);
-        if (owner && owner !== creep.name) continue;
-        if (cnt >= MAX_LUNA_PER_SOURCE) continue;
+        var cap = getSourceMaxSlots(sid);
+        if (cnt >= cap) continue;
 
         if (creep.memory.sourceId===sid) sticky.push(sid);
-        else if (!owner) free.push(sid);
+        else if (!owners.length) free.push(sid);
         else rest.push(sid);
       }
 
