@@ -352,6 +352,36 @@ function countApprovedLunaSourcesForRemote(remoteName) {
   return 0;
 }
 
+
+function getLunaRemoteIntelTick(remoteName) {
+  var mem = Memory.rooms && Memory.rooms[remoteName];
+  if (!mem) return null;
+
+  var best = null;
+
+  if (mem.intel) {
+    if (typeof mem.intel.lastScanAt === 'number') best = Math.max(best || 0, mem.intel.lastScanAt);
+    if (typeof mem.intel.lastVisited === 'number') best = Math.max(best || 0, mem.intel.lastVisited);
+    if (typeof mem.intel.t === 'number') best = Math.max(best || 0, mem.intel.t);
+  }
+
+  if (mem.scout && typeof mem.scout.lastVisited === 'number') {
+    best = Math.max(best || 0, mem.scout.lastVisited);
+  }
+
+  if (mem.sources) {
+    for (var sid in mem.sources) {
+      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
+      var srec = mem.sources[sid];
+      if (!srec) continue;
+      if (typeof srec.lastSeen === 'number') best = Math.max(best || 0, srec.lastSeen);
+      if (typeof srec.lastActive === 'number') best = Math.max(best || 0, srec.lastActive);
+    }
+  }
+
+  return best;
+}
+
 function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
   if (!homeRoom || !remoteName) {
     if (outMeta) outMeta.reason = 'missing-home-or-remote';
@@ -389,8 +419,14 @@ function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
     return false;
   }
 
-  var intelTick = mem.intel && typeof mem.intel.t === 'number' ? mem.intel.t : null;
-  if (intelTick != null && Game.time - intelTick > INVADER_LOCK_TTL) {
+  var intelTick = getLunaRemoteIntelTick(remoteName);
+  var intelTtl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
+  if (intelTick == null) {
+    if (!Game.rooms[remoteName]) {
+      if (outMeta) outMeta.reason = 'stale-source-intel';
+      return false;
+    }
+  } else if ((Game.time - intelTick) > intelTtl) {
     if (outMeta) outMeta.reason = 'stale-source-intel';
     return false;
   }
