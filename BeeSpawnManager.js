@@ -439,11 +439,9 @@ function determineLunaQuota(C, room) {
   var remotes = C.remotesByHome[room.name] || [];
   if (!remotes.length) return 0;
 
-  var perSource = (LunaConfig && LunaConfig.MAX_LUNA_PER_SOURCE) || 1;
-
   var approvedRemotes = [];
   var rejectedRemotes = [];
-  var approvedSourceCount = 0;
+  var approvedSources = [];
   for (var i = 0; i < remotes.length; i++) {
     var remoteName = remotes[i];
     var meta = { room: remoteName, routeDistance: Infinity, reason: 'unknown' };
@@ -460,22 +458,165 @@ function determineLunaQuota(C, room) {
     }
 
     approvedRemotes.push({ room: remoteName, routeDistance: meta.routeDistance, sources: sourceCount });
-    approvedSourceCount += sourceCount;
+    collectApprovedLunaSourcesFromRemote(remoteName, approvedSources);
   }
 
-  var active = (C.lunaCountsByHome && C.lunaCountsByHome[room.name]) || 0;
-  var desired = approvedSourceCount * perSource;
+  var slotPlan = buildLunaSourceSlotPlan(room, approvedSources);
+  var desired = slotPlan.totalSlots;
   if (tickEvery(DBG_EVERY)) {
     dlog('🌙 [Signal] lunaQuota', fmt(room),
       'candidates=', JSON.stringify(remotes),
       'accepted=', JSON.stringify(approvedRemotes),
       'rejected=', JSON.stringify(rejectedRemotes),
-      'approvedSourceCount=', approvedSourceCount,
-      'perSource=', perSource,
-      'active=', active,
+      'sources=', approvedSources.length,
+      'totalSlots=', slotPlan.totalSlots,
+      'liveUsedSlots=', slotPlan.liveUsedSlots,
+      'queuedReservedSlots=', slotPlan.queuedReservedSlots,
       'desired=', desired);
   }
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+  Memory.rooms[room.name].lastLunaQuota = {
+    tick: Game.time,
+    acceptedRemoteRooms: approvedRemotes,
+    rejectedRemoteRooms: rejectedRemotes,
+    totalLunaSlots: slotPlan.totalSlots,
+    usedLiveSlots: slotPlan.liveUsedSlots,
+    queuedReservedSlots: slotPlan.queuedReservedSlots,
+    desiredLunaQuota: desired
+  };
   return desired;
+}
+
+function collectApprovedLunaSourcesFromRemote(remoteName, out) {
+  if (!remoteName || !out) return;
+  var mem = Memory.rooms && Memory.rooms[remoteName];
+  if (!mem) return;
+
+  var live = Game.rooms[remoteName];
+  if (live) {
+    var found = live.find(FIND_SOURCES) || [];
+    for (var i = 0; i < found.length; i++) {
+      out.push({ sourceId: found[i].id, targetRoom: remoteName });
+    }
+    return;
+  }
+
+  if (mem.sources) {
+    for (var sid in mem.sources) {
+      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
+      out.push({ sourceId: sid, targetRoom: remoteName });
+    }
+  }
+}
+
+function getSourceMaxSlotsForSpawn(sourceId, targetRoom) {
+  if (!sourceId || !targetRoom) return 0;
+  if (isLunaRemoteRoomUnsafe(targetRoom)) return 0;
+  var mem = Memory.rooms && Memory.rooms[targetRoom];
+  if (!mem) return 0;
+
+  var intelTick = getLunaRemoteIntelTick(targetRoom);
+  var intelTtl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
+  if (!Game.rooms[targetRoom] && (intelTick == null || (Game.time - intelTick) > intelTtl)) {
+    return 0;
+  }
+
+  var allowMulti = !(LunaConfig && LunaConfig.ALLOW_MULTI_LUNA_PER_SOURCE === false);
+  if (!allowMulti) return 1;
+  var maxPerSource = Math.max(1, ((LunaConfig && LunaConfig.MAX_LUNA_PER_SOURCE) || 1));
+  var minOpenForExtra = (LunaConfig && LunaConfig.MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA) || 2;
+  var source = Game.getObjectById(sourceId);
+  if (!source) return 1;
+  var openTiles = countOpenHarvestTilesForSpawn(source);
+  if (openTiles < minOpenForExtra) return 1;
+  return Math.min(maxPerSource, openTiles);
+}
+
+function countOpenHarvestTilesForSpawn(source) {
+  if (!source || !source.pos || !source.room) return 1;
+  var terrain = source.room.getTerrain();
+  var count = 0;
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var x = source.pos.x + dx;
+      var y = source.pos.y + dy;
+      if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+      if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
+
+      var look = source.room.lookAt(x, y);
+      var blocked = false;
+      for (var i = 0; i < look.length; i++) {
+        var item = look[i];
+        if (item.type === LOOK_STRUCTURES) {
+          var s = item.structure;
+          if (s.structureType === STRUCTURE_RAMPART && !s.my) { blocked = true; break; }
+          if (s.structureType !== STRUCTURE_ROAD && s.structureType !== STRUCTURE_CONTAINER && s.structureType !== STRUCTURE_RAMPART) {
+            blocked = true; break;
+          }
+        }
+        if (item.type === LOOK_CONSTRUCTION_SITES) {
+          var cs = item.constructionSite;
+          if (cs.structureType !== STRUCTURE_ROAD && cs.structureType !== STRUCTURE_CONTAINER) {
+            blocked = true; break;
+          }
+        }
+      }
+      if (!blocked) count++;
+    }
+  }
+  return count;
+}
+
+function buildLunaSourceSlotPlan(room, approvedSources) {
+  var plan = {
+    totalSlots: 0,
+    liveUsedSlots: 0,
+    queuedReservedSlots: 0,
+    perSource: Object.create(null)
+  };
+  if (!room || !approvedSources || !approvedSources.length) return plan;
+
+  for (var i = 0; i < approvedSources.length; i++) {
+    var src = approvedSources[i];
+    if (!src || !src.sourceId || !src.targetRoom) continue;
+    var key = src.sourceId;
+    if (plan.perSource[key]) continue;
+    var maxSlots = getSourceMaxSlotsForSpawn(src.sourceId, src.targetRoom);
+    if (maxSlots <= 0) continue;
+    plan.perSource[key] = {
+      sourceId: src.sourceId,
+      targetRoom: src.targetRoom,
+      maxSlots: maxSlots,
+      live: 0,
+      queued: 0
+    };
+    plan.totalSlots += maxSlots;
+  }
+
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    if (creep.memory.task !== 'luna') continue;
+    if ((creep.memory.home || (creep.room && creep.room.name)) !== room.name) continue;
+    var sid = creep.memory.sourceId;
+    if (!sid || !plan.perSource[sid]) continue;
+    plan.perSource[sid].live++;
+    plan.liveUsedSlots++;
+  }
+
+  var q = ensureRoomQueue(room.name);
+  for (var j = 0; j < q.length; j++) {
+    var item = q[j];
+    if (!item || item.role !== 'Luna') continue;
+    if (!item.sourceId || !plan.perSource[item.sourceId]) continue;
+    plan.perSource[item.sourceId].queued++;
+    plan.queuedReservedSlots++;
+  }
+
+  return plan;
 }
 
 
@@ -624,6 +765,7 @@ function fillQueueForRoom(C, room) {
   // Iterate quotas in plain English order so future maintainers can eyeball
   // which roles will be enqueued before touching the code.
   var roles = Object.keys(quotas);
+  var lunaSlotPlan = null;
   for (var i = 0; i < roles.length; i++) {
     var role = roles[i];
     var limit = quotas[role] || 0;
@@ -636,9 +778,47 @@ function fillQueueForRoom(C, room) {
         'active=', active, 'queued=', queued, 'deficit=', deficit);
     }
     for (var j = 0; j < deficit; j++) {
-      enqueue(roomName, role);
+      if (role !== 'Luna') {
+        enqueue(roomName, role);
+        continue;
+      }
+      if (!lunaSlotPlan) {
+        var remotes = C.remotesByHome[roomName] || [];
+        var sources = [];
+        for (var ri = 0; ri < remotes.length; ri++) {
+          var rmeta = { room: remotes[ri], routeDistance: Infinity, reason: 'unknown' };
+          if (!isApprovedLunaRemoteForHome(room, remotes[ri], rmeta)) continue;
+          collectApprovedLunaSourcesFromRemote(remotes[ri], sources);
+        }
+        lunaSlotPlan = buildLunaSourceSlotPlan(room, sources);
+      }
+      var pick = pickLunaSourceForQueue(lunaSlotPlan);
+      if (!pick) {
+        dlog('🌙 [QueueGate]', roomName, 'skip Luna enqueue: no free source slots');
+        break;
+      }
+      if (enqueue(roomName, role, { sourceId: pick.sourceId, targetRoom: pick.targetRoom })) {
+        pick.queued++;
+        lunaSlotPlan.queuedReservedSlots++;
+      }
     }
   }
+}
+
+function pickLunaSourceForQueue(plan) {
+  if (!plan || !plan.perSource) return null;
+  var best = null;
+  for (var sid in plan.perSource) {
+    if (!Object.prototype.hasOwnProperty.call(plan.perSource, sid)) continue;
+    var rec = plan.perSource[sid];
+    if (!rec) continue;
+    var used = (rec.live || 0) + (rec.queued || 0);
+    if (used >= rec.maxSlots) continue;
+    if (!best || used < ((best.live || 0) + (best.queued || 0))) {
+      best = rec;
+    }
+  }
+  return best;
 }
 
 function dequeueAndSpawn(spawner) {
