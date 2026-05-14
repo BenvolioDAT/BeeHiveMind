@@ -452,6 +452,31 @@ function softenRemoteDefensePlan(roomName) {
     var e = ensureMiningAssignment(memAssign[sid], null);
     return e.owners || [];
   }
+  function getLiveLunaContendersForSource(sid){
+    var contenders = [];
+    for (var name in Game.creeps){
+      var c = Game.creeps[name];
+      if (!c || !c.memory) continue;
+      if (c.memory.task === 'luna' && c.memory.sourceId === sid) contenders.push(c);
+    }
+    return contenders;
+  }
+  function ownersMatchLiveContenders(entry, contenders, sid){
+    var e = ensureMiningAssignment(entry, null);
+    var owners = e.owners || [];
+    if (owners.length !== contenders.length) return false;
+    if ((e.owner || null) !== (owners[0] || null)) return false;
+
+    var liveMap = {};
+    for (var i = 0; i < contenders.length; i++) liveMap[contenders[i].name] = true;
+    for (var j = 0; j < owners.length; j++) {
+      var ownerName = owners[j];
+      var oc = Game.creeps[ownerName];
+      if (!liveMap[ownerName]) return false;
+      if (!oc || !oc.memory || oc.memory.task !== 'luna' || oc.memory.sourceId !== sid) return false;
+    }
+    return true;
+  }
   function countOpenHarvestTiles(source){
     if (!source || !source.pos || !source.room) return 1;
     var terrain = source.room.getTerrain();
@@ -514,6 +539,7 @@ function softenRemoteDefensePlan(roomName) {
     var e = ensureMiningAssignment(memAssign[sid], null);
     e.owner = null; e.since = null;
     e.owners = [];
+    e.count = 0;
     e.lastAudit = Game.time;
     memAssign[sid] = e;
   }
@@ -537,14 +563,7 @@ function softenRemoteDefensePlan(roomName) {
     var memAssign = ensureAssignmentsMem();
     var e = ensureMiningAssignment(memAssign[sid], null);
 
-    var contenders = [];
-    for (var name in Game.creeps){
-      var c = Game.creeps[name];
-      if (!c || !c.memory) continue;
-      if (c.memory.task === 'luna' && c.memory.sourceId === sid){
-        contenders.push(c);
-      }
-    }
+    var contenders = getLiveLunaContendersForSource(sid);
 
     if (!contenders.length){
       maClearOwner(memAssign, sid);
@@ -610,15 +629,14 @@ function softenRemoteDefensePlan(roomName) {
     }
 
     for (var sid3 in memAssign){
-      var owner = maOwner(memAssign, sid3);
+      var entry = ensureMiningAssignment(memAssign[sid3], null);
       var cap = getSourceMaxSlots(sid3);
-      var owners = maOwners(memAssign, sid3);
-      if (owner){
-        var oc = Game.creeps[owner];
-        if (!oc || !oc.memory || oc.memory.sourceId !== sid3 || memAssign[sid3].count > cap || owners.length !== memAssign[sid3].count){
-          resolveOwnershipForSid(sid3);
-        }
-      }else if (memAssign[sid3].count > 0){
+      var contenders = getLiveLunaContendersForSource(sid3);
+      if (!contenders.length) {
+        maClearOwner(memAssign, sid3);
+        continue;
+      }
+      if (entry.count > cap || !ownersMatchLiveContenders(entry, contenders, sid3)) {
         resolveOwnershipForSid(sid3);
       }
     }
@@ -1029,19 +1047,16 @@ function isLunaRoomUnsafe(roomName) {
     var sid = creep.memory.sourceId;
     var memAssign = ensureAssignmentsMem();
     var owners = maOwners(memAssign, sid);
+    var winners = getLiveLunaContendersForSource(sid);
+    var cap = getSourceMaxSlots(sid);
+    if (owners.length && owners.indexOf(creep.name) === -1 && winners.length <= cap){
+      resolveOwnershipForSid(sid);
+      owners = maOwners(memAssign, sid);
+    }
     if (owners.length && owners.indexOf(creep.name) === -1){
       releaseAssignment(creep);
       return false;
     }
-
-    var winners=[];
-    for (var name in Game.creeps){
-      var c=Game.creeps[name];
-      if (c && c.memory && c.memory.task==='luna' && c.memory.sourceId===sid){
-        winners.push(c);
-      }
-    }
-    var cap = getSourceMaxSlots(sid);
     if (winners.length <= cap){
       if (!owners.length) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
       return true;
