@@ -1155,6 +1155,7 @@ function isLunaRoomUnsafe(roomName) {
   function tryBuildLunaFallback(creep, target) {
     if (!target) return false;
     var mode = (target.progressTotal != null) ? 'build' : 'repair';
+    if (mode === 'repair' && (target.hits == null || target.hits >= target.hitsMax)) return false;
     creep.memory.lunaFallbackMode = mode;
     creep.memory.lunaFallbackTargetId = target.id;
     var rc = (mode === 'build') ? creep.build(target) : creep.repair(target);
@@ -1163,6 +1164,28 @@ function isLunaRoomUnsafe(roomName) {
       return true;
     }
     return rc === OK;
+  }
+
+  function tryCachedLunaFallback(creep) {
+    var targetId = creep.memory.lunaFallbackTargetId;
+    var mode = creep.memory.lunaFallbackMode;
+    if (!targetId || !mode) return false;
+    var target = Game.getObjectById(targetId);
+    if (!target) {
+      clearLunaFallbackMemory(creep);
+      return false;
+    }
+    if (mode === 'upgrade') return tryUpgradeLunaFallback(creep);
+    if (mode === 'build' || mode === 'repair') {
+      var ok = tryBuildLunaFallback(creep, target);
+      if (!ok) {
+        clearLunaFallbackMemory(creep);
+        return false;
+      }
+      return true;
+    }
+    clearLunaFallbackMemory(creep);
+    return false;
   }
 
   function tryUpgradeLunaFallback(creep) {
@@ -1183,8 +1206,7 @@ function isLunaRoomUnsafe(roomName) {
   function tryLunaProductiveFallback(creep, src) {
     if (!shouldRunLunaProductiveFallback(creep, src)) return false;
     if (creep.memory.lunaFallbackCheckedAt && (Game.time - creep.memory.lunaFallbackCheckedAt) < LUNA_FALLBACK_RECHECK_TTL) {
-      var cached = creep.memory.lunaFallbackTargetId ? Game.getObjectById(creep.memory.lunaFallbackTargetId) : null;
-      if (cached) return tryBuildLunaFallback(creep, cached);
+      if (tryCachedLunaFallback(creep)) return true;
     }
     clearLunaFallbackMemory(creep);
     creep.memory.lunaFallbackCheckedAt = Game.time;
