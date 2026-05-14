@@ -362,7 +362,14 @@ function getActiveRemoteRooms(homeRoom) {
   const mem = memoryFor(homeRoom);
   const rooms = new Set();
   for (const key of Object.keys(mem.paths || {})) {
-    rooms.add(key.split(':')[0]);
+    const parts = key.split(':');
+    const first = parts[0];
+    const second = parts[1];
+
+    // Ignore local planning tracks and never report the home room as remote demand.
+    if (!first || first === homeRoom.name) continue;
+    if (second === 'LOCAL') continue;
+    rooms.add(first);
   }
   return [...rooms];
 }
