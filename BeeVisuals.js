@@ -261,20 +261,33 @@ function canonicalWorkerRole(tag) {
 }
 
 /** Count current workers against the target quotas so we can render the table. */
-function collectWorkerStats() {
+function collectWorkerStats(room) {
   var tasks = {};
   var totalCount = 0;
   var maxTotal = 0;
-  var hasDynamicMax = false;
+  var hasUnknownMax = false;
   var key;
+
+  var quotaSnapshot = room && Memory.rooms && Memory.rooms[room.name] && Memory.rooms[room.name].lastRoleQuotas;
+  var quotaMap = quotaSnapshot && quotaSnapshot.quotas ? quotaSnapshot.quotas : null;
 
   for (key in WORKER_MAX_TASKS) {
     if (!WORKER_MAX_TASKS.hasOwnProperty(key)) continue;
     tasks[key] = 0;
-    if (WORKER_MAX_TASKS[key] == null) {
-      hasDynamicMax = true;
+
+    var quotaValue = null;
+    if (quotaMap && Object.prototype.hasOwnProperty.call(quotaMap, key)) {
+      quotaValue = quotaMap[key];
+    } else if (quotaMap && key === 'BaseHarvest' && Object.prototype.hasOwnProperty.call(quotaMap, 'Baseharvest')) {
+      quotaValue = quotaMap.Baseharvest;
     } else {
-      maxTotal += Number(WORKER_MAX_TASKS[key]) || 0;
+      quotaValue = WORKER_MAX_TASKS[key];
+    }
+
+    if (quotaValue == null) {
+      hasUnknownMax = true;
+    } else {
+      maxTotal += Number(quotaValue) || 0;
     }
   }
 
@@ -289,7 +302,7 @@ function collectWorkerStats() {
     }
   }
 
-  return { totalCount: totalCount, maxTotal: maxTotal, tasks: tasks, hasDynamicMax: hasDynamicMax };
+  return { totalCount: totalCount, maxTotal: maxTotal, tasks: tasks, hasUnknownMax: hasUnknownMax, quotas: quotaMap };
 }
 
 /** Pre-compute table geometry once so the draw loop reads like instructions. */
@@ -321,7 +334,7 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
   if (!shouldDrawForRoom(CFG.tableTickModulo, room.name)) return;
 
   var v = new RoomVisual(room.name);
-  var stats = collectWorkerStats();
+  var stats = collectWorkerStats(room);
   var geom = workerTableGeometry();
 
   var pos = _reserveBottomRight(room.name, geom.outerW, geom.outerH);
@@ -347,7 +360,7 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
     radius: 0.05
   });
   text(v, 'Workers', xLeft + 0.3, yTop + geom.cellH / 2 + 0.15, 0.5, 'left', 1);
-  var headerTotal = stats.hasDynamicMax ? (stats.totalCount + '/dynamic') : (stats.totalCount + '/' + stats.maxTotal);
+  var headerTotal = stats.hasUnknownMax ? (stats.totalCount + '/?') : (stats.totalCount + '/' + stats.maxTotal);
   text(v, headerTotal, xLeft + geom.nameW + geom.valueW - 0.3,
        yTop + geom.cellH / 2 + 0.15, 0.5, 'right', 1);
 
@@ -356,7 +369,15 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
   for (var k in WORKER_MAX_TASKS) {
     if (!WORKER_MAX_TASKS.hasOwnProperty(k)) continue;
     var y = yTop + row * geom.cellH;
-    var val = (WORKER_MAX_TASKS[k] == null) ? ((stats.tasks[k] || 0) + '/dynamic') : ((stats.tasks[k] || 0) + '/' + (WORKER_MAX_TASKS[k] || 0));
+    var roleQuota = null;
+    if (stats.quotas && Object.prototype.hasOwnProperty.call(stats.quotas, k)) {
+      roleQuota = stats.quotas[k];
+    } else if (stats.quotas && k === 'BaseHarvest' && Object.prototype.hasOwnProperty.call(stats.quotas, 'Baseharvest')) {
+      roleQuota = stats.quotas.Baseharvest;
+    } else {
+      roleQuota = WORKER_MAX_TASKS[k];
+    }
+    var val = (roleQuota == null) ? ((stats.tasks[k] || 0) + '/?') : ((stats.tasks[k] || 0) + '/' + (Number(roleQuota) || 0));
 
     v.rect(xLeft, y, geom.nameW, geom.cellH, {
       fill: CFG.colors.panelFill,

@@ -612,6 +612,13 @@ function fillQueueForRoom(C, room) {
   var quotas = computeRoomQuotas(C, room);
   var roomName = room.name;
 
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  Memory.rooms[roomName].lastRoleQuotas = {
+    tick: Game.time,
+    quotas: quotas
+  };
+
   pruneOverfilledQueue(roomName, quotas, C);
 
   // Iterate quotas in plain English order so future maintainers can eyeball
