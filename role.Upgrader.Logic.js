@@ -3,6 +3,7 @@
 // Upgrader behavior implementation only. Public role wiring stays in role.Upgrader.js.
 var CFG = require('role.Upgrader.Config');
 const BeeToolbox = require('BeeToolbox');
+var Handoff = require('role.EnergyHandoff');
 
 function debugSay(creep, msg) { if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true); }
 function getTargetPosition(target) { if (!target) return null; if (target.pos) return target.pos; if (target.x != null && target.y != null && target.roomName) return target; return null; }
@@ -60,12 +61,28 @@ function runUpgradePhase(creep) {
 
 function shouldPauseAtSafeRCL8(controller) { if (!CFG.SKIP_RCL8_IF_SAFE) return false; if (controller.level !== 8) return false; var ticksToDowngrade = controller.ticksToDowngrade || 0; return ticksToDowngrade > CFG.RCL8_SAFE_TTL; }
 
-function runRefuelPhase(creep) { if (tryLinkPull(creep)) return; tryToolboxSweep(creep); if (tryWithdrawStorage(creep)) return; if (tryWithdrawContainer(creep)) return; if (pickDroppedEnergy(creep)) return; if (CFG.DEBUG_DRAW) debugSay(creep, "❓"); }
+function runRefuelPhase(creep) { if (maybePublishUpgraderRequest(creep)) { debugSay(creep, '⏳'); return; } if (tryLinkPull(creep)) return; tryToolboxSweep(creep); if (tryWithdrawStorage(creep)) return; if (tryWithdrawContainer(creep)) return; if (pickDroppedEnergy(creep)) return; if (CFG.DEBUG_DRAW) debugSay(creep, "❓"); }
 function tryLinkPull(creep) { var ctrl = creep.room.controller; if (!ctrl) return false; var linkNearController = creep.pos.findClosestByRange(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_LINK && s.store && (s.store[RESOURCE_ENERGY] || 0) > 0 && s.pos.inRangeTo(ctrl, 3); } }); if (!linkNearController) return false; var lr = creep.withdraw(linkNearController, RESOURCE_ENERGY); var linkRoom = getRoomOfPos(linkNearController.pos); debugRing(linkRoom, linkNearController.pos, CFG.DRAW.LINK, "LINK"); debugDrawLine(creep, linkNearController, CFG.DRAW.LINK, "LINK"); if (lr === ERR_NOT_IN_RANGE) creep.travelTo(linkNearController, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
 function tryToolboxSweep(creep) { try { if (BeeToolbox && typeof BeeToolbox.collectEnergy === 'function') BeeToolbox.collectEnergy(creep); } catch (e) {} }
 function tryWithdrawStorage(creep) { var stor = creep.room.storage; if (!stor || !stor.store || (stor.store[RESOURCE_ENERGY] || 0) <= 0) return false; debugRing(getRoomOfPos(stor.pos), stor.pos, CFG.DRAW.STORE, "STO"); debugDrawLine(creep, stor, CFG.DRAW.STORE, "STO"); var sr = creep.withdraw(stor, RESOURCE_ENERGY); if (sr === ERR_NOT_IN_RANGE) creep.travelTo(stor, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
 function tryWithdrawContainer(creep) { var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store && (s.store[RESOURCE_ENERGY] || 0) > 0; } }); if (!containerWithEnergy) return false; debugRing(getRoomOfPos(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT"); debugDrawLine(creep, containerWithEnergy, CFG.DRAW.CONT, "CONT"); var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY); if (cr === ERR_NOT_IN_RANGE) creep.travelTo(containerWithEnergy, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
 
-function run(creep) { if (!creep) return; ensureUpgraderIdentity(creep); var state = determineUpgraderState(creep); if (state === 'UPGRADE') { runUpgradePhase(creep); return; } runRefuelPhase(creep); }
+function shouldUpgraderRequestEnergy(creep) {
+  if (!CFG.HANDOFF_ENABLED) return false;
+  var ctrl = creep.room.controller;
+  if (!ctrl || !ctrl.my) return false;
+  var free = creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+  return free >= CFG.HANDOFF_MIN_RECEIVER_FREE && creep.pos.getRangeTo(ctrl) <= 6;
+}
+
+function maybePublishUpgraderRequest(creep) {
+  if (!shouldUpgraderRequestEnergy(creep)) { Handoff.clearEnergyHandoffRequest(creep); return false; }
+  var req = Handoff.publishEnergyHandoffRequest(creep, 'Upgrader', creep.room.controller, creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0);
+  if (!req) return false;
+  if (req.assignedCourierName && req.waitUntil && Game.time <= req.waitUntil) { creep.memory.energyHandoffCourier = req.assignedCourierName; return true; }
+  return false;
+}
+
+function run(creep) { if (!creep) return; ensureUpgraderIdentity(creep); var state = determineUpgraderState(creep); if (state === 'UPGRADE') { Handoff.clearEnergyHandoffRequest(creep); runUpgradePhase(creep); return; } runRefuelPhase(creep); }
 
 module.exports = { run: run };
