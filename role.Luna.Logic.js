@@ -1125,36 +1125,88 @@ function isLunaRoomUnsafe(roomName) {
     return true;
   }
 
+  function isLunaFallbackTargetAllowed(creep, src, target) {
+    if (!target || !target.pos || !src || !src.pos) return false;
+    var homeName = getHomeName(creep);
+    var targetRoom = target.pos.roomName;
+    var sourceRoom = src.pos.roomName;
+    if (targetRoom === sourceRoom) {
+      return target.pos.getRangeTo(src.pos) <= LUNA_FALLBACK_MAX_RANGE_FROM_SOURCE;
+    }
+    var roomDist = Game.map.getRoomLinearDistance(targetRoom, sourceRoom);
+    if (roomDist <= LUNA_FALLBACK_MAX_ROOM_DISTANCE_FROM_SOURCE) return true;
+    if (targetRoom === homeName) {
+      if (target.progressTotal != null && LUNA_FALLBACK_ALLOW_HOME_BUILD_IF_IN_HOME) return true;
+      if (target.structureType === STRUCTURE_CONTROLLER && LUNA_FALLBACK_ALLOW_HOME_UPGRADE_IF_IN_HOME) return true;
+    }
+    return false;
+  }
+
   function findLunaFallbackBuildTarget(creep, src) {
     if (!LUNA_FALLBACK_BUILD_ENABLED || !src) return null;
-    var nearSrcSites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1);
-    for (var i = 0; i < nearSrcSites.length; i++) if (nearSrcSites[i].structureType === STRUCTURE_CONTAINER) return nearSrcSites[i];
-    var nearSrcContainers = src.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) {
-      return s.structureType === STRUCTURE_CONTAINER && s.hits < s.hitsMax;
-    }});
-    if (nearSrcContainers.length) return nearSrcContainers[0];
-    var nearRoadSites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 3, { filter: function (s) { return s.structureType === STRUCTURE_ROAD; } });
-    if (nearRoadSites.length) return nearRoadSites[0];
-    var nearRoads = src.pos.findInRange(FIND_STRUCTURES, 3, { filter: function (s) { return s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax; } });
-    if (nearRoads.length) return nearRoads[0];
+    function getLunaBuildPriority(target) {
+      if (!target || !target.structureType) return 40;
+      var prio = {
+        spawn: 100,
+        extension: 90,
+        tower: 80,
+        container: 70,
+        storage: 60,
+        terminal: 55,
+        link: 50,
+        rampart: 30,
+        wall: 20,
+        road: 10
+      };
+      return prio[target.structureType] || 40;
+    }
+    function isSourceContainerTarget(target) {
+      return target && target.structureType === STRUCTURE_CONTAINER && target.pos && src.pos && target.pos.inRangeTo(src.pos, 1);
+    }
 
     var localSites = creep.room.find(FIND_CONSTRUCTION_SITES);
     if (creep.pos.roomName === getHomeName(creep) && !LUNA_FALLBACK_ALLOW_HOME_BUILD_IF_IN_HOME) localSites = [];
+    var candidates = [];
     if (localSites && localSites.length) {
-      var prio = { 'spawn': 5, 'extension': 4, 'tower': 3, 'container': 2, 'road': 1 };
-      localSites.sort(function(a, b) {
-        var sa = prio[a.structureType] || 0; var sb = prio[b.structureType] || 0;
-        if (sb !== sa) return sb - sa;
-        return creep.pos.getRangeTo(a.pos) - creep.pos.getRangeTo(b.pos);
+      for (var i = 0; i < localSites.length; i++) {
+        if (!isLunaFallbackTargetAllowed(creep, src, localSites[i])) continue;
+        candidates.push({ target: localSites[i], mode: 'build', priority: getLunaBuildPriority(localSites[i]) });
+      }
+    }
+
+    var nearSrcContainers = src.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER && s.hits < s.hitsMax;
+    }});
+    for (var j = 0; j < nearSrcContainers.length; j++) {
+      if (!isLunaFallbackTargetAllowed(creep, src, nearSrcContainers[j])) continue;
+      candidates.push({ target: nearSrcContainers[j], mode: 'repair', priority: 75 });
+    }
+
+    var nearRoads = src.pos.findInRange(FIND_STRUCTURES, 3, { filter: function (s) {
+      return s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax;
+    }});
+    for (var k = 0; k < nearRoads.length; k++) {
+      if (!isLunaFallbackTargetAllowed(creep, src, nearRoads[k])) continue;
+      candidates.push({ target: nearRoads[k], mode: 'repair', priority: 10 });
+    }
+
+    if (candidates.length) {
+      candidates.sort(function(a, b) {
+        if (b.priority !== a.priority) return b.priority - a.priority;
+        var aSrc = isSourceContainerTarget(a.target) ? 1 : 0;
+        var bSrc = isSourceContainerTarget(b.target) ? 1 : 0;
+        if (bSrc !== aSrc) return bSrc - aSrc;
+        return creep.pos.getRangeTo(a.target.pos) - creep.pos.getRangeTo(b.target.pos);
       });
-      return localSites[0];
+      return candidates[0];
     }
     return null;
   }
 
-  function tryBuildLunaFallback(creep, target) {
+  function tryBuildLunaFallback(creep, targetInfo) {
+    var target = targetInfo && targetInfo.target ? targetInfo.target : targetInfo;
     if (!target) return false;
-    var mode = (target.progressTotal != null) ? 'build' : 'repair';
+    var mode = (targetInfo && targetInfo.mode) ? targetInfo.mode : ((target.progressTotal != null) ? 'build' : 'repair');
     if (mode === 'repair' && (target.hits == null || target.hits >= target.hitsMax)) return false;
     creep.memory.lunaFallbackMode = mode;
     creep.memory.lunaFallbackTargetId = target.id;
@@ -1166,7 +1218,7 @@ function isLunaRoomUnsafe(roomName) {
     return rc === OK;
   }
 
-  function tryCachedLunaFallback(creep) {
+  function tryCachedLunaFallback(creep, src) {
     var targetId = creep.memory.lunaFallbackTargetId;
     var mode = creep.memory.lunaFallbackMode;
     if (!targetId || !mode) return false;
@@ -1175,7 +1227,13 @@ function isLunaRoomUnsafe(roomName) {
       clearLunaFallbackMemory(creep);
       return false;
     }
-    if (mode === 'upgrade') return tryUpgradeLunaFallback(creep);
+    if (mode === 'build' || mode === 'repair') {
+      if (!isLunaFallbackTargetAllowed(creep, src, target)) {
+        clearLunaFallbackMemory(creep);
+        return false;
+      }
+    }
+    if (mode === 'upgrade') return tryUpgradeLunaFallback(creep, src);
     if (mode === 'build' || mode === 'repair') {
       var ok = tryBuildLunaFallback(creep, target);
       if (!ok) {
@@ -1188,10 +1246,14 @@ function isLunaRoomUnsafe(roomName) {
     return false;
   }
 
-  function tryUpgradeLunaFallback(creep) {
+  function tryUpgradeLunaFallback(creep, src) {
     if (!LUNA_FALLBACK_UPGRADE_ENABLED) return false;
     var ctrl = creep.room.controller;
     if (!ctrl || !ctrl.my) return false;
+    if (src && !isLunaFallbackTargetAllowed(creep, src, ctrl)) {
+      clearLunaFallbackMemory(creep);
+      return false;
+    }
     if (creep.pos.roomName === getHomeName(creep) && !LUNA_FALLBACK_ALLOW_HOME_UPGRADE_IF_IN_HOME) return false;
     var rc = creep.upgradeController(ctrl);
     creep.memory.lunaFallbackMode = 'upgrade';
@@ -1206,19 +1268,19 @@ function isLunaRoomUnsafe(roomName) {
   function tryLunaProductiveFallback(creep, src) {
     if (!shouldRunLunaProductiveFallback(creep, src)) return false;
     if (creep.memory.lunaFallbackCheckedAt && (Game.time - creep.memory.lunaFallbackCheckedAt) < LUNA_FALLBACK_RECHECK_TTL) {
-      if (tryCachedLunaFallback(creep)) return true;
+      if (tryCachedLunaFallback(creep, src)) return true;
     }
     clearLunaFallbackMemory(creep);
     creep.memory.lunaFallbackCheckedAt = Game.time;
     var buildTarget = findLunaFallbackBuildTarget(creep, src);
     if (buildTarget) return tryBuildLunaFallback(creep, buildTarget);
-    return tryUpgradeLunaFallback(creep);
+    return tryUpgradeLunaFallback(creep, src);
   }
 
   function tryBuildOrUpgrade(creep) {
     var site = creep.pos.findClosestByRange(FIND_CONSTRUCTION_SITES);
     if (site) return tryBuildLunaFallback(creep, site);
-    return tryUpgradeLunaFallback(creep);
+    return tryUpgradeLunaFallback(creep, null);
   }
 
   // ============================
