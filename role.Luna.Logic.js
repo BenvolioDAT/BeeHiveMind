@@ -452,12 +452,47 @@ function softenRemoteDefensePlan(roomName) {
     var e = ensureMiningAssignment(memAssign[sid], null);
     return e.owners || [];
   }
+  function countOpenHarvestTiles(source){
+    if (!source || !source.pos || !source.room) return 1;
+    var terrain = source.room.getTerrain();
+    var count = 0;
+    for (var dx = -1; dx <= 1; dx++) {
+      for (var dy = -1; dy <= 1; dy++) {
+        if (dx === 0 && dy === 0) continue;
+        var x = source.pos.x + dx;
+        var y = source.pos.y + dy;
+        if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+        if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
+
+        var look = source.room.lookAt(x, y);
+        var blocked = false;
+        for (var i = 0; i < look.length; i++) {
+          var item = look[i];
+          if (item.type === LOOK_STRUCTURES) {
+            var s = item.structure;
+            if (s.structureType === STRUCTURE_RAMPART && !s.my) { blocked = true; break; }
+            if (s.structureType !== STRUCTURE_ROAD && s.structureType !== STRUCTURE_CONTAINER && s.structureType !== STRUCTURE_RAMPART) {
+              blocked = true; break;
+            }
+          }
+          if (item.type === LOOK_CONSTRUCTION_SITES) {
+            var cs = item.constructionSite;
+            if (cs.structureType !== STRUCTURE_ROAD && cs.structureType !== STRUCTURE_CONTAINER) {
+              blocked = true; break;
+            }
+          }
+        }
+        if (!blocked) count++;
+      }
+    }
+    return count;
+  }
   function getSourceMaxSlots(sid) {
     if (!ALLOW_MULTI_LUNA_PER_SOURCE) return 1;
     var maxSlots = Math.max(1, MAX_LUNA_PER_SOURCE);
     var source = Game.getObjectById(sid);
     if (!source || !source.pos || !source.room) return 1;
-    var openTiles = source.pos.getOpenPositionsIgnoreCreeps ? source.pos.getOpenPositionsIgnoreCreeps().length : 1;
+    var openTiles = countOpenHarvestTiles(source);
     if (openTiles < MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA) return 1;
     return Math.min(maxSlots, openTiles);
   }
@@ -576,19 +611,15 @@ function softenRemoteDefensePlan(roomName) {
 
     for (var sid3 in memAssign){
       var owner = maOwner(memAssign, sid3);
+      var cap = getSourceMaxSlots(sid3);
+      var owners = maOwners(memAssign, sid3);
       if (owner){
         var oc = Game.creeps[owner];
-        if (!oc || !oc.memory || oc.memory.sourceId !== sid3){
-          resolveOwnershipForSid(sid3);
-        }else{
-          if (memAssign[sid3].count > MAX_LUNA_PER_SOURCE){
-            resolveOwnershipForSid(sid3);
-          }
-        }
-      }else{
-        if (memAssign[sid3].count > 0){
+        if (!oc || !oc.memory || oc.memory.sourceId !== sid3 || memAssign[sid3].count > cap || owners.length !== memAssign[sid3].count){
           resolveOwnershipForSid(sid3);
         }
+      }else if (memAssign[sid3].count > 0){
+        resolveOwnershipForSid(sid3);
       }
     }
 
@@ -757,7 +788,7 @@ function softenRemoteDefensePlan(roomName) {
         // replacements can be spawned even after a wipe.
         if (!e.homeRoom) e.homeRoom = homeName;
         e.remoteRoom = rn;
-        if (maCount(memAssign, s.id) >= MAX_LUNA_PER_SOURCE) continue;
+        if (maCount(memAssign, s.id) >= getSourceMaxSlots(s.id)) continue;
         var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
         ensureSourceFlag(s);
         var srec = getSourceMemory(rn, s.id); srec.x = s.pos.x; srec.y = s.pos.y;
