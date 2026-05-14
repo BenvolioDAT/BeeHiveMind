@@ -1127,34 +1127,66 @@ function isLunaRoomUnsafe(roomName) {
 
   function findLunaFallbackBuildTarget(creep, src) {
     if (!LUNA_FALLBACK_BUILD_ENABLED || !src) return null;
-    var nearSrcSites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1);
-    for (var i = 0; i < nearSrcSites.length; i++) if (nearSrcSites[i].structureType === STRUCTURE_CONTAINER) return nearSrcSites[i];
-    var nearSrcContainers = src.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) {
-      return s.structureType === STRUCTURE_CONTAINER && s.hits < s.hitsMax;
-    }});
-    if (nearSrcContainers.length) return nearSrcContainers[0];
-    var nearRoadSites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 3, { filter: function (s) { return s.structureType === STRUCTURE_ROAD; } });
-    if (nearRoadSites.length) return nearRoadSites[0];
-    var nearRoads = src.pos.findInRange(FIND_STRUCTURES, 3, { filter: function (s) { return s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax; } });
-    if (nearRoads.length) return nearRoads[0];
+    function getLunaBuildPriority(target) {
+      if (!target || !target.structureType) return 40;
+      var prio = {
+        spawn: 100,
+        extension: 90,
+        tower: 80,
+        container: 70,
+        storage: 60,
+        terminal: 55,
+        link: 50,
+        rampart: 30,
+        wall: 20,
+        road: 10
+      };
+      return prio[target.structureType] || 40;
+    }
+    function isSourceContainerTarget(target) {
+      return target && target.structureType === STRUCTURE_CONTAINER && target.pos && src.pos && target.pos.inRangeTo(src.pos, 1);
+    }
 
     var localSites = creep.room.find(FIND_CONSTRUCTION_SITES);
     if (creep.pos.roomName === getHomeName(creep) && !LUNA_FALLBACK_ALLOW_HOME_BUILD_IF_IN_HOME) localSites = [];
+    var candidates = [];
     if (localSites && localSites.length) {
-      var prio = { 'spawn': 5, 'extension': 4, 'tower': 3, 'container': 2, 'road': 1 };
-      localSites.sort(function(a, b) {
-        var sa = prio[a.structureType] || 0; var sb = prio[b.structureType] || 0;
-        if (sb !== sa) return sb - sa;
-        return creep.pos.getRangeTo(a.pos) - creep.pos.getRangeTo(b.pos);
+      for (var i = 0; i < localSites.length; i++) {
+        candidates.push({ target: localSites[i], mode: 'build', priority: getLunaBuildPriority(localSites[i]) });
+      }
+    }
+
+    var nearSrcContainers = src.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) {
+      return s.structureType === STRUCTURE_CONTAINER && s.hits < s.hitsMax;
+    }});
+    for (var j = 0; j < nearSrcContainers.length; j++) {
+      candidates.push({ target: nearSrcContainers[j], mode: 'repair', priority: 75 });
+    }
+
+    var nearRoads = src.pos.findInRange(FIND_STRUCTURES, 3, { filter: function (s) {
+      return s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax;
+    }});
+    for (var k = 0; k < nearRoads.length; k++) {
+      candidates.push({ target: nearRoads[k], mode: 'repair', priority: 10 });
+    }
+
+    if (candidates.length) {
+      candidates.sort(function(a, b) {
+        if (b.priority !== a.priority) return b.priority - a.priority;
+        var aSrc = isSourceContainerTarget(a.target) ? 1 : 0;
+        var bSrc = isSourceContainerTarget(b.target) ? 1 : 0;
+        if (bSrc !== aSrc) return bSrc - aSrc;
+        return creep.pos.getRangeTo(a.target.pos) - creep.pos.getRangeTo(b.target.pos);
       });
-      return localSites[0];
+      return candidates[0];
     }
     return null;
   }
 
-  function tryBuildLunaFallback(creep, target) {
+  function tryBuildLunaFallback(creep, targetInfo) {
+    var target = targetInfo && targetInfo.target ? targetInfo.target : targetInfo;
     if (!target) return false;
-    var mode = (target.progressTotal != null) ? 'build' : 'repair';
+    var mode = (targetInfo && targetInfo.mode) ? targetInfo.mode : ((target.progressTotal != null) ? 'build' : 'repair');
     if (mode === 'repair' && (target.hits == null || target.hits >= target.hitsMax)) return false;
     creep.memory.lunaFallbackMode = mode;
     creep.memory.lunaFallbackTargetId = target.id;
