@@ -227,7 +227,7 @@ BeeVisuals.drawEnergyBar = function () {
 // Teach-by-example constants live at module scope so they are easy to tweak.
 var WORKER_MAX_TASKS = {
   BaseHarvest: 2, Builder: 1, Upgrader: 1, Repair: 0,
-  Courier: 1, Luna: 8, Scout: 1, Queen: 2,
+  Courier: 1, Luna: 0, Scout: 1, Queen: 2,
   CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
   Dismantler: 0, Claimer: 2
 };
@@ -350,7 +350,7 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
   for (var k in WORKER_MAX_TASKS) {
     if (!WORKER_MAX_TASKS.hasOwnProperty(k)) continue;
     var y = yTop + row * geom.cellH;
-    var val = (stats.tasks[k] || 0) + '/' + (WORKER_MAX_TASKS[k] || 0);
+    var val = (k === 'Luna') ? ((stats.tasks[k] || 0) + '/dynamic') : ((stats.tasks[k] || 0) + '/' + (WORKER_MAX_TASKS[k] || 0));
 
     v.rect(xLeft, y, geom.nameW, geom.cellH, {
       fill: CFG.colors.panelFill,
