@@ -1201,6 +1201,67 @@ function isLunaRoomUnsafe(roomName) {
     requests[id] = { id: id, homeRoom: homeName, remoteRoom: container.pos.roomName, sourceId: source.id, containerId: container.id, amount: amount, capacity: container.store.getCapacity(RESOURCE_ENERGY) || 2000, fillPct: (container.store.getCapacity(RESOURCE_ENERGY) > 0 ? amount / container.store.getCapacity(RESOURCE_ENERGY) : 0), x: container.pos.x, y: container.pos.y, roomName: container.pos.roomName, urgent: amount >= urgentThreshold || (amount / Math.max(1, container.store.getCapacity(RESOURCE_ENERGY))) >= 0.8, updated: Game.time, assignedTo: (requests[id] && requests[id].assignedTo) || null, assignedUntil: (requests[id] && requests[id].assignedUntil) || 0 };
   }
 
+
+
+  function findSourceContainer(source) {
+    if (!source || !source.pos) return null;
+    var containers = source.pos.findInRange(FIND_STRUCTURES, 1, {
+      filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
+    });
+    return containers.length ? containers[0] : null;
+  }
+
+  function findSourceContainerSite(source) {
+    if (!source || !source.pos) return null;
+    var sites = source.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
+      filter: function (cs) { return cs.structureType === STRUCTURE_CONTAINER; }
+    });
+    return sites.length ? sites[0] : null;
+  }
+
+  function chooseSourceContainerBuildPosition(source) {
+    if (!source || !source.pos || !source.room) return null;
+    var terrain = source.room.getTerrain();
+    var best = null;
+    for (var dx = -1; dx <= 1; dx++) {
+      for (var dy = -1; dy <= 1; dy++) {
+        if (dx === 0 && dy === 0) continue;
+        var x = source.pos.x + dx;
+        var y = source.pos.y + dy;
+        if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+        if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
+        var blocked = false;
+        var look = source.room.lookAt(x, y);
+        for (var i = 0; i < look.length; i++) {
+          var item = look[i];
+          if (item.type === 'structure' && item.structure && item.structure.structureType !== STRUCTURE_CONTAINER && item.structure.structureType !== STRUCTURE_ROAD && item.structure.structureType !== STRUCTURE_RAMPART) { blocked = true; break; }
+          if (item.type === 'constructionSite' && item.constructionSite && item.constructionSite.structureType !== STRUCTURE_CONTAINER && item.constructionSite.structureType !== STRUCTURE_ROAD) { blocked = true; break; }
+        }
+        if (blocked) continue;
+        var range = source.pos.getRangeTo(x, y);
+        if (!best || range < best.range) best = { x: x, y: y, roomName: source.pos.roomName, range: range };
+      }
+    }
+    return best;
+  }
+
+  function ensureSourceContainerOrSite(source) {
+    var container = findSourceContainer(source);
+    if (container) return { container: container, site: null };
+
+    var site = findSourceContainerSite(source);
+    if (site) return { container: null, site: site };
+
+    var pos = chooseSourceContainerBuildPosition(source);
+    if (pos) {
+      var rc = source.room.createConstructionSite(pos.x, pos.y, STRUCTURE_CONTAINER);
+      if (rc === OK || rc === ERR_INVALID_TARGET) {
+        site = findSourceContainerSite(source);
+      }
+    }
+    return { container: null, site: site || null };
+  }
+
   // ============================
   // Main role
   // ============================
@@ -1456,15 +1517,9 @@ function isLunaRoomUnsafe(roomName) {
         debugSay(creep, '🚧');
       }
 
-      var containers = src.pos.findInRange(FIND_STRUCTURES, 1, { filter: function(s){ return s.structureType === STRUCTURE_CONTAINER; } });
-      var container = containers.length ? containers[0] : null;
-      var sites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function(cs){ return cs.structureType === STRUCTURE_CONTAINER; } });
-      var site = sites.length ? sites[0] : null;
-      if (!container && !site) {
-        src.pos.createConstructionSite(STRUCTURE_CONTAINER);
-        sites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function(cs){ return cs.structureType === STRUCTURE_CONTAINER; } });
-        site = sites.length ? sites[0] : null;
-      }
+      var infra = ensureSourceContainerOrSite(src);
+      var container = infra.container;
+      var site = infra.site;
       if (container && !creep.pos.isEqualTo(container.pos)) { creep.travelTo(container, { range: 0, reusePath: 10 }); return; }
       if (!container && creep.pos.getRangeTo(src) > 1) { creep.travelTo(src, { range: 1, reusePath: 10 }); return; }
 

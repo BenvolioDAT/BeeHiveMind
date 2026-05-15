@@ -28,6 +28,9 @@ function reserveRequest(creep, req) {
   creep.memory.requestId = req.id;
   creep.memory.containerId = req.containerId;
   creep.memory.sourceId = req.sourceId;
+  creep.memory.requestRoom = req.roomName || req.remoteRoom || null;
+  creep.memory.requestX = req.x;
+  creep.memory.requestY = req.y;
   creep.memory.targetRoom = req.remoteRoom || req.roomName;
 }
 
@@ -58,6 +61,15 @@ function clearAssignment(creep) {
   delete creep.memory.containerId;
   delete creep.memory.sourceId;
   delete creep.memory.targetRoom;
+  delete creep.memory.requestRoom;
+  delete creep.memory.requestX;
+  delete creep.memory.requestY;
+}
+
+function getAssignedRequest(creep) {
+  if (!creep.memory.requestId) return null;
+  var requests = ensureHaulRoot();
+  return requests[creep.memory.requestId] || null;
 }
 
 function deliverTarget(creep) {
@@ -79,14 +91,26 @@ function deliverTarget(creep) {
 function run(creep) {
   if (creep.spawning) return;
   ensureIdentity(creep);
+
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0 && creep.memory.state === 'DELIVER') creep.memory.state = 'IDLE';
   if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) creep.memory.state = 'RETURN';
 
-  if (!creep.memory.requestId && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) pickRequest(creep);
+  var request = getAssignedRequest(creep);
+  if (creep.memory.requestId && !request) {
+    clearAssignment(creep);
+    request = null;
+  }
+
+  if (!request && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
+    request = pickRequest(creep);
+  }
 
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && (creep.memory.state === 'RETURN' || creep.memory.state === 'DELIVER' || creep.room.name === creep.memory.home)) {
     creep.memory.state = 'DELIVER';
-    if (creep.room.name !== creep.memory.home) return creep.travelTo(new RoomPosition(25, 25, creep.memory.home), { range: 20, reusePath: CFG.PATH_REUSE });
+    if (creep.room.name !== creep.memory.home) {
+      creep.travelTo(new RoomPosition(25, 25, creep.memory.home), { range: 20, reusePath: CFG.PATH_REUSE });
+      return;
+    }
     var target = deliverTarget(creep);
     if (!target) return;
     var tr = creep.transfer(target, RESOURCE_ENERGY);
@@ -95,16 +119,35 @@ function run(creep) {
     return;
   }
 
-  var container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
-  if (!container) {
+  if (!request) {
+    creep.memory.state = 'IDLE';
+    var idlePos = (creep.room.storage && creep.room.storage.pos) || (creep.room.find(FIND_MY_SPAWNS)[0] && creep.room.find(FIND_MY_SPAWNS)[0].pos);
+    if (idlePos) creep.travelTo(idlePos, { range: CFG.IDLE_RANGE, reusePath: CFG.PATH_REUSE });
+    return;
+  }
+
+  if (!isActiveRequest(request, creep.memory.home)) {
     clearAssignment(creep);
-    if (!pickRequest(creep)) {
-      var idlePos = (creep.room.storage && creep.room.storage.pos) || (creep.room.find(FIND_MY_SPAWNS)[0] && creep.room.find(FIND_MY_SPAWNS)[0].pos);
-      if (idlePos) creep.travelTo(idlePos, { range: CFG.IDLE_RANGE, reusePath: CFG.PATH_REUSE });
+    return;
+  }
+
+  var container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
+
+  if (!container) {
+    var reqRoom = creep.memory.requestRoom || request.roomName || request.remoteRoom;
+    var reqX = (typeof creep.memory.requestX === 'number') ? creep.memory.requestX : request.x;
+    var reqY = (typeof creep.memory.requestY === 'number') ? creep.memory.requestY : request.y;
+    if (reqRoom && typeof reqX === 'number' && typeof reqY === 'number' && creep.room.name !== reqRoom) {
+      creep.memory.state = 'TO_REMOTE';
+      creep.travelTo(new RoomPosition(reqX, reqY, reqRoom), { range: 1, reusePath: CFG.PATH_REUSE });
       return;
     }
-    container = Game.getObjectById(creep.memory.containerId);
-    if (!container) return;
+    if (reqRoom && typeof reqX === 'number' && typeof reqY === 'number' && creep.room.name === reqRoom) {
+      clearAssignment(creep);
+      return;
+    }
+    clearAssignment(creep);
+    return;
   }
 
   if (creep.pos.roomName !== container.pos.roomName) {
@@ -115,12 +158,24 @@ function run(creep) {
 
   creep.memory.state = 'WITHDRAW';
   var wr = creep.withdraw(container, RESOURCE_ENERGY);
-  if (wr === ERR_NOT_IN_RANGE) creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE });
-  if (wr === ERR_NOT_ENOUGH_RESOURCES && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
-    clearAssignment(creep);
+  if (wr === ERR_NOT_IN_RANGE) {
+    creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE });
+    return;
   }
-  if (wr === OK && (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0 || (container.store[RESOURCE_ENERGY] || 0) < CFG.MIN_HAUL_REQUEST_ENERGY)) {
-    creep.memory.state = 'RETURN';
+
+  if (wr === ERR_NOT_ENOUGH_RESOURCES) {
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      creep.memory.state = 'RETURN';
+    } else {
+      clearAssignment(creep);
+    }
+    return;
+  }
+
+  if (wr === OK) {
+    if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0 || (container.store[RESOURCE_ENERGY] || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) {
+      creep.memory.state = 'RETURN';
+    }
   }
 }
 
