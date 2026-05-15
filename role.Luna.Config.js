@@ -36,9 +36,9 @@ module.exports = Object.freeze({
   MAX_PF_OPS: 3000,
   PLAIN_COST: 2,
   SWAMP_COST: 10,
-  MAX_LUNA_PER_SOURCE: 1,
+  MAX_LUNA_PER_SOURCE: 1, // Luna is one seated remote container miner per source.
   LUNA_REMOTE_INTEL_TTL: 3000,
-  ALLOW_MULTI_LUNA_PER_SOURCE: false,
+  ALLOW_MULTI_LUNA_PER_SOURCE: false, // Keep strict one-Luna-per-source assignment.
   MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA: 2,
   PREFER_EMPTY_SOURCES_BEFORE_STACKING: true,
   LUNA_SECONDARY_SOURCE_SCORE_PENALTY: 150,

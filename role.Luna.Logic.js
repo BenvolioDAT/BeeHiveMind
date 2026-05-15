@@ -1520,15 +1520,45 @@ function isLunaRoomUnsafe(roomName) {
       var infra = ensureSourceContainerOrSite(src);
       var container = infra.container;
       var site = infra.site;
-      if (container && !creep.pos.isEqualTo(container.pos)) { creep.travelTo(container, { range: 0, reusePath: 10 }); return; }
-      if (!container && creep.pos.getRangeTo(src) > 1) { creep.travelTo(src, { range: 1, reusePath: 10 }); return; }
+
+      creep.memory.assignedSource = sid;
+      debugRing(creep.room, src.pos, CFG.DRAW.SRC_COLOR, 'SRC');
+
+      if (container) {
+        creep.memory.assignedContainer = container.id;
+        creep.memory.seatX = container.pos.x;
+        creep.memory.seatY = container.pos.y;
+        creep.memory.seatRoom = container.pos.roomName;
+        debugRing(creep.room, container.pos, CFG.DRAW.SEAT, 'SEAT');
+      } else if (site) {
+        delete creep.memory.assignedContainer;
+        creep.memory.seatX = site.pos.x;
+        creep.memory.seatY = site.pos.y;
+        creep.memory.seatRoom = site.pos.roomName;
+        debugRing(creep.room, site.pos, CFG.DRAW.BUILD_COLOR, 'SITE');
+      } else {
+        delete creep.memory.assignedContainer;
+        if (creep.memory.planX != null && creep.memory.planY != null) {
+          creep.memory.seatX = creep.memory.planX;
+          creep.memory.seatY = creep.memory.planY;
+          creep.memory.seatRoom = creep.memory.targetRoom;
+          debugRing(creep.room, new RoomPosition(creep.memory.planX, creep.memory.planY, creep.memory.targetRoom), CFG.DRAW.SEAT, 'PLAN');
+        }
+      }
+
+      if (container && !creep.pos.isEqualTo(container.pos)) { debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT'); creep.travelTo(container, { range: 0, reusePath: 10 }); return; }
+      if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); creep.travelTo(site, { range: 0, reusePath: 10 }); return; }
+      if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); creep.travelTo(src, { range: 1, reusePath: 10 }); return; }
 
       debugSay(creep, '⛏️SRC');
       var rc = creep.harvest(src);
       if (rc === OK) touchSourceActive(creep.room.name, sid);
+      debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, 'SRC');
       if (container && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+        debugDrawLine(creep, container, CFG.DRAW.OFFLOAD, 'CONT');
         creep.transfer(container, RESOURCE_ENERGY);
       } else if (!container && site && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+        debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE');
         creep.build(site);
       } else if (!container && !site && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
         creep.drop(RESOURCE_ENERGY);
