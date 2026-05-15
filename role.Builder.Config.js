@@ -6,7 +6,6 @@ module.exports = Object.freeze({
   DEBUG_DRAW: true,
   HOME_RICH_ENERGY: 5000,
   HOME_LOW_ENERGY: 1000,
-  ALLOW_HARVEST_FALLBACK: true,
   PICKUP_MIN: 50,
   SRC_CONTAINER_MIN: 100,
 
