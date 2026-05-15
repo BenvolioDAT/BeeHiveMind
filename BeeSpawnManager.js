@@ -16,6 +16,7 @@ var CoreConfig  = require('core.config');
 
 var spawnLogic  = require('spawn.logic');
 var LunaConfig  = require('role.Luna.Config');
+var TruckerConfig = require('role.Trucker.Config');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 
@@ -723,6 +724,29 @@ function computeLocalDefenseQuotas(room) {
   };
 }
 
+
+function computeTruckerQuotaForHome(roomName) {
+  var requests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
+  var active = 0;
+  var urgent = 0;
+  for (var id in requests) {
+    if (!Object.prototype.hasOwnProperty.call(requests, id)) continue;
+    var req = requests[id];
+    if (!req || req.homeRoom !== roomName) continue;
+    if ((req.amount || 0) < TruckerConfig.MIN_HAUL_REQUEST_ENERGY) continue;
+    if ((Game.time - (req.updated || 0)) > TruckerConfig.REQUEST_STALE_TICKS) continue;
+    if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
+    active++;
+    if (req.urgent) urgent++;
+  }
+  var desired = 0;
+  if (active > 0) desired = 1;
+  if (active > 1 || urgent > 1) desired = 2;
+  if (active > 2 || urgent > 2) desired = 3;
+  desired = Math.min(desired, TruckerConfig.MAX_TRUCKERS_PER_HOME || 3);
+  return { activeRequests: active, urgentRequests: urgent, desiredTruckers: desired };
+}
+
 function computeRoomQuotas(C, room) {
   var localDefense = computeLocalDefenseQuotas(room);
 
@@ -737,7 +761,7 @@ function computeRoomQuotas(C, room) {
     Scout:        1,
     Luna:         determineLunaQuota(C, room),
     Repair:       0,
-    Trucker:      0,
+    Trucker:      computeTruckerQuotaForHome(room.name).desiredTruckers,
     Claimer:      0,
     CombatMelee:  localDefense.CombatMelee,
     CombatArcher: localDefense.CombatArcher,
@@ -755,9 +779,19 @@ function fillQueueForRoom(C, room) {
 
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  var truckerQuotaMeta = computeTruckerQuotaForHome(roomName);
   Memory.rooms[roomName].lastRoleQuotas = {
     tick: Game.time,
     quotas: quotas
+  };
+  Memory.rooms[roomName].lastTruckerQuota = {
+    tick: Game.time,
+    activeRequests: truckerQuotaMeta.activeRequests,
+    urgentRequests: truckerQuotaMeta.urgentRequests,
+    desiredTruckers: truckerQuotaMeta.desiredTruckers,
+    liveTruckers: getRoomLocalLiveCount(C, roomName, "Trucker"),
+    queuedTruckers: queuedCount(roomName, "Trucker"),
+    reasons: truckerQuotaMeta.desiredTruckers > 0 ? "active remote haul requests" : "no active remote haul requests"
   };
 
   pruneOverfilledQueue(roomName, quotas, C);

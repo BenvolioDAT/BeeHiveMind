@@ -20,7 +20,8 @@ var ROLE_CONFIGS = {
   CombatArcher: require('role.CombatArcher.Body.Config'),
   CombatMedic: require('role.CombatMedic.Body.Config'),
   Dismantler: require('role.Dismantler.Body.Config'),
-  Claimer: require('role.Claimer.Body.Config')
+  Claimer: require('role.Claimer.Body.Config'),
+  Trucker: require('role.Trucker.Body.Config')
 };
 
 module.exports = { ROLE_CONFIGS: ROLE_CONFIGS };

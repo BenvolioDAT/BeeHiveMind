@@ -1173,15 +1173,32 @@ function isLunaRoomUnsafe(roomName) {
   // Memory keys:
   // - sourceId: remote source assigned this tick
   // - targetRoom: room name for the assignment
-  // - returning: boolean toggled when full to head home
-
   function determineLunaState(creep) {
     var state = 'HARVEST';
-    if (creep.memory.returning) state = 'RETURN';
-    else if (!creep.memory.targetRoom || !creep.memory.sourceId) state = 'UNASSIGNED';
+    if (!creep.memory.targetRoom || !creep.memory.sourceId) state = 'UNASSIGNED';
     else if (creep.pos.roomName !== creep.memory.targetRoom) state = 'TRAVEL';
     creep.memory.state = state;
     return state;
+  }
+
+
+  function ensureRemoteHaulRequestsMemory() {
+    if (!Memory.__BHM) Memory.__BHM = {};
+    if (!Memory.__BHM.remoteHaulRequests) Memory.__BHM.remoteHaulRequests = {};
+    return Memory.__BHM.remoteHaulRequests;
+  }
+
+  function upsertRemoteHaulRequest(creep, source, container) {
+    if (!creep || !source || !container) return;
+    var homeName = getHomeName(creep);
+    if (!homeName || container.pos.roomName === homeName) return;
+    var minAmount = CFG.REMOTE_CONTAINER_REQUEST_MIN || 300;
+    var urgentThreshold = CFG.REMOTE_CONTAINER_REQUEST_URGENT || 1600;
+    var amount = container.store ? (container.store[RESOURCE_ENERGY] || 0) : 0;
+    var requests = ensureRemoteHaulRequestsMemory();
+    var id = container.id || source.id;
+    if (amount < minAmount || isLunaRoomUnsafe(container.pos.roomName)) { delete requests[id]; return; }
+    requests[id] = { id: id, homeRoom: homeName, remoteRoom: container.pos.roomName, sourceId: source.id, containerId: container.id, amount: amount, capacity: container.store.getCapacity(RESOURCE_ENERGY) || 2000, fillPct: (container.store.getCapacity(RESOURCE_ENERGY) > 0 ? amount / container.store.getCapacity(RESOURCE_ENERGY) : 0), x: container.pos.x, y: container.pos.y, roomName: container.pos.roomName, urgent: amount >= urgentThreshold || (amount / Math.max(1, container.store.getCapacity(RESOURCE_ENERGY))) >= 0.8, updated: Game.time, assignedTo: (requests[id] && requests[id].assignedTo) || null, assignedUntil: (requests[id] && requests[id].assignedUntil) || 0 };
   }
 
   // ============================
@@ -1192,12 +1209,7 @@ function isLunaRoomUnsafe(roomName) {
     run: function(creep){
       prepareLuna(creep);
 
-      roleLuna.updateReturnState(creep);
       var state = determineLunaState(creep);
-      if (state === 'RETURN') {
-        roleLuna.returnToStorage(creep);
-        return;
-      }
 
       if (shouldReleaseForEndOfLife(creep)) return;
       if (respectCooldown(creep)) return;
@@ -1391,86 +1403,6 @@ function isLunaRoomUnsafe(roomName) {
       return pick;
     },
 
-    updateReturnState: function(creep){
-      if (!creep.memory.returning && creep.store.getFreeCapacity(RESOURCE_ENERGY)===0) { creep.memory.returning=true; debugSay(creep, '⤴️RET'); }
-      if (creep.memory.returning && creep.store.getUsedCapacity(RESOURCE_ENERGY)===0) { creep.memory.returning=false; debugSay(creep, '⤵️WK'); }
-    },
-
-    // UPDATED: includes build/upgrade fallback when all sinks are full
-    returnToStorage: function(creep){
-      var homeName = getHomeName(creep);
-
-      // Go home first
-      if (creep.room.name !== homeName) {
-        var destHome = new RoomPosition(25, 25, homeName);
-        debugSay(creep, '🏠');
-        debugDrawLine(creep, destHome, CFG.DRAW.TRAVEL_COLOR, "HOME");
-        creep.travelTo(destHome, { range: 20, reusePath: 20 });
-        return;
-      }
-
-      // Priority 1: Extensions/Spawns/Towers
-      var pri = creep.room.find(FIND_STRUCTURES, {
-        filter: function (s) {
-          if (!s.store) return false;
-          var t = s.structureType;
-          if (t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN && t !== STRUCTURE_TOWER) return false;
-          var freeEnergy = s.store.getFreeCapacity(RESOURCE_ENERGY);
-          return typeof freeEnergy === 'number' && freeEnergy > 0;
-        }
-      });
-      if (pri.length) {
-        var a = creep.pos.findClosestByPath(pri);
-        if (a) {
-          var lbl = (a.structureType===STRUCTURE_EXTENSION?'EXT': a.structureType===STRUCTURE_SPAWN?'SPN':'TWR');
-          debugSay(creep, '→ '+lbl);
-          debugDrawLine(creep, a, CFG.DRAW.DELIVER_COLOR, lbl);
-          var rc = creep.transfer(a, RESOURCE_ENERGY);
-          if (rc === ERR_NOT_IN_RANGE) {
-            creep.travelTo(a, { reusePath: CFG.PATH_REUSE });
-          }
-          return;
-        }
-      }
-
-      // Priority 2: Storage
-      var stor = creep.room.storage;
-      if (stor && stor.store && stor.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
-        debugSay(creep, '→ STO');
-        debugDrawLine(creep, stor, CFG.DRAW.DELIVER_COLOR, "STO");
-        var rc2 = creep.transfer(stor, RESOURCE_ENERGY);
-        if (rc2 === ERR_NOT_IN_RANGE) {
-          creep.travelTo(stor, { reusePath: CFG.PATH_REUSE });
-        }
-        return;
-      }
-
-      // Priority 3: Any container with room
-      var conts = creep.room.find(FIND_STRUCTURES, {
-        filter: function (s) {
-          return s.structureType === STRUCTURE_CONTAINER &&
-                 s.store && (s.store.getFreeCapacity(RESOURCE_ENERGY) || 0) > 0;
-        }
-      });
-      if (conts.length) {
-        var b = creep.pos.findClosestByPath(conts);
-        if (b) {
-          debugSay(creep, '→ CON');
-          debugDrawLine(creep, b, CFG.DRAW.DELIVER_COLOR, "CON");
-          var rc3 = creep.transfer(b, RESOURCE_ENERGY);
-          if (rc3 === ERR_NOT_IN_RANGE) {
-            creep.travelTo(b, { reusePath: CFG.PATH_REUSE });
-          }
-          return;
-        }
-      }
-
-      // Idle near anchor
-      var anchor = getAnchorPos(homeName);
-      debugSay(creep, 'IDLE');
-      debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE");
-      creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
-    },
 
     harvestSource: function(creep){
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
@@ -1524,15 +1456,29 @@ function isLunaRoomUnsafe(roomName) {
         debugSay(creep, '🚧');
       }
 
+      var containers = src.pos.findInRange(FIND_STRUCTURES, 1, { filter: function(s){ return s.structureType === STRUCTURE_CONTAINER; } });
+      var container = containers.length ? containers[0] : null;
+      var sites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function(cs){ return cs.structureType === STRUCTURE_CONTAINER; } });
+      var site = sites.length ? sites[0] : null;
+      if (!container && !site) {
+        src.pos.createConstructionSite(STRUCTURE_CONTAINER);
+        sites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function(cs){ return cs.structureType === STRUCTURE_CONTAINER; } });
+        site = sites.length ? sites[0] : null;
+      }
+      if (container && !creep.pos.isEqualTo(container.pos)) { creep.travelTo(container, { range: 0, reusePath: 10 }); return; }
+      if (!container && creep.pos.getRangeTo(src) > 1) { creep.travelTo(src, { range: 1, reusePath: 10 }); return; }
+
       debugSay(creep, '⛏️SRC');
-      debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, "SRC");
       var rc = creep.harvest(src);
-      if (rc===ERR_NOT_IN_RANGE) {
-        creep.travelTo(src, { range: 1, reusePath: 15, });
+      if (rc === OK) touchSourceActive(creep.room.name, sid);
+      if (container && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+        creep.transfer(container, RESOURCE_ENERGY);
+      } else if (!container && site && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+        creep.build(site);
+      } else if (!container && !site && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+        creep.drop(RESOURCE_ENERGY);
       }
-      else if (rc===OK){
-        touchSourceActive(creep.room.name, sid);
-      }
+      if (container) upsertRemoteHaulRequest(creep, src, container);
     }
   };
 
