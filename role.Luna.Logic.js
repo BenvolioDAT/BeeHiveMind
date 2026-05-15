@@ -5,6 +5,7 @@ const BeeToolbox = require('BeeToolbox');
 const BeeCombatSquads = require('BeeCombatSquads');
 const MovementManager = require('Movement.Manager');
 var CFG = require('role.Luna.Config');
+var RemoteHarvestManager = require('RemoteHarvest.Manager');
 
 var REMOTE_DEFENSE_MAX_DISTANCE = CFG.REMOTE_DEFENSE_MAX_DISTANCE;
 var THREAT_DECAY_TICKS_COPY = CFG.THREAT_DECAY_TICKS_COPY;
@@ -1024,6 +1025,7 @@ function isLunaRoomUnsafe(roomName) {
   }
 
   function releaseAssignment(creep){
+    RemoteHarvestManager.releaseSource(creep);
     var memAssign = ensureAssignmentsMem();
     var sid = creep.memory.sourceId;
 
@@ -1055,6 +1057,7 @@ function isLunaRoomUnsafe(roomName) {
       owners = maOwners(memAssign, sid);
     }
     if (owners.length && owners.indexOf(creep.name) === -1){
+      creep.memory._forceYield = true;
       releaseAssignment(creep);
       return false;
     }
@@ -1136,6 +1139,7 @@ function isLunaRoomUnsafe(roomName) {
       creep.memory.targetRoom = pick.roomName;
       creep.memory.assigned   = true;
       creep.memory._assignTick = Game.time;
+      RemoteHarvestManager.claimSource(creep, pick.id, pick.roomName);
       return true;
     }
 

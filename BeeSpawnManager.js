@@ -17,6 +17,7 @@ var CoreConfig  = require('core.config');
 var spawnLogic  = require('spawn.logic');
 var LunaConfig  = require('role.Luna.Config');
 var TruckerConfig = require('role.Trucker.Config');
+var RemoteHarvestManager = require('RemoteHarvest.Manager');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 
@@ -437,56 +438,8 @@ function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
 }
 function determineLunaQuota(C, room) {
   if (!room) return 0;
-  var remotes = C.remotesByHome[room.name] || [];
-  if (!remotes.length) return 0;
-
-  var approvedRemotes = [];
-  var rejectedRemotes = [];
-  var approvedSources = [];
-  for (var i = 0; i < remotes.length; i++) {
-    var remoteName = remotes[i];
-    var meta = { room: remoteName, routeDistance: Infinity, reason: 'unknown' };
-    if (!isApprovedLunaRemoteForHome(room, remoteName, meta)) {
-      rejectedRemotes.push(meta);
-      continue;
-    }
-
-    var sourceCount = countApprovedLunaSourcesForRemote(remoteName);
-    if (sourceCount <= 0) {
-      meta.reason = 'zero-sources';
-      rejectedRemotes.push(meta);
-      continue;
-    }
-
-    approvedRemotes.push({ room: remoteName, routeDistance: meta.routeDistance, sources: sourceCount });
-    collectApprovedLunaSourcesFromRemote(remoteName, approvedSources);
-  }
-
-  var slotPlan = buildLunaSourceSlotPlan(room, approvedSources);
-  var desired = slotPlan.totalSlots;
-  if (tickEvery(DBG_EVERY)) {
-    dlog('🌙 [Signal] lunaQuota', fmt(room),
-      'candidates=', JSON.stringify(remotes),
-      'accepted=', JSON.stringify(approvedRemotes),
-      'rejected=', JSON.stringify(rejectedRemotes),
-      'sources=', approvedSources.length,
-      'totalSlots=', slotPlan.totalSlots,
-      'liveUsedSlots=', slotPlan.liveUsedSlots,
-      'queuedReservedSlots=', slotPlan.queuedReservedSlots,
-      'desired=', desired);
-  }
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-  Memory.rooms[room.name].lastLunaQuota = {
-    tick: Game.time,
-    acceptedRemoteRooms: approvedRemotes,
-    rejectedRemoteRooms: rejectedRemotes,
-    totalLunaSlots: slotPlan.totalSlots,
-    usedLiveSlots: slotPlan.liveUsedSlots,
-    queuedReservedSlots: slotPlan.queuedReservedSlots,
-    desiredLunaQuota: desired
-  };
-  return desired;
+  var home = RemoteHarvestManager.ensureHomeMemory(room.name);
+  return home.desiredLuna || 0;
 }
 
 function collectApprovedLunaSourcesFromRemote(remoteName, out) {
@@ -816,24 +769,13 @@ function fillQueueForRoom(C, room) {
         enqueue(roomName, role);
         continue;
       }
-      if (!lunaSlotPlan) {
-        var remotes = C.remotesByHome[roomName] || [];
-        var sources = [];
-        for (var ri = 0; ri < remotes.length; ri++) {
-          var rmeta = { room: remotes[ri], routeDistance: Infinity, reason: 'unknown' };
-          if (!isApprovedLunaRemoteForHome(room, remotes[ri], rmeta)) continue;
-          collectApprovedLunaSourcesFromRemote(remotes[ri], sources);
-        }
-        lunaSlotPlan = buildLunaSourceSlotPlan(room, sources);
-      }
-      var pick = pickLunaSourceForQueue(lunaSlotPlan);
+      var pick = RemoteHarvestManager.reserveSourceForQueue(roomName);
       if (!pick) {
         dlog('🌙 [QueueGate]', roomName, 'skip Luna enqueue: no free source slots');
         break;
       }
       if (enqueue(roomName, role, { sourceId: pick.sourceId, targetRoom: pick.targetRoom })) {
-        pick.queued++;
-        lunaSlotPlan.queuedReservedSlots++;
+        // Reservation already recorded by RemoteHarvestManager.reserveSourceForQueue().
       }
     }
   }
@@ -934,6 +876,8 @@ function prepareRoomQueues(C) {
   for (var i = 0; i < rooms.length; i++) {
     var room = rooms[i];
     if (!room.find(FIND_MY_SPAWNS).length) continue;
+    RemoteHarvestManager.buildSourcePlanForHome(room.name, C.remotesByHome[room.name] || []);
+    RemoteHarvestManager.auditAssignmentsForHome(room.name);
     ensureRoomQueue(room.name);
     fillQueueForRoom(C, room);
   }
