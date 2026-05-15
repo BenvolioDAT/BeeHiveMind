@@ -774,8 +774,8 @@ function fillQueueForRoom(C, room) {
         dlog('🌙 [QueueGate]', roomName, 'skip Luna enqueue: no free source slots');
         break;
       }
-      if (enqueue(roomName, role, { sourceId: pick.sourceId, targetRoom: pick.targetRoom })) {
-        // Reservation already recorded by RemoteHarvestManager.reserveSourceForQueue().
+      if (!enqueue(roomName, role, { sourceId: pick.sourceId, targetRoom: pick.targetRoom })) {
+        RemoteHarvestManager.unreserveSourceForQueue(roomName, pick.sourceId);
       }
     }
   }
