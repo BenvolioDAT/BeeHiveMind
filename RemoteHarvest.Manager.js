@@ -1,0 +1,328 @@
+'use strict';
+
+var LunaConfig = require('role.Luna.Config');
+
+var RESERVE_TTL = 100;
+
+function ensureMemory() {
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Memory.__BHM.remoteHarvest) {
+    Memory.__BHM.remoteHarvest = { tick: Game.time, homes: {} };
+  }
+  if (!Memory.__BHM.remoteHarvest.homes) Memory.__BHM.remoteHarvest.homes = {};
+  Memory.__BHM.remoteHarvest.tick = Game.time;
+  return Memory.__BHM.remoteHarvest;
+}
+
+function ensureHomeMemory(homeRoom) {
+  var root = ensureMemory();
+  if (!root.homes[homeRoom]) {
+    root.homes[homeRoom] = {
+      sources: {}, desiredLuna: 0, liveLuna: 0, queuedLuna: 0,
+      missingSources: [], unsafeSources: [], staleSources: [], duplicateSources: [], lastAudit: Game.time
+    };
+  }
+  var rec = root.homes[homeRoom];
+  if (!rec.sources) rec.sources = {};
+  if (!rec.missingSources) rec.missingSources = [];
+  if (!rec.unsafeSources) rec.unsafeSources = [];
+  if (!rec.staleSources) rec.staleSources = [];
+  if (!rec.duplicateSources) rec.duplicateSources = [];
+  return rec;
+}
+
+function isRemoteUnsafe(remoteName) {
+  var mem = (Memory.rooms && Memory.rooms[remoteName]) || {};
+  if (mem.lunaBlocked || mem.lunaUnsafe || mem.hostile || mem.hostileRoom) return true;
+  if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
+  if (mem.lunaInvaderLockUntil && mem.lunaInvaderLockUntil > Game.time) return true;
+  if (mem._invaderLock && mem._invaderLock.locked) {
+    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+    var lockTtl = (LunaConfig && LunaConfig.INVADER_LOCK_MEMO_TTL) || 1500;
+    if (lockTick == null || (Game.time - lockTick) <= lockTtl) return true;
+  }
+  if (mem.threatLevel && mem.threatLevel > 0) return true;
+  var room = Game.rooms[remoteName];
+  var ctl = room && room.controller;
+  var myName = getMyUsername();
+  if (ctl && ctl.owner && (!myName || ctl.owner.username !== myName)) return true;
+  if (ctl && ctl.reservation && (!myName || ctl.reservation.username !== myName)) return true;
+  if (room) {
+    var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+    if (hostiles.length > 0) return true;
+  }
+  return false;
+}
+
+function getMyUsername() {
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (!spawn || !spawn.owner || !spawn.owner.username) continue;
+    return spawn.owner.username;
+  }
+  return null;
+}
+
+function getRemoteIntelTick(remoteName) {
+  var mem = Memory.rooms && Memory.rooms[remoteName];
+  if (!mem) return null;
+  var best = null;
+  if (mem.intel) {
+    if (typeof mem.intel.lastScanAt === 'number') best = Math.max(best || 0, mem.intel.lastScanAt);
+    if (typeof mem.intel.lastVisited === 'number') best = Math.max(best || 0, mem.intel.lastVisited);
+    if (typeof mem.intel.t === 'number') best = Math.max(best || 0, mem.intel.t);
+  }
+  if (mem.scout && typeof mem.scout.lastVisited === 'number') best = Math.max(best || 0, mem.scout.lastVisited);
+  if (mem.sources) {
+    for (var sid in mem.sources) {
+      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
+      var s = mem.sources[sid];
+      if (!s) continue;
+      if (typeof s.lastSeen === 'number') best = Math.max(best || 0, s.lastSeen);
+      if (typeof s.lastActive === 'number') best = Math.max(best || 0, s.lastActive);
+    }
+  }
+  return best;
+}
+
+function buildSourcePlanForHome(homeRoom, remoteRooms) {
+  var home = ensureHomeMemory(homeRoom);
+  var oldSources = home.sources || {};
+  home.sources = {};
+  home.unsafeSources = [];
+  home.staleSources = [];
+
+  var ttl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
+  for (var i = 0; i < (remoteRooms || []).length; i++) {
+    var remoteRoom = remoteRooms[i];
+    if (!remoteRoom) continue;
+    if (isRemoteUnsafe(remoteRoom)) { home.unsafeSources.push(remoteRoom); continue; }
+
+    var intelTick = getRemoteIntelTick(remoteRoom);
+    if (!Game.rooms[remoteRoom] && (intelTick == null || (Game.time - intelTick) > ttl)) {
+      home.staleSources.push(remoteRoom);
+      continue;
+    }
+
+    var list = [];
+    var live = Game.rooms[remoteRoom];
+    if (live) {
+      var found = live.find(FIND_SOURCES) || [];
+      for (var f = 0; f < found.length; f++) list.push(found[f]);
+    } else {
+      var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+      if (mem.sources) {
+        for (var sid in mem.sources) {
+          if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
+          list.push({ id: sid, pos: mem.sources[sid].pos || mem.sources[sid] });
+        }
+      }
+    }
+
+    for (var j = 0; j < list.length; j++) {
+      var src = list[j];
+      if (!src || !src.id) continue;
+      var prev = oldSources[src.id] || {};
+      var x = src.pos && typeof src.pos.x === 'number' ? src.pos.x : (typeof prev.x === 'number' ? prev.x : null);
+      var y = src.pos && typeof src.pos.y === 'number' ? src.pos.y : (typeof prev.y === 'number' ? prev.y : null);
+      home.sources[src.id] = {
+        sourceId: src.id, homeRoom: homeRoom, remoteRoom: remoteRoom,
+        x: x, y: y,
+        containerId: prev.containerId || null,
+        assignedLuna: prev.assignedLuna || null,
+        reservedBy: prev.reservedBy || null,
+        reservedUntil: prev.reservedUntil || 0,
+        lastSeen: Game.time,
+        lastActive: prev.lastActive || 0,
+        status: 'open',
+        reason: 'planned'
+      };
+    }
+  }
+
+  return home;
+}
+
+function auditAssignmentsForHome(homeRoom) {
+  var home = ensureHomeMemory(homeRoom);
+  var bySource = {};
+  var liveCount = 0;
+
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (c.memory.role !== 'Luna' && c.memory.task !== 'luna' && c.memory.task !== 'remoteharvest') continue;
+    var chome = c.memory.home || c.memory._home || (c.room && c.room.name);
+    if (chome !== homeRoom) continue;
+    liveCount++;
+    if (!c.memory.sourceId) continue;
+    if (!bySource[c.memory.sourceId]) bySource[c.memory.sourceId] = [];
+    bySource[c.memory.sourceId].push(c);
+  }
+
+  home.liveLuna = liveCount;
+  home.duplicateSources = [];
+  home.missingSources = [];
+  var queuedSources = [];
+  var queuedBySource = {};
+  var duplicateQueuedSources = [];
+  var assignedSources = [];
+  var queued = 0;
+  var spawnQueue = (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].spawnQueue) || [];
+  for (var q = 0; q < spawnQueue.length; q++) {
+    var item = spawnQueue[q];
+    if (!item || item.role !== 'Luna' || !item.sourceId) continue;
+    queuedBySource[item.sourceId] = (queuedBySource[item.sourceId] || 0) + 1;
+  }
+
+  for (var sid in home.sources) {
+    if (!Object.prototype.hasOwnProperty.call(home.sources, sid)) continue;
+    var rec = home.sources[sid];
+    if (!rec) continue;
+
+    if (rec.reservedUntil && rec.reservedUntil <= Game.time) {
+      rec.reservedBy = null;
+      rec.reservedUntil = 0;
+    }
+    var hasQueueItemsForSource = queuedBySource[sid] > 0;
+    if (rec.reservedBy && rec.reservedUntil > Game.time && !hasQueueItemsForSource) queued++;
+    if (hasQueueItemsForSource) {
+      rec.reservedBy = rec.reservedBy || ('queue:spawnQueue:' + sid);
+      rec.reservedUntil = Math.max(rec.reservedUntil || 0, Game.time + RESERVE_TTL);
+      queued += queuedBySource[sid];
+      queuedSources.push(sid);
+      if (hasQueueItemsForSource && queuedBySource[sid] > 1) duplicateQueuedSources.push(sid);
+    }
+
+    if (rec.assignedLuna && !Game.creeps[rec.assignedLuna]) rec.assignedLuna = null;
+
+    var contenders = bySource[sid] || [];
+    if (contenders.length > 1) {
+      contenders.sort(function (a, b) {
+        var at = a.memory && typeof a.memory._assignTick === 'number' ? a.memory._assignTick : 99999999;
+        var bt = b.memory && typeof b.memory._assignTick === 'number' ? b.memory._assignTick : 99999999;
+        if (at !== bt) return at - bt;
+        return a.name < b.name ? -1 : 1;
+      });
+      for (var d = 1; d < contenders.length; d++) contenders[d].memory._forceYield = true;
+      home.duplicateSources.push(sid);
+    }
+
+    if (contenders.length > 0) {
+      rec.assignedLuna = contenders[0].name;
+      rec.status = 'assigned';
+      rec.reason = 'live-luna';
+      rec.lastActive = Game.time;
+      assignedSources.push(sid);
+      rec.reservedBy = null;
+      rec.reservedUntil = 0;
+    } else if ((rec.reservedBy && rec.reservedUntil > Game.time) || hasQueueItemsForSource) {
+      rec.status = 'queued';
+      rec.reason = rec.reservedBy;
+    } else {
+      rec.status = 'open';
+      rec.reason = 'missing-luna';
+      home.missingSources.push(sid);
+    }
+  }
+
+  home.desiredLuna = Object.keys(home.sources).length;
+  home.queuedLuna = queued;
+  home.lastAudit = Game.time;
+
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[homeRoom]) Memory.rooms[homeRoom] = {};
+  Memory.rooms[homeRoom].lastRemoteHarvestPlan = {
+    tick: Game.time,
+    desiredLuna: home.desiredLuna,
+    liveLuna: home.liveLuna,
+    queuedLuna: home.queuedLuna,
+    queuedSources: queuedSources,
+    duplicateQueuedSources: duplicateQueuedSources,
+    missingSources: home.missingSources.slice(0),
+    assignedSources: assignedSources,
+    unsafeSources: home.unsafeSources.slice(0),
+    staleSources: home.staleSources.slice(0),
+    duplicateSources: home.duplicateSources.slice(0),
+    notes: 'one Luna per approved source'
+  };
+
+  return home;
+}
+
+function unreserveSourceForQueue(homeRoom, sourceId) {
+  var home = ensureHomeMemory(homeRoom);
+  var rec = home.sources[sourceId];
+  if (!rec) return false;
+  if (rec.assignedLuna) return false;
+  rec.reservedBy = null;
+  rec.reservedUntil = 0;
+  if (rec.status === 'queued') {
+    rec.status = 'open';
+    rec.reason = 'enqueue-failed';
+  }
+  return true;
+}
+
+function reserveSourceForQueue(homeRoom) {
+  var home = ensureHomeMemory(homeRoom);
+  var pick = null;
+  for (var i = 0; i < home.missingSources.length; i++) {
+    var sid = home.missingSources[i];
+    var rec = home.sources[sid];
+    if (!rec || rec.assignedLuna) continue;
+    if (rec.reservedBy && rec.reservedUntil > Game.time) continue;
+    pick = rec; break;
+  }
+  if (!pick) return null;
+  pick.reservedBy = 'queue:' + Game.time + ':' + pick.sourceId;
+  pick.reservedUntil = Game.time + RESERVE_TTL;
+  pick.status = 'queued';
+  pick.reason = pick.reservedBy;
+  return { sourceId: pick.sourceId, targetRoom: pick.remoteRoom };
+}
+
+function claimSource(creep, sourceId, targetRoom) {
+  if (!creep || !creep.memory) return false;
+  var homeRoom = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
+  if (!homeRoom || !sourceId) return false;
+  var home = ensureHomeMemory(homeRoom);
+  var rec = home.sources[sourceId];
+  if (!rec) return false;
+  rec.assignedLuna = creep.name;
+  rec.remoteRoom = targetRoom || rec.remoteRoom;
+  rec.reservedBy = null;
+  rec.reservedUntil = 0;
+  rec.status = 'assigned';
+  rec.reason = 'claimed';
+  rec.lastActive = Game.time;
+  return true;
+}
+
+function releaseSource(creep) {
+  if (!creep || !creep.memory || !creep.memory.sourceId) return false;
+  var homeRoom = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
+  if (!homeRoom) return false;
+  var home = ensureHomeMemory(homeRoom);
+  var rec = home.sources[creep.memory.sourceId];
+  if (!rec) return false;
+  if (rec.assignedLuna === creep.name) rec.assignedLuna = null;
+  rec.status = 'open';
+  rec.reason = 'released';
+  rec.reservedBy = null;
+  rec.reservedUntil = 0;
+  return true;
+}
+
+module.exports = {
+  ensureMemory: ensureMemory,
+  ensureHomeMemory: ensureHomeMemory,
+  buildSourcePlanForHome: buildSourcePlanForHome,
+  auditAssignmentsForHome: auditAssignmentsForHome,
+  reserveSourceForQueue: reserveSourceForQueue,
+  unreserveSourceForQueue: unreserveSourceForQueue,
+  claimSource: claimSource,
+  releaseSource: releaseSource
+};
