@@ -1,6 +1,7 @@
 'use strict';
 
 // Safe tuning knobs for Luna remote-mining behavior and diagnostics.
+// Luna is a seated remote container miner: one Luna per remote source.
 module.exports = Object.freeze({
   DEBUG_SAY: false,
   DEBUG_DRAW: true,
@@ -35,9 +36,9 @@ module.exports = Object.freeze({
   MAX_PF_OPS: 3000,
   PLAIN_COST: 2,
   SWAMP_COST: 10,
-  MAX_LUNA_PER_SOURCE: 2,
+  MAX_LUNA_PER_SOURCE: 1,
   LUNA_REMOTE_INTEL_TTL: 3000,
-  ALLOW_MULTI_LUNA_PER_SOURCE: true,
+  ALLOW_MULTI_LUNA_PER_SOURCE: false,
   MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA: 2,
   PREFER_EMPTY_SOURCES_BEFORE_STACKING: true,
   LUNA_SECONDARY_SOURCE_SCORE_PENALTY: 150,
