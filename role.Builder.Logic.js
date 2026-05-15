@@ -24,7 +24,6 @@ function collectEnergy(creep) {
   if (homeTerminal && homeTerminal.store) homeEnergy += homeTerminal.store[RESOURCE_ENERGY] || 0;
 
   var homeIsRich = homeEnergy >= CFG.HOME_RICH_ENERGY;
-  var homeIsLow = homeEnergy <= CFG.HOME_LOW_ENERGY;
 
   if (homeIsRich && homeName) {
     if (!homeRoom || creep.pos.roomName !== homeName) {
@@ -53,10 +52,7 @@ function collectEnergy(creep) {
   var storeLike = creep.pos.findClosestByRange(FIND_STRUCTURES, { filter: function (s) { if (!s.store) return false; var t = s.structureType; if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_LINK && t !== STRUCTURE_STORAGE && t !== STRUCTURE_TERMINAL) return false; var energy = s.store[RESOURCE_ENERGY] || 0; return energy > 0; } });
   if (storeLike) { debugSay(creep, '🏦'); debugDrawLine(creep, storeLike, CFG.DRAW.FILL_COLOR, "WITHDRAW"); var sr = creep.withdraw(storeLike, RESOURCE_ENERGY); if (sr === ERR_NOT_IN_RANGE) creep.travelTo(storeLike, { range: 1, reusePath: 25 }); return true; }
 
-  if (CFG.ALLOW_HARVEST_FALLBACK || homeIsLow) {
-    var src = creep.pos.findClosestByRange(FIND_SOURCES_ACTIVE);
-    if (src) { debugSay(creep, '⛏️'); debugDrawLine(creep, src, CFG.DRAW.SOURCE, "MINE"); var hr = creep.harvest(src); if (hr === ERR_NOT_IN_RANGE) creep.travelTo(src, { range: 1, reusePath: 20 }); return true; }
-  }
+  // Builder does not harvest directly. If no stored/dropped energy exists, it waits or returns home.
 
   if (typeof getHomeName === 'function' && typeof getAnchorPos === 'function') {
     var homeName2 = getHomeName(creep);
