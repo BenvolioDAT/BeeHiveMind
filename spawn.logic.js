@@ -47,7 +47,8 @@ var ROLE_CANONICAL = [
   'CombatArcher',
   'CombatMedic',
   'Dismantler',
-  'Claimer'
+  'Claimer',
+  'Trucker'
 ];
 
 var ROLE_NORMALIZE_MAP = (function () {
@@ -58,7 +59,7 @@ var ROLE_NORMALIZE_MAP = (function () {
     map[role.toLowerCase()] = role;
   }
   map.remoteharvest = 'Luna';
-  map.trucker = 'Courier';
+  map.trucker = 'Trucker';
   map.worker = 'BaseHarvest';
   map.harvester = 'BaseHarvest';
   return map;
