@@ -69,20 +69,72 @@ function collectEnergy(creep) {
 function idleNearAnchor(creep) { var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos; if (anchor && anchor.pos) { debugSay(creep, '🧘'); debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE"); creep.travelTo(anchor, { range: 2, reusePath: 20 }); } }
 function dumpEnergyToSink(creep) { var carried = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0; if (carried <= 0) return false; var sink = creep.pos.findClosestByRange(FIND_STRUCTURES, { filter: function (s) { if (!s.store) return false; var free = s.store.getFreeCapacity(RESOURCE_ENERGY) || 0; return free > 0 && (s.structureType === STRUCTURE_STORAGE || s.structureType === STRUCTURE_TERMINAL || s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION || s.structureType === STRUCTURE_TOWER || s.structureType === STRUCTURE_CONTAINER || s.structureType === STRUCTURE_LINK); } }); if (!sink) return false; debugSay(creep, '➡️SINK'); debugDrawLine(creep, sink, CFG.DRAW.SINK_COLOR, "SINK"); if (creep.transfer(sink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) creep.travelTo(sink, { range: 1, reusePath: 20 }); return true; }
 
+function getBuilderBuildPriority(site) {
+  if (!site || !site.structureType) return 1;
+
+  // Builders construct roads last because roads are useful quality-of-life infrastructure,
+  // but core production, economy, and defense structures are usually more urgent.
+  if (site.structureType === STRUCTURE_SPAWN) return 100;
+  if (site.structureType === STRUCTURE_EXTENSION) return 90;
+  if (site.structureType === STRUCTURE_TOWER) return 80;
+  if (site.structureType === STRUCTURE_STORAGE) return 70;
+  if (site.structureType === STRUCTURE_TERMINAL) return 65;
+  if (site.structureType === STRUCTURE_CONTAINER) return 60;
+  if (site.structureType === STRUCTURE_LINK) return 55;
+  if (site.structureType === STRUCTURE_EXTRACTOR) return 50;
+  if (site.structureType === STRUCTURE_LAB) return 45;
+  if (site.structureType === STRUCTURE_FACTORY) return 40;
+  if (site.structureType === STRUCTURE_OBSERVER) return 35;
+  if (site.structureType === STRUCTURE_POWER_SPAWN) return 30;
+  if (site.structureType === STRUCTURE_NUKER) return 25;
+
+  // New ramparts/walls still need initial construction; this is separate from
+  // long-term maintenance/repair strategy for mature fortifications.
+  if (site.structureType === STRUCTURE_RAMPART) return 20;
+  if (site.structureType === STRUCTURE_WALL) return 15;
+
+  if (site.structureType === STRUCTURE_ROAD) return 5;
+  return 1;
+}
+
 function getBuilderTarget(creep) {
   var cachedId = creep.memory.builderTargetId;
   var cachedType = creep.memory.builderTargetType;
   if (cachedId && cachedType === 'construction') { var cachedSite = Game.constructionSites[cachedId]; if (cachedSite) return { target: cachedSite, type: 'build' }; creep.memory.builderTargetId = null; creep.memory.builderTargetType = null; }
   var localSites = creep.room.find(FIND_CONSTRUCTION_SITES);
   if (localSites && localSites.length > 0) {
-    var prio = { 'spawn': 5, 'extension': 4, 'tower': 3, 'container': 2, 'road': 1 };
-    var bestLocal = null; var bestScore = -1; var bestRange = 1e9;
-    for (var i = 0; i < localSites.length; i++) { var site = localSites[i]; var score = prio[site.structureType] || 0; var range = creep.pos.getRangeTo(site.pos); if (score > bestScore || (score === bestScore && range < bestRange)) { bestLocal = site; bestScore = score; bestRange = range; } }
+    var bestLocal = null; var bestPriority = -1; var bestRange = 1e9;
+    for (var i = 0; i < localSites.length; i++) {
+      var site = localSites[i];
+      var priority = getBuilderBuildPriority(site);
+      var range = creep.pos.getRangeTo(site.pos);
+      if (priority > bestPriority || (priority === bestPriority && range < bestRange)) {
+        bestLocal = site; bestPriority = priority; bestRange = range;
+      }
+    }
     if (bestLocal) { creep.memory.builderTargetId = bestLocal.id; creep.memory.builderTargetType = 'construction'; debugRing(creep.room, bestLocal.pos, CFG.DRAW.BUILD_COLOR, 'BUILD'); return { target: bestLocal, type: 'build' }; }
   }
-  var nearestSite = null; var bestDistance = 1e9;
-  for (var sid in Game.constructionSites) { if (!Game.constructionSites.hasOwnProperty(sid)) continue; var s2 = Game.constructionSites[sid]; var dist = Game.map.getRoomLinearDistance(creep.pos.roomName, s2.pos.roomName); if (dist < bestDistance) { bestDistance = dist; nearestSite = s2; } }
-  if (nearestSite) { creep.memory.builderTargetId = nearestSite.id; creep.memory.builderTargetType = 'construction'; debugRing(creep.room, nearestSite.pos, CFG.DRAW.BUILD_COLOR, 'REMOTE'); return { target: nearestSite, type: 'build' }; }
+
+  var bestRemoteSite = null; var bestRemotePriority = -1; var bestRoomDistance = 1e9; var bestVisibleRange = 1e9;
+  for (var sid in Game.constructionSites) {
+    if (!Game.constructionSites.hasOwnProperty(sid)) continue;
+    var s2 = Game.constructionSites[sid];
+    var priority2 = getBuilderBuildPriority(s2);
+    var roomDistance = Game.map.getRoomLinearDistance(creep.pos.roomName, s2.pos.roomName);
+    var visibleRange = (s2.pos.roomName === creep.pos.roomName) ? creep.pos.getRangeTo(s2.pos) : 1e9;
+
+    if (
+      priority2 > bestRemotePriority ||
+      (priority2 === bestRemotePriority && roomDistance < bestRoomDistance) ||
+      (priority2 === bestRemotePriority && roomDistance === bestRoomDistance && visibleRange < bestVisibleRange)
+    ) {
+      bestRemoteSite = s2;
+      bestRemotePriority = priority2;
+      bestRoomDistance = roomDistance;
+      bestVisibleRange = visibleRange;
+    }
+  }
+  if (bestRemoteSite) { creep.memory.builderTargetId = bestRemoteSite.id; creep.memory.builderTargetType = 'construction'; debugRing(creep.room, bestRemoteSite.pos, CFG.DRAW.BUILD_COLOR, 'REMOTE'); return { target: bestRemoteSite, type: 'build' }; }
   return null;
 }
 
