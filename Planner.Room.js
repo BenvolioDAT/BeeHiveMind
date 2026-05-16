@@ -24,6 +24,7 @@ const STRUCTURE_LIMITS = (() => {
 // Base layout blueprint: offsets around the anchor spawn. Keeping the
 // array flat makes it easy to tweak or visualize.
 const BASE_OFFSETS = [
+  { type: STRUCTURE_TOWER,     x:  2, y:  0 },
   { type: STRUCTURE_STORAGE,   x:  8, y:  0 },
   { type: STRUCTURE_LINK,      x:  7, y:  0 },
   { type: STRUCTURE_SPAWN,     x: -5, y:  0 },
