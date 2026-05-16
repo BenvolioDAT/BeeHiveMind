@@ -626,7 +626,7 @@ BeeVisuals.drawRemoteContainerHaulVisuals = function () {
     }
   } catch (err) {
     if (Logger && Logger.log) {
-      Logger.log(LOG_LEVEL.WARN, '[BeeVisuals] drawRemoteContainerHaulVisuals error: ' + err);
+      Logger.log(LOG_LEVEL.BASIC, '[BeeVisuals] drawRemoteContainerHaulVisuals error: ' + err);
     }
   }
 };
