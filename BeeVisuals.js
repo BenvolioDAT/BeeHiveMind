@@ -16,6 +16,8 @@
 var Builder = require('role.Builder'); // exposes structurePlacements metadata
 var Logger      = require('core.logger');
 var LOG_LEVEL   = Logger.LOG_LEVEL;
+var CoreConfig = require('core.config');
+var BeeVisuals = {};
 
 // ------------------------------- Settings --------------------------------
 var CFG = {
@@ -61,6 +63,24 @@ var CFG = {
     bottomY: 48.6,  // near bottom edge of the room
     panelGap: 0.35  // vertical spacing between stacked panels
   }
+};
+
+function visualsConfig() {
+  return (CoreConfig && CoreConfig.settings && CoreConfig.settings.visuals) || {};
+}
+
+BeeVisuals.visualBudgetLevel = function () {
+  var vc = visualsConfig();
+  if (vc.enabled === false) return 'off';
+  if (vc.lowCpuMode === false) return 'full';
+
+  var bucket = (Game && Game.cpu && typeof Game.cpu.bucket === 'number') ? Game.cpu.bucket : null;
+  var used = (Game && Game.cpu && typeof Game.cpu.getUsed === 'function') ? Game.cpu.getUsed() : 0;
+
+  if (bucket !== null && bucket < (vc.minBucketForAnyVisuals || 1000)) return 'minimal';
+  if (used > (vc.maxCpuUsedBeforeVisuals || 14)) return 'minimal';
+  if (bucket !== null && bucket < (vc.minBucketForFullVisuals || 5000)) return 'medium';
+  return 'full';
 };
 
 // ------------------------------- Utilities -------------------------------
@@ -121,7 +141,6 @@ function text(visual, str, x, y, size, align, opacity, color) {
 }
 
 // ------------------------------- Module ----------------------------------
-var BeeVisuals = {};
 
 // bottom-right stack state (per room, resets each drawVisuals call)
 BeeVisuals._stack = {}; // roomName -> current bottom cursor (y)
@@ -162,6 +181,8 @@ function _reserveBottomRight(roomName, panelWidth, panelHeight) {
 BeeVisuals.drawVisuals = function () {
   var room = getMainRoom();
   if (!room) return;
+  var budget = BeeVisuals.visualBudgetLevel();
+  if (budget === 'off') return;
 
   // reset the bottom-right stack for this room
   _resetBottomRightStack(room.name);
@@ -169,30 +190,28 @@ BeeVisuals.drawVisuals = function () {
   var visual = new RoomVisual(room.name);
 
   // 1) Creep debug list + optional structure placement dots
-  if (Logger.shouldLog(LOG_LEVEL.DEBUG) &&
+  if (budget === 'full' &&
+      Logger.shouldLog(LOG_LEVEL.DEBUG) &&
       (CFG.drawDebugEachTick || shouldDrawForRoom(CFG.debugTickModulo, room.name))) {
     drawCreepDebugList(visual, room);
     drawStructurePlacementDots(visual, room);
   }
 
   // 2) CPU / bucket info
-  if (CFG.showCpuStats) {
+  var vc = visualsConfig();
+  if (CFG.showCpuStats && ((vc.cpuStatsModulo || 1) <= 1 || (Game.time % (vc.cpuStatsModulo || 1)) === 0)) {
     drawCpuStats(visual);
   }
 
-  // 3) In-room planned roads (debug)
-  BeeVisuals.drawPlannedRoadsDebug();
+  if (budget !== 'minimal') {
+    if (CFG.showRepairCounter) drawRepairCounter(visual);
+  }
 
-  // 4) World overlays (flags + planned roads)
-  BeeVisuals.drawWorldOverview();
-  BeeVisuals.drawRemoteContainerHaulMapVisuals();
-
-  // 5) Remote container haul request overlays
-  BeeVisuals.drawRemoteContainerHaulVisuals();
-
-  // 6) Repair counter line
-  if (CFG.showRepairCounter) {
-    drawRepairCounter(visual);
+  if (budget === 'full') {
+    BeeVisuals.drawPlannedRoadsDebug();
+    BeeVisuals.drawWorldOverview();
+    BeeVisuals.drawRemoteContainerHaulMapVisuals();
+    BeeVisuals.drawRemoteContainerHaulVisuals();
   }
 };
 
@@ -202,6 +221,10 @@ BeeVisuals.drawVisuals = function () {
 BeeVisuals.drawEnergyBar = function () {
   var room = getMainRoom();
   if (!room) return;
+  var vc = visualsConfig();
+  var mod = vc.energyBarModulo || 1;
+  if (mod > 1 && (Game.time % mod) !== 0) return;
+  if (BeeVisuals.visualBudgetLevel() === 'off') return;
 
   var v = new RoomVisual(room.name);
 
@@ -340,7 +363,10 @@ function workerTableGeometry() {
 BeeVisuals.drawWorkerBeeTaskTable = function () {
   var room = getMainRoom();
   if (!room) return;
-  if (!shouldDrawForRoom(CFG.tableTickModulo, room.name)) return;
+  var budget = BeeVisuals.visualBudgetLevel();
+  if (budget !== 'full' && budget !== 'medium') return;
+  var vc = visualsConfig();
+  if (!shouldDrawForRoom(vc.workerTableModulo || CFG.tableTickModulo, room.name)) return;
 
   var v = new RoomVisual(room.name);
   var stats = collectWorkerStats(room);
@@ -375,8 +401,10 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
 
   // Each row repeats the same structure: label on the left, current/max on the right.
   var row = 1;
+  var maxRows = vc.maxWorkerRowsDrawn || 15;
   for (var k in WORKER_MAX_TASKS) {
     if (!WORKER_MAX_TASKS.hasOwnProperty(k)) continue;
+    if (row > maxRows) break;
     var y = yTop + row * geom.cellH;
     var roleQuota = null;
     if (stats.quotas && Object.prototype.hasOwnProperty.call(stats.quotas, k)) {
@@ -414,13 +442,15 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
  * Draws a handful per tick to avoid going ham on CPU.
  */
 BeeVisuals.drawPlannedRoadsDebug = function () {
+  if (BeeVisuals.visualBudgetLevel() !== 'full') return;
   if (!Logger.shouldLog(LOG_LEVEL.DEBUG)) return;
 
   var room = getMainRoom();
   if (!room) return;
 
   // Light tick-gate (set MOD>1 if you want to throttle)
-  var MOD = 1;
+  var vc = visualsConfig();
+  var MOD = vc.plannedRoadDebugModulo || 1;
   if (((Game.time + 3) % MOD) !== 0) return;
 
   var v = new RoomVisual(room.name);
@@ -431,7 +461,7 @@ BeeVisuals.drawPlannedRoadsDebug = function () {
   var paths = rp.paths || {};
 
   var MAX_PATHS = 6;
-  var MAX_TILES = 250;
+  var MAX_TILES = vc.maxPlannedRoadTilesDrawn || 75;
 
   var COLOR_PLANNED = CFG.colors.plannedRoad;
   var COLOR_BUILT   = CFG.colors.builtRoad;
@@ -571,6 +601,7 @@ BeeVisuals.drawWorldOverview = function () {
  * Uses RoomVisual(roomName) so remote rooms can be drawn from remembered positions.
  */
 BeeVisuals.drawRemoteContainerHaulVisuals = function () {
+  if (BeeVisuals.visualBudgetLevel() !== 'full') return;
   if (!CFG.showRemoteContainerHaulVisuals) return;
 
   try {
@@ -578,8 +609,13 @@ BeeVisuals.drawRemoteContainerHaulVisuals = function () {
 
     var requests = Memory.__BHM.remoteHaulRequests;
 
+    var vc = visualsConfig();
+    var limit = vc.maxRemoteHaulRequestsDrawn || 10;
+    if (vc.remoteHaulVisualModulo > 1 && (Game.time % vc.remoteHaulVisualModulo) !== 0) return;
+    var drawn = 0;
     for (var reqId in requests) {
       if (!requests.hasOwnProperty(reqId)) continue;
+      if (drawn >= limit) break;
       var req = requests[reqId];
       if (!req) continue;
 
@@ -626,6 +662,7 @@ BeeVisuals.drawRemoteContainerHaulVisuals = function () {
           v.line(trucker.pos.x, trucker.pos.y, req.x, req.y, { color: '#00e5ff', width: 0.07, opacity: 0.7, lineStyle: 'dashed' });
         }
       }
+      drawn++;
     }
   } catch (err) {
     if (Logger && Logger.log) {
@@ -639,8 +676,11 @@ BeeVisuals.drawRemoteContainerHaulVisuals = function () {
  * Uses Game.map.visual + RoomPosition for overworld visibility.
  */
 BeeVisuals.drawRemoteContainerHaulMapVisuals = function () {
+  if (BeeVisuals.visualBudgetLevel() !== 'full') return;
   if (!CFG.showRemoteContainerHaulMapVisuals) return;
-  if (CFG.remoteContainerHaulMapModulo > 0 && (Game.time % CFG.remoteContainerHaulMapModulo) !== 0) return;
+  var vc = visualsConfig();
+  var mapMod = vc.remoteHaulMapModulo || CFG.remoteContainerHaulMapModulo || 1;
+  if (mapMod > 0 && (Game.time % mapMod) !== 0) return;
 
   try {
     if (!Memory.__BHM || !Memory.__BHM.remoteHaulRequests) return;
@@ -648,8 +688,11 @@ BeeVisuals.drawRemoteContainerHaulMapVisuals = function () {
     var requests = Memory.__BHM.remoteHaulRequests;
     var mv = Game.map.visual;
 
+    var limit = vc.maxRemoteHaulRequestsDrawn || 10;
+    var drawn = 0;
     for (var reqId in requests) {
       if (!requests.hasOwnProperty(reqId)) continue;
+      if (drawn >= limit) break;
       var req = requests[reqId];
       if (!req) continue;
 
@@ -688,6 +731,7 @@ BeeVisuals.drawRemoteContainerHaulMapVisuals = function () {
         backgroundPadding: 0.2,
         opacity: 0.9
       });
+      drawn++;
     }
   } catch (err) {
     if (Logger && Logger.log) {

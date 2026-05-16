@@ -10,6 +10,7 @@
  */
 
 var BeeVisualsSpawnPanel = {};
+var CoreConfig = require('core.config');
 
 // ------------------------------- Settings ---------------------------------
 var CFG = {
@@ -26,7 +27,15 @@ var CFG = {
 
 /** Cheap cadence gate so the HUD can be throttled by simply raising CFG.modulo. */
 function shouldDrawSpawnPanels() {
-  var cadence = CFG.modulo;
+  var visuals = CoreConfig && CoreConfig.settings && CoreConfig.settings.visuals;
+  if (visuals && visuals.enabled === false) return false;
+  if (visuals && visuals.lowCpuMode !== false) {
+    var bucket = (Game && Game.cpu && typeof Game.cpu.bucket === 'number') ? Game.cpu.bucket : null;
+    var used = (Game && Game.cpu && typeof Game.cpu.getUsed === 'function') ? Game.cpu.getUsed() : 0;
+    if (bucket !== null && bucket < (visuals.minBucketForAnyVisuals || 1000)) return false;
+    if (used > (visuals.maxCpuUsedBeforeVisuals || 14)) return false;
+  }
+  var cadence = (visuals && visuals.spawnPanelModulo) || CFG.modulo;
   if (typeof cadence !== 'number' || cadence < 1) cadence = 1;
   return cadence <= 1 || (Game.time % cadence) === 0;
 }
@@ -203,7 +212,11 @@ BeeVisualsSpawnPanel.drawSpawnPanels = function () {
 };
 
 BeeVisualsSpawnPanel.drawVisuals = function () {
-  BeeVisualsSpawnPanel.drawSpawnPanels();
+  try {
+    BeeVisualsSpawnPanel.drawSpawnPanels();
+  } catch (err) {
+    // Never let visual code break the bot loop.
+  }
 };
 
 module.exports = BeeVisualsSpawnPanel;
