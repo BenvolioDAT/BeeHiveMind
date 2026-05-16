@@ -305,9 +305,38 @@ function getBuilderNeed(C, room) {
     var rn = remotes[i];
     remoteTotal += (C.roomSiteCounts[rn] || 0);
   }
-  var need = (local + remoteTotal) > 0 ? 1 : 0;
+  var totalSites = local + remoteTotal;
+  var rcl = (room.controller && room.controller.level) || 0;
+  var maxByRcl = 4;
+  var need = 0;
+
+  if (rcl <= 2) {
+    maxByRcl = 2;
+  } else if (rcl === 3) {
+    maxByRcl = 3;
+  }
+
+  if (totalSites <= 0) {
+    need = 0;
+  } else if (totalSites >= 15) {
+    need = 4;
+  } else if (totalSites >= 8) {
+    need = 3;
+  } else {
+    need = 2;
+  }
+
+  if (need > maxByRcl) {
+    need = maxByRcl;
+  }
+
   if (tickEvery(DBG_EVERY)) {
-    dlog('🧱 [Signal] builderNeed', fmt(room), 'local=', local, 'remote=', remoteTotal, '->', need);
+    dlog('🧱 [Signal] builderNeed', fmt(room),
+      'local=', local,
+      'remote=', remoteTotal,
+      'total=', totalSites,
+      'rcl=', rcl,
+      'need=', need);
   }
   return need;
 }
