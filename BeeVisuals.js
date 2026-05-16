@@ -17,6 +17,7 @@ var Builder = require('role.Builder'); // exposes structurePlacements metadata
 var Logger      = require('core.logger');
 var LOG_LEVEL   = Logger.LOG_LEVEL;
 var CoreConfig = require('core.config');
+var BeeVisuals = {};
 
 // ------------------------------- Settings --------------------------------
 var CFG = {
@@ -140,7 +141,6 @@ function text(visual, str, x, y, size, align, opacity, color) {
 }
 
 // ------------------------------- Module ----------------------------------
-var BeeVisuals = {};
 
 // bottom-right stack state (per room, resets each drawVisuals call)
 BeeVisuals._stack = {}; // roomName -> current bottom cursor (y)
