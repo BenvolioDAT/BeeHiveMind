@@ -27,6 +27,7 @@ var CFG = {
   // CPU + counters
   showCpuStats: true,
   showRepairCounter: true,
+  showRemoteContainerHaulVisuals: true,
 
   // Task table cadence
   tableTickModulo: 1,            // e.g. 2 = every other tick
@@ -183,7 +184,10 @@ BeeVisuals.drawVisuals = function () {
   // 4) World overlays (flags + planned roads)
   BeeVisuals.drawWorldOverview();
 
-  // 5) Repair counter line
+  // 5) Remote container haul request overlays
+  BeeVisuals.drawRemoteContainerHaulVisuals();
+
+  // 6) Repair counter line
   if (CFG.showRepairCounter) {
     drawRepairCounter(visual);
   }
@@ -556,6 +560,75 @@ BeeVisuals.drawWorldOverview = function () {
   var mv = Game.map.visual;
   drawWorldFlagMarkers(mv, CFG.worldMaxFlagMarkers);
   drawWorldRoadDots(mv, CFG.worldMaxPlannedTiles);
+};
+
+
+/**
+ * Draw remote container haul request overlays directly from memory requests.
+ * Uses RoomVisual(roomName) so remote rooms can be drawn from remembered positions.
+ */
+BeeVisuals.drawRemoteContainerHaulVisuals = function () {
+  if (!CFG.showRemoteContainerHaulVisuals) return;
+
+  try {
+    if (!Memory.__BHM || !Memory.__BHM.remoteHaulRequests) return;
+
+    var requests = Memory.__BHM.remoteHaulRequests;
+
+    for (var reqId in requests) {
+      if (!requests.hasOwnProperty(reqId)) continue;
+      var req = requests[reqId];
+      if (!req) continue;
+
+      var roomName = req.roomName || req.remoteRoom;
+      if (!roomName) continue;
+      if (typeof req.x !== 'number' || typeof req.y !== 'number') continue;
+
+      var amount = Number(req.amount) || 0;
+      var capacity = Number(req.capacity) || 0;
+
+      if (req.containerId) {
+        var container = Game.getObjectById(req.containerId);
+        if (container && container.store) {
+          amount = container.store[RESOURCE_ENERGY] || 0;
+          capacity = container.store.getCapacity(RESOURCE_ENERGY) || container.store.getCapacity() || capacity;
+        }
+      }
+
+      var fillPct = capacity > 0 ? Math.floor((amount / capacity) * 100) : (Number(req.fillPct) || 0);
+      if (fillPct < 0) fillPct = 0;
+      if (fillPct > 100) fillPct = 100;
+
+      var assigned = !!(req.assignedTo && req.assignedUntil > Game.time);
+      var statusText = assigned ? (req.assignedTo + ' On route') : 'READY';
+      var statusColor = assigned ? '#00e5ff' : '#00ff66';
+
+      var v = new RoomVisual(roomName);
+      var px = req.x + 0.7;
+      var py = req.y - 0.2;
+
+      var ringColor = '#66ccff';
+      if (!assigned && req.urgent) ringColor = '#ff8c42';
+
+      v.circle(req.x, req.y, { radius: 0.45, fill: 'transparent', stroke: ringColor, opacity: 0.8, strokeWidth: 0.12 });
+      v.rect(px - 0.25, py - 0.55, 5.6, 2.1, { fill: '#000000', opacity: 0.45, stroke: '#333333', strokeWidth: 0.05 });
+
+      text(v, 'Energy: ' + amount, px, py, 0.45, 'left', 1, '#ffffff');
+      text(v, 'Full: ' + fillPct + '%', px, py + 0.6, 0.45, 'left', 1, '#ffffff');
+      text(v, statusText, px, py + 1.2, 0.45, 'left', 1, statusColor);
+
+      if (assigned && Game.creeps[req.assignedTo]) {
+        var trucker = Game.creeps[req.assignedTo];
+        if (trucker && trucker.pos && trucker.pos.roomName === roomName) {
+          v.line(trucker.pos.x, trucker.pos.y, req.x, req.y, { color: '#00e5ff', width: 0.07, opacity: 0.7, lineStyle: 'dashed' });
+        }
+      }
+    }
+  } catch (err) {
+    if (Logger && Logger.log) {
+      Logger.log(LOG_LEVEL.BASIC, '[BeeVisuals] drawRemoteContainerHaulVisuals error: ' + err);
+    }
+  }
 };
 
 // ------------------------------ Draw helpers -----------------------------
