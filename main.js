@@ -120,9 +120,9 @@ module.exports.loop = function () {
     }
 
     // --- Visual aids for quick debugging ---
-    BeeVisuals.drawVisuals();
-    BeeVisuals.drawEnergyBar();
-    BeeVisuals.drawWorkerBeeTaskTable();
+    try { BeeVisuals.drawVisuals(); } catch (err) { mainLog.warn('BeeVisuals.drawVisuals error: ' + err); }
+    try { BeeVisuals.drawEnergyBar(); } catch (err2) { mainLog.warn('BeeVisuals.drawEnergyBar error: ' + err2); }
+    try { BeeVisuals.drawWorkerBeeTaskTable(); } catch (err3) { mainLog.warn('BeeVisuals.drawWorkerBeeTaskTable error: ' + err3); }
 
     // --- Less frequent maintenance ---
     if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {

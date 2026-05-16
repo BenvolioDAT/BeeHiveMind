@@ -58,6 +58,23 @@ CoreConfig.settings = Object.freeze({
     /** How long before the stale room sweep runs. */
     roomSweepInterval: 50,
   }),
+  visuals: Object.freeze({
+    enabled: true,
+    lowCpuMode: true,
+    maxCpuUsedBeforeVisuals: 14,
+    minBucketForFullVisuals: 5000,
+    minBucketForAnyVisuals: 1000,
+    spawnPanelModulo: 3,
+    workerTableModulo: 5,
+    energyBarModulo: 1,
+    cpuStatsModulo: 1,
+    remoteHaulVisualModulo: 10,
+    remoteHaulMapModulo: 25,
+    plannedRoadDebugModulo: 25,
+    maxRemoteHaulRequestsDrawn: 10,
+    maxWorkerRowsDrawn: 15,
+    maxPlannedRoadTilesDrawn: 75,
+  }),
 });
 
 module.exports = CoreConfig;
