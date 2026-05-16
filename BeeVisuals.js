@@ -29,7 +29,7 @@ var CFG = {
   showRepairCounter: true,
   showRemoteContainerHaulVisuals: true,
   showRemoteContainerHaulMapVisuals: true,
-  remoteContainerHaulMapModulo: 5,
+  remoteContainerHaulMapModulo: 1,
 
   // Task table cadence
   tableTickModulo: 1,            // e.g. 2 = every other tick
