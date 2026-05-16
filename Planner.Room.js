@@ -24,7 +24,9 @@ const STRUCTURE_LIMITS = (() => {
 // Base layout blueprint: offsets around the anchor spawn. Keeping the
 // array flat makes it easy to tweak or visualize.
 const BASE_OFFSETS = [
+  { type: STRUCTURE_TOWER,     x:  2, y:  0 },
   { type: STRUCTURE_STORAGE,   x:  8, y:  0 },
+  { type: STRUCTURE_LINK,      x:  7, y:  0 },
   { type: STRUCTURE_SPAWN,     x: -5, y:  0 },
   { type: STRUCTURE_SPAWN,     x:  5, y:  0 },
 
@@ -154,6 +156,37 @@ function allowedCount(type, room) {
   return (hard < controllerLimit) ? hard : controllerLimit;
 }
 
+function planPriorityForRcl(rcl) {
+  // RCL-aware priorities:
+  // 2 => extension rush, 3 => first tower, 4 => storage pivot, 5 => links.
+  if (rcl <= 1) return [STRUCTURE_EXTENSION];
+  if (rcl === 2) return [STRUCTURE_EXTENSION];
+  if (rcl === 3) return [STRUCTURE_TOWER, STRUCTURE_EXTENSION];
+  if (rcl === 4) return [STRUCTURE_STORAGE, STRUCTURE_EXTENSION, STRUCTURE_TOWER];
+  if (rcl >= 5) return [STRUCTURE_LINK, STRUCTURE_STORAGE, STRUCTURE_TOWER, STRUCTURE_EXTENSION];
+  return [STRUCTURE_EXTENSION];
+}
+
+function orderedBaseOffsetsForRcl(rcl) {
+  var priority = planPriorityForRcl(rcl);
+  var ordered = [];
+  var used = Object.create(null);
+
+  for (var p = 0; p < priority.length; p++) {
+    var wanted = priority[p];
+    for (var i = 0; i < BASE_OFFSETS.length; i++) {
+      if (BASE_OFFSETS[i].type !== wanted) continue;
+      ordered.push(BASE_OFFSETS[i]);
+      used[i] = true;
+    }
+  }
+  for (var j = 0; j < BASE_OFFSETS.length; j++) {
+    if (used[j]) continue;
+    ordered.push(BASE_OFFSETS[j]);
+  }
+  return ordered;
+}
+
 /**
  * High level orchestration:
  *  1. Skip work unless this is our tick slice (smooth CPU).
@@ -216,6 +249,7 @@ function ensureSites(room) {
     anchor,
     snapshot,
     allowedFn,
+    rcl,
     CFG.maxSitesPerTick - placed,
     CFG.csiteSafetyLimit - cCount
   );
@@ -230,15 +264,24 @@ function ensureSites(room) {
  * place whatever is still missing. Everything is kept tiny and linear so
  * new contributors can trace the decision making.
  */
-function ensureBaseLayout(room, anchor, snapshot, allowedFn, slotsLeft, globalCapLeft) {
+function ensureBaseLayout(room, anchor, snapshot, allowedFn, rcl, slotsLeft, globalCapLeft) {
   if (!anchor) return 0;
   if (slotsLeft <= 0 || globalCapLeft <= 0) return 0;
   let placed = 0;
+  var offsets = orderedBaseOffsetsForRcl(rcl || 0);
+  var hasStorage = (snapshot.built[STRUCTURE_STORAGE] || 0) + (snapshot.sites[STRUCTURE_STORAGE] || 0) > 0;
+  var hasTower = (snapshot.built[STRUCTURE_TOWER] || 0) + (snapshot.sites[STRUCTURE_TOWER] || 0) > 0;
 
-  for (let i = 0; i < BASE_OFFSETS.length; i++) {
+  for (let i = 0; i < offsets.length; i++) {
     if (slotsLeft <= 0 || globalCapLeft <= 0) break;
 
-    const plan = BASE_OFFSETS[i];
+    const plan = offsets[i];
+    // RCL goal gates keep the planner focused and avoid csite spam.
+    if (plan.type === STRUCTURE_TOWER && (rcl || 0) < 3) continue;
+    if (plan.type === STRUCTURE_STORAGE && (rcl || 0) < 4) continue;
+    if (plan.type === STRUCTURE_LINK && (rcl || 0) < 5) continue;
+    if (plan.type === STRUCTURE_EXTENSION && (rcl || 0) >= 4 && !hasStorage) continue;
+    if (plan.type === STRUCTURE_EXTENSION && (rcl || 0) >= 3 && !hasTower) continue;
     const tx = anchor.x + plan.x;
     const ty = anchor.y + plan.y;
 
@@ -257,6 +300,8 @@ function ensureBaseLayout(room, anchor, snapshot, allowedFn, slotsLeft, globalCa
       slotsLeft--;
       globalCapLeft--;
       snapshot.sites[plan.type] = (snapshot.sites[plan.type] || 0) + 1;
+      if (plan.type === STRUCTURE_STORAGE) hasStorage = true;
+      if (plan.type === STRUCTURE_TOWER) hasTower = true;
     }
   }
 

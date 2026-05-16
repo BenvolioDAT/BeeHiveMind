@@ -27,6 +27,9 @@ var QUEUE_HARD_LIMIT      = 20;
 var DEBUG_SPAWN_QUEUE     = true;
 var DBG_EVERY             = 5;
 var INVADER_LOCK_TTL      = 1500;
+var REPLACEMENT_TTL = {
+  Baseharvest: 80
+};
 
 var ROLE_PRIORITY = {
   Baseharvest: 100,
@@ -175,6 +178,23 @@ function getRoomLocalLiveCount(C, roomName, role) {
   var byRoom = C.roleCountsByRoom || {};
   var roomCounts = byRoom[roomName] || {};
   return roomCounts[role] || 0;
+}
+
+function countRoleNeedingReplacement(roomName, role, threshold) {
+  if (!roomName || !role || !threshold || threshold <= 0) return 0;
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    var creepRole = canonicalRole(creep.memory.role);
+    if (creepRole !== role) continue;
+    var home = creep.memory.home || (creep.room && creep.room.name);
+    if (home !== roomName) continue;
+    if (typeof creep.ticksToLive !== 'number') continue;
+    if (creep.ticksToLive <= threshold) count++;
+  }
+  return count;
 }
 
 function enqueue(roomName, role, opts) {
@@ -608,12 +628,13 @@ function computeEarlyUpgraderQuota(room) {
     return 1;
   }
 
-  var energyAvailable = room.energyAvailable || 0;
-  var energyCapacity = room.energyCapacityAvailable || 0;
-  var spawnExtensionFillRatio = energyCapacity > 0 ? (energyAvailable / energyCapacity) : 0;
-  if (spawnExtensionFillRatio < 0.80) {
-    return 1;
-  }
+  var controller = room.controller;
+  if (!controller || !controller.my) return 1;
+
+  var rcl = controller.level || 1;
+  var ticksToDowngrade = controller.ticksToDowngrade || 0;
+  var downgradeDanger = ticksToDowngrade > 0 && ticksToDowngrade <= 4000;
+  var downgradeWarning = ticksToDowngrade > 0 && ticksToDowngrade <= 8000;
 
   var sourceContainerEnergy = 0;
   var sourceContainerCapacity = 0;
@@ -644,17 +665,35 @@ function computeEarlyUpgraderQuota(room) {
     }
   }
 
-  var quota = 1;
-  if (sourceContainerFillRatio >= 0.75 || droppedEnergy >= 300) quota = 2;
-  if (sourceContainerFillRatio >= 0.90 || droppedEnergy >= 700) quota = 3;
-  if (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 1000) quota = 4;
-  if (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 2000) quota = 5;
-  if (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 3500) quota = 6;
+  var storedEnergy = 0;
+  if (room.storage && room.storage.store) {
+    storedEnergy += room.storage.store[RESOURCE_ENERGY] || 0;
+  }
+  if (room.terminal && room.terminal.store) {
+    storedEnergy += room.terminal.store[RESOURCE_ENERGY] || 0;
+  }
+  var energySurplus = sourceContainerEnergy + droppedEnergy + storedEnergy;
 
-  if (quota > 6) {
-    quota = 6;
+  // Keep RCL 2-4 conservative unless downgrade pressure says otherwise.
+  var quota = 1;
+  if (rcl <= 4) {
+    if (downgradeWarning) quota = 2;
+    if (downgradeDanger) quota = 3;
+    if (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 1500) quota = Math.max(quota, 2);
+    return quota;
   }
 
+  if (downgradeDanger) {
+    return 4;
+  }
+  if (downgradeWarning) {
+    quota = 2;
+  }
+  if (energySurplus >= 2000 || sourceContainerFillRatio >= 0.75 || droppedEnergy >= 300) quota = Math.max(quota, 2);
+  if (energySurplus >= 6000 || sourceContainerFillRatio >= 0.90 || droppedEnergy >= 700) quota = Math.max(quota, 3);
+  if (energySurplus >= 12000 || (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 1000)) quota = Math.max(quota, 4);
+  if (energySurplus >= 25000 || (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 2000)) quota = Math.max(quota, 5);
+  if (energySurplus >= 45000 || (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 3500)) quota = Math.max(quota, 6);
   return quota;
 }
 
@@ -731,11 +770,14 @@ function computeTruckerQuotaForHome(roomName) {
 
 function computeRoomQuotas(C, room) {
   var localDefense = computeLocalDefenseQuotas(room);
+  var sourceCount = room ? room.find(FIND_SOURCES).length : 0;
+  var safeBaseHarvestQuota = Math.max(1, sourceCount || 0);
 
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
   var quotas = {
-    Baseharvest:  2,
+    // One BaseHarvest per owned source keeps mining stable without over-spawning.
+    Baseharvest:  safeBaseHarvestQuota,
     Courier:      2,
     Queen:        1,
     Upgrader:     computeEarlyUpgraderQuota(room),
@@ -788,7 +830,15 @@ function fillQueueForRoom(C, room) {
     var canonical = canonicalRole(role);
     var active = getRoomLocalLiveCount(C, roomName, canonical);
     var queued = queuedCount(roomName, role);
-    var deficit = Math.max(0, limit - active - queued);
+    // Replacement behavior: allow at most one queued replacement for low-TTL
+    // workers instead of blindly over-spawning to fill a temporary dip.
+    var replacementNeed = 0;
+    if (REPLACEMENT_TTL[role]) {
+      replacementNeed = countRoleNeedingReplacement(roomName, canonical, REPLACEMENT_TTL[role]);
+      if (replacementNeed > 1) replacementNeed = 1;
+    }
+    var effectiveLimit = limit + replacementNeed;
+    var deficit = Math.max(0, effectiveLimit - active - queued);
     if (deficit > 0 && tickEvery(DBG_EVERY)) {
       dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit,
         'active=', active, 'queued=', queued, 'deficit=', deficit);
