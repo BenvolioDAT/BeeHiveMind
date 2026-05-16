@@ -164,7 +164,12 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
 
   // Copy over provided memory so we never mutate the caller's object.
   var mem = copyMemory(memory);
-  if (!mem.role) mem.role = canonicalRole;
+  // Always persist canonical role spelling so all role modules can trust it.
+  var requestedRole = mem.role || roleName;
+  mem.role = canonicalRole;
+  if (requestedRole && String(requestedRole) !== canonicalRole) {
+    mem.requestedRole = String(requestedRole);
+  }
   if (mem.skipTaskMemory) {
     delete mem.skipTaskMemory;
   }
