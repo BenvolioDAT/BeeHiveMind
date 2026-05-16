@@ -28,6 +28,8 @@ var CFG = {
   showCpuStats: true,
   showRepairCounter: true,
   showRemoteContainerHaulVisuals: true,
+  showRemoteContainerHaulMapVisuals: true,
+  remoteContainerHaulMapModulo: 1,
 
   // Task table cadence
   tableTickModulo: 1,            // e.g. 2 = every other tick
@@ -183,6 +185,7 @@ BeeVisuals.drawVisuals = function () {
 
   // 4) World overlays (flags + planned roads)
   BeeVisuals.drawWorldOverview();
+  BeeVisuals.drawRemoteContainerHaulMapVisuals();
 
   // 5) Remote container haul request overlays
   BeeVisuals.drawRemoteContainerHaulVisuals();
@@ -627,6 +630,68 @@ BeeVisuals.drawRemoteContainerHaulVisuals = function () {
   } catch (err) {
     if (Logger && Logger.log) {
       Logger.log(LOG_LEVEL.BASIC, '[BeeVisuals] drawRemoteContainerHaulVisuals error: ' + err);
+    }
+  }
+};
+
+/**
+ * Draw compact remote container haul request markers on the world map.
+ * Uses Game.map.visual + RoomPosition for overworld visibility.
+ */
+BeeVisuals.drawRemoteContainerHaulMapVisuals = function () {
+  if (!CFG.showRemoteContainerHaulMapVisuals) return;
+  if (CFG.remoteContainerHaulMapModulo > 0 && (Game.time % CFG.remoteContainerHaulMapModulo) !== 0) return;
+
+  try {
+    if (!Memory.__BHM || !Memory.__BHM.remoteHaulRequests) return;
+
+    var requests = Memory.__BHM.remoteHaulRequests;
+    var mv = Game.map.visual;
+
+    for (var reqId in requests) {
+      if (!requests.hasOwnProperty(reqId)) continue;
+      var req = requests[reqId];
+      if (!req) continue;
+
+      var roomName = req.roomName || req.remoteRoom;
+      if (!roomName) continue;
+      if (typeof req.x !== 'number' || typeof req.y !== 'number') continue;
+
+      var pos = new RoomPosition(req.x, req.y, roomName);
+
+      var amount = Number(req.amount) || 0;
+      var capacity = Number(req.capacity) || 0;
+
+      if (req.containerId) {
+        var container = Game.getObjectById(req.containerId);
+        if (container && container.store) {
+          amount = container.store[RESOURCE_ENERGY] || 0;
+          capacity = container.store.getCapacity(RESOURCE_ENERGY) || container.store.getCapacity() || capacity;
+        }
+      }
+
+      var fillPct = capacity > 0 ? Math.floor((amount / capacity) * 100) : (Number(req.fillPct) || 0);
+      if (fillPct < 0) fillPct = 0;
+      if (fillPct > 100) fillPct = 100;
+
+      var assigned = !!(req.assignedTo && req.assignedUntil > Game.time);
+      var statusText = assigned ? (req.assignedTo + ' On route') : ('READY ' + fillPct + '%');
+      var ringColor = assigned ? '#00e5ff' : '#00ff66';
+      if (!assigned && req.urgent) ringColor = '#ff8c42';
+
+      mv.circle(pos, { radius: 4, fill: 'transparent', stroke: ringColor, opacity: 0.85, strokeWidth: 1.5 });
+      mv.text(statusText, pos, {
+        color: assigned ? '#00e5ff' : '#ffffff',
+        fontSize: 7,
+        align: 'left',
+        backgroundColor: '#000000',
+        backgroundPadding: 0.2,
+        opacity: 0.9
+      });
+    }
+  } catch (err) {
+    if (Logger && Logger.log) {
+      Logger.log(LOG_LEVEL.BASIC, '[BeeVisuals] drawRemoteContainerHaulMapVisuals error: ' + err);
     }
   }
 };
