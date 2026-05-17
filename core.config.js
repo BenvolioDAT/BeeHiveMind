@@ -109,6 +109,8 @@ CoreConfig.settings = Object.freeze({
     plannerStampCandidateFailedReplanTicks: 250,
     plannerStampCandidateShowScores: false,
     plannerStampCandidateMaxVisuals: 25,
+    plannerInvariantChecksEnabled: false,
+    plannerInvariantLogInterval: 250,
     plannerStampBuildEnabled: false,
     plannerStampBuildRoom: null,
     plannerStampBuildRclMax: 3,
