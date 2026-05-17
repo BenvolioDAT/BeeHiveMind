@@ -290,6 +290,10 @@ function desiredSquadLayout(score) {
 function normalizeRoomName(roomLike) {
   if (!roomLike) return null;
   if (typeof roomLike === 'string') return roomLike;
+  // Accept both direct roomName carriers and nested squad target objects:
+  // { targetRoom: "W8S57" } and { target: { roomName: "W8S57" } }.
+  if (typeof roomLike.targetRoom === 'string') return roomLike.targetRoom;
+  if (roomLike.target && typeof roomLike.target.roomName === 'string') return roomLike.target.roomName;
   if (typeof roomLike.roomName === 'string') return roomLike.roomName;
   if (roomLike.pos && typeof roomLike.pos.roomName === 'string') return roomLike.pos.roomName;
   if (roomLike.room && typeof roomLike.room.name === 'string') return roomLike.room.name;
