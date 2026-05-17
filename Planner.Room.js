@@ -222,6 +222,12 @@ function ensureSites(room) {
   // Teaching note: This is the planner entry point. We bail out aggressively
   // so heavy scans only run when they are most useful (interval + triggers).
   if (!isOwnedRoom(room)) return;
+
+  // Phase 2B stamp planner: draw preview every tick when enabled.
+  // Preview is pure visuals and never places construction sites.
+  var anchor = pickAnchor(room);
+  maybeDrawStampPreview(room, anchor);
+
   if (shouldSkipTick(room)) return;
 
   var mem = plannerMemory(room);
@@ -235,11 +241,7 @@ function ensureSites(room) {
     mem.lastPlannedRcl = rcl;
   }
 
-  var anchor = pickAnchor(room);
   if (!anchor) return;
-
-  // Phase 2B stamp planner: preview only (no construction placement).
-  maybeDrawStampPreview(room, anchor);
 
   var globalCount = Object.keys(Game.constructionSites).length;
   if (globalCount >= CFG.csiteSafetyLimit) {
