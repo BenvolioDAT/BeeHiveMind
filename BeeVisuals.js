@@ -666,7 +666,8 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (!mergedById.hasOwnProperty(mergedId)) continue;
       var merged = mergedById[mergedId];
       var statusReq = merged.status;
-      var req = merged.haul || merged.status;
+      var haulReq = merged.haul;
+      var req = statusReq || haulReq;
       if (!req) continue;
 
       var amount = Number(req.amount) || 0;
@@ -724,14 +725,14 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
         status = 'URGENT';
       }
 
-      if (statusReq && merged.haul) {
-        var haulAssigned = !!(merged.haul.assignedTo && merged.haul.assignedUntil > Game.time);
+      if (statusReq && haulReq) {
+        var haulAssigned = !!(haulReq.assignedTo && haulReq.assignedUntil > Game.time);
         if (haulAssigned) {
           assigned = true;
           if (status === 'READY' || status === 'URGENT') {
-            status = merged.haul.assignedTo;
+            status = haulReq.assignedTo;
           }
-        } else if (merged.haul.urgent && status === 'READY') {
+        } else if (haulReq.urgent && status === 'READY') {
           status = 'URGENT';
         }
       }
