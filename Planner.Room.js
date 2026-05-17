@@ -259,6 +259,17 @@ function shouldUseStampBuild(room) {
   return true;
 }
 
+function isRampartBuildActiveForRoom(room, cfg) {
+  if (!room || !cfg) return false;
+  if (!cfg.plannerRampartBuildEnabled) return false;
+  if (cfg.plannerRampartBuildRoom && cfg.plannerRampartBuildRoom !== room.name) return false;
+  var minRcl = Math.max(0, Number(cfg.plannerRampartBuildMinRcl || 0));
+  var rcl = (room.controller && room.controller.level) || 0;
+  if (rcl < minRcl) return false;
+  if (cfg.plannerRampartBuildRequirePreviewEnabled && !isRampartPreviewActiveForRoom(room, cfg)) return false;
+  return true;
+}
+
 function isStampBuildTypeAllowed(type, rcl) {
   var lvl = Number(rcl) || 0;
   if (type === STRUCTURE_EXTENSION) return lvl >= 2;
@@ -374,6 +385,71 @@ function ensureStampLayoutSites(room, anchor, stamp, snapshot, allowedFn, rcl, s
   return { placed: placed, skippedBlocked: skippedBlocked, skippedCap: skippedCap, skippedType: skippedType, skippedReserved: skippedReserved };
 }
 
+function canPlaceRampartSite(room, x, y, reservations, opts) {
+  if (!room) return { ok: false, reason: 'blocked' };
+  if (x < 2 || x > 47 || y < 2 || y > 47) return { ok: false, reason: 'blocked' };
+  if (room.getTerrain().get(x, y) === TERRAIN_MASK_WALL) return { ok: false, reason: 'blocked' };
+  if (opts && opts.useReservations && PlannerReservations.isReserved(reservations, x, y)) return { ok: false, reason: 'reserved' };
+
+  var sources = room.find(FIND_SOURCES);
+  for (var s = 0; s < sources.length; s++) {
+    if (sources[s].pos.x === x && sources[s].pos.y === y) return { ok: false, reason: 'blocked' };
+  }
+  var mins = room.find(FIND_MINERALS);
+  for (var m = 0; m < mins.length; m++) {
+    if (mins[m].pos.x === x && mins[m].pos.y === y) return { ok: false, reason: 'blocked' };
+  }
+  if (room.controller && room.controller.pos.x === x && room.controller.pos.y === y) return { ok: false, reason: 'blocked' };
+
+  var structs = room.lookForAt(LOOK_STRUCTURES, x, y);
+  for (var i = 0; i < structs.length; i++) {
+    if (structs[i].structureType === STRUCTURE_RAMPART && structs[i].my) return { ok: false, reason: 'existing' };
+    if (structs[i].structureType === STRUCTURE_ROAD || structs[i].structureType === STRUCTURE_CONTAINER) continue;
+    return { ok: false, reason: 'blocked' };
+  }
+  var sites = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y);
+  for (var j = 0; j < sites.length; j++) {
+    if (sites[j].structureType === STRUCTURE_RAMPART) return { ok: false, reason: 'existing' };
+    return { ok: false, reason: 'blocked' };
+  }
+
+  return { ok: true };
+}
+
+function ensureRampartSites(room, plan, reservations, opts, slotsLeft, globalCapLeft) {
+  var placed = 0;
+  var skippedExisting = 0;
+  var skippedBlocked = 0;
+  var skippedReserved = 0;
+  var skippedCap = 0;
+  if (!room || !plan || !Array.isArray(plan.tiles)) return { placed: 0, skippedExisting: 0, skippedBlocked: 0, skippedReserved: 0, skippedCap: 0, previewTiles: 0 };
+
+  for (var i = 0; i < plan.tiles.length; i++) {
+    if (slotsLeft <= 0 || globalCapLeft <= 0) { skippedCap += (plan.tiles.length - i); break; }
+    var t = plan.tiles[i];
+    var can = canPlaceRampartSite(room, t.x, t.y, reservations, opts);
+    if (!can.ok) {
+      if (can.reason === 'existing') skippedExisting++;
+      else if (can.reason === 'reserved') skippedReserved++;
+      else skippedBlocked++;
+      continue;
+    }
+
+    var rc = room.createConstructionSite(t.x, t.y, STRUCTURE_RAMPART);
+    if (rc === OK) {
+      placed++;
+      slotsLeft--;
+      globalCapLeft--;
+    } else if (rc === ERR_FULL) {
+      skippedCap += (plan.tiles.length - i);
+      break;
+    } else {
+      skippedBlocked++;
+    }
+  }
+  return { placed: placed, skippedExisting: skippedExisting, skippedBlocked: skippedBlocked, skippedReserved: skippedReserved, skippedCap: skippedCap, previewTiles: plan.tiles.length };
+}
+
 function orderedBaseOffsetsForRcl(rcl) {
   var priority = planPriorityForRcl(rcl);
   var ordered = [];
@@ -435,7 +511,12 @@ function ensureSites(room) {
   var snapshot = scanRoomState(room);
   var allowedFn = function (type) { return allowedCount(type, room); };
   var buildCfg = stampBuildConfig();
-  var shouldBuildReservations = !!(buildCfg.plannerReservationsEnabled || buildCfg.plannerReservationVisualsEnabled || (isRampartPreviewActiveForRoom(room, buildCfg) && buildCfg.plannerRampartPreviewUseReservations));
+  var shouldBuildReservations = !!(
+    buildCfg.plannerReservationsEnabled ||
+    buildCfg.plannerReservationVisualsEnabled ||
+    (isRampartPreviewActiveForRoom(room, buildCfg) && buildCfg.plannerRampartPreviewUseReservations) ||
+    (isRampartBuildActiveForRoom(room, buildCfg) && buildCfg.plannerRampartBuildUseReservations !== false)
+  );
   var reservations = shouldBuildReservations ? PlannerReservations.buildReservations(room, buildCfg) : null;
   if (shouldBuildReservations) {
     mem.lastReservations = {
@@ -530,6 +611,44 @@ function ensureSites(room) {
         skippedNoAnchor: 1,
         reservationCount: reservations ? reservations.count : 0,
         reservationReasons: reservations ? reservations.byReason : {}
+      };
+    }
+  }
+
+  var rampartBuildActive = isRampartBuildActiveForRoom(room, buildCfg);
+  if (rampartBuildActive && placed < CFG.maxSitesPerTick && cCount < CFG.csiteSafetyLimit) {
+    var preview = getPreviewStampAndAnchor(room, anchor, buildCfg);
+    if (preview && preview.stamp && preview.previewAnchor) {
+      var useReservations = buildCfg.plannerRampartBuildUseReservations !== false;
+      var rampartPlan = PlannerRamparts.buildRampartPreview(room, preview.stamp, preview.previewAnchor, reservations, {
+        useReservations: useReservations,
+        range: buildCfg.plannerRampartPreviewRange,
+        maxTiles: buildCfg.plannerRampartPreviewMaxTiles,
+        showLabels: false,
+        rcl: buildCfg.plannerRampartPreviewRcl
+      });
+      var rampartPerTick = Math.max(0, Number(buildCfg.plannerRampartBuildMaxSitesPerTick || 0));
+      var rampartResult = ensureRampartSites(
+        room,
+        rampartPlan,
+        reservations,
+        { useReservations: useReservations },
+        Math.min(CFG.maxSitesPerTick - placed, rampartPerTick),
+        CFG.csiteSafetyLimit - cCount
+      );
+      placed += rampartResult.placed;
+      cCount += rampartResult.placed;
+      mem.lastRampartBuild = {
+        t: Game.time,
+        placed: rampartResult.placed,
+        skippedExisting: rampartResult.skippedExisting,
+        skippedBlocked: rampartResult.skippedBlocked,
+        skippedReserved: rampartResult.skippedReserved,
+        skippedCap: rampartResult.skippedCap,
+        previewTiles: rampartResult.previewTiles,
+        minRcl: Math.max(0, Number(buildCfg.plannerRampartBuildMinRcl || 0)),
+        anchor: { x: preview.previewAnchor.x, y: preview.previewAnchor.y, roomName: preview.previewAnchor.roomName },
+        stampId: preview.stamp.id
       };
     }
   }
