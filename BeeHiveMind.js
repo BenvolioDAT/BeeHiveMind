@@ -452,6 +452,11 @@ var BeeHiveMind = {
   // Output: none; hands off each creep to its role.run and handles errors.
   runCreeps: function runCreeps(C) {
     var creeps = C.creeps;
+    var roleProfilingEnabled =
+      CpuProfiler.isEnabled() &&
+      CoreConfig.settings.cpuProfiler &&
+      CoreConfig.settings.cpuProfiler.includeRoleBreakdown === true;
+
     for (var i = 0; i < creeps.length; i++) {
       var creep = creeps[i];
       var roleName = ensureCreepRole(creep);
@@ -461,15 +466,19 @@ var BeeHiveMind = {
         continue;
       }
       try {
-        if (CoreConfig.settings.cpuProfiler.includeRoleBreakdown === true) {
+        if (roleProfilingEnabled) {
           var roleSection = 'role.' + roleName;
+          var isCombatRole = roleName.indexOf('Combat') === 0;
           CpuProfiler.start(roleSection);
           CpuProfiler.start('role.total');
-          if (roleName.indexOf('Combat') === 0) CpuProfiler.start('role.Combat*');
-          roleFn(creep);
-          if (roleName.indexOf('Combat') === 0) CpuProfiler.end('role.Combat*');
-          CpuProfiler.end('role.total');
-          CpuProfiler.end(roleSection);
+          if (isCombatRole) CpuProfiler.start('role.Combat*');
+          try {
+            roleFn(creep);
+          } finally {
+            if (isCombatRole) CpuProfiler.end('role.Combat*');
+            CpuProfiler.end('role.total');
+            CpuProfiler.end(roleSection);
+          }
         } else {
           roleFn(creep);
         }
