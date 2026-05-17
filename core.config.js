@@ -106,6 +106,7 @@ CoreConfig.settings = Object.freeze({
     plannerStampCandidateScanStep: 2,
     plannerStampCandidateMaxChecks: 250,
     plannerStampCandidateReplanTicks: 1500,
+    plannerStampCandidateFailedReplanTicks: 250,
     plannerStampCandidateShowScores: false,
     plannerStampCandidateMaxVisuals: 25,
     maxRemoteHaulRequestsDrawn: 10,

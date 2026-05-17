@@ -11,7 +11,8 @@ var DEFAULTS = Object.freeze({
   showScores: false,
   scoreCandidateVisuals: false,
   minExitRange: 3,
-  pathMaxOps: 1200
+  pathMaxOps: 1200,
+  failedReplanTicks: 250
 });
 
 function plannerMemory(room) {
@@ -30,6 +31,9 @@ function getLayoutMemory(room) {
 function clearLayoutPlan(room) {
   var mem = plannerMemory(room);
   mem.layout = null;
+  delete mem.layoutFailedAt;
+  delete mem.nextLayoutPlanTick;
+  delete mem.layoutFailureReason;
 }
 
 function getConfig(opts) {
@@ -42,7 +46,8 @@ function getConfig(opts) {
     maxVisuals: Number(o.maxVisuals || visualCfg.plannerStampCandidateMaxVisuals || DEFAULTS.maxVisuals),
     showScores: o.showScores === true || visualCfg.plannerStampCandidateShowScores === true,
     minExitRange: Number(o.minExitRange || DEFAULTS.minExitRange),
-    pathMaxOps: Number(o.pathMaxOps || DEFAULTS.pathMaxOps)
+    pathMaxOps: Number(o.pathMaxOps || DEFAULTS.pathMaxOps),
+    failedReplanTicks: Number(o.failedReplanTicks || visualCfg.plannerStampCandidateFailedReplanTicks || DEFAULTS.failedReplanTicks)
   };
 }
 
@@ -208,6 +213,10 @@ function getChosenAnchor(room, stamp, opts) {
     else return { pos: anchorPos, score: layout.score || 0 };
   }
 
+  if (!force && !layout && mem.nextLayoutPlanTick && now < mem.nextLayoutPlanTick) {
+    return null;
+  }
+
   var best = planBestAnchor(room, stamp, opts);
   if (best && best.pos) {
     mem.layout = {
@@ -218,8 +227,14 @@ function getChosenAnchor(room, stamp, opts) {
       rcl: (room.controller && room.controller.level) || 0,
       version: LAYOUT_VERSION
     };
+    delete mem.nextLayoutPlanTick;
+    delete mem.layoutFailureReason;
+    delete mem.layoutFailedAt;
   } else {
     mem.layout = null;
+    mem.layoutFailedAt = now;
+    mem.nextLayoutPlanTick = now + Math.max(1, cfg.failedReplanTicks | 0);
+    mem.layoutFailureReason = 'no-valid-candidate';
   }
   mem.forceLayoutReplan = false;
   return best;
