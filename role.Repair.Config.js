@@ -15,5 +15,12 @@ module.exports = Object.freeze({
   }),
   WIDTH: 0.12,
   OPACITY: 0.45,
-  FONT: 0.7
+  FONT: 0.7,
+  remoteContainerEmergencyRepairEnabled: true,
+  remoteContainerEmergencyRepairStartPct: 0.40,
+  remoteContainerEmergencyRepairStopPct: 0.85,
+  remoteContainerEmergencyRepairMaxPerHome: 1,
+  remoteContainerEmergencyRepairHoldTicks: 50,
+  remoteContainerEmergencyRepairMinContainerEnergy: 100,
+  remoteContainerEmergencyRepairWithdrawAmount: 100
 });
