@@ -220,6 +220,9 @@ BeeVisuals.drawVisuals = function () {
   if (budget === 'full') {
     BeeVisuals.drawPlannedRoadsDebug();
     BeeVisuals.drawWorldOverview();
+    if (vc.remoteMiningMapEnabled !== false) {
+      BeeVisuals.drawRemoteMiningMapVisuals();
+    }
 
     if (vc.remoteHaulMapEnabled === true) {
       BeeVisuals.drawRemoteContainerHaulMapVisuals();
@@ -614,6 +617,136 @@ BeeVisuals.drawWorldOverview = function () {
 };
 
 
+
+
+function shortId(id) {
+  if (!id) return '------';
+  var txt = String(id);
+  return txt.length > 6 ? txt.slice(-6) : txt;
+}
+
+function getRemoteSourcePosition(sourceRecord) {
+  if (!sourceRecord) return null;
+  var roomName = sourceRecord.remoteRoom || sourceRecord.roomName;
+  if (!roomName) return null;
+  if (typeof sourceRecord.x !== 'number' || typeof sourceRecord.y !== 'number') return null;
+  return new RoomPosition(sourceRecord.x, sourceRecord.y, roomName);
+}
+
+function sourceHasLiveAssignedLuna(sourceRecord) {
+  if (!sourceRecord || !sourceRecord.assignedLuna) return false;
+  return !!Game.creeps[sourceRecord.assignedLuna];
+}
+
+function drawMapText(mapVisual, label, pos, color, bg) {
+  if (!mapVisual || !label || !pos) return;
+  mapVisual.text(label, pos, {
+    fontSize: 7,
+    color: color || '#ffffff',
+    backgroundColor: bg || '#000000',
+    backgroundPadding: 0.12,
+    opacity: 0.95
+  });
+}
+
+BeeVisuals.drawRemoteMiningMapVisuals = function () {
+  var vc = visualsConfig();
+  var mod = vc.remoteMiningMapModulo || 5;
+  if (mod > 1 && (Game.time % mod) !== 0) return;
+
+  var mv = Game.map.visual;
+  var maxCreeps = vc.maxRemoteMiningMapCreepsDrawn || 40;
+  var maxSources = vc.maxRemoteMiningMapSourcesDrawn || 80;
+  var sourcesDrawn = 0;
+  var creepsDrawn = 0;
+
+  if (vc.remoteMiningMapShowCreeps !== false) {
+    for (var creepName in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) continue;
+      if (creepsDrawn >= maxCreeps) break;
+      var creep = Game.creeps[creepName];
+      if (!creep || !creep.pos || !creep.memory) continue;
+
+      var role = creep.memory.role;
+      var task = String(creep.memory.task || '').toLowerCase();
+      if (role === 'Luna' || task === 'luna') {
+        drawMapText(mv, '⛏', creep.pos, '#ffe066', '#111111');
+        creepsDrawn++;
+        continue;
+      }
+      if (role === 'Trucker' || task === 'trucker' || task.indexOf('haul') >= 0) {
+        drawMapText(mv, '🚚', creep.pos, '#66ccff', '#111111');
+        creepsDrawn++;
+      }
+    }
+  }
+
+  if (vc.remoteMiningMapShowSources !== false) {
+    var homes = Memory && Memory.__BHM && Memory.__BHM.remoteHarvest && Memory.__BHM.remoteHarvest.homes;
+    if (homes) {
+      for (var homeName in homes) {
+        if (!Object.prototype.hasOwnProperty.call(homes, homeName)) continue;
+        if (sourcesDrawn >= maxSources) break;
+        var homeRec = homes[homeName];
+        if (!homeRec || !homeRec.sources) continue;
+
+        for (var sourceId in homeRec.sources) {
+          if (!Object.prototype.hasOwnProperty.call(homeRec.sources, sourceId)) continue;
+          if (sourcesDrawn >= maxSources) break;
+          var rec = homeRec.sources[sourceId];
+          var spos = getRemoteSourcePosition(rec);
+          if (!spos) continue;
+
+          var label = '⚠';
+          var color = '#ff6b6b';
+          if (sourceHasLiveAssignedLuna(rec)) {
+            label = '✓';
+            color = '#6effa1';
+          } else if (rec.status === 'queued' || (rec.reservedUntil && rec.reservedUntil > Game.time)) {
+            label = '⌛';
+            color = '#ffd166';
+          }
+
+          drawMapText(mv, label, spos, color, '#111111');
+          drawMapText(mv, shortId(sourceId), new RoomPosition(spos.x + 1, spos.y, spos.roomName), '#bbbbbb', '#111111');
+          sourcesDrawn++;
+        }
+      }
+    }
+  }
+
+  if (vc.remoteMiningMapShowContainers === true && sourcesDrawn < maxSources) {
+    var builds = Memory && Memory.__BHM && Memory.__BHM.remoteContainerBuilds;
+    if (builds) {
+      for (var buildSourceId in builds) {
+        if (!Object.prototype.hasOwnProperty.call(builds, buildSourceId)) continue;
+        if (sourcesDrawn >= maxSources) break;
+        var buildRec = builds[buildSourceId];
+        if (!buildRec) continue;
+        var bpos = getRemoteSourcePosition(buildRec);
+        if (!bpos) continue;
+
+        var bLabel = null;
+        var bColor = '#cccccc';
+        var status = buildRec.status || 'missing';
+        if (status === 'building') {
+          bLabel = '🚧';
+          if (typeof buildRec.progressPct === 'number') bLabel = '📦 ' + Math.floor(buildRec.progressPct) + '%';
+          bColor = '#2ad1c9';
+        } else if (status === 'built') {
+          bLabel = '📦';
+          bColor = '#6effa1';
+        } else if (status === 'planned') {
+          bLabel = '□';
+          bColor = '#ffe066';
+        }
+        if (!bLabel) continue;
+        drawMapText(mv, bLabel, new RoomPosition(bpos.x, bpos.y + 1, bpos.roomName), bColor, '#111111');
+        sourcesDrawn++;
+      }
+    }
+  }
+};
 
 BeeVisuals.drawRemoteHaulStatusTable = function () {
   var vc = visualsConfig();
