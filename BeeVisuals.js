@@ -203,8 +203,8 @@ BeeVisuals.drawVisuals = function () {
     drawCpuStats(visual);
   }
 
-  if (budget !== 'minimal') {
-    if (CFG.showRepairCounter) drawRepairCounter(visual);
+  if ((budget === 'medium' || budget === 'full') && CFG.showRepairCounter) {
+    drawRepairCounter(visual);
   }
 
   if (budget === 'full') {
