@@ -664,6 +664,11 @@ function drawMapText(mapVisual, label, pos, color, bg) {
   });
 }
 
+function getRoomCenter(roomName) {
+  if (!roomName) return null;
+  return new RoomPosition(25, 25, roomName);
+}
+
 BeeVisuals.drawRemoteMiningMapVisuals = function () {
   var vc = visualsConfig();
   var mod = vc.remoteMiningMapModulo || 1;
@@ -678,12 +683,38 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
   var containerIconsDrawn = 0;
   var skippedNoPosition = 0;
   var skippedNoHomeData = 0;
+  var homeBeaconsDrawn = 0;
+  var remoteRoomBeaconsDrawn = 0;
+  var homeRooms = [];
+  var remoteRooms = [];
+  var maxDebugRooms = 30;
 
-  if (vc.remoteMiningMapShowHeartbeat !== false) {
-    var firstSpawnName = Object.keys(Game.spawns || {})[0];
-    var firstSpawn = firstSpawnName ? Game.spawns[firstSpawnName] : null;
-    if (firstSpawn && firstSpawn.pos) {
-      drawMapText(mv, '🐝', firstSpawn.pos, '#ffe066', '#111111');
+  if (vc.remoteMiningMapShowHeartbeat !== false && vc.remoteMiningMapShowHomeBeacon !== false) {
+    var seenHomeRooms = {};
+    for (var spawnName in Game.spawns) {
+      if (!Object.prototype.hasOwnProperty.call(Game.spawns, spawnName)) continue;
+      var spawn = Game.spawns[spawnName];
+      var homeRoomName = spawn && spawn.room && spawn.room.name;
+      if (!homeRoomName || seenHomeRooms[homeRoomName]) continue;
+      seenHomeRooms[homeRoomName] = true;
+      var homeCenter = getRoomCenter(homeRoomName);
+      if (!homeCenter) continue;
+      mv.circle(homeCenter, {
+        radius: vc.remoteMiningMapHomeBeaconRadius || 20,
+        fill: 'transparent',
+        stroke: '#ffe066',
+        strokeWidth: 2,
+        opacity: 0.75
+      });
+      mv.text('🐝 BHM', homeCenter, {
+        fontSize: 11,
+        color: '#ffe066',
+        backgroundColor: '#111111',
+        backgroundPadding: 0.25,
+        opacity: 0.95
+      });
+      homeBeaconsDrawn++;
+      if (homeRooms.length < maxDebugRooms) homeRooms.push(homeRoomName);
     }
   }
 
@@ -711,6 +742,7 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
   if (vc.remoteMiningMapShowSources !== false) {
     var homes = Memory && Memory.__BHM && Memory.__BHM.remoteHarvest && Memory.__BHM.remoteHarvest.homes;
     if (homes) {
+      var seenRemoteRooms = {};
       for (var homeName in homes) {
         if (!Object.prototype.hasOwnProperty.call(homes, homeName)) continue;
         if (sourcesDrawn >= maxSources) break;
@@ -728,6 +760,28 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
           if (!spos) {
             skippedNoPosition++;
             continue;
+          }
+          if (vc.remoteMiningMapShowRemoteRoomBeacon !== false && !seenRemoteRooms[spos.roomName]) {
+            seenRemoteRooms[spos.roomName] = true;
+            var remoteCenter = getRoomCenter(spos.roomName);
+            if (remoteCenter) {
+              mv.circle(remoteCenter, {
+                radius: vc.remoteMiningMapRemoteBeaconRadius || 14,
+                fill: 'transparent',
+                stroke: '#66ccff',
+                strokeWidth: 1.4,
+                opacity: 0.35
+              });
+              mv.text('REMOTE', remoteCenter, {
+                fontSize: 8,
+                color: '#66ccff',
+                backgroundColor: '#111111',
+                backgroundPadding: 0.2,
+                opacity: 0.8
+              });
+              remoteRoomBeaconsDrawn++;
+              if (remoteRooms.length < maxDebugRooms) remoteRooms.push(spos.roomName);
+            }
           }
 
           var label = '⚠';
@@ -786,6 +840,26 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
       }
     }
   }
+
+  if (vc.remoteMiningMapTestRoom && typeof vc.remoteMiningMapTestRoom === 'string') {
+    var testCenter = getRoomCenter(vc.remoteMiningMapTestRoom);
+    if (testCenter) {
+      mv.circle(testCenter, {
+        radius: 22,
+        fill: 'transparent',
+        stroke: '#ff00ff',
+        strokeWidth: 2.2,
+        opacity: 0.95
+      });
+      mv.text('MAP TEST', testCenter, {
+        fontSize: 12,
+        color: '#ff00ff',
+        backgroundColor: '#111111',
+        backgroundPadding: 0.3,
+        opacity: 0.98
+      });
+    }
+  }
   if (vc.remoteMiningMapDebugStats === true) {
     Memory.__BHM = Memory.__BHM || {};
     Memory.__BHM.visualDebug = Memory.__BHM.visualDebug || {};
@@ -795,6 +869,11 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
       creepsDrawn: creepsDrawn,
       sourcesDrawn: sourceStateIconsDrawn,
       containersDrawn: containerIconsDrawn,
+      mapVisualSize: (mv && typeof mv.getSize === 'function') ? mv.getSize() : null,
+      homeBeaconsDrawn: homeBeaconsDrawn,
+      remoteRoomBeaconsDrawn: remoteRoomBeaconsDrawn,
+      homeRooms: homeRooms,
+      remoteRooms: remoteRooms,
       skippedNoPosition: skippedNoPosition,
       skippedNoHomeData: skippedNoHomeData,
       modulo: mod,
