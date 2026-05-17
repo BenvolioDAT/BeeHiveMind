@@ -43,6 +43,12 @@ CoreConfig.settings = Object.freeze({
      * temporary while local autonomous defense is being built.
      */
     ENABLE_SQUAD_SPAWNING: false,
+    IDLE_STAGING_ENABLED: true,
+    DEBUG_STAGING_VISUALS: false,
+    STAGING_MIN_RANGE_FROM_SPAWN: 5,
+    STAGING_MAX_RANGE_FROM_SPAWN: 9,
+    STAGING_SLOT_RADIUS: 3,
+    STAGING_REPLAN_TICKS: 1500,
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */

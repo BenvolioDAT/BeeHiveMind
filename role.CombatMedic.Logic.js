@@ -3,6 +3,7 @@
 // CombatMedic behavior implementation only. Public role wiring stays in role.CombatMedic.js.
 var CFG = require('role.CombatMedic.Config');
 var Traveler = require('Traveler');
+var CombatStaging = require('Combat.Staging');
 
 function isCombatRole(creep, roleName) { return creep && creep.memory && creep.memory.role === roleName; }
 function wasRecentlyEngaging(creep) {
@@ -37,7 +38,7 @@ function run(creep) {
   if (creep.hits < creep.hitsMax) creep.heal(creep);
   var groups = getSupportCandidates(creep);
   var target = pickClosestFromGroups(creep, groups);
-  if (!target) { setIdleMemory(creep); return; }
+  if (!target) { setIdleMemory(creep); CombatStaging.moveToStaging(creep); return; }
   setHealingMemory(creep, target);
   if (creep.pos.inRangeTo(target, CFG.HEAL_RANGE)) { creep.heal(target); return; }
   if (creep.pos.inRangeTo(target, CFG.RANGED_HEAL_RANGE)) creep.rangedHeal(target);
