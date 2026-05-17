@@ -17,6 +17,7 @@ function ensureIdentity(creep) {
 
 function isActiveRequest(r, homeName) {
   if (!r || !r.id || r.homeRoom !== homeName) return false;
+  if (r.maintenanceUntil && r.maintenanceUntil > Game.time) return false;
   if ((r.amount || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) return false;
   if ((Game.time - (r.updated || 0)) > CFG.REQUEST_STALE_TICKS) return false;
   return true;
