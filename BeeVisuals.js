@@ -207,11 +207,20 @@ BeeVisuals.drawVisuals = function () {
     drawRepairCounter(visual);
   }
 
+  if ((vc.persistentHud === true || budget === 'medium' || budget === 'full')) {
+    BeeVisuals.drawRemoteHaulStatusTable();
+  }
+
   if (budget === 'full') {
     BeeVisuals.drawPlannedRoadsDebug();
     BeeVisuals.drawWorldOverview();
-    BeeVisuals.drawRemoteContainerHaulMapVisuals();
-    BeeVisuals.drawRemoteContainerHaulVisuals();
+
+    if (vc.remoteHaulMapEnabled === true) {
+      BeeVisuals.drawRemoteContainerHaulMapVisuals();
+    }
+    if (vc.remoteHaulRoomOverlayEnabled === true) {
+      BeeVisuals.drawRemoteContainerHaulVisuals();
+    }
   }
 };
 
@@ -596,6 +605,148 @@ BeeVisuals.drawWorldOverview = function () {
 };
 
 
+
+BeeVisuals.drawRemoteHaulStatusTable = function () {
+  var vc = visualsConfig();
+  if (vc.enabled === false) return;
+  if (vc.remoteHaulTableEnabled === false) return;
+
+  var mod = vc.remoteHaulTableModulo || 1;
+  if (mod > 1 && (Game.time % mod) !== 0) return;
+
+  var root = Memory && Memory.__BHM;
+  var requests = root && root.remoteHaulRequests;
+  if (!requests) return;
+
+  var staleTicks = vc.remoteHaulTableStaleTicks || 150;
+  var showStale = vc.remoteHaulTableShowStale === true;
+  var maxRows = vc.maxRemoteHaulTableRows || 8;
+
+  var ownedRooms = [];
+  for (var roomName in Game.rooms) {
+    if (!Game.rooms.hasOwnProperty(roomName)) continue;
+    var room = Game.rooms[roomName];
+    if (!room || !room.controller || !room.controller.my) continue;
+    if (!room.find || room.find(FIND_MY_SPAWNS).length <= 0) continue;
+    ownedRooms.push(room);
+  }
+
+  for (var i = 0; i < ownedRooms.length; i++) {
+    var roomObj = ownedRooms[i];
+    var rows = [];
+
+    for (var reqId in requests) {
+      if (!requests.hasOwnProperty(reqId)) continue;
+      var req = requests[reqId];
+      if (!req) continue;
+      if (req.homeRoom !== roomObj.name) continue;
+
+      var amount = Number(req.amount) || 0;
+      if (amount <= 0) continue;
+
+      var stale = false;
+      if (typeof req.updated === 'number' && staleTicks > 0) {
+        stale = (Game.time - req.updated) > staleTicks;
+      }
+      if (stale && !showStale) continue;
+
+      var remoteRoomName = req.remoteRoom || req.roomName || '?';
+      var energyAmount = amount;
+      var capacity = Number(req.capacity) || 0;
+      var fillPct = Number(req.fillPct) || 0;
+
+      if (req.containerId) {
+        var container = Game.getObjectById(req.containerId);
+        if (container && container.store) {
+          energyAmount = container.store[RESOURCE_ENERGY] || 0;
+          capacity = container.store.getCapacity(RESOURCE_ENERGY) || container.store.getCapacity() || capacity;
+          if (capacity > 0) {
+            fillPct = Math.floor((energyAmount / capacity) * 100);
+          }
+        } else if (capacity > 0) {
+          fillPct = Math.floor((energyAmount / capacity) * 100);
+        }
+      } else if (capacity > 0) {
+        fillPct = Math.floor((energyAmount / capacity) * 100);
+      }
+
+      if (fillPct < 0) fillPct = 0;
+      if (fillPct > 100) fillPct = 100;
+
+      var assigned = !!(req.assignedTo && req.assignedUntil > Game.time);
+      var status = 'READY';
+      if (stale && showStale) {
+        status = 'STALE';
+      } else if (assigned) {
+        status = req.assignedTo;
+      } else if (req.urgent) {
+        status = 'URGENT';
+      }
+
+      rows.push({
+        roomName: remoteRoomName,
+        energy: energyAmount,
+        fillPct: fillPct,
+        status: status,
+        urgent: !!req.urgent,
+        assigned: assigned,
+        amount: energyAmount
+      });
+    }
+
+    if (rows.length <= 0) continue;
+
+    rows.sort(function (a, b) {
+      if (a.urgent !== b.urgent) return a.urgent ? -1 : 1;
+      if (a.assigned !== b.assigned) return a.assigned ? -1 : 1;
+      return (b.amount || 0) - (a.amount || 0);
+    });
+
+    var shownRows = rows.slice(0, maxRows);
+    var hiddenCount = rows.length - shownRows.length;
+
+    var panelX = 1.0;
+    var panelY = 1.2;
+    var rowHeight = 0.55;
+    var panelWidth = 14.4;
+    var totalRows = 1 + shownRows.length + (hiddenCount > 0 ? 1 : 0);
+    var panelHeight = 0.55 + (totalRows * rowHeight);
+
+    var v = new RoomVisual(roomObj.name);
+    v.rect(panelX - 0.2, panelY - 0.45, panelWidth, panelHeight, {
+      fill: '#000000',
+      opacity: 0.35,
+      stroke: '#333333',
+      strokeWidth: 0.05
+    });
+
+    text(v, 'Remote Haul', panelX, panelY, 0.5, 'left', 1, '#ffffff');
+    text(v, 'Room', panelX, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'Energy', panelX + 3.9, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'Full', panelX + 7.5, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'Status', panelX + 9.8, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+
+    for (var r = 0; r < shownRows.length; r++) {
+      var line = shownRows[r];
+      var y = panelY + rowHeight * (2 + r);
+      var statusColor = '#00ff66';
+      if (line.status === 'URGENT') statusColor = '#ff8c42';
+      if (line.status === 'STALE') statusColor = '#ff5555';
+      if (line.assigned) statusColor = '#66ccff';
+
+      text(v, line.roomName, panelX, y, 0.42, 'left', 1, '#ffffff');
+      text(v, String(line.energy), panelX + 3.9, y, 0.42, 'left', 1, '#ffffff');
+      text(v, line.fillPct + '%', panelX + 7.5, y, 0.42, 'left', 1, '#ffffff');
+      text(v, line.status, panelX + 9.8, y, 0.42, 'left', 1, statusColor);
+    }
+
+    if (hiddenCount > 0) {
+      var moreY = panelY + rowHeight * (2 + shownRows.length);
+      text(v, '+' + hiddenCount + ' more', panelX, moreY, 0.42, 'left', 1, '#aaaaaa');
+    }
+  }
+};
+
 /**
  * Draw remote container haul request overlays directly from memory requests.
  * Uses RoomVisual(roomName) so remote rooms can be drawn from remembered positions.
@@ -603,6 +754,7 @@ BeeVisuals.drawWorldOverview = function () {
 BeeVisuals.drawRemoteContainerHaulVisuals = function () {
   if (BeeVisuals.visualBudgetLevel() !== 'full') return;
   if (!CFG.showRemoteContainerHaulVisuals) return;
+  if (visualsConfig().remoteHaulRoomOverlayEnabled !== true) return;
 
   try {
     if (!Memory.__BHM || !Memory.__BHM.remoteHaulRequests) return;
@@ -678,6 +830,7 @@ BeeVisuals.drawRemoteContainerHaulVisuals = function () {
 BeeVisuals.drawRemoteContainerHaulMapVisuals = function () {
   if (BeeVisuals.visualBudgetLevel() !== 'full') return;
   if (!CFG.showRemoteContainerHaulMapVisuals) return;
+  if (visualsConfig().remoteHaulMapEnabled !== true) return;
   var vc = visualsConfig();
   var mapMod = vc.remoteHaulMapModulo || CFG.remoteContainerHaulMapModulo || 1;
   if (mapMod > 0 && (Game.time % mapMod) !== 0) return;
