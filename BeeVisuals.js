@@ -217,12 +217,13 @@ BeeVisuals.drawVisuals = function () {
     }
   }
 
+  if ((vc.remoteMiningMapEnabled !== false) && (vc.persistentHud === true || budget === 'medium' || budget === 'full')) {
+    BeeVisuals.drawRemoteMiningMapVisuals();
+  }
+
   if (budget === 'full') {
     BeeVisuals.drawPlannedRoadsDebug();
     BeeVisuals.drawWorldOverview();
-    if (vc.remoteMiningMapEnabled !== false) {
-      BeeVisuals.drawRemoteMiningMapVisuals();
-    }
 
     if (vc.remoteHaulMapEnabled === true) {
       BeeVisuals.drawRemoteContainerHaulMapVisuals();
@@ -627,10 +628,24 @@ function shortId(id) {
 
 function getRemoteSourcePosition(sourceRecord) {
   if (!sourceRecord) return null;
+
   var roomName = sourceRecord.remoteRoom || sourceRecord.roomName;
-  if (!roomName) return null;
-  if (typeof sourceRecord.x !== 'number' || typeof sourceRecord.y !== 'number') return null;
-  return new RoomPosition(sourceRecord.x, sourceRecord.y, roomName);
+  if (roomName && typeof sourceRecord.x === 'number' && typeof sourceRecord.y === 'number') {
+    return new RoomPosition(sourceRecord.x, sourceRecord.y, roomName);
+  }
+
+  if (sourceRecord.pos && typeof sourceRecord.pos.x === 'number' && typeof sourceRecord.pos.y === 'number' && sourceRecord.pos.roomName) {
+    return new RoomPosition(sourceRecord.pos.x, sourceRecord.pos.y, sourceRecord.pos.roomName);
+  }
+
+  if (sourceRecord.container && typeof sourceRecord.container.x === 'number' && typeof sourceRecord.container.y === 'number') {
+    var containerRoom = sourceRecord.container.roomName || sourceRecord.remoteRoom || sourceRecord.roomName;
+    if (containerRoom) {
+      return new RoomPosition(sourceRecord.container.x, sourceRecord.container.y, containerRoom);
+    }
+  }
+
+  return null;
 }
 
 function sourceHasLiveAssignedLuna(sourceRecord) {
@@ -651,7 +666,7 @@ function drawMapText(mapVisual, label, pos, color, bg) {
 
 BeeVisuals.drawRemoteMiningMapVisuals = function () {
   var vc = visualsConfig();
-  var mod = vc.remoteMiningMapModulo || 5;
+  var mod = vc.remoteMiningMapModulo || 1;
   if (mod > 1 && (Game.time % mod) !== 0) return;
 
   var mv = Game.map.visual;
@@ -659,6 +674,18 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
   var maxSources = vc.maxRemoteMiningMapSourcesDrawn || 80;
   var sourcesDrawn = 0;
   var creepsDrawn = 0;
+  var sourceStateIconsDrawn = 0;
+  var containerIconsDrawn = 0;
+  var skippedNoPosition = 0;
+  var skippedNoHomeData = 0;
+
+  if (vc.remoteMiningMapShowHeartbeat !== false) {
+    var firstSpawnName = Object.keys(Game.spawns || {})[0];
+    var firstSpawn = firstSpawnName ? Game.spawns[firstSpawnName] : null;
+    if (firstSpawn && firstSpawn.pos) {
+      drawMapText(mv, '🐝', firstSpawn.pos, '#ffe066', '#111111');
+    }
+  }
 
   if (vc.remoteMiningMapShowCreeps !== false) {
     for (var creepName in Game.creeps) {
@@ -688,14 +715,20 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
         if (!Object.prototype.hasOwnProperty.call(homes, homeName)) continue;
         if (sourcesDrawn >= maxSources) break;
         var homeRec = homes[homeName];
-        if (!homeRec || !homeRec.sources) continue;
+        if (!homeRec || !homeRec.sources) {
+          skippedNoHomeData++;
+          continue;
+        }
 
         for (var sourceId in homeRec.sources) {
           if (!Object.prototype.hasOwnProperty.call(homeRec.sources, sourceId)) continue;
           if (sourcesDrawn >= maxSources) break;
           var rec = homeRec.sources[sourceId];
           var spos = getRemoteSourcePosition(rec);
-          if (!spos) continue;
+          if (!spos) {
+            skippedNoPosition++;
+            continue;
+          }
 
           var label = '⚠';
           var color = '#ff6b6b';
@@ -708,7 +741,10 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
           }
 
           drawMapText(mv, label, spos, color, '#111111');
-          drawMapText(mv, shortId(sourceId), new RoomPosition(spos.x + 1, spos.y, spos.roomName), '#bbbbbb', '#111111');
+          sourceStateIconsDrawn++;
+          if (vc.remoteMiningMapShowSourceLabels !== false) {
+            drawMapText(mv, shortId(sourceId), new RoomPosition(spos.x + 1, spos.y, spos.roomName), '#bbbbbb', '#111111');
+          }
           sourcesDrawn++;
         }
       }
@@ -724,7 +760,10 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
         var buildRec = builds[buildSourceId];
         if (!buildRec) continue;
         var bpos = getRemoteSourcePosition(buildRec);
-        if (!bpos) continue;
+        if (!bpos) {
+          skippedNoPosition++;
+          continue;
+        }
 
         var bLabel = null;
         var bColor = '#cccccc';
@@ -742,10 +781,27 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
         }
         if (!bLabel) continue;
         drawMapText(mv, bLabel, new RoomPosition(bpos.x, bpos.y + 1, bpos.roomName), bColor, '#111111');
+        containerIconsDrawn++;
         sourcesDrawn++;
       }
     }
   }
+  if (vc.remoteMiningMapDebugStats === true) {
+    Memory.__BHM = Memory.__BHM || {};
+    Memory.__BHM.visualDebug = Memory.__BHM.visualDebug || {};
+    Memory.__BHM.visualDebug.remoteMiningMap = {
+      tick: Game.time,
+      ran: true,
+      creepsDrawn: creepsDrawn,
+      sourcesDrawn: sourceStateIconsDrawn,
+      containersDrawn: containerIconsDrawn,
+      skippedNoPosition: skippedNoPosition,
+      skippedNoHomeData: skippedNoHomeData,
+      modulo: mod,
+      budgetHint: BeeVisuals.visualBudgetLevel ? BeeVisuals.visualBudgetLevel() : null
+    };
+  }
+
 };
 
 BeeVisuals.drawRemoteHaulStatusTable = function () {
