@@ -1202,7 +1202,8 @@ function isLunaRoomUnsafe(roomName) {
     var requests = ensureRemoteHaulRequestsMemory();
     var id = container.id || source.id;
     if (amount < minAmount || isLunaRoomUnsafe(container.pos.roomName)) { delete requests[id]; return; }
-    requests[id] = { id: id, homeRoom: homeName, remoteRoom: container.pos.roomName, sourceId: source.id, containerId: container.id, amount: amount, capacity: container.store.getCapacity(RESOURCE_ENERGY) || 2000, fillPct: (container.store.getCapacity(RESOURCE_ENERGY) > 0 ? amount / container.store.getCapacity(RESOURCE_ENERGY) : 0), x: container.pos.x, y: container.pos.y, roomName: container.pos.roomName, urgent: amount >= urgentThreshold || (amount / Math.max(1, container.store.getCapacity(RESOURCE_ENERGY))) >= 0.8, updated: Game.time, assignedTo: (requests[id] && requests[id].assignedTo) || null, assignedUntil: (requests[id] && requests[id].assignedUntil) || 0 };
+    var prev = requests[id] || {};
+    requests[id] = { id: id, homeRoom: homeName, remoteRoom: container.pos.roomName, sourceId: source.id, containerId: container.id, amount: amount, capacity: container.store.getCapacity(RESOURCE_ENERGY) || 2000, fillPct: (container.store.getCapacity(RESOURCE_ENERGY) > 0 ? amount / container.store.getCapacity(RESOURCE_ENERGY) : 0), x: container.pos.x, y: container.pos.y, roomName: container.pos.roomName, urgent: amount >= urgentThreshold || (amount / Math.max(1, container.store.getCapacity(RESOURCE_ENERGY))) >= 0.8, updated: Game.time, assignedTo: prev.assignedTo || null, assignedUntil: prev.assignedUntil || 0, maintenanceUntil: prev.maintenanceUntil || 0, maintenanceBy: prev.maintenanceBy || null, maintenanceReason: prev.maintenanceReason || null };
   }
 
   function findAssignedSourceContainer(creep, source) {
@@ -1559,7 +1560,7 @@ function isLunaRoomUnsafe(roomName) {
       }
 
       var infra = ensureSourceContainerOrSite(src);
-      var container = infra.container;
+      var container = findAssignedSourceContainer(creep, src) || infra.container;
       var site = infra.site;
 
       creep.memory.assignedSource = sid;
@@ -1602,31 +1603,34 @@ function isLunaRoomUnsafe(roomName) {
       if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); creep.travelTo(site, { range: 0, reusePath: 10 }); return; }
       if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); creep.travelTo(src, { range: 1, reusePath: 10 }); return; }
 
+      if (container && creep.memory.lunaRepairingContainer) {
+        markContainerRepairMaintenanceHold(creep, container, src);
+        var minEnergy = CFG.remoteContainerRepairMinContainerEnergy || 100;
+        var withdrawAmount = CFG.remoteContainerRepairWithdrawAmount || 50;
+        if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+          if (creep.pos.getRangeTo(container) > 3) {
+            creep.travelTo(container, { range: 3, reusePath: 5 });
+            return;
+          }
+          creep.repair(container);
+          creep.say('🔧 box', true);
+          return;
+        }
+        var available = (container.store && container.store[RESOURCE_ENERGY]) || 0;
+        var maxTake = Math.max(0, available - minEnergy);
+        var need = Math.min(withdrawAmount, creep.store.getFreeCapacity(RESOURCE_ENERGY), maxTake);
+        if (need > 0) {
+          creep.withdraw(container, RESOURCE_ENERGY, need);
+          return;
+        }
+        creep.harvest(src);
+        return;
+      }
+
       debugSay(creep, '⛏️SRC');
       var rc = creep.harvest(src);
       if (rc === OK) touchSourceActive(creep.room.name, sid);
       debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, 'SRC');
-
-      if (container && creep.memory.lunaRepairingContainer) {
-        var minEnergy = CFG.remoteContainerRepairMinContainerEnergy || 100;
-        var withdrawAmount = CFG.remoteContainerRepairWithdrawAmount || 50;
-        if (creep.store.getUsedCapacity(RESOURCE_ENERGY) <= 0) {
-          var available = (container.store && container.store[RESOURCE_ENERGY]) || 0;
-          if (available >= minEnergy) {
-            var maxTake = Math.max(0, available - minEnergy);
-            var need = Math.min(withdrawAmount, creep.store.getFreeCapacity(RESOURCE_ENERGY), maxTake);
-            if (need > 0) {
-              markContainerRepairMaintenanceHold(creep, container, src);
-              creep.withdraw(container, RESOURCE_ENERGY, need);
-            }
-          }
-        }
-        if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && creep.pos.getRangeTo(container) <= 3) {
-          markContainerRepairMaintenanceHold(creep, container, src);
-          creep.repair(container);
-          creep.say('🔧 box', true);
-        }
-      }
 
       if (container && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         debugDrawLine(creep, container, CFG.DRAW.OFFLOAD, 'CONT');
