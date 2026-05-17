@@ -147,6 +147,7 @@ function buildRampartPreview(room, stamp, anchor, reservations, opts) {
   mem.skippedReserved = summary.skippedReserved;
   mem.skippedWall = summary.skippedWall;
   mem.skippedExit = summary.skippedExit;
+  mem.anchorSource = o.anchorSource || 'fallback';
   mem.version = 1;
 
   return plan;
