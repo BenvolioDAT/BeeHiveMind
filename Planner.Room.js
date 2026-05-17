@@ -211,6 +211,124 @@ function planPriorityForRcl(rcl) {
   return [STRUCTURE_EXTENSION];
 }
 
+function stampBuildConfig() {
+  return (CoreConfig && CoreConfig.settings && CoreConfig.settings.visuals) || {};
+}
+
+function shouldUseStampBuild(room) {
+  if (!room) return false;
+  var cfg = stampBuildConfig();
+  if (!cfg.plannerStampBuildEnabled) return false;
+  if (cfg.plannerStampBuildRoom && cfg.plannerStampBuildRoom !== room.name) return false;
+  return true;
+}
+
+function isStampBuildTypeAllowed(type, rcl) {
+  var lvl = Number(rcl) || 0;
+  if (type === STRUCTURE_EXTENSION) return lvl >= 2;
+  if (type === STRUCTURE_TOWER) return lvl >= 3;
+  return false;
+}
+
+function countExistingOrSiteAt(room, x, y, type) {
+  var structs = room.lookForAt(LOOK_STRUCTURES, x, y);
+  for (var i = 0; i < structs.length; i++) {
+    if (structs[i].structureType === type) return 1;
+  }
+  var sites = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y);
+  for (var j = 0; j < sites.length; j++) {
+    if (sites[j].structureType === type) return 1;
+  }
+  return 0;
+}
+
+function canPlaceStampStructure(room, snapshot, x, y, type) {
+  if (x < 1 || x > 48 || y < 1 || y > 48) return false;
+  if (snapshot.terrain.get(x, y) === TERRAIN_MASK_WALL) return false;
+  if (countExistingOrSiteAt(room, x, y, type) > 0) return false;
+
+  // Keep roads intact; stamp build should never overwrite travel lanes.
+  var structs = room.lookForAt(LOOK_STRUCTURES, x, y);
+  for (var i = 0; i < structs.length; i++) {
+    var st = structs[i];
+    if (st.structureType === STRUCTURE_RAMPART && st.my) continue;
+    return false;
+  }
+  var sites = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y);
+  for (var j = 0; j < sites.length; j++) {
+    if (sites[j].structureType !== type) return false;
+  }
+
+  var sources = room.find(FIND_SOURCES);
+  for (var s = 0; s < sources.length; s++) {
+    if (sources[s].pos.x === x && sources[s].pos.y === y) return false;
+  }
+  var mins = room.find(FIND_MINERALS);
+  for (var m = 0; m < mins.length; m++) {
+    if (mins[m].pos.x === x && mins[m].pos.y === y) return false;
+  }
+  if (room.controller && room.controller.pos.x === x && room.controller.pos.y === y) return false;
+  return true;
+}
+
+function ensureStampLayoutSites(room, anchor, stamp, snapshot, allowedFn, rcl, slotsLeft, globalCapLeft) {
+  var placed = 0;
+  var skippedBlocked = 0;
+  var skippedCap = 0;
+  var skippedType = 0;
+  if (!room || !anchor || !stamp) return { placed: 0, skippedBlocked: 0, skippedCap: 0, skippedType: 0 };
+  if (slotsLeft <= 0 || globalCapLeft <= 0) return { placed: 0, skippedBlocked: 0, skippedCap: 0, skippedType: 0 };
+
+  var absTiles = PlannerStamps.getAbsoluteStampTiles(stamp, anchor);
+  // Priority order follows stamp metadata: lower RCL first, then lower p first.
+  absTiles.sort(function (a, b) {
+    var ar = a.rcl || 0;
+    var br = b.rcl || 0;
+    if (ar !== br) return ar - br;
+    var ap = a.p || 0;
+    var bp = b.p || 0;
+    return ap - bp;
+  });
+
+  for (var i = 0; i < absTiles.length; i++) {
+    if (slotsLeft <= 0 || globalCapLeft <= 0) break;
+    var t = absTiles[i];
+    if ((t.rcl || 0) > (rcl || 0)) continue;
+
+    if (!isStampBuildTypeAllowed(t.type, rcl)) {
+      skippedType++;
+      continue;
+    }
+
+    var have = (snapshot.built[t.type] || 0) + (snapshot.sites[t.type] || 0);
+    var cap = allowedFn(t.type);
+    if (have >= cap) {
+      skippedCap++;
+      continue;
+    }
+
+    if (!canPlaceStampStructure(room, snapshot, t.x, t.y, t.type)) {
+      skippedBlocked++;
+      continue;
+    }
+
+    var rc = room.createConstructionSite(t.x, t.y, t.type);
+    if (rc === OK) {
+      placed++;
+      slotsLeft--;
+      globalCapLeft--;
+      snapshot.sites[t.type] = (snapshot.sites[t.type] || 0) + 1;
+    } else if (rc === ERR_FULL) {
+      skippedCap++;
+      break;
+    } else {
+      skippedBlocked++;
+    }
+  }
+
+  return { placed: placed, skippedBlocked: skippedBlocked, skippedCap: skippedCap, skippedType: skippedType };
+}
+
 function orderedBaseOffsetsForRcl(rcl) {
   var priority = planPriorityForRcl(rcl);
   var ordered = [];
@@ -292,18 +410,72 @@ function ensureSites(room) {
     return;
   }
 
-  // Phase 2: follow the base offsets as long as we have placements left.
-  const basePlaced = ensureBaseLayout(
-    room,
-    anchor,
-    snapshot,
-    allowedFn,
-    rcl,
-    CFG.maxSitesPerTick - placed,
-    CFG.csiteSafetyLimit - cCount
-  );
-  placed += basePlaced;
-  cCount += basePlaced;
+  var buildCfg = stampBuildConfig();
+  var stampBuildActive = shouldUseStampBuild(room);
+  if (stampBuildActive) {
+    var stamp = PlannerStamps.getDefaultCoreStamp();
+    var chosen = stamp ? PlannerLayout.getChosenAnchor(room, stamp, {
+      scanStep: buildCfg.plannerStampCandidateScanStep,
+      maxChecks: buildCfg.plannerStampCandidateMaxChecks,
+      replanTicks: buildCfg.plannerStampCandidateReplanTicks,
+      showScores: buildCfg.plannerStampCandidateShowScores
+    }) : null;
+    var stampAnchor = chosen && chosen.pos ? chosen.pos : null;
+    var memStamp = plannerMemory(room);
+    if (stampAnchor && stamp) {
+      var stampMaxRcl = Number(buildCfg.plannerStampBuildRclMax || 3);
+      var stampRcl = Math.min(rcl || 0, stampMaxRcl);
+      var stampPerTick = Math.max(0, Number(buildCfg.plannerStampBuildMaxSitesPerTick || 0));
+      var stampResult = ensureStampLayoutSites(
+        room,
+        stampAnchor,
+        stamp,
+        snapshot,
+        allowedFn,
+        stampRcl,
+        Math.min(CFG.maxSitesPerTick - placed, stampPerTick),
+        CFG.csiteSafetyLimit - cCount
+      );
+      placed += stampResult.placed;
+      cCount += stampResult.placed;
+      memStamp.lastStampBuild = {
+        t: Game.time,
+        stampId: stamp.id,
+        anchor: { x: stampAnchor.x, y: stampAnchor.y, roomName: stampAnchor.roomName },
+        placed: stampResult.placed,
+        skippedBlocked: stampResult.skippedBlocked,
+        skippedCap: stampResult.skippedCap,
+        skippedType: stampResult.skippedType
+      };
+    } else {
+      memStamp.lastStampBuild = {
+        t: Game.time,
+        stampId: stamp ? stamp.id : null,
+        anchor: null,
+        placed: 0,
+        skippedBlocked: 0,
+        skippedCap: 0,
+        skippedType: 0,
+        skippedNoAnchor: 1
+      };
+    }
+  }
+
+  var skipLegacy = stampBuildActive && buildCfg.plannerStampBuildSkipLegacyBaseLayout === true;
+  if (!skipLegacy) {
+    // Phase 2/3: follow the legacy base offsets as long as we have placements left.
+    const basePlaced = ensureBaseLayout(
+      room,
+      anchor,
+      snapshot,
+      allowedFn,
+      rcl,
+      CFG.maxSitesPerTick - placed,
+      CFG.csiteSafetyLimit - cCount
+    );
+    placed += basePlaced;
+    cCount += basePlaced;
+  }
 
   mem.nextPlanTick = Game.time + (placed ? CFG.noPlacementCooldownPlaced : CFG.noPlacementCooldownNone);
 }
