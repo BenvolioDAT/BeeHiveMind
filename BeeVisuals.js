@@ -203,8 +203,8 @@ BeeVisuals.drawVisuals = function () {
     drawCpuStats(visual);
   }
 
-  if (budget !== 'minimal') {
-    if (CFG.showRepairCounter) drawRepairCounter(visual);
+  if ((budget === 'medium' || budget === 'full' || (vc.persistentHud === true)) && CFG.showRepairCounter) {
+    drawRepairCounter(visual);
   }
 
   if (budget === 'full') {
@@ -364,8 +364,8 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
   var room = getMainRoom();
   if (!room) return;
   var budget = BeeVisuals.visualBudgetLevel();
-  if (budget !== 'full' && budget !== 'medium') return;
   var vc = visualsConfig();
+  if (budget !== 'full' && budget !== 'medium' && vc.persistentHud !== true) return;
   if (!shouldDrawForRoom(vc.workerTableModulo || CFG.tableTickModulo, room.name)) return;
 
   var v = new RoomVisual(room.name);
