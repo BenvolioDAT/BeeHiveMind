@@ -1192,6 +1192,42 @@ function isLunaRoomUnsafe(roomName) {
     return Memory.__BHM.remoteHaulRequests;
   }
 
+  function ensureRemoteContainerStatusMemory() {
+    if (!Memory.__BHM) Memory.__BHM = {};
+    if (!Memory.__BHM.remoteContainerStatus) Memory.__BHM.remoteContainerStatus = {};
+    return Memory.__BHM.remoteContainerStatus;
+  }
+
+  function upsertRemoteContainerStatus(creep, source, container) {
+    if (!creep || !source || !container) return;
+    var homeName = getHomeName(creep);
+    if (!homeName || container.pos.roomName === homeName) return;
+    var status = ensureRemoteContainerStatusMemory();
+    var key = container.id || source.id;
+    var prev = status[key] || {};
+    var amount = container.store ? (container.store[RESOURCE_ENERGY] || 0) : 0;
+    var capacity = container.store ? (container.store.getCapacity(RESOURCE_ENERGY) || 2000) : 2000;
+    status[key] = {
+      id: container.id,
+      homeRoom: homeName,
+      remoteRoom: container.pos.roomName,
+      roomName: container.pos.roomName,
+      sourceId: source.id,
+      containerId: container.id,
+      x: container.pos.x,
+      y: container.pos.y,
+      amount: amount,
+      capacity: capacity,
+      containerHits: container.hits || 0,
+      containerHitsMax: container.hitsMax || 0,
+      containerHitsPct: container.hitsMax > 0 ? container.hits / container.hitsMax : 1,
+      updated: Game.time,
+      maintenanceUntil: prev.maintenanceUntil || 0,
+      maintenanceBy: prev.maintenanceBy || null,
+      maintenanceReason: prev.maintenanceReason || null
+    };
+  }
+
   function upsertRemoteHaulRequest(creep, source, container) {
     if (!creep || !source || !container) return;
     var homeName = getHomeName(creep);
@@ -1651,7 +1687,10 @@ function isLunaRoomUnsafe(roomName) {
       } else if (!container && !site && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
         creep.drop(RESOURCE_ENERGY);
       }
-      if (container) upsertRemoteHaulRequest(creep, src, container);
+      if (container) {
+        upsertRemoteContainerStatus(creep, src, container);
+        upsertRemoteHaulRequest(creep, src, container);
+      }
     }
   };
 

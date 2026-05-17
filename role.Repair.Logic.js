@@ -52,6 +52,11 @@ function getRemoteHaulRequestById(id){
   if (!root || !id) return null;
   return root[id] || null;
 }
+function getRemoteContainerStatusById(id){
+  var root = Memory.__BHM && Memory.__BHM.remoteContainerStatus;
+  if (!root || !id) return null;
+  return root[id] || null;
+}
 function clearRemoteTask(creep){
   if (!creep || !creep.memory) return;
   delete creep.memory.task;
@@ -61,6 +66,7 @@ function clearRemoteTask(creep){
   delete creep.memory.requestId;
   delete creep.memory.x;
   delete creep.memory.y;
+  delete creep.memory.remoteRepairMissingTicks;
   delete creep.memory.remoteRepairReturningHome;
 }
 function runRemoteContainerEmergencyRepair(creep){
@@ -83,6 +89,14 @@ function runRemoteContainerEmergencyRepair(creep){
 
   var container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
   if (!container) {
+    if (creep.room.name === creep.memory.targetRoom) {
+      creep.memory.remoteRepairMissingTicks = (creep.memory.remoteRepairMissingTicks || 0) + 1;
+      if (creep.memory.remoteRepairMissingTicks >= 25) {
+        creep.memory.remoteRepairReturningHome = true;
+      }
+    } else {
+      creep.memory.remoteRepairMissingTicks = 0;
+    }
     var tx = creep.memory.x;
     var ty = creep.memory.y;
     var tr = creep.memory.targetRoom;
@@ -91,6 +105,7 @@ function runRemoteContainerEmergencyRepair(creep){
     }
     return;
   }
+  creep.memory.remoteRepairMissingTicks = 0;
 
   var hitsPct = container.hitsMax > 0 ? (container.hits / container.hitsMax) : 1;
   if (hitsPct >= stopPct) {
@@ -104,10 +119,16 @@ function runRemoteContainerEmergencyRepair(creep){
   }
 
   var req = getRemoteHaulRequestById(creep.memory.requestId || container.id);
+  var status = getRemoteContainerStatusById(container.id);
   if (req) {
     req.maintenanceUntil = Game.time + holdTicks;
     req.maintenanceBy = creep.name;
     req.maintenanceReason = 'emergencyRemoteRepair';
+  }
+  if (status) {
+    status.maintenanceUntil = Game.time + holdTicks;
+    status.maintenanceBy = creep.name;
+    status.maintenanceReason = 'emergencyRemoteRepair';
   }
 
   var energy = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;

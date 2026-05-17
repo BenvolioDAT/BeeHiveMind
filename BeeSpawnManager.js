@@ -841,7 +841,9 @@ function isRepairAlreadyAssignedToContainer(roomName, containerId) {
 
 function findRemoteContainerEmergencyRepairRequest(roomName) {
   if (!RepairConfig.remoteContainerEmergencyRepairEnabled) return null;
-  var requests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
+  var statusRequests = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : null;
+  var haulRequests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
+  var requests = statusRequests || haulRequests;
   var staleTicks = (TruckerConfig && TruckerConfig.REQUEST_STALE_TICKS) || 100;
   var startPct = RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40;
   for (var id in requests) {
@@ -853,7 +855,11 @@ function findRemoteContainerEmergencyRepairRequest(roomName) {
     if (req.containerHitsPct > startPct) continue;
     if ((Game.time - (req.updated || 0)) > staleTicks) continue;
     if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
-    if (req.maintenanceUntil && req.maintenanceUntil > Game.time && req.maintenanceBy) continue;
+    var heldByEmergencyRepair =
+      req.maintenanceUntil &&
+      req.maintenanceUntil > Game.time &&
+      req.maintenanceReason === 'emergencyRemoteRepair';
+    if (heldByEmergencyRepair) continue;
     if (isRepairAlreadyAssignedToContainer(roomName, req.containerId)) continue;
     return req;
   }
