@@ -864,6 +864,17 @@ function computeRoomQuotas(C, room) {
   var localDefense = computeLocalDefenseQuotas(room);
   var sourceCount = room ? room.find(FIND_SOURCES).length : 0;
   var safeBaseHarvestQuota = Math.max(1, sourceCount || 0);
+  var localRepairQuota = computeLocalRepairQuotaForRoom(room);
+  var maxRemoteEmergencyPerHome = Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1);
+  var activeRemoteEmergencyRepairs = countRemoteEmergencyRepairAssignments(room.name);
+  var emergencyRepairQuota = 0;
+  if (maxRemoteEmergencyPerHome > 0 && activeRemoteEmergencyRepairs < maxRemoteEmergencyPerHome) {
+    emergencyRepairQuota = findRemoteContainerEmergencyRepairRequest(room.name) ? 1 : 0;
+  }
+  var repairQuota = Math.min(
+    Math.max(localRepairQuota, emergencyRepairQuota),
+    Math.max(1, maxRemoteEmergencyPerHome)
+  );
 
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
@@ -1179,11 +1190,3 @@ var BeeSpawnManager = {
 };
 
 module.exports = BeeSpawnManager;
-  var localRepairQuota = computeLocalRepairQuotaForRoom(room);
-  var maxRemoteEmergencyPerHome = Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1);
-  var activeRemoteEmergencyRepairs = countRemoteEmergencyRepairAssignments(room.name);
-  var emergencyRepairQuota = 0;
-  if (maxRemoteEmergencyPerHome > 0 && activeRemoteEmergencyRepairs < maxRemoteEmergencyPerHome) {
-    emergencyRepairQuota = findRemoteContainerEmergencyRepairRequest(room.name) ? 1 : 0;
-  }
-  var repairQuota = Math.min(Math.max(localRepairQuota, emergencyRepairQuota), Math.max(1, maxRemoteEmergencyPerHome));
