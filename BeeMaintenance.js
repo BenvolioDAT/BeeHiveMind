@@ -278,6 +278,51 @@ function isSourceMetadataRecord(sourceRecord) {
   return false;
 }
 
+function isLikelyAssignmentMap(sourceRecord) {
+  if (!_isObject(sourceRecord) || Array.isArray(sourceRecord)) return false;
+  if (isSourceMetadataRecord(sourceRecord)) return false;
+
+  var assignmentLikeKeys = {
+    miner: true,
+    harvester: true,
+    baseharvest: true,
+    baseHarvest: true,
+    luna: true,
+    remoteharvest: true,
+    remoteHarvest: true,
+    hauler: true,
+    trucker: true,
+    courier: true,
+    builder: true,
+    repair: true,
+    upgrader: true,
+    queen: true,
+    scout: true,
+    claimer: true,
+    owner: true,
+    assigned: true,
+    assignedCreep: true,
+    creep: true
+  };
+
+  var hasAssignmentSignal = false;
+  for (var key in sourceRecord) {
+    if (!_hasOwn(sourceRecord, key)) continue;
+    var value = sourceRecord[key];
+
+    if (value == null) {
+      if (assignmentLikeKeys[key]) hasAssignmentSignal = true;
+      continue;
+    }
+
+    if (typeof value !== 'string') return false;
+    if (assignmentLikeKeys[key]) hasAssignmentSignal = true;
+    if (Game.creeps[value]) hasAssignmentSignal = true;
+  }
+
+  return hasAssignmentSignal;
+}
+
 function _pruneSourceAssignments(roomMemory) {
   if (!_isObject(roomMemory.sources)) return;
   for (var sourceId in roomMemory.sources) {
@@ -301,17 +346,25 @@ function _pruneSourceAssignments(roomMemory) {
         continue;
       }
 
-      // Object form: drop role slots that point at dead creeps so reassignment can happen.
-      var keptSlots = {};
-      for (var role in assignedCreeps) {
-        if (!assignedCreeps.hasOwnProperty(role)) continue;
-        var creepName = assignedCreeps[role];
-        if (creepName && Game.creeps[creepName]) {
-          keptSlots[role] = creepName;
+      if (isLikelyAssignmentMap(assignedCreeps)) {
+        // Assignment-map form: drop role slots that point at dead creeps so
+        // reassignment can happen.
+        var keptSlots = {};
+        for (var role in assignedCreeps) {
+          if (!assignedCreeps.hasOwnProperty(role)) continue;
+          var creepName = assignedCreeps[role];
+          if (creepName && Game.creeps[creepName]) {
+            keptSlots[role] = creepName;
+          }
         }
+        if (_isEmptyObject(keptSlots)) delete roomMemory.sources[sourceId];
+        else roomMemory.sources[sourceId] = keptSlots;
+        continue;
       }
-      if (_isEmptyObject(keptSlots)) delete roomMemory.sources[sourceId];
-      else roomMemory.sources[sourceId] = keptSlots;
+
+      // Unknown source object shapes are preserved deliberately. Source memory
+      // now stores intel/build metadata, and future fields should survive
+      // cleanup even if this maintenance pass does not recognize them yet.
     }
   }
 
