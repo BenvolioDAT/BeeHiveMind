@@ -783,7 +783,7 @@ function hasMeaningfulRepairTarget(target) {
   return false;
 }
 
-function computeRepairQuotaForRoom(room) {
+function computeLocalRepairQuotaForRoom(room) {
   if (!room) return 0;
   var towers = room.find(FIND_MY_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_TOWER; } });
   if (towers && towers.length > 0) return 0;
@@ -793,6 +793,29 @@ function computeRepairQuotaForRoom(room) {
     if (hasMeaningfulRepairTarget(queue[i])) return 1;
   }
   return 0;
+}
+
+function countRemoteEmergencyRepairAssignments(roomName) {
+  if (!roomName) return 0;
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    if (canonicalRole(creep.memory.role) !== 'Repair') continue;
+    if (creep.memory.task !== 'remoteContainerEmergencyRepair') continue;
+    if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
+    count++;
+  }
+  var q = ensureRoomQueue(roomName);
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (!item || item.role !== 'Repair') continue;
+    if (item.task !== 'remoteContainerEmergencyRepair') continue;
+    if ((item.home || roomName) !== roomName) continue;
+    count++;
+  }
+  return count;
 }
 
 function isRepairAlreadyAssignedToContainer(roomName, containerId) {
@@ -853,7 +876,7 @@ function computeRoomQuotas(C, room) {
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
     Luna:         determineLunaQuota(C, room),
-    Repair:       computeRepairQuotaForRoom(room),
+    Repair:       repairQuota,
     Trucker:      computeTruckerQuotaForHome(room.name).desiredTruckers,
     Claimer:      0,
     CombatMelee:  localDefense.CombatMelee,
@@ -1156,3 +1179,11 @@ var BeeSpawnManager = {
 };
 
 module.exports = BeeSpawnManager;
+  var localRepairQuota = computeLocalRepairQuotaForRoom(room);
+  var maxRemoteEmergencyPerHome = Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1);
+  var activeRemoteEmergencyRepairs = countRemoteEmergencyRepairAssignments(room.name);
+  var emergencyRepairQuota = 0;
+  if (maxRemoteEmergencyPerHome > 0 && activeRemoteEmergencyRepairs < maxRemoteEmergencyPerHome) {
+    emergencyRepairQuota = findRemoteContainerEmergencyRepairRequest(room.name) ? 1 : 0;
+  }
+  var repairQuota = Math.min(Math.max(localRepairQuota, emergencyRepairQuota), Math.max(1, maxRemoteEmergencyPerHome));

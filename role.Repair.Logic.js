@@ -61,6 +61,7 @@ function clearRemoteTask(creep){
   delete creep.memory.requestId;
   delete creep.memory.x;
   delete creep.memory.y;
+  delete creep.memory.remoteRepairReturningHome;
 }
 function runRemoteContainerEmergencyRepair(creep){
   if (!creep || !creep.memory) return;
@@ -70,6 +71,15 @@ function runRemoteContainerEmergencyRepair(creep){
   var holdTicks = CFG.remoteContainerEmergencyRepairHoldTicks || 50;
   var minContainerEnergy = CFG.remoteContainerEmergencyRepairMinContainerEnergy || 100;
   var withdrawAmount = CFG.remoteContainerEmergencyRepairWithdrawAmount || 100;
+
+  if (creep.memory.remoteRepairReturningHome === true) {
+    if (creep.room.name !== home) {
+      go(creep, new RoomPosition(25, 25, home), 20);
+      return;
+    }
+    clearRemoteTask(creep);
+    return;
+  }
 
   var container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
   if (!container) {
@@ -84,8 +94,12 @@ function runRemoteContainerEmergencyRepair(creep){
 
   var hitsPct = container.hitsMax > 0 ? (container.hits / container.hitsMax) : 1;
   if (hitsPct >= stopPct) {
+    if (creep.room.name !== home) {
+      creep.memory.remoteRepairReturningHome = true;
+      go(creep, new RoomPosition(25, 25, home), 20);
+      return;
+    }
     clearRemoteTask(creep);
-    if (creep.room.name !== home) go(creep, new RoomPosition(25, 25, home), 20);
     return;
   }
 
