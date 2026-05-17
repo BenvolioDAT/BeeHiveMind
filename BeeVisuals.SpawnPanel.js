@@ -29,7 +29,7 @@ var CFG = {
 function shouldDrawSpawnPanels() {
   var visuals = CoreConfig && CoreConfig.settings && CoreConfig.settings.visuals;
   if (visuals && visuals.enabled === false) return false;
-  if (visuals && visuals.lowCpuMode !== false) {
+  if (visuals && visuals.lowCpuMode !== false && visuals.persistentHud !== true) {
     var bucket = (Game && Game.cpu && typeof Game.cpu.bucket === 'number') ? Game.cpu.bucket : null;
     var used = (Game && Game.cpu && typeof Game.cpu.getUsed === 'function') ? Game.cpu.getUsed() : 0;
     if (bucket !== null && bucket < (visuals.minBucketForAnyVisuals || 1000)) return false;

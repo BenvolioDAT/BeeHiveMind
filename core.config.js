@@ -70,6 +70,7 @@ CoreConfig.settings = Object.freeze({
     maxCpuUsedBeforeVisuals: 14,
     minBucketForFullVisuals: 5000,
     minBucketForAnyVisuals: 1000,
+    persistentHud: true,
     spawnPanelModulo: 1,
     workerTableModulo: 1,
     energyBarModulo: 1,
