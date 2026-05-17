@@ -106,6 +106,18 @@ class Traveler {
             let cpu = Game.cpu.getUsed();
             let ret = this.findTravelPath(creep.pos, destination, options);
             let cpuUsed = Game.cpu.getUsed() - cpu;
+            if (ret.incomplete && (!ret.path || ret.path.length === 0)) {
+                delete travelData.path;
+                // Avoid stale cumulative heavy-cpu warnings when this tick's
+                // result is a cheap fast-fail no-route response.
+                state.cpu = 0;
+                this.logNoRouteLimited(creep.pos.roomName, destination.roomName, ret.reason || "empty-incomplete-path", creep.name);
+                if (options.returnData) {
+                    options.returnData.pathfinderReturn = ret;
+                }
+                this.serializeState(creep, destination, state, travelData);
+                return ERR_NO_PATH;
+            }
             state.cpu = _.round(cpuUsed + state.cpu);
             if (state.cpu > REPORT_CPU_THRESHOLD) {
                 // see note at end of file for more info on this
@@ -121,12 +133,6 @@ class Traveler {
                 options.returnData.pathfinderReturn = ret;
             }
             travelData.path = Traveler.serializePath(creep.pos, ret.path, color);
-            if (ret.incomplete && (!ret.path || ret.path.length === 0)) {
-                delete travelData.path;
-                this.logNoRouteLimited(creep.pos.roomName, destination.roomName, ret.reason || "empty-incomplete-path", creep.name);
-                this.serializeState(creep, destination, state, travelData);
-                return ERR_NO_PATH;
-            }
             state.stuckCount = 0;
         }
         this.serializeState(creep, destination, state, travelData);
