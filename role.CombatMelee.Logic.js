@@ -3,6 +3,7 @@
 // CombatMelee behavior implementation only. Public role wiring stays in role.CombatMelee.js.
 var CFG = require('role.CombatMelee.Config');
 var Traveler = require('Traveler');
+var CombatStaging = require('Combat.Staging');
 
 function findClosestHostile(creep) {
   if (!creep || !creep.room) return null;
@@ -31,6 +32,7 @@ function run(creep) {
   var target = findClosestHostile(creep);
   if (!target) {
     setIdleMemory(creep);
+    CombatStaging.moveToStaging(creep);
     return;
   }
   setEngagingMemory(creep, target);
