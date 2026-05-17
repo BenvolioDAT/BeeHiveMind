@@ -227,6 +227,7 @@ function isStampBuildTypeAllowed(type, rcl) {
   var lvl = Number(rcl) || 0;
   if (type === STRUCTURE_EXTENSION) return lvl >= 2;
   if (type === STRUCTURE_TOWER) return lvl >= 3;
+  if (type === STRUCTURE_STORAGE) return lvl >= 4;
   return false;
 }
 
@@ -442,10 +443,16 @@ function ensureSites(room) {
         t: Game.time,
         stampId: stamp.id,
         anchor: { x: stampAnchor.x, y: stampAnchor.y, roomName: stampAnchor.roomName },
+        stampRcl: stampRcl,
         placed: stampResult.placed,
         skippedBlocked: stampResult.skippedBlocked,
         skippedCap: stampResult.skippedCap,
-        skippedType: stampResult.skippedType
+        skippedType: stampResult.skippedType,
+        allowedTypes: {
+          extension: isStampBuildTypeAllowed(STRUCTURE_EXTENSION, stampRcl),
+          tower: isStampBuildTypeAllowed(STRUCTURE_TOWER, stampRcl),
+          storage: isStampBuildTypeAllowed(STRUCTURE_STORAGE, stampRcl)
+        }
       };
     } else {
       memStamp.lastStampBuild = {
