@@ -62,11 +62,11 @@ function getStagingAnchor(room) {
   var mem = getRoomCombatMemory(room.name);
   var existing = mem.stagingAnchor;
   var failedReplanTicks = cfg.STAGING_FAILED_REPLAN_TICKS || 250;
-  if (existing && existing.x != null && existing.y != null && existing.roomName === room.name && (Game.time - (existing.t || 0)) <= replanTicks) {
-    if (isWalkable(room, existing.x, existing.y)) return new RoomPosition(existing.x, existing.y, room.name);
-  }
+  var hasValidExisting = existing && existing.x != null && existing.y != null && existing.roomName === room.name && (Game.time - (existing.t || 0)) <= replanTicks && isWalkable(room, existing.x, existing.y);
+  if (hasValidExisting) return new RoomPosition(existing.x, existing.y, room.name);
 
-  if (!existing && mem.nextStagingAnchorPlanTick && Game.time < mem.nextStagingAnchorPlanTick) return null;
+  if (existing) delete mem.stagingAnchor;
+  if (mem.nextStagingAnchorPlanTick && Game.time < mem.nextStagingAnchorPlanTick) return null;
 
   var spawn = getPrimarySpawn(room);
   if (!spawn) return null;
@@ -126,6 +126,7 @@ function getStagingAnchor(room) {
   }
 
   if (!best) {
+    delete mem.stagingAnchor;
     mem.nextStagingAnchorPlanTick = Game.time + failedReplanTicks;
     return null;
   }
@@ -189,7 +190,13 @@ function assignStagingSlot(creep) {
   });
 
   var current = assignments[creep.name];
-  if (current && current.x != null && current.y != null) return new RoomPosition(current.x, current.y, current.roomName || homeRoomName);
+  if (current && current.x != null && current.y != null) {
+    var currentRoomName = current.roomName || homeRoomName;
+    var currentRoom = Game.rooms[currentRoomName];
+    var currentValid = currentRoomName === room.name && isWalkable(room, current.x, current.y) && !hasRoadAt(room, current.x, current.y) && !isNearExit(current.x, current.y);
+    if (currentValid) return new RoomPosition(current.x, current.y, currentRoomName);
+    delete assignments[creep.name];
+  }
 
   var slots = getStagingSlots(room);
   if (!slots.length) return null;
