@@ -411,8 +411,8 @@ function ensureSites(room) {
   }
 
   var buildCfg = stampBuildConfig();
-  var didStampBuild = false;
-  if (shouldUseStampBuild(room)) {
+  var stampBuildActive = shouldUseStampBuild(room);
+  if (stampBuildActive) {
     var stamp = PlannerStamps.getDefaultCoreStamp();
     var chosen = stamp ? PlannerLayout.getChosenAnchor(room, stamp, {
       scanStep: buildCfg.plannerStampCandidateScanStep,
@@ -421,6 +421,7 @@ function ensureSites(room) {
       showScores: buildCfg.plannerStampCandidateShowScores
     }) : null;
     var stampAnchor = chosen && chosen.pos ? chosen.pos : null;
+    var memStamp = plannerMemory(room);
     if (stampAnchor && stamp) {
       var stampMaxRcl = Number(buildCfg.plannerStampBuildRclMax || 3);
       var stampRcl = Math.min(rcl || 0, stampMaxRcl);
@@ -437,7 +438,6 @@ function ensureSites(room) {
       );
       placed += stampResult.placed;
       cCount += stampResult.placed;
-      var memStamp = plannerMemory(room);
       memStamp.lastStampBuild = {
         t: Game.time,
         stampId: stamp.id,
@@ -447,11 +447,21 @@ function ensureSites(room) {
         skippedCap: stampResult.skippedCap,
         skippedType: stampResult.skippedType
       };
-      didStampBuild = true;
+    } else {
+      memStamp.lastStampBuild = {
+        t: Game.time,
+        stampId: stamp ? stamp.id : null,
+        anchor: null,
+        placed: 0,
+        skippedBlocked: 0,
+        skippedCap: 0,
+        skippedType: 0,
+        skippedNoAnchor: 1
+      };
     }
   }
 
-  var skipLegacy = didStampBuild && buildCfg.plannerStampBuildSkipLegacyBaseLayout === true;
+  var skipLegacy = stampBuildActive && buildCfg.plannerStampBuildSkipLegacyBaseLayout === true;
   if (!skipLegacy) {
     // Phase 2/3: follow the legacy base offsets as long as we have placements left.
     const basePlaced = ensureBaseLayout(
