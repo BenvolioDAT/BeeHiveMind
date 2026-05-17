@@ -47,6 +47,8 @@ var roleDismantler       = require('role.Dismantler');
 var RoomPlanner          = require('Planner.Room');
 var RoadPlanner          = require('Planner.Road');
 var TradeEnergy          = require('Trade.Energy');
+var CpuProfiler         = require('core.cpuProfiler');
+var CoreConfig          = require('core.config');
 
 // Keep references to the role modules so validation can check the intended
 // mapping (e.g. a swapped import would surface as a role name mismatch).
@@ -359,7 +361,8 @@ var BeeHiveMind = {
   // Output: none; orchestrates tick: memory init → visuals → caches → rooms → creeps → movement → spawns → trade.
   // Side-effects: updates global.__BHM, Memory rooms, MovementManager state.
   run: function run() {
-    BeeHiveMind.initializeMemory();
+    CpuProfiler.start('BeeHiveMind.total');
+    CpuProfiler.measure('initializeMemory', BeeHiveMind.initializeMemory);
 
     // Expose action/selectors globally for console debugging and legacy modules
     // expecting global symbols.
@@ -369,46 +372,61 @@ var BeeHiveMind = {
     if (BeeSelectors) global.BeeSelectors = BeeSelectors;
 
     // Verify role bindings once per tick so missing modules are visible in logs.
-    validateRoleBindings();
+    CpuProfiler.measure('validateRoleBindings', validateRoleBindings);
 
     if (MovementManager && typeof MovementManager.startTick === 'function') {
       // Reset movement queue before any role enqueues requests.
-      MovementManager.startTick();
+      CpuProfiler.measure('MovementManager.startTick', function () {
+        MovementManager.startTick();
+      });
     }
 
     // Visual overlays (spawn HUD + queue)
     if (BeeVisualsSpawnPanel && typeof BeeVisualsSpawnPanel.drawVisuals === 'function') {
-      BeeVisualsSpawnPanel.drawVisuals();
+      CpuProfiler.measure('BeeVisualsSpawnPanel.drawVisuals', function () {
+        BeeVisualsSpawnPanel.drawVisuals();
+      });
     }
 
-    var C = prepareTickCaches();
+    var C = CpuProfiler.measure('prepareTickCaches', prepareTickCaches);
 
     // 1) Per-room planning
     // Working from general to specific keeps the mental model tidy: rooms
     // come first, then creeps that exist inside those rooms.
     var rooms = C.roomsOwned;
     for (var i = 0; i < rooms.length; i++) {
-      BeeHiveMind.manageRoom(rooms[i]);
+      CpuProfiler.measure('manageRoom.total', function () {
+        BeeHiveMind.manageRoom(rooms[i]);
+      });
     }
 
     // 2) Per-creep behavior
-    BeeHiveMind.runCreeps(C);
+    CpuProfiler.measure('runCreeps.total', function () {
+      BeeHiveMind.runCreeps(C);
+    });
 
     if (MovementManager && typeof MovementManager.resolveAndMove === 'function') {
       // Execute queued movement intents after all roles finish issuing actions.
       // This mirrors a "commit" phase in a database transaction—everyone
       // proposes moves, then we resolve conflicts once.
-      MovementManager.resolveAndMove();
+      CpuProfiler.measure('MovementManager.resolveAndMove', function () {
+        MovementManager.resolveAndMove();
+      });
     }
 
     // 3) Spawning (queue-based)
-    BeeHiveMind.manageSpawns(C);
+    CpuProfiler.measure('manageSpawns', function () {
+      BeeHiveMind.manageSpawns(C);
+    });
 
     // 4) Trading
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
       // if (Game.time % 3 === 0) TradeEnergy.runAll();
-      TradeEnergy.runAll();
+      CpuProfiler.measure('TradeEnergy.runAll', function () {
+        TradeEnergy.runAll();
+      });
     }
+    CpuProfiler.end('BeeHiveMind.total');
   },
 
   /** Room loop – keep lean. */
@@ -443,7 +461,18 @@ var BeeHiveMind = {
         continue;
       }
       try {
-        roleFn(creep);
+        if (CoreConfig.settings.cpuProfiler.includeRoleBreakdown === true) {
+          var roleSection = 'role.' + roleName;
+          CpuProfiler.start(roleSection);
+          CpuProfiler.start('role.total');
+          if (roleName.indexOf('Combat') === 0) CpuProfiler.start('role.Combat*');
+          roleFn(creep);
+          if (roleName.indexOf('Combat') === 0) CpuProfiler.end('role.Combat*');
+          CpuProfiler.end('role.total');
+          CpuProfiler.end(roleSection);
+        } else {
+          roleFn(creep);
+        }
       } catch (e) {
         hiveLog.debug('⚠️ Role error for', (creep.name || 'unknown'), '(' + roleName + '):', e);
       }

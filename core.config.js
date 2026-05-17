@@ -58,6 +58,12 @@ CoreConfig.settings = Object.freeze({
     /** How long before the stale room sweep runs. */
     roomSweepInterval: 50,
   }),
+  cpuProfiler: Object.freeze({
+    enabled: false,
+    reportEvery: 100,
+    minSectionCpuToReport: 0.05,
+    includeRoleBreakdown: true
+  }),
   visuals: Object.freeze({
     enabled: true,
     lowCpuMode: true,

@@ -10,6 +10,7 @@ const BeeHiveMind = require('BeeHiveMind');
 var BeeStructureLogic = require('BeeStructureLogic');
 const BeeToolbox = require('BeeToolbox');
 const BeeCombatSquads = require('BeeCombatSquads');
+const CpuProfiler = require('core.cpuProfiler');
 require('Traveler');
 
 const LOG_LEVEL = CoreConfig.LOG_LEVEL;
@@ -105,29 +106,32 @@ function maybeGeneratePixel() {
 }
 
 module.exports.loop = function () {
+    CpuProfiler.start('main.total');
     // --- Intel and housekeeping ---
-    refreshSourceIntel();
-    BeeMaintenance.cleanUpMemory();
-    maintainRepairTargets();
-    ensureFirstSpawnMemory();
+    CpuProfiler.measure('refreshSourceIntel', refreshSourceIntel);
+    CpuProfiler.measure('BeeMaintenance.cleanUpMemory', BeeMaintenance.cleanUpMemory);
+    CpuProfiler.measure('maintainRepairTargets', maintainRepairTargets);
+    CpuProfiler.measure('ensureFirstSpawnMemory', ensureFirstSpawnMemory);
 
     // --- Primary AI behaviors ---
-    BeeHiveMind.run();
-    BeeStructureLogic.runTowerLogic();
-    BeeStructureLogic.runLinkManager();
+    CpuProfiler.measure('BeeHiveMind.run', BeeHiveMind.run);
+    CpuProfiler.measure('BeeStructureLogic.runTowerLogic', BeeStructureLogic.runTowerLogic);
+    CpuProfiler.measure('BeeStructureLogic.runLinkManager', BeeStructureLogic.runLinkManager);
     if (CoreConfig.settings.combat.ENABLE_SQUAD_SPAWNING === true) {
         BeeCombatSquads.ensureSquadFlags();
     }
 
     // --- Visual aids for quick debugging ---
-    try { BeeVisuals.drawVisuals(); } catch (err) { mainLog.warn('BeeVisuals.drawVisuals error: ' + err); }
-    try { BeeVisuals.drawEnergyBar(); } catch (err2) { mainLog.warn('BeeVisuals.drawEnergyBar error: ' + err2); }
-    try { BeeVisuals.drawWorkerBeeTaskTable(); } catch (err3) { mainLog.warn('BeeVisuals.drawWorkerBeeTaskTable error: ' + err3); }
+    try { CpuProfiler.measure('BeeVisuals.drawVisuals', BeeVisuals.drawVisuals); } catch (err) { mainLog.warn('BeeVisuals.drawVisuals error: ' + err); }
+    try { CpuProfiler.measure('BeeVisuals.drawEnergyBar', BeeVisuals.drawEnergyBar); } catch (err2) { mainLog.warn('BeeVisuals.drawEnergyBar error: ' + err2); }
+    try { CpuProfiler.measure('BeeVisuals.drawWorkerBeeTaskTable', BeeVisuals.drawWorkerBeeTaskTable); } catch (err3) { mainLog.warn('BeeVisuals.drawWorkerBeeTaskTable error: ' + err3); }
 
     // --- Less frequent maintenance ---
     if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {
-        BeeMaintenance.cleanStaleRooms();
+        CpuProfiler.measure('cleanStaleRooms', BeeMaintenance.cleanStaleRooms);
     }
 
-    maybeGeneratePixel();
+    CpuProfiler.measure('maybeGeneratePixel', maybeGeneratePixel);
+    CpuProfiler.end('main.total');
+    CpuProfiler.reportMaybe();
 };
