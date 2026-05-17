@@ -254,7 +254,7 @@ function ensureRemoteDefensePlan(room, threatBundle, distance) {
   bucket.requestedAt = Game.time;
   var intel = ensureCombatIntelMemory();
   if (intel && intel.bindings) {
-    intel.bindings[flagName] = room.name;
+    intel.bindings[flagName] = { flagName: flagName, target: serialized, targetId: bucket.targetId, source: 'Luna' };
   }
   Memory.squads[flagName] = bucket;
 }
@@ -885,6 +885,14 @@ function isLunaRoomUnsafe(roomName) {
   var room = Game.rooms[roomName];
   if (room && isVisibleRoomUnsafeForLuna(room)) return true;
   return false;
+}
+
+function logLunaNoSafeSource(creep, details) {
+  if (!creep || !details) return;
+  var interval = CFG.NO_SAFE_ASSIGN_LOG_INTERVAL || 25;
+  if (creep.memory && creep.memory._lastNoSafeAssignLog && (Game.time - creep.memory._lastNoSafeAssignLog) < interval) return;
+  if (creep.memory) creep.memory._lastNoSafeAssignLog = Game.time;
+  console.log('🛑 Luna ' + creep.name + ' no safe assignment: ' + details);
 }
 
 // ============================
@@ -1536,6 +1544,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         if (!rm || !rm.sources) return false;
         if (!inRadius[roomName]) return false;
         if (rm.hostile) return false;
+        if (isLunaRoomUnsafe(roomName)) return false;
         if (isRoomLockedByInvaderCore(roomName)) return false;
         return roomName !== Memory.firstSpawnRoom;
       });
@@ -1556,6 +1565,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       for (var j=0;j<rooms.length;j++){
         var rn=rooms[j];
         if (!inRadius[rn]) continue;
+        if (isLunaRoomUnsafe(rn)) continue;
         if (isRoomLockedByInvaderCore(rn)) continue;
 
         var rm=getRoomMemoryBucket(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
@@ -1575,7 +1585,14 @@ function upsertRemoteContainerStatus(creep, source, container) {
       var targetRooms = roleLuna.getNearbyRoomsWithSources(creep);
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
         var least = roleLuna.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
-        if (!least){ if (Game.time%25===0) console.log('🚫 Forager '+creep.name+' found no suitable room with unclaimed sources.'); return; }
+        if (!least){
+          var report = roleLuna.buildNoSafeAssignmentReport(creep);
+          logLunaNoSafeSource(creep, report);
+          delete creep.memory.targetRoom;
+          delete creep.memory.sourceId;
+          delete creep.memory.assigned;
+          return;
+        }
         creep.memory.targetRoom = least;
 
         var roomMemory = getRoomMemoryBucket(creep.memory.targetRoom);
@@ -1599,14 +1616,44 @@ function upsertRemoteContainerStatus(creep, source, container) {
             creep.memory._lastLogSid = sid;
           }
         }else{
-          if (Game.time%25===0) console.log('No available sources for creep: '+creep.name);
+          logLunaNoSafeSource(creep, 'room=' + creep.memory.targetRoom + ' has no safe/open sources');
           creep.memory.targetRoom=null; creep.memory.sourceId=null;
         }
       }
     },
 
+    buildNoSafeAssignmentReport: function(creep) {
+      var homeName = getHomeName(creep);
+      var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+      var memAssign = ensureAssignmentsMem();
+      var blocked = 0, staleIntel = 0, noSources = 0, fullSources = 0, noRoute = 0;
+      for (var i = 0; i < ring.length; i++) {
+        var rn = ring[i];
+        if (rn === Memory.firstSpawnRoom) continue;
+        if (isLunaRoomUnsafe(rn)) { blocked++; continue; }
+        var rm = getRoomMemoryBucket(rn);
+        if (!rm || !rm.sources || !Object.keys(rm.sources).length) { noSources++; continue; }
+        var roomRoute = null;
+        try { roomRoute = Game.map.findRoute(homeName, rn); } catch (e) { roomRoute = ERR_NO_PATH; }
+        if (roomRoute === ERR_NO_PATH || roomRoute == null) { noRoute++; continue; }
+        var sids = Object.keys(rm.sources);
+        var hasOpen = false;
+        var freshSeen = false;
+        for (var si = 0; si < sids.length; si++) {
+          var sid = sids[si];
+          var rec = rm.sources[sid] || {};
+          if (typeof rec.lastSeen === 'number' && (Game.time - rec.lastSeen) <= 2000) freshSeen = true;
+          if (maCount(memAssign, sid) < getSourceMaxSlots(sid)) hasOpen = true;
+        }
+        if (!freshSeen) staleIntel++;
+        if (!hasOpen) fullSources++;
+      }
+      return 'blocked=' + blocked + ' staleIntel=' + staleIntel + ' noSources=' + noSources + ' fullSources=' + fullSources + ' noRoute=' + noRoute;
+    },
+
     assignSource: function(creep, roomMemory){
       if (!roomMemory || !roomMemory.sources) return null;
+      if (creep.memory && creep.memory.targetRoom && isLunaRoomUnsafe(creep.memory.targetRoom)) return null;
       var sids = Object.keys(roomMemory.sources); if (!sids.length) return null;
 
       var memAssign = ensureAssignmentsMem();
