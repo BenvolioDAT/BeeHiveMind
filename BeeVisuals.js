@@ -212,6 +212,9 @@ BeeVisuals.drawVisuals = function () {
 
   if ((vc.persistentHud === true || budget === 'medium' || budget === 'full')) {
     BeeVisuals.drawRemoteHaulStatusTable();
+    if (vc.remoteContainerBuildTableEnabled !== false) {
+      BeeVisuals.drawRemoteContainerBuildStatusTable();
+    }
   }
 
   if (budget === 'full') {
@@ -821,6 +824,104 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
  * Uses RoomVisual(roomName) so remote rooms can be drawn from remembered positions.
  */
 
+
+
+BeeVisuals.drawRemoteContainerBuildStatusTable = function () {
+  var vc = visualsConfig();
+  if (vc.remoteContainerBuildTableEnabled === false) return;
+
+  var mod = vc.remoteContainerBuildTableModulo || 1;
+  if (mod > 1 && (Game.time % mod) !== 0) return;
+
+  var builds = Memory && Memory.__BHM && Memory.__BHM.remoteContainerBuilds;
+  if (!builds) return;
+
+  var staleTicks = vc.remoteContainerBuildTableStaleTicks || 150;
+  var maxRows = vc.maxRemoteContainerBuildTableRows || 8;
+  var grouped = {};
+
+  for (var sourceId in builds) {
+    if (!Object.prototype.hasOwnProperty.call(builds, sourceId)) continue;
+    var rec = builds[sourceId];
+    if (!rec || !rec.homeRoom) continue;
+
+    var status = rec.status || 'missing';
+    var updated = typeof rec.updated === 'number' ? rec.updated : -1;
+    var stale = updated < 0 ? true : ((Game.time - updated) > staleTicks);
+
+    var statusText = '?';
+    if (status === 'planned') statusText = 'PLAN';
+    else if (status === 'building') statusText = String(Math.floor(Number(rec.progressPct) || 0)) + '%';
+    else if (status === 'built') statusText = 'DONE';
+    else if (status === 'blocked') statusText = 'BLOCK';
+
+    var luna = '-';
+    if (rec.assignedLuna && Game.creeps[rec.assignedLuna]) luna = rec.assignedLuna;
+
+    var shortSource = sourceId ? String(sourceId).slice(-6) : '------';
+    var remoteRoom = rec.remoteRoom || rec.roomName || '?';
+
+    var pri = 3;
+    if (status === 'building') pri = 0;
+    else if (status === 'planned' || status === 'missing') pri = 1;
+    else if (status === 'blocked' || stale) pri = 2;
+
+    if (!grouped[rec.homeRoom]) grouped[rec.homeRoom] = [];
+    grouped[rec.homeRoom].push({
+      remoteRoom: remoteRoom,
+      sourceShort: shortSource,
+      statusText: statusText,
+      luna: luna,
+      stale: stale,
+      pri: pri,
+      updated: updated
+    });
+  }
+
+  for (var homeRoom in grouped) {
+    if (!Object.prototype.hasOwnProperty.call(grouped, homeRoom)) continue;
+
+    var rows = grouped[homeRoom];
+    rows.sort(function (a, b) {
+      if (a.pri !== b.pri) return a.pri - b.pri;
+      if (a.updated !== b.updated) return a.updated - b.updated;
+      if (a.remoteRoom !== b.remoteRoom) return a.remoteRoom < b.remoteRoom ? -1 : 1;
+      if (a.sourceShort !== b.sourceShort) return a.sourceShort < b.sourceShort ? -1 : 1;
+      return 0;
+    });
+
+    var shownRows = rows.slice(0, maxRows);
+    var hidden = rows.length - shownRows.length;
+
+    var v = new RoomVisual(homeRoom);
+    var x = 48.6;
+    var y = 1.2;
+    var rowH = 0.78;
+    var panelWidth = 16.6;
+    var panelHeight = rowH * (2.25 + shownRows.length + (hidden > 0 ? 1 : 0));
+    var leftX = x - panelWidth;
+
+    v.rect(leftX, y - 0.45, panelWidth, panelHeight, {
+      fill: '#000000',
+      opacity: 0.35,
+      stroke: '#333333',
+      strokeWidth: 0.05
+    });
+
+    text(v, 'Remote Builds', leftX + 0.25, y, 0.52, 'left', 1, '#ffffff');
+
+    for (var i = 0; i < shownRows.length; i++) {
+      var line = shownRows[i];
+      var lineY = y + rowH * (1 + i);
+      var rowTxt = line.remoteRoom + '  ' + line.sourceShort + '  ' + line.statusText + '  ' + line.luna + (line.stale ? ' !' : '');
+      text(v, rowTxt, leftX + 0.25, lineY, 0.43, 'left', 1, line.stale ? '#ffd166' : '#ffffff');
+    }
+
+    if (hidden > 0) {
+      text(v, '+' + hidden + ' more', leftX + 0.25, y + rowH * (1 + shownRows.length), 0.4, 'left', 1, '#aaaaaa');
+    }
+  }
+};
 
 BeeVisuals.drawRemoteContainerBuildVisuals = function () {
   if (!CFG.showRemoteContainerBuildVisuals) return;
