@@ -483,7 +483,18 @@ function resolveSquadTarget(identifier) {
       resolvedName = resolvedName || candidate;
     }
     if (!targetRoom && bindings[candidate]) {
-      targetRoom = bindings[candidate];
+      // Support both legacy and new binding schemas:
+      // 1) Legacy: bindings[flagName] = "W8S57"
+      // 2) Object: bindings[flagName] = { targetRoom: "W8S57" } or
+      //            { target: { roomName: "W8S57" }, ... }
+      var binding = bindings[candidate];
+      if (typeof binding === 'string') {
+        targetRoom = binding;
+      } else if (binding && typeof binding === 'object') {
+        if (typeof binding.targetRoom === 'string') targetRoom = binding.targetRoom;
+        else if (binding.target && typeof binding.target.roomName === 'string') targetRoom = binding.target.roomName;
+        else if (typeof binding.roomName === 'string') targetRoom = binding.roomName;
+      }
       resolvedName = resolvedName || candidate;
     }
   }
