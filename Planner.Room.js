@@ -157,6 +157,18 @@ function getPreviewStampAndAnchor(room, fallbackAnchor, vc) {
   return { stamp: stamp, previewAnchor: previewAnchor, chosen: chosen };
 }
 
+function getStampBuildAnchor(room, fallbackAnchor, stamp, cfg) {
+  if (!room || !fallbackAnchor || !stamp) return null;
+  var chosen = PlannerLayout.getChosenAnchor(room, stamp, {
+    scanStep: cfg.plannerStampCandidateScanStep,
+    maxChecks: cfg.plannerStampCandidateMaxChecks,
+    replanTicks: cfg.plannerStampCandidateReplanTicks,
+    showScores: cfg.plannerStampCandidateShowScores
+  });
+  if (chosen && chosen.pos) return chosen.pos;
+  return fallbackAnchor;
+}
+
 function maybeDrawPlannerPreviews(room, anchor) {
   if (!room || !anchor) return;
   if (typeof RoomVisual === 'undefined') return;
@@ -617,10 +629,11 @@ function ensureSites(room) {
 
   var rampartBuildActive = isRampartBuildActiveForRoom(room, buildCfg);
   if (rampartBuildActive && placed < CFG.maxSitesPerTick && cCount < CFG.csiteSafetyLimit) {
-    var preview = getPreviewStampAndAnchor(room, anchor, buildCfg);
-    if (preview && preview.stamp && preview.previewAnchor) {
+    var rampartStamp = PlannerStamps.getDefaultCoreStamp();
+    var rampartAnchor = getStampBuildAnchor(room, anchor, rampartStamp, buildCfg);
+    if (rampartStamp && rampartAnchor) {
       var useReservations = buildCfg.plannerRampartBuildUseReservations !== false;
-      var rampartPlan = PlannerRamparts.buildRampartPreview(room, preview.stamp, preview.previewAnchor, reservations, {
+      var rampartPlan = PlannerRamparts.buildRampartPreview(room, rampartStamp, rampartAnchor, reservations, {
         useReservations: useReservations,
         range: buildCfg.plannerRampartPreviewRange,
         maxTiles: buildCfg.plannerRampartPreviewMaxTiles,
@@ -647,8 +660,22 @@ function ensureSites(room) {
         skippedCap: rampartResult.skippedCap,
         previewTiles: rampartResult.previewTiles,
         minRcl: Math.max(0, Number(buildCfg.plannerRampartBuildMinRcl || 0)),
-        anchor: { x: preview.previewAnchor.x, y: preview.previewAnchor.y, roomName: preview.previewAnchor.roomName },
-        stampId: preview.stamp.id
+        anchor: { x: rampartAnchor.x, y: rampartAnchor.y, roomName: rampartAnchor.roomName },
+        stampId: rampartStamp.id
+      };
+    } else {
+      mem.lastRampartBuild = {
+        t: Game.time,
+        placed: 0,
+        skippedExisting: 0,
+        skippedBlocked: 0,
+        skippedReserved: 0,
+        skippedCap: 0,
+        skippedNoAnchor: 1,
+        previewTiles: 0,
+        minRcl: Math.max(0, Number(buildCfg.plannerRampartBuildMinRcl || 0)),
+        anchor: null,
+        stampId: rampartStamp ? rampartStamp.id : null
       };
     }
   }
