@@ -203,6 +203,12 @@ var MovementManager = {
       if (intent.targetId && Game.rooms[intent.roomName] && !Game.getObjectById(intent.targetId)) continue;
       var pos = new RoomPosition(intent.x, intent.y, intent.roomName);
       if (creep.pos.getRangeTo(pos) <= intent.range) continue; // Already within desired range; no move issued to avoid thrashing.
+      if (pos.roomName !== creep.pos.roomName && Game.map && typeof Game.map.getRoomStatus === 'function') {
+        try {
+          var status = Game.map.getRoomStatus(pos.roomName);
+          if (status && status.status === 'closed') continue;
+        } catch (e) {}
+      }
       var travelOpts = {
         range: intent.range,
         reusePath: (intent.reusePath != null) ? intent.reusePath : 20,

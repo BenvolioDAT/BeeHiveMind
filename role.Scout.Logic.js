@@ -177,8 +177,30 @@ function ensureScoutMem(creep) {
   return m;
 }
 
+
+function getScoutMapRoomStatus(roomName) { if (!roomName || !Game.map || typeof Game.map.getRoomStatus !== 'function') return null; try { return Game.map.getRoomStatus(roomName) || null; } catch (e) { return null; } }
+function isScoutRoomClosed(roomName) { var status = getScoutMapRoomStatus(roomName); return !!(status && status.status === 'closed'); }
+function isScoutTargetReachableFrom(creep, targetRoomName) {
+  if (!creep || !targetRoomName) return false;
+  if (isScoutRoomClosed(targetRoomName)) return false;
+  if (creep.pos.roomName === targetRoomName) return true;
+  var dist = Game.map.getRoomLinearDistance(creep.pos.roomName, targetRoomName);
+  if (dist === 1) {
+    var exits = Game.map.describeExits(creep.pos.roomName) || {};
+    for (var k in exits) if (exits[k] === targetRoomName) return true;
+    return false;
+  }
+  var route = null;
+  try { route = Game.map.findRoute(creep.pos.roomName, targetRoomName); } catch (e) { route = ERR_NO_PATH; }
+  if (route === ERR_NO_PATH || route == null || !Array.isArray(route)) return false;
+  return route.length > 0;
+}
+function rememberBadScoutTarget(mem, roomName, reason) { if (!mem || !roomName) return; if (!mem.badTargets) mem.badTargets = {}; mem.badTargets[roomName] = { tick: Game.time, reason: reason || 'unknown' }; }
+function isBadScoutTargetRecently(mem, roomName) { if (!mem || !roomName || !mem.badTargets || !mem.badTargets[roomName]) return false; var rec = mem.badTargets[roomName]; var ttl = 750; if ((Game.time - rec.tick) > ttl) { delete mem.badTargets[roomName]; return false; } return true; }
+function clearScoutTarget(creep, mem) { mem.targetRoom = null; mem.arrivedAt = null; creep.memory.targetRoom = null; mem.state = STATE_IDLE; creep.memory.state = STATE_IDLE; }
+
 function getIntelAge(roomName) { var age = Infinity; var intel = ensureCombatIntelMemory(); if (intel && intel.rooms && intel.rooms[roomName] && intel.rooms[roomName].lastSeen) age = Game.time - intel.rooms[roomName].lastSeen; var last = lastVisited(roomName); if (last !== -Infinity) { var alt = Game.time - last; if (age === Infinity || alt > age) age = alt; } return age; }
-function chooseTargetRoom(creep, mem) { var desc = Game.map.describeExits(creep.pos.roomName) || {}; var exits = []; for (var dir in desc) { if (!desc.hasOwnProperty(dir)) continue; if (!desc[dir]) continue; exits.push(desc[dir]); } var best = null; var bestScore = -Infinity; for (var i = 0; i < exits.length; i++) { var rn = exits[i]; if (rn === mem.home) continue; if (shouldScoutSkipPlayerRoom(rn, creep)) continue; var age = getIntelAge(rn); var score = age; if (age === Infinity) score = 999999; if (age < CFG.REVISIT_TICKS) score = score / 10; if (score > bestScore) { bestScore = score; best = rn; } } if (!best && exits.length) { var idx = mem.exitIndex || 0; best = exits[idx % exits.length]; } mem.exitIndex = (mem.exitIndex + 1) % (exits.length || 1); mem.targetRoom = best || null; mem.arrivedAt = null; mem.state = mem.targetRoom ? STATE_TRAVEL : STATE_IDLE; creep.memory.targetRoom = mem.targetRoom; return mem.targetRoom; }
+function chooseTargetRoom(creep, mem) { var desc = Game.map.describeExits(creep.pos.roomName) || {}; var exits = []; for (var dir in desc) { if (!desc.hasOwnProperty(dir)) continue; if (!desc[dir]) continue; exits.push(desc[dir]); } var best = null; var bestScore = -Infinity; for (var i = 0; i < exits.length; i++) { var rn = exits[i]; if (rn === mem.home) continue; if (shouldScoutSkipPlayerRoom(rn, creep)) continue; if (isScoutRoomClosed(rn)) continue; if (isBadScoutTargetRecently(mem, rn)) continue; if (!isScoutTargetReachableFrom(creep, rn)) continue; var age = getIntelAge(rn); var score = age; if (age === Infinity) score = 999999; if (age < CFG.REVISIT_TICKS) score = score / 10; if (score > bestScore) { bestScore = score; best = rn; } } if (!best && exits.length) { var idx = mem.exitIndex || 0; var fallback = exits[idx % exits.length]; if (!isScoutRoomClosed(fallback) && !isBadScoutTargetRecently(mem, fallback) && isScoutTargetReachableFrom(creep, fallback) && !shouldScoutSkipPlayerRoom(fallback, creep)) best = fallback; } mem.exitIndex = (mem.exitIndex + 1) % (exits.length || 1); mem.targetRoom = best || null; mem.arrivedAt = null; mem.state = mem.targetRoom ? STATE_TRAVEL : STATE_IDLE; creep.memory.targetRoom = mem.targetRoom; return mem.targetRoom; }
 function refreshState(creep, mem) { if (mem.state === STATE_RETURN) { creep.memory.state = mem.state; return mem.state; } if (mem.targetRoom && creep.pos.roomName === mem.targetRoom) mem.state = STATE_SCOUT; else if (mem.targetRoom) mem.state = STATE_TRAVEL; else mem.state = STATE_IDLE; creep.memory.state = mem.state; return mem.state; }
 function updateIntel(creep) { var room = creep.room; if (!room) return null; stampVisit(room.name); if (shouldLogIntel(room)) logRoomIntel(room); seedSourcesFromVision(room); var threatInfo = evaluateRoomThreat(room, 'Scout'); if (threatInfo && threatInfo.threat && threatInfo.threat.hasThreat && threatInfo.canEscalate) ensureRemoteDefensePlan(room, threatInfo.threat, threatInfo.distance); return threatInfo; }
 function shouldRetreat(creep, threatInfo) { if (threatInfo && threatInfo.threat && threatInfo.threat.hasThreat && threatInfo.threat.score > 0) return true; var hostiles = (creep.room && creep.room.find) ? creep.room.find(FIND_HOSTILE_CREEPS) : []; return hostiles.length > 0 && creep.hits < creep.hitsMax; }
@@ -192,7 +214,17 @@ function run(creep) {
   if (state === STATE_RETURN) { returnHome(creep, mem); return; }
   if (state === STATE_TRAVEL) {
     if (!mem.targetRoom) { mem.state = STATE_IDLE; creep.memory.state = mem.state; return; }
-    creep.travelTo(new RoomPosition(25, 25, mem.targetRoom), { range: 20, reusePath: CFG.PATH_REUSE });
+    if (!isScoutTargetReachableFrom(creep, mem.targetRoom)) {
+      rememberBadScoutTarget(mem, mem.targetRoom, 'unreachable-before-travel');
+      clearScoutTarget(creep, mem);
+      chooseTargetRoom(creep, mem);
+      return;
+    }
+    var result = creep.travelTo(new RoomPosition(25, 25, mem.targetRoom), { range: 20, reusePath: CFG.PATH_REUSE });
+    if (result === ERR_NO_PATH) {
+      rememberBadScoutTarget(mem, mem.targetRoom, 'ERR_NO_PATH');
+      clearScoutTarget(creep, mem);
+    }
     return;
   }
   if (state === STATE_SCOUT) {

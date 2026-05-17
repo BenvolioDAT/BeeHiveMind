@@ -64,6 +64,11 @@ CoreConfig.settings = Object.freeze({
     minSectionCpuToReport: 0.05,
     includeRoleBreakdown: true
   }),
+  movement: Object.freeze({
+    DEBUG_NO_ROUTE: false,
+    NO_ROUTE_LOG_INTERVAL: 250,
+    NO_ROUTE_CACHE_TTL: 150,
+  }),
   visuals: Object.freeze({
     enabled: true,
     lowCpuMode: true,

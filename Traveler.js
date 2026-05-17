@@ -4,6 +4,7 @@
  */
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+const CoreConfig = require("core.config");
 class Traveler {
     /**
      * move creep to destination
@@ -120,6 +121,12 @@ class Traveler {
                 options.returnData.pathfinderReturn = ret;
             }
             travelData.path = Traveler.serializePath(creep.pos, ret.path, color);
+            if (ret.incomplete && (!ret.path || ret.path.length === 0)) {
+                delete travelData.path;
+                this.logNoRouteLimited(creep.pos.roomName, destination.roomName, ret.reason || "empty-incomplete-path", creep.name);
+                this.serializeState(creep, destination, state, travelData);
+                return ERR_NO_PATH;
+            }
             state.stuckCount = 0;
         }
         this.serializeState(creep, destination, state, travelData);
@@ -128,7 +135,7 @@ class Traveler {
         }
         // consume path
         if (state.stuckCount === 0 && !newPath) {
-            travelData.path = travelData.path.substr(1);
+            travelData.path = travelData.path.slice(1);
         }
         let nextDirection = parseInt(travelData.path[0], 10);
         if (options.returnData) {
@@ -216,6 +223,87 @@ class Traveler {
             }
         }
     }
+    static getMovementSettings() {
+        return (CoreConfig && CoreConfig.settings && CoreConfig.settings.movement) || {};
+    }
+    static getNoRouteCache() {
+        if (!global.__BHM_TRAVEL_NO_ROUTE || typeof global.__BHM_TRAVEL_NO_ROUTE !== "object") {
+            global.__BHM_TRAVEL_NO_ROUTE = {};
+        }
+        return global.__BHM_TRAVEL_NO_ROUTE;
+    }
+    static getRoomStatusSafe(roomName) {
+        if (!roomName || !Game.map || typeof Game.map.getRoomStatus !== "function") {
+            return null;
+        }
+        try {
+            return Game.map.getRoomStatus(roomName) || null;
+        }
+        catch (e) {
+            return null;
+        }
+    }
+    static isRoomClosed(roomName) {
+        const status = this.getRoomStatusSafe(roomName);
+        return !!(status && status.status === "closed");
+    }
+    static hasDirectExitBetween(fromRoomName, toRoomName) {
+        if (!fromRoomName || !toRoomName || !Game.map || typeof Game.map.describeExits !== "function") {
+            return false;
+        }
+        let exits;
+        try {
+            exits = Game.map.describeExits(fromRoomName);
+        }
+        catch (e) {
+            exits = null;
+        }
+        if (!exits) {
+            return false;
+        }
+        for (const direction in exits) {
+            if (exits[direction] === toRoomName) {
+                return true;
+            }
+        }
+        return false;
+    }
+    static rememberNoRoute(originRoomName, destRoomName, reason) {
+        if (!originRoomName || !destRoomName) return;
+        const cache = this.getNoRouteCache();
+        const key = `${originRoomName}>${destRoomName}`;
+        cache[key] = { tick: Game.time, reason: reason || "unknown" };
+        this.logNoRouteLimited(originRoomName, destRoomName, reason);
+    }
+    static isNoRouteRecentlyKnown(originRoomName, destRoomName) {
+        const cache = this.getNoRouteCache();
+        const key = `${originRoomName}>${destRoomName}`;
+        const rec = cache[key];
+        if (!rec || typeof rec.tick !== "number") return false;
+        const settings = this.getMovementSettings();
+        const ttl = settings.NO_ROUTE_CACHE_TTL || 150;
+        if ((Game.time - rec.tick) > ttl) {
+            delete cache[key];
+            return false;
+        }
+        return true;
+    }
+    static logNoRouteLimited(originRoomName, destRoomName, reason, creepName) {
+        const settings = this.getMovementSettings();
+        if (!settings.DEBUG_NO_ROUTE) return;
+        if (!global.__BHM_TRAVEL_NO_ROUTE_LOG || typeof global.__BHM_TRAVEL_NO_ROUTE_LOG !== "object") {
+            global.__BHM_TRAVEL_NO_ROUTE_LOG = {};
+        }
+        const key = `${originRoomName}>${destRoomName}:${reason || "unknown"}`;
+        const interval = settings.NO_ROUTE_LOG_INTERVAL || 250;
+        const last = global.__BHM_TRAVEL_NO_ROUTE_LOG[key] || 0;
+        if ((Game.time - last) < interval) return;
+        global.__BHM_TRAVEL_NO_ROUTE_LOG[key] = Game.time;
+        console.log(`[TravelerNoRoute] ${creepName || "unknown"} ${originRoomName} -> ${destRoomName} reason=${reason || "unknown"}`);
+    }
+    static makeNoPathResult(reason) {
+        return { path: [], ops: 0, cost: 0, incomplete: true, reason: reason || "no-path" };
+    }
     /**
      * find a path from origin to destination
      * @param origin
@@ -239,9 +327,24 @@ class Traveler {
         // check to see whether findRoute should be used
         let roomDistance = Game.map.getRoomLinearDistance(origin.roomName, destination.roomName);
         let allowedRooms = options.route;
-        if (!allowedRooms && (options.useFindRoute || (options.useFindRoute === undefined && roomDistance > 2))) {
-            let route = this.findRoute(origin.roomName, destination.roomName, options);
-            if (route) {
+        if (originRoomName !== destRoomName) {
+            if (this.isRoomClosed(destRoomName)) {
+                this.rememberNoRoute(originRoomName, destRoomName, "closed-room");
+                return this.makeNoPathResult("closed-room");
+            }
+            if (this.isNoRouteRecentlyKnown(originRoomName, destRoomName)) {
+                return this.makeNoPathResult("cached-no-route");
+            }
+            if (roomDistance === 1 && !this.hasDirectExitBetween(originRoomName, destRoomName)) {
+                this.rememberNoRoute(originRoomName, destRoomName, "missing-direct-exit");
+                return this.makeNoPathResult("missing-direct-exit");
+            }
+            if (!allowedRooms) {
+                let route = this.findRoute(originRoomName, destRoomName, options);
+                if (!route || !_.isObject(route)) {
+                    this.rememberNoRoute(originRoomName, destRoomName, "findRoute-failed");
+                    return this.makeNoPathResult("findRoute-failed");
+                }
                 allowedRooms = route;
             }
         }
