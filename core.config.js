@@ -49,6 +49,7 @@ CoreConfig.settings = Object.freeze({
     STAGING_MAX_RANGE_FROM_SPAWN: 9,
     STAGING_SLOT_RADIUS: 3,
     STAGING_REPLAN_TICKS: 1500,
+    STAGING_FAILED_REPLAN_TICKS: 250,
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */

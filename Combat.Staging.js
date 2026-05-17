@@ -29,6 +29,14 @@ function getPrimarySpawn(room) {
 
 function isNearExit(x, y) { return x <= 1 || x >= 48 || y <= 1 || y >= 48; }
 
+function hasRoadAt(room, x, y) {
+  var structures = room.lookForAt(LOOK_STRUCTURES, x, y);
+  for (var i = 0; i < structures.length; i++) {
+    if (structures[i].structureType === STRUCTURE_ROAD) return true;
+  }
+  return false;
+}
+
 function hasBlockingStructureOrSite(room, x, y) {
   var structures = room.lookForAt(LOOK_STRUCTURES, x, y);
   for (var i = 0; i < structures.length; i++) {
@@ -53,9 +61,12 @@ function getStagingAnchor(room) {
   var replanTicks = cfg.STAGING_REPLAN_TICKS || 1500;
   var mem = getRoomCombatMemory(room.name);
   var existing = mem.stagingAnchor;
+  var failedReplanTicks = cfg.STAGING_FAILED_REPLAN_TICKS || 250;
   if (existing && existing.x != null && existing.y != null && existing.roomName === room.name && (Game.time - (existing.t || 0)) <= replanTicks) {
     if (isWalkable(room, existing.x, existing.y)) return new RoomPosition(existing.x, existing.y, room.name);
   }
+
+  if (!existing && mem.nextStagingAnchorPlanTick && Game.time < mem.nextStagingAnchorPlanTick) return null;
 
   var spawn = getPrimarySpawn(room);
   if (!spawn) return null;
@@ -79,6 +90,7 @@ function getStagingAnchor(room) {
       var distPenalty = Math.abs(7 - range) * 3;
       score -= distPenalty;
       if (isNearExit(x, y)) score -= 10;
+      if (hasRoadAt(room, x, y)) score -= 6;
 
       for (var i = 0; i < structures.length; i++) {
         var s = structures[i];
@@ -113,8 +125,12 @@ function getStagingAnchor(room) {
     }
   }
 
-  if (!best) return null;
+  if (!best) {
+    mem.nextStagingAnchorPlanTick = Game.time + failedReplanTicks;
+    return null;
+  }
   mem.stagingAnchor = { x: best.x, y: best.y, roomName: room.name, t: Game.time };
+  delete mem.nextStagingAnchorPlanTick;
   return new RoomPosition(best.x, best.y, room.name);
 }
 
@@ -126,6 +142,17 @@ function getStagingSlots(room) {
   var anchor = getStagingAnchor(room);
   if (!anchor) return [];
 
+  var slotsCache = mem.stagingSlots;
+  var cacheKey = anchor.x + ':' + anchor.y + ':' + radius;
+  if (slotsCache && slotsCache.anchorKey === cacheKey && (Game.time - (slotsCache.t || 0)) <= (cfg.STAGING_REPLAN_TICKS || 1500) && slotsCache.slots && slotsCache.slots.length) {
+    var valid = true;
+    for (var ci = 0; ci < slotsCache.slots.length; ci++) {
+      var cs = slotsCache.slots[ci];
+      if (!isWalkable(room, cs.x, cs.y) || hasRoadAt(room, cs.x, cs.y) || isNearExit(cs.x, cs.y)) { valid = false; break; }
+    }
+    if (valid) return slotsCache.slots;
+  }
+
   var slots = [];
   var sources = room.find(FIND_SOURCES);
   var controller = room.controller;
@@ -134,7 +161,7 @@ function getStagingSlots(room) {
       var pos = new RoomPosition(x, y, room.name);
       var d = pos.getRangeTo(anchor);
       if (d < 1 || d > radius) continue;
-      if (!isWalkable(room, x, y) || isNearExit(x, y)) continue;
+      if (!isWalkable(room, x, y) || isNearExit(x, y) || hasRoadAt(room, x, y)) continue;
 
       var skip = false;
       for (var si = 0; si < sources.length; si++) { if (pos.getRangeTo(sources[si]) <= 1) { skip = true; break; } }
@@ -144,7 +171,7 @@ function getStagingSlots(room) {
     }
   }
 
-  mem.stagingSlots = { t: Game.time, slots: slots };
+  mem.stagingSlots = { t: Game.time, anchorKey: cacheKey, slots: slots };
   return slots;
 }
 
@@ -229,6 +256,7 @@ function moveToStaging(creep) {
 module.exports = {
   getHomeRoomName: getHomeRoomName,
   getPrimarySpawn: getPrimarySpawn,
+  hasRoadAt: hasRoadAt,
   getStagingAnchor: getStagingAnchor,
   getStagingSlots: getStagingSlots,
   assignStagingSlot: assignStagingSlot,
