@@ -3,6 +3,7 @@ var PlannerStamps = require('Planner.Stamps');
 var PlannerVisuals = require('Planner.Visuals');
 var PlannerLayout = require('Planner.Layout');
 var PlannerReservations = require('Planner.Reservations');
+var PlannerRamparts = require('Planner.Ramparts');
 
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
@@ -163,6 +164,23 @@ function maybeDrawStampPreview(room, anchor) {
     PlannerVisuals.drawChosenAnchor(room, chosen.pos, chosen.score, {
       showScores: vc.plannerStampCandidateShowScores
     });
+  }
+
+  if (vc.plannerRampartPreviewEnabled && (!vc.plannerRampartPreviewRoom || vc.plannerRampartPreviewRoom === room.name)) {
+    var rampartReservations = null;
+    if (vc.plannerRampartPreviewUseReservations) rampartReservations = PlannerReservations.buildReservations(room, vc);
+    var rampartPlan = PlannerRamparts.buildRampartPreview(room, stamp, previewAnchor, rampartReservations, {
+      useReservations: vc.plannerRampartPreviewUseReservations !== false,
+      range: vc.plannerRampartPreviewRange,
+      maxTiles: vc.plannerRampartPreviewMaxTiles,
+      showLabels: vc.plannerRampartPreviewShowLabels === true,
+      rcl: vc.plannerRampartPreviewRcl
+    });
+    PlannerRamparts.drawRampartPreview(room, rampartPlan, {
+      showLabels: vc.plannerRampartPreviewShowLabels === true
+    });
+  } else {
+    PlannerRamparts.clearRampartPreview(room);
   }
 }
 
@@ -400,7 +418,7 @@ function ensureSites(room) {
   var snapshot = scanRoomState(room);
   var allowedFn = function (type) { return allowedCount(type, room); };
   var buildCfg = stampBuildConfig();
-  var shouldBuildReservations = !!(buildCfg.plannerReservationsEnabled || buildCfg.plannerReservationVisualsEnabled);
+  var shouldBuildReservations = !!(buildCfg.plannerReservationsEnabled || buildCfg.plannerReservationVisualsEnabled || (buildCfg.plannerRampartPreviewEnabled && buildCfg.plannerRampartPreviewUseReservations));
   var reservations = shouldBuildReservations ? PlannerReservations.buildReservations(room, buildCfg) : null;
   if (shouldBuildReservations) {
     mem.lastReservations = {
