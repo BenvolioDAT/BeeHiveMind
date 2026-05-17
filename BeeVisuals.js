@@ -14,6 +14,8 @@
 
 // ----------------------------- Dependencies ------------------------------
 var Builder = require('role.Builder'); // exposes structurePlacements metadata
+var RepairConfig = require('role.Repair.Config');
+var LunaConfig = require('role.Luna.Config');
 var Logger      = require('core.logger');
 var LOG_LEVEL   = Logger.LOG_LEVEL;
 var CoreConfig = require('core.config');
@@ -699,6 +701,8 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (fillPct > 100) fillPct = 100;
 
       var assigned = !!(req.assignedTo && req.assignedUntil > Game.time);
+      var emergencyRepairStartPct = RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40;
+      var lunaRepairStartPct = LunaConfig.remoteContainerRepairStartPct || 0.50;
       var maintenanceUntil = Number(req.maintenanceUntil) || 0;
       var maintenanceReason = req.maintenanceReason || null;
       var hitsPct = Number(req.containerHitsPct);
@@ -710,9 +714,9 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
         status = 'EMERGENCY';
       } else if (maintenanceReason === 'containerRepair' && maintenanceUntil > Game.time) {
         status = 'LUNA FIX';
-      } else if (hitsPct != null && hitsPct <= RepairConfig.remoteContainerEmergencyRepairStartPct) {
+      } else if (hitsPct != null && hitsPct <= emergencyRepairStartPct) {
         status = 'CRITICAL';
-      } else if (hitsPct != null && hitsPct <= LunaConfig.remoteContainerRepairStartPct) {
+      } else if (hitsPct != null && hitsPct <= lunaRepairStartPct) {
         status = 'LOW HP';
       } else if (assigned) {
         status = req.assignedTo;
@@ -721,9 +725,12 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       }
 
       if (statusReq && merged.haul) {
-        if (!!(merged.haul.assignedTo && merged.haul.assignedUntil > Game.time)) {
+        var haulAssigned = !!(merged.haul.assignedTo && merged.haul.assignedUntil > Game.time);
+        if (haulAssigned) {
           assigned = true;
-          status = merged.haul.assignedTo;
+          if (status === 'READY' || status === 'URGENT') {
+            status = merged.haul.assignedTo;
+          }
         } else if (merged.haul.urgent && status === 'READY') {
           status = 'URGENT';
         }
@@ -788,7 +795,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (line.status === 'URGENT') statusColor = '#ff8c42';
       if (line.status === 'STALE' || line.status === 'CRITICAL' || line.status === 'EMERGENCY') statusColor = '#ff5555';
       if (line.status === 'LOW HP' || line.status === 'LUNA FIX') statusColor = '#ffd166';
-      if (line.assigned) statusColor = '#66ccff';
+      if (line.assigned && line.status !== 'EMERGENCY' && line.status !== 'CRITICAL' && line.status !== 'STALE' && line.status !== 'LUNA FIX' && line.status !== 'LOW HP' && line.status !== 'URGENT' && line.status !== 'READY') statusColor = '#66ccff';
 
       text(v, line.roomName, panelX, y, 0.42, 'left', 1, '#ffffff');
       text(v, String(line.energy), panelX + 3.9, y, 0.42, 'left', 1, '#ffffff');
