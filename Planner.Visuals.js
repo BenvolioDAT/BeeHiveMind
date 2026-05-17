@@ -118,8 +118,52 @@ function drawStampPreview(room, stamp, anchorPos, opts) {
   });
 }
 
+
+function drawCandidateAnchor(room, pos, score, opts) {
+  if (!room || !pos || typeof RoomVisual === 'undefined') return;
+  var o = opts || {};
+  var v = o.visual || new RoomVisual(room.name);
+  v.circle(pos.x, pos.y, {
+    radius: 0.22,
+    fill: '#85c1e9',
+    opacity: 0.25,
+    stroke: '#2e86c1',
+    strokeWidth: 0.05
+  });
+  if (o.showScores) {
+    v.text(Math.round(score), pos.x, pos.y - 0.35, {
+      color: '#aed6f1',
+      font: '0.35 monospace',
+      opacity: 0.8,
+      align: 'center'
+    });
+  }
+}
+
+function drawChosenAnchor(room, pos, score, opts) {
+  if (!room || !pos || typeof RoomVisual === 'undefined') return;
+  var v = (opts && opts.visual) || new RoomVisual(room.name);
+  v.circle(pos.x, pos.y, {
+    radius: 0.5,
+    fill: 'transparent',
+    opacity: 0.9,
+    stroke: '#2ecc71',
+    strokeWidth: 0.12
+  });
+  if (!opts || opts.showScores !== false) {
+    v.text('best ' + Math.round(score || 0), pos.x, pos.y - 0.7, {
+      color: '#58d68d',
+      font: '0.45 monospace',
+      opacity: 0.9,
+      align: 'center'
+    });
+  }
+}
+
 module.exports = {
   drawStampPreview: drawStampPreview,
   drawStampTile: drawStampTile,
-  drawStampBounds: drawStampBounds
+  drawStampBounds: drawStampBounds,
+  drawCandidateAnchor: drawCandidateAnchor,
+  drawChosenAnchor: drawChosenAnchor
 };

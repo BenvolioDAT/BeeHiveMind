@@ -1,6 +1,7 @@
 var CoreConfig = require('core.config');
 var PlannerStamps = require('Planner.Stamps');
 var PlannerVisuals = require('Planner.Visuals');
+var PlannerLayout = require('Planner.Layout');
 
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
@@ -139,10 +140,29 @@ function maybeDrawStampPreview(room, anchor) {
   var stamp = PlannerStamps.getStampById(stampId) || PlannerStamps.getDefaultCoreStamp();
   if (!stamp) return;
 
-  PlannerVisuals.drawStampPreview(room, stamp, anchor, {
+  var chosen = null;
+  var previewAnchor = anchor;
+
+  if (vc.plannerStampCandidatePreviewEnabled) {
+    chosen = PlannerLayout.getChosenAnchor(room, stamp, {
+      scanStep: vc.plannerStampCandidateScanStep,
+      maxChecks: vc.plannerStampCandidateMaxChecks,
+      replanTicks: vc.plannerStampCandidateReplanTicks,
+      showScores: vc.plannerStampCandidateShowScores
+    });
+    if (chosen && chosen.pos) previewAnchor = chosen.pos;
+  }
+
+  PlannerVisuals.drawStampPreview(room, stamp, previewAnchor, {
     rcl: (room.controller && room.controller.level) || 0,
     showFutureRcl: vc.plannerStampPreviewShowFutureRcl !== false
   });
+
+  if (vc.plannerStampCandidatePreviewEnabled && chosen && chosen.pos) {
+    PlannerVisuals.drawChosenAnchor(room, chosen.pos, chosen.score, {
+      showScores: vc.plannerStampCandidateShowScores
+    });
+  }
 }
 
 function scanRoomState(room) {
