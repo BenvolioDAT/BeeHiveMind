@@ -615,8 +615,9 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
   if (mod > 1 && (Game.time % mod) !== 0) return;
 
   var root = Memory && Memory.__BHM;
-  var requests = root && root.remoteHaulRequests;
-  if (!requests) return;
+  var requests = root && root.remoteHaulRequests ? root.remoteHaulRequests : {};
+  var statusRoot = root && root.remoteContainerStatus ? root.remoteContainerStatus : {};
+  if (!requests && !statusRoot) return;
 
   var staleTicks = vc.remoteHaulTableStaleTicks || 150;
   var showStale = vc.remoteHaulTableShowStale === true;
@@ -635,14 +636,38 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
     var roomObj = ownedRooms[i];
     var rows = [];
 
+    var mergedById = {};
+    for (var statusId in statusRoot) {
+      if (!statusRoot.hasOwnProperty(statusId)) continue;
+      var statusReq = statusRoot[statusId];
+      if (!statusReq) continue;
+      if (statusReq.homeRoom !== roomObj.name) continue;
+      mergedById[statusId] = {
+        status: statusReq,
+        haul: null
+      };
+    }
     for (var reqId in requests) {
       if (!requests.hasOwnProperty(reqId)) continue;
-      var req = requests[reqId];
+      var haulReq = requests[reqId];
+      if (!haulReq) continue;
+      if (haulReq.homeRoom !== roomObj.name) continue;
+      var keyId = haulReq.containerId || haulReq.id || reqId;
+      if (!mergedById[keyId]) {
+        mergedById[keyId] = { status: null, haul: haulReq };
+      } else {
+        mergedById[keyId].haul = haulReq;
+      }
+    }
+
+    for (var mergedId in mergedById) {
+      if (!mergedById.hasOwnProperty(mergedId)) continue;
+      var merged = mergedById[mergedId];
+      var statusReq = merged.status;
+      var req = merged.haul || merged.status;
       if (!req) continue;
-      if (req.homeRoom !== roomObj.name) continue;
 
       var amount = Number(req.amount) || 0;
-      if (amount <= 0) continue;
 
       var stale = false;
       if (typeof req.updated === 'number' && staleTicks > 0) {
@@ -674,19 +699,48 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (fillPct > 100) fillPct = 100;
 
       var assigned = !!(req.assignedTo && req.assignedUntil > Game.time);
+      var maintenanceUntil = Number(req.maintenanceUntil) || 0;
+      var maintenanceReason = req.maintenanceReason || null;
+      var hitsPct = Number(req.containerHitsPct);
+      if (!(hitsPct >= 0)) hitsPct = null;
       var status = 'READY';
       if (stale && showStale) {
         status = 'STALE';
+      } else if (maintenanceReason === 'emergencyRemoteRepair' && maintenanceUntil > Game.time) {
+        status = 'EMERGENCY';
+      } else if (maintenanceReason === 'containerRepair' && maintenanceUntil > Game.time) {
+        status = 'LUNA FIX';
+      } else if (hitsPct != null && hitsPct <= RepairConfig.remoteContainerEmergencyRepairStartPct) {
+        status = 'CRITICAL';
+      } else if (hitsPct != null && hitsPct <= LunaConfig.remoteContainerRepairStartPct) {
+        status = 'LOW HP';
       } else if (assigned) {
         status = req.assignedTo;
       } else if (req.urgent) {
         status = 'URGENT';
       }
 
+      if (statusReq && merged.haul) {
+        if (!!(merged.haul.assignedTo && merged.haul.assignedUntil > Game.time)) {
+          assigned = true;
+          status = merged.haul.assignedTo;
+        } else if (merged.haul.urgent && status === 'READY') {
+          status = 'URGENT';
+        }
+      }
+
+      var containerHealth = '-';
+      if (typeof req.containerHits === 'number' && typeof req.containerHitsMax === 'number' && req.containerHitsMax > 0) {
+        containerHealth = Math.floor((req.containerHits / req.containerHitsMax) * 100) + '%';
+      } else if (hitsPct != null) {
+        containerHealth = Math.floor(hitsPct * 100) + '%';
+      }
+
       rows.push({
         roomName: remoteRoomName,
         energy: energyAmount,
         fillPct: fillPct,
+        health: containerHealth,
         status: status,
         urgent: !!req.urgent,
         assigned: assigned,
@@ -708,7 +762,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
     var panelX = 1.0;
     var panelY = 1.2;
     var rowHeight = 0.55;
-    var panelWidth = 14.4;
+    var panelWidth = 17.2;
     var totalRows = 1 + shownRows.length + (hiddenCount > 0 ? 1 : 0);
     var panelHeight = 0.55 + (totalRows * rowHeight);
 
@@ -724,20 +778,23 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
     text(v, 'Room', panelX, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
     text(v, 'Energy', panelX + 3.9, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
     text(v, 'Full', panelX + 7.5, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
-    text(v, 'Status', panelX + 9.8, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'HP', panelX + 9.8, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'Status', panelX + 11.6, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
 
     for (var r = 0; r < shownRows.length; r++) {
       var line = shownRows[r];
       var y = panelY + rowHeight * (2 + r);
       var statusColor = '#00ff66';
       if (line.status === 'URGENT') statusColor = '#ff8c42';
-      if (line.status === 'STALE') statusColor = '#ff5555';
+      if (line.status === 'STALE' || line.status === 'CRITICAL' || line.status === 'EMERGENCY') statusColor = '#ff5555';
+      if (line.status === 'LOW HP' || line.status === 'LUNA FIX') statusColor = '#ffd166';
       if (line.assigned) statusColor = '#66ccff';
 
       text(v, line.roomName, panelX, y, 0.42, 'left', 1, '#ffffff');
       text(v, String(line.energy), panelX + 3.9, y, 0.42, 'left', 1, '#ffffff');
       text(v, line.fillPct + '%', panelX + 7.5, y, 0.42, 'left', 1, '#ffffff');
-      text(v, line.status, panelX + 9.8, y, 0.42, 'left', 1, statusColor);
+      text(v, line.health, panelX + 9.8, y, 0.42, 'left', 1, '#ffffff');
+      text(v, line.status, panelX + 11.6, y, 0.42, 'left', 1, statusColor);
     }
 
     if (hiddenCount > 0) {

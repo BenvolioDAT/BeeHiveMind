@@ -755,6 +755,7 @@ function computeTruckerQuotaForHome(roomName) {
     if (!Object.prototype.hasOwnProperty.call(requests, id)) continue;
     var req = requests[id];
     if (!req || req.homeRoom !== roomName) continue;
+    if (req.maintenanceUntil && req.maintenanceUntil > Game.time) continue;
     if ((req.amount || 0) < TruckerConfig.MIN_HAUL_REQUEST_ENERGY) continue;
     if ((Game.time - (req.updated || 0)) > TruckerConfig.REQUEST_STALE_TICKS) continue;
     if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;

@@ -16,6 +16,8 @@ var CFG = {
   EMPTY_ROOM_GRACE_TICKS:   300, // if a room mem is "empty-ish" this long, delete it
   BLOCK_MARK_TTL:         10000, // drop old "blocked" stamps after this long
   REPAIR_SCAN_INTERVAL:       maintCfg.repairScanInterval || 5,
+  REMOTE_CONTAINER_STATUS_SWEEP_INTERVAL: maintCfg.remoteContainerStatusSweepInterval || 500,
+  REMOTE_CONTAINER_STATUS_STALE_TICKS: maintCfg.remoteContainerStatusStaleTicks || 1500,
   REPAIR_MAX_RAMPART:      30000,
   REPAIR_MAX_WALL:         30000,
   LOG: Logger.shouldLog(LOG_LEVEL.DEBUG)
@@ -329,6 +331,7 @@ function _heavyRoomSweep(roomName, roomMemory) {
 function cleanUpMemory() {
   var now = _now();
   _removeDeadCreepMemory();
+  _pruneRemoteContainerStatus(now);
 
   // Heavy work is cadence gated.  This way the cheap dead-creep prune runs
   // every tick, while the per-room scans only fire every MEMORY_SWEEP_INTERVAL
@@ -339,6 +342,22 @@ function cleanUpMemory() {
   for (var roomName in Memory.rooms) {
     if (!Memory.rooms.hasOwnProperty(roomName)) continue;
     _heavyRoomSweep(roomName, Memory.rooms[roomName]);
+  }
+}
+
+function _pruneRemoteContainerStatus(now) {
+  var interval = CFG.REMOTE_CONTAINER_STATUS_SWEEP_INTERVAL || 500;
+  if (interval > 1 && (now % interval) !== 0) return;
+  var root = Memory.__BHM;
+  if (!root || !_isObject(root.remoteContainerStatus)) return;
+  var staleTicks = CFG.REMOTE_CONTAINER_STATUS_STALE_TICKS || 1500;
+  for (var id in root.remoteContainerStatus) {
+    if (!Object.prototype.hasOwnProperty.call(root.remoteContainerStatus, id)) continue;
+    var entry = root.remoteContainerStatus[id];
+    var updated = entry && typeof entry.updated === 'number' ? entry.updated : 0;
+    if ((now - updated) > staleTicks) {
+      delete root.remoteContainerStatus[id];
+    }
   }
 }
 
