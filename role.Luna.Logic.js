@@ -1207,11 +1207,13 @@ function isLunaRoomUnsafe(roomName) {
   }
 
   function findAssignedSourceContainer(creep, source) {
-    if (!creep) return null;
+    if (!creep || !source) return null;
     var memContainerId = creep.memory.containerId || creep.memory.assignedContainer;
     if (memContainerId) {
       var direct = Game.getObjectById(memContainerId);
-      if (direct && direct.structureType === STRUCTURE_CONTAINER) return direct;
+      if (isContainerForSource(direct, source)) return direct;
+      delete creep.memory.containerId;
+      delete creep.memory.assignedContainer;
     }
     var sid = creep.memory.sourceId || (source && source.id);
     if (sid) {
@@ -1219,11 +1221,19 @@ function isLunaRoomUnsafe(roomName) {
       var srec = getSourceMemory(roomName, sid);
       if (srec && srec.containerId) {
         var fromSourceMem = Game.getObjectById(srec.containerId);
-        if (fromSourceMem && fromSourceMem.structureType === STRUCTURE_CONTAINER) return fromSourceMem;
+        if (isContainerForSource(fromSourceMem, source)) return fromSourceMem;
+        delete srec.containerId;
       }
     }
     if (source) return findSourceContainer(source);
     return null;
+  }
+
+  function isContainerForSource(container, source) {
+    if (!container || !source || !container.pos || !source.pos) return false;
+    if (container.structureType !== STRUCTURE_CONTAINER) return false;
+    if (container.pos.roomName !== source.pos.roomName) return false;
+    return container.pos.inRangeTo(source.pos, 1);
   }
 
   function shouldRepairAssignedContainer(creep, container) {
