@@ -1198,7 +1198,85 @@ function isLunaRoomUnsafe(roomName) {
     return Memory.__BHM.remoteContainerStatus;
   }
 
-  function upsertRemoteContainerStatus(creep, source, container) {
+  
+
+  function ensureRemoteContainerBuildMemory() {
+    if (!Memory.__BHM) Memory.__BHM = {};
+    if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
+    return Memory.__BHM.remoteContainerBuilds;
+  }
+
+  function computeConstructionProgressPct(site) {
+    if (!site || !(site.progressTotal > 0)) return 0;
+    var pct = Math.floor((site.progress / site.progressTotal) * 100);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+  }
+
+  function upsertRemoteContainerBuildStatus(creep, source, container, site, plannedPos) {
+    if (!creep || !source) return;
+    var homeName = getHomeName(creep);
+    var remoteRoom = creep.memory && creep.memory.targetRoom ? creep.memory.targetRoom : (source.pos && source.pos.roomName);
+    if (!homeName || !remoteRoom || remoteRoom === homeName) return;
+
+    var pos = (container && container.pos) || (site && site.pos) || plannedPos || (source && source.pos) || null;
+    var status = 'missing';
+    var progress = 0;
+    var progressTotal = 0;
+    var progressPct = 0;
+
+    if (container) {
+      status = 'built';
+      progress = 1;
+      progressTotal = 1;
+      progressPct = 100;
+    } else if (site) {
+      status = 'building';
+      progress = site.progress || 0;
+      progressTotal = site.progressTotal || 0;
+      progressPct = computeConstructionProgressPct(site);
+    } else if (plannedPos) {
+      status = 'planned';
+    }
+
+    var builds = ensureRemoteContainerBuildMemory();
+    var prev = builds[source.id] || {};
+    builds[source.id] = {
+      sourceId: source.id,
+      homeRoom: homeName,
+      remoteRoom: remoteRoom,
+      roomName: pos ? pos.roomName : (prev.roomName || remoteRoom),
+      x: pos && typeof pos.x === 'number' ? pos.x : (typeof prev.x === 'number' ? prev.x : null),
+      y: pos && typeof pos.y === 'number' ? pos.y : (typeof prev.y === 'number' ? prev.y : null),
+      siteId: site ? site.id : null,
+      containerId: container ? container.id : null,
+      status: status,
+      progress: progress,
+      progressTotal: progressTotal,
+      progressPct: progressPct,
+      assignedLuna: creep.name || null,
+      updated: Game.time,
+      lastSeen: Game.time
+    };
+
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[remoteRoom]) Memory.rooms[remoteRoom] = {};
+    if (!Memory.rooms[remoteRoom].sources) Memory.rooms[remoteRoom].sources = {};
+    if (!Memory.rooms[remoteRoom].sources[source.id]) Memory.rooms[remoteRoom].sources[source.id] = {};
+    Memory.rooms[remoteRoom].sources[source.id].container = {
+      status: status,
+      x: builds[source.id].x,
+      y: builds[source.id].y,
+      siteId: site ? site.id : null,
+      containerId: container ? container.id : null,
+      progress: progress,
+      progressTotal: progressTotal,
+      progressPct: progressPct,
+      updated: Game.time
+    };
+  }
+function upsertRemoteContainerStatus(creep, source, container) {
     if (!creep || !source || !container) return;
     var homeName = getHomeName(creep);
     if (!homeName || container.pos.roomName === homeName) return;
@@ -1335,10 +1413,10 @@ function isLunaRoomUnsafe(roomName) {
 
   function ensureSourceContainerOrSite(source) {
     var container = findSourceContainer(source);
-    if (container) return { container: container, site: null };
+    if (container) return { container: container, site: null, plannedPos: container.pos };
 
     var site = findSourceContainerSite(source);
-    if (site) return { container: null, site: site };
+    if (site) return { container: null, site: site, plannedPos: site.pos };
 
     var pos = chooseSourceContainerBuildPosition(source);
     if (pos) {
@@ -1347,7 +1425,7 @@ function isLunaRoomUnsafe(roomName) {
         site = findSourceContainerSite(source);
       }
     }
-    return { container: null, site: site || null };
+    return { container: null, site: site || null, plannedPos: pos || null };
   }
 
   // ============================
@@ -1608,6 +1686,8 @@ function isLunaRoomUnsafe(roomName) {
       var infra = ensureSourceContainerOrSite(src);
       var container = findAssignedSourceContainer(creep, src) || infra.container;
       var site = infra.site;
+      var plannedPos = infra.plannedPos || null;
+      upsertRemoteContainerBuildStatus(creep, src, container, site, plannedPos);
 
       creep.memory.assignedSource = sid;
       debugRing(creep.room, src.pos, CFG.DRAW.SRC_COLOR, 'SRC');
@@ -1685,6 +1765,7 @@ function isLunaRoomUnsafe(roomName) {
       } else if (!container && site && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
         debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE');
         creep.build(site);
+        upsertRemoteContainerBuildStatus(creep, src, container, site, plannedPos);
       } else if (!container && !site && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
         creep.drop(RESOURCE_ENERGY);
       }

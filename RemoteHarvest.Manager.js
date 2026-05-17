@@ -86,6 +86,29 @@ function getRemoteIntelTick(remoteName) {
   return best;
 }
 
+
+
+function ensureRemoteContainerBuildsMemory() {
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
+  return Memory.__BHM.remoteContainerBuilds;
+}
+
+function isUnfinishedContainerBuild(sourceRec) {
+  if (!sourceRec || !sourceRec.sourceId) return false;
+  if (sourceRec.remoteRoom && isRemoteUnsafe(sourceRec.remoteRoom)) return false;
+
+  var containerRec = sourceRec.container;
+  if (containerRec && (containerRec.status === 'planned' || containerRec.status === 'building' || containerRec.status === 'missing')) {
+    return true;
+  }
+
+  var builds = ensureRemoteContainerBuildsMemory();
+  var buildRec = builds[sourceRec.sourceId];
+  if (!buildRec) return false;
+  if (buildRec.remoteRoom && isRemoteUnsafe(buildRec.remoteRoom)) return false;
+  return buildRec.status !== 'built';
+}
 function buildSourcePlanForHome(homeRoom, remoteRooms) {
   var home = ensureHomeMemory(homeRoom);
   var oldSources = home.sources || {};
@@ -130,6 +153,7 @@ function buildSourcePlanForHome(homeRoom, remoteRooms) {
         sourceId: src.id, homeRoom: homeRoom, remoteRoom: remoteRoom,
         x: x, y: y,
         containerId: prev.containerId || null,
+        container: prev.container || null,
         assignedLuna: prev.assignedLuna || null,
         reservedBy: prev.reservedBy || null,
         reservedUntil: prev.reservedUntil || 0,
@@ -169,6 +193,7 @@ function auditAssignmentsForHome(homeRoom) {
   var queuedBySource = {};
   var duplicateQueuedSources = [];
   var assignedSources = [];
+  var unfinishedContainerSources = [];
   var queued = 0;
   var spawnQueue = (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].spawnQueue) || [];
   for (var q = 0; q < spawnQueue.length; q++) {
@@ -224,6 +249,11 @@ function auditAssignmentsForHome(homeRoom) {
     } else {
       rec.status = 'open';
       rec.reason = 'missing-luna';
+      if (isUnfinishedContainerBuild(rec)) {
+        rec.reason = 'unfinished-container';
+        if (rec.container) rec.container.status = rec.container.status || 'missing';
+        unfinishedContainerSources.push(sid);
+      }
       home.missingSources.push(sid);
     }
   }
@@ -242,6 +272,7 @@ function auditAssignmentsForHome(homeRoom) {
     queuedSources: queuedSources,
     duplicateQueuedSources: duplicateQueuedSources,
     missingSources: home.missingSources.slice(0),
+    unfinishedContainerSources: unfinishedContainerSources,
     assignedSources: assignedSources,
     unsafeSources: home.unsafeSources.slice(0),
     staleSources: home.staleSources.slice(0),
@@ -269,8 +300,18 @@ function unreserveSourceForQueue(homeRoom, sourceId) {
 function reserveSourceForQueue(homeRoom) {
   var home = ensureHomeMemory(homeRoom);
   var pick = null;
+  var unfinishedFirst = [];
+  var normalMissing = [];
   for (var i = 0; i < home.missingSources.length; i++) {
-    var sid = home.missingSources[i];
+    var sidList = home.missingSources[i];
+    var recList = home.sources[sidList];
+    if (!recList) continue;
+    if (isUnfinishedContainerBuild(recList)) unfinishedFirst.push(sidList);
+    else normalMissing.push(sidList);
+  }
+  var orderedMissing = unfinishedFirst.concat(normalMissing);
+  for (var i = 0; i < orderedMissing.length; i++) {
+    var sid = orderedMissing[i];
     var rec = home.sources[sid];
     if (!rec || rec.assignedLuna) continue;
     if (rec.reservedBy && rec.reservedUntil > Game.time) continue;

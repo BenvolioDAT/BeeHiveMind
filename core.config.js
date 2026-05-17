@@ -88,6 +88,9 @@ CoreConfig.settings = Object.freeze({
     maxRemoteHaulRequestsDrawn: 10,
     maxWorkerRowsDrawn: 15,
     maxPlannedRoadTilesDrawn: 75,
+    remoteContainerBuildOverlayEnabled: true,
+    remoteContainerBuildVisualModulo: 1,
+    maxRemoteContainerBuildsDrawn: 12,
   }),
 });
 

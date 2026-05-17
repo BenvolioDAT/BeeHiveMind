@@ -33,6 +33,7 @@ var CFG = {
   showRepairCounter: true,
   showRemoteContainerHaulVisuals: true,
   showRemoteContainerHaulMapVisuals: true,
+  showRemoteContainerBuildVisuals: true,
   remoteContainerHaulMapModulo: 1,
 
   // Task table cadence
@@ -222,6 +223,9 @@ BeeVisuals.drawVisuals = function () {
     }
     if (vc.remoteHaulRoomOverlayEnabled === true) {
       BeeVisuals.drawRemoteContainerHaulVisuals();
+    }
+    if (vc.remoteContainerBuildOverlayEnabled !== false) {
+      BeeVisuals.drawRemoteContainerBuildVisuals();
     }
   }
 };
@@ -816,6 +820,56 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
  * Draw remote container haul request overlays directly from memory requests.
  * Uses RoomVisual(roomName) so remote rooms can be drawn from remembered positions.
  */
+
+
+BeeVisuals.drawRemoteContainerBuildVisuals = function () {
+  if (!CFG.showRemoteContainerBuildVisuals) return;
+  var vc = visualsConfig();
+  if (vc.remoteContainerBuildOverlayEnabled === false) return;
+  var mod = vc.remoteContainerBuildVisualModulo || 1;
+  if (mod > 1 && (Game.time % mod) !== 0) return;
+
+  var builds = Memory && Memory.__BHM && Memory.__BHM.remoteContainerBuilds;
+  if (!builds) return;
+
+  var staleTicks = vc.remoteContainerBuildStaleTicks || 150;
+  var maxDraw = vc.maxRemoteContainerBuildsDrawn || 12;
+  var drawn = 0;
+
+  for (var sourceId in builds) {
+    if (!Object.prototype.hasOwnProperty.call(builds, sourceId)) continue;
+    if (drawn >= maxDraw) break;
+    var rec = builds[sourceId];
+    if (!rec || !rec.roomName || typeof rec.x !== 'number' || typeof rec.y !== 'number') continue;
+
+    var status = rec.status || 'missing';
+    var stale = (typeof rec.updated === 'number') ? ((Game.time - rec.updated) > staleTicks) : true;
+    var ringColor = '#cccccc';
+    var label = 'BOX ?';
+    if (status === 'planned') { ringColor = '#ffe066'; label = 'BOX PLAN'; }
+    else if (status === 'building') { ringColor = '#2ad1c9'; label = 'BOX ' + (Math.floor(rec.progressPct || 0)) + '%'; }
+    else if (status === 'built') { ringColor = '#6effa1'; label = 'BOX DONE'; }
+    else if (status === 'missing') { ringColor = '#ff8c42'; label = 'BOX ?'; }
+    else if (status === 'blocked') { ringColor = '#ff5555'; label = 'BOX BLOCK'; }
+    if (stale) label += ' STALE';
+
+    var v = new RoomVisual(rec.roomName);
+    v.circle(rec.x, rec.y, { radius: 0.55, fill: 'transparent', stroke: ringColor, opacity: stale ? 0.4 : 0.85, strokeWidth: 0.12 });
+    v.rect(rec.x + 0.55, rec.y - 1.0, 5.9, 2.0, { fill: '#000000', opacity: 0.4, stroke: '#333333', strokeWidth: 0.05 });
+    text(v, label, rec.x + 0.75, rec.y - 0.45, 0.42, 'left', 1, '#ffffff');
+
+    if (status === 'building') {
+      var pct = Math.max(0, Math.min(1, (Number(rec.progressPct) || 0) / 100));
+      drawBar(v, rec.x + 0.75, rec.y - 0.2, 4.2, 0.25, pct, '#2ad1c9', '#222222');
+    }
+
+    var assigned = rec.assignedLuna;
+    if (assigned && Game.creeps[assigned]) {
+      text(v, assigned, rec.x + 0.75, rec.y + 0.45, 0.38, 'left', 1, '#66ccff');
+    }
+    drawn++;
+  }
+};
 BeeVisuals.drawRemoteContainerHaulVisuals = function () {
   if (BeeVisuals.visualBudgetLevel() !== 'full') return;
   if (!CFG.showRemoteContainerHaulVisuals) return;
