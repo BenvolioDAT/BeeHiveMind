@@ -98,6 +98,13 @@ CoreConfig.settings = Object.freeze({
     remoteContainerBuildTableStaleTicks: 150,
     remoteContainerBuildStaleTicks: 150,
     maxRemoteContainerBuildsDrawn: 12,
+    remoteMiningMapEnabled: true,
+    remoteMiningMapModulo: 5,
+    maxRemoteMiningMapSourcesDrawn: 80,
+    maxRemoteMiningMapCreepsDrawn: 40,
+    remoteMiningMapShowCreeps: true,
+    remoteMiningMapShowSources: true,
+    remoteMiningMapShowContainers: true,
   }),
 });
 
