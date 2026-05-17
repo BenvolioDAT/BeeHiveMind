@@ -829,6 +829,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
 BeeVisuals.drawRemoteContainerBuildStatusTable = function () {
   var vc = visualsConfig();
   if (vc.remoteContainerBuildTableEnabled === false) return;
+  var showBuilt = vc.remoteContainerBuildTableShowBuilt === true;
 
   var mod = vc.remoteContainerBuildTableModulo || 1;
   if (mod > 1 && (Game.time % mod) !== 0) return;
@@ -846,6 +847,7 @@ BeeVisuals.drawRemoteContainerBuildStatusTable = function () {
     if (!rec || !rec.homeRoom) continue;
 
     var status = rec.status || 'missing';
+    if (status === 'built' && !showBuilt) continue;
     var updated = typeof rec.updated === 'number' ? rec.updated : -1;
     var stale = updated < 0 ? true : ((Game.time - updated) > staleTicks);
 
@@ -865,6 +867,7 @@ BeeVisuals.drawRemoteContainerBuildStatusTable = function () {
     if (status === 'building') pri = 0;
     else if (status === 'planned' || status === 'missing') pri = 1;
     else if (status === 'blocked' || stale) pri = 2;
+    else if (status === 'built') pri = 4;
 
     if (!grouped[rec.homeRoom]) grouped[rec.homeRoom] = [];
     grouped[rec.homeRoom].push({
@@ -927,6 +930,7 @@ BeeVisuals.drawRemoteContainerBuildVisuals = function () {
   if (!CFG.showRemoteContainerBuildVisuals) return;
   var vc = visualsConfig();
   if (vc.remoteContainerBuildOverlayEnabled === false) return;
+  var showBuilt = vc.remoteContainerBuildOverlayShowBuilt === true;
   var mod = vc.remoteContainerBuildVisualModulo || 1;
   if (mod > 1 && (Game.time % mod) !== 0) return;
 
@@ -944,6 +948,7 @@ BeeVisuals.drawRemoteContainerBuildVisuals = function () {
     if (!rec || !rec.roomName || typeof rec.x !== 'number' || typeof rec.y !== 'number') continue;
 
     var status = rec.status || 'missing';
+    if (status === 'built' && !showBuilt) continue;
     var stale = (typeof rec.updated === 'number') ? ((Game.time - rec.updated) > staleTicks) : true;
     var ringColor = '#cccccc';
     var label = 'BOX ?';
