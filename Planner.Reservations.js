@@ -62,6 +62,12 @@ function reserveRing(room, reservations, center, range, reason, walkableOnly, te
   }
 }
 
+function getPathSteps(pathRecord) {
+  if (Array.isArray(pathRecord)) return pathRecord;
+  if (pathRecord && Array.isArray(pathRecord.path)) return pathRecord.path;
+  return null;
+}
+
 function buildReservations(room, opts) {
   var reservations = makeReservations();
   if (!room) return reservations;
@@ -89,10 +95,10 @@ function buildReservations(room, opts) {
   if (paths && typeof paths === 'object') {
     var pathKeys = Object.keys(paths);
     for (var pk = 0; pk < pathKeys.length; pk++) {
-      var path = paths[pathKeys[pk]];
-      if (!Array.isArray(path)) continue;
-      for (var si = 0; si < path.length; si++) {
-        var step = path[si];
+      var steps = getPathSteps(paths[pathKeys[pk]]);
+      if (!steps) continue;
+      for (var si = 0; si < steps.length; si++) {
+        var step = steps[si];
         if (!step || step.x == null || step.y == null) continue;
         if (step.roomName && step.roomName !== room.name) continue;
         rememberReserved(reservations, step.x, step.y, 'road-planner');
