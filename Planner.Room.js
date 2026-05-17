@@ -160,13 +160,21 @@ function maybeDrawPlannerPreviews(room, anchor) {
   if (!CoreConfig || !CoreConfig.settings || !CoreConfig.settings.visuals) return;
 
   var vc = CoreConfig.settings.visuals;
+  var stampPreviewAllowed = !!(vc.plannerStampPreviewEnabled &&
+    (!vc.plannerStampPreviewRoom || vc.plannerStampPreviewRoom === room.name));
+  var rampartPreviewAllowed = isRampartPreviewActiveForRoom(room, vc);
+
+  // CPU safety: when previews are disabled for this room, bail out before
+  // stamp lookup and before resolving layout anchors.
+  if (!stampPreviewAllowed && !rampartPreviewAllowed) {
+    PlannerRamparts.clearRampartPreview(room);
+    return;
+  }
+
   var stampId = vc.plannerStampPreviewStampId || 'core_v1';
   var stamp = PlannerStamps.getStampById(stampId) || PlannerStamps.getDefaultCoreStamp();
   var resolved = resolvePlannerStampAnchor(room, anchor, stamp, vc);
   if (!resolved || !resolved.stamp || !resolved.anchor) return;
-
-  var stampPreviewAllowed = !!(vc.plannerStampPreviewEnabled &&
-    (!vc.plannerStampPreviewRoom || vc.plannerStampPreviewRoom === room.name));
 
   if (stampPreviewAllowed) {
     PlannerVisuals.drawStampPreview(room, resolved.stamp, resolved.anchor, {
@@ -182,7 +190,6 @@ function maybeDrawPlannerPreviews(room, anchor) {
     }
   }
 
-  var rampartPreviewAllowed = isRampartPreviewActiveForRoom(room, vc);
   if (rampartPreviewAllowed) {
     var rampartReservations = null;
     if (vc.plannerRampartPreviewUseReservations) rampartReservations = PlannerReservations.buildReservations(room, vc);
@@ -553,6 +560,8 @@ function ensureSites(room) {
 
   var stampBuildActive = shouldUseStampBuild(room);
   if (stampBuildActive) {
+    // Build path currently uses the default core stamp while preview can use
+    // plannerStampPreviewStampId. This is intentional for now (single stamp).
     var stamp = PlannerStamps.getDefaultCoreStamp();
     var resolvedStamp = stamp ? resolvePlannerStampAnchor(room, anchor, stamp, buildCfg) : null;
     var stampAnchor = resolvedStamp && resolvedStamp.anchor ? resolvedStamp.anchor : null;
@@ -614,6 +623,7 @@ function ensureSites(room) {
 
   var rampartBuildActive = isRampartBuildActiveForRoom(room, buildCfg);
   if (rampartBuildActive && placed < CFG.maxSitesPerTick && cCount < CFG.csiteSafetyLimit) {
+    // Same note as stamp build above: build uses default core stamp for now.
     var rampartStamp = PlannerStamps.getDefaultCoreStamp();
     var resolvedRampart = resolvePlannerStampAnchor(room, anchor, rampartStamp, buildCfg);
     var rampartAnchor = resolvedRampart && resolvedRampart.anchor ? resolvedRampart.anchor : null;
