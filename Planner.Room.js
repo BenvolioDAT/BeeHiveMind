@@ -136,37 +136,22 @@ function isRampartPreviewActiveForRoom(room, cfg) {
     (!cfg.plannerRampartPreviewRoom || cfg.plannerRampartPreviewRoom === room.name));
 }
 
-function getPreviewStampAndAnchor(room, fallbackAnchor, vc) {
-  if (!room || !fallbackAnchor || !vc) return null;
-  var stampId = vc.plannerStampPreviewStampId || 'core_v1';
-  var stamp = PlannerStamps.getStampById(stampId) || PlannerStamps.getDefaultCoreStamp();
-  if (!stamp) return null;
-
-  var chosen = null;
-  var previewAnchor = fallbackAnchor;
-  if (vc.plannerStampCandidatePreviewEnabled) {
-    chosen = PlannerLayout.getChosenAnchor(room, stamp, {
-      scanStep: vc.plannerStampCandidateScanStep,
-      maxChecks: vc.plannerStampCandidateMaxChecks,
-      replanTicks: vc.plannerStampCandidateReplanTicks,
-      showScores: vc.plannerStampCandidateShowScores
-    });
-    if (chosen && chosen.pos) previewAnchor = chosen.pos;
-  }
-
-  return { stamp: stamp, previewAnchor: previewAnchor, chosen: chosen };
-}
-
-function getStampBuildAnchor(room, fallbackAnchor, stamp, cfg) {
-  if (!room || !fallbackAnchor || !stamp) return null;
+function resolvePlannerStampAnchor(room, fallbackAnchor, stamp, cfg, opts) {
+  if (!room || !fallbackAnchor || !stamp || !cfg) return null;
+  var o = opts || {};
   var chosen = PlannerLayout.getChosenAnchor(room, stamp, {
-    scanStep: cfg.plannerStampCandidateScanStep,
-    maxChecks: cfg.plannerStampCandidateMaxChecks,
-    replanTicks: cfg.plannerStampCandidateReplanTicks,
-    showScores: cfg.plannerStampCandidateShowScores
+    scanStep: o.scanStep || cfg.plannerStampCandidateScanStep,
+    maxChecks: o.maxChecks || cfg.plannerStampCandidateMaxChecks,
+    replanTicks: o.replanTicks || cfg.plannerStampCandidateReplanTicks,
+    showScores: (o.showScores != null) ? o.showScores : cfg.plannerStampCandidateShowScores
   });
-  if (chosen && chosen.pos) return chosen.pos;
-  return fallbackAnchor;
+  var anchor = (chosen && chosen.pos) ? chosen.pos : fallbackAnchor;
+  return {
+    stamp: stamp,
+    anchor: anchor,
+    chosen: chosen || null,
+    source: (chosen && chosen.pos) ? 'layout' : 'fallback'
+  };
 }
 
 function maybeDrawPlannerPreviews(room, anchor) {
@@ -175,20 +160,23 @@ function maybeDrawPlannerPreviews(room, anchor) {
   if (!CoreConfig || !CoreConfig.settings || !CoreConfig.settings.visuals) return;
 
   var vc = CoreConfig.settings.visuals;
-  var preview = getPreviewStampAndAnchor(room, anchor, vc);
-  if (!preview || !preview.stamp || !preview.previewAnchor) return;
+  var stampId = vc.plannerStampPreviewStampId || 'core_v1';
+  var stamp = PlannerStamps.getStampById(stampId) || PlannerStamps.getDefaultCoreStamp();
+  var resolved = resolvePlannerStampAnchor(room, anchor, stamp, vc);
+  if (!resolved || !resolved.stamp || !resolved.anchor) return;
 
   var stampPreviewAllowed = !!(vc.plannerStampPreviewEnabled &&
     (!vc.plannerStampPreviewRoom || vc.plannerStampPreviewRoom === room.name));
 
   if (stampPreviewAllowed) {
-    PlannerVisuals.drawStampPreview(room, preview.stamp, preview.previewAnchor, {
+    PlannerVisuals.drawStampPreview(room, resolved.stamp, resolved.anchor, {
       rcl: (room.controller && room.controller.level) || 0,
       showFutureRcl: vc.plannerStampPreviewShowFutureRcl !== false
     });
 
-    if (vc.plannerStampCandidatePreviewEnabled && preview.chosen && preview.chosen.pos) {
-      PlannerVisuals.drawChosenAnchor(room, preview.chosen.pos, preview.chosen.score, {
+    // Candidate preview only gates debug visuals (not anchor selection).
+    if (vc.plannerStampCandidatePreviewEnabled && resolved.chosen && resolved.chosen.pos) {
+      PlannerVisuals.drawChosenAnchor(room, resolved.chosen.pos, resolved.chosen.score, {
         showScores: vc.plannerStampCandidateShowScores
       });
     }
@@ -198,12 +186,13 @@ function maybeDrawPlannerPreviews(room, anchor) {
   if (rampartPreviewAllowed) {
     var rampartReservations = null;
     if (vc.plannerRampartPreviewUseReservations) rampartReservations = PlannerReservations.buildReservations(room, vc);
-    var rampartPlan = PlannerRamparts.buildRampartPreview(room, preview.stamp, preview.previewAnchor, rampartReservations, {
+    var rampartPlan = PlannerRamparts.buildRampartPreview(room, resolved.stamp, resolved.anchor, rampartReservations, {
       useReservations: vc.plannerRampartPreviewUseReservations !== false,
       range: vc.plannerRampartPreviewRange,
       maxTiles: vc.plannerRampartPreviewMaxTiles,
       showLabels: vc.plannerRampartPreviewShowLabels === true,
-      rcl: vc.plannerRampartPreviewRcl
+      rcl: vc.plannerRampartPreviewRcl,
+      anchorSource: resolved.source
     });
     PlannerRamparts.drawRampartPreview(room, rampartPlan, {
       showLabels: vc.plannerRampartPreviewShowLabels === true
@@ -565,13 +554,8 @@ function ensureSites(room) {
   var stampBuildActive = shouldUseStampBuild(room);
   if (stampBuildActive) {
     var stamp = PlannerStamps.getDefaultCoreStamp();
-    var chosen = stamp ? PlannerLayout.getChosenAnchor(room, stamp, {
-      scanStep: buildCfg.plannerStampCandidateScanStep,
-      maxChecks: buildCfg.plannerStampCandidateMaxChecks,
-      replanTicks: buildCfg.plannerStampCandidateReplanTicks,
-      showScores: buildCfg.plannerStampCandidateShowScores
-    }) : null;
-    var stampAnchor = chosen && chosen.pos ? chosen.pos : null;
+    var resolvedStamp = stamp ? resolvePlannerStampAnchor(room, anchor, stamp, buildCfg) : null;
+    var stampAnchor = resolvedStamp && resolvedStamp.anchor ? resolvedStamp.anchor : null;
     var memStamp = plannerMemory(room);
     if (stampAnchor && stamp) {
       var stampMaxRcl = Number(buildCfg.plannerStampBuildRclMax || 3);
@@ -595,6 +579,7 @@ function ensureSites(room) {
         t: Game.time,
         stampId: stamp.id,
         anchor: { x: stampAnchor.x, y: stampAnchor.y, roomName: stampAnchor.roomName },
+        anchorSource: resolvedStamp ? resolvedStamp.source : 'fallback',
         stampRcl: stampRcl,
         placed: stampResult.placed,
         skippedBlocked: stampResult.skippedBlocked,
@@ -630,7 +615,8 @@ function ensureSites(room) {
   var rampartBuildActive = isRampartBuildActiveForRoom(room, buildCfg);
   if (rampartBuildActive && placed < CFG.maxSitesPerTick && cCount < CFG.csiteSafetyLimit) {
     var rampartStamp = PlannerStamps.getDefaultCoreStamp();
-    var rampartAnchor = getStampBuildAnchor(room, anchor, rampartStamp, buildCfg);
+    var resolvedRampart = resolvePlannerStampAnchor(room, anchor, rampartStamp, buildCfg);
+    var rampartAnchor = resolvedRampart && resolvedRampart.anchor ? resolvedRampart.anchor : null;
     if (rampartStamp && rampartAnchor) {
       var useReservations = buildCfg.plannerRampartBuildUseReservations !== false;
       var rampartPlan = PlannerRamparts.buildRampartPreview(room, rampartStamp, rampartAnchor, reservations, {
@@ -638,7 +624,8 @@ function ensureSites(room) {
         range: buildCfg.plannerRampartPreviewRange,
         maxTiles: buildCfg.plannerRampartPreviewMaxTiles,
         showLabels: false,
-        rcl: buildCfg.plannerRampartPreviewRcl
+        rcl: buildCfg.plannerRampartPreviewRcl,
+        anchorSource: resolvedRampart ? resolvedRampart.source : 'fallback'
       });
       var rampartPerTick = Math.max(0, Number(buildCfg.plannerRampartBuildMaxSitesPerTick || 0));
       var rampartResult = ensureRampartSites(
@@ -660,6 +647,7 @@ function ensureSites(room) {
         skippedCap: rampartResult.skippedCap,
         previewTiles: rampartResult.previewTiles,
         minRcl: Math.max(0, Number(buildCfg.plannerRampartBuildMinRcl || 0)),
+        anchorSource: resolvedRampart ? resolvedRampart.source : 'fallback',
         anchor: { x: rampartAnchor.x, y: rampartAnchor.y, roomName: rampartAnchor.roomName },
         stampId: rampartStamp.id
       };
