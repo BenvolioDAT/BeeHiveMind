@@ -2,6 +2,7 @@ var CoreConfig = require('core.config');
 var PlannerStamps = require('Planner.Stamps');
 var PlannerVisuals = require('Planner.Visuals');
 var PlannerLayout = require('Planner.Layout');
+var PlannerReservations = require('Planner.Reservations');
 
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
@@ -244,7 +245,7 @@ function countExistingOrSiteAt(room, x, y, type) {
   return 0;
 }
 
-function canPlaceStampStructure(room, snapshot, x, y, type) {
+function canPlaceStampStructure(room, snapshot, x, y, type, reservations, opts) {
   if (x < 1 || x > 48 || y < 1 || y > 48) return false;
   if (snapshot.terrain.get(x, y) === TERRAIN_MASK_WALL) return false;
   if (countExistingOrSiteAt(room, x, y, type) > 0) return false;
@@ -270,14 +271,18 @@ function canPlaceStampStructure(room, snapshot, x, y, type) {
     if (mins[m].pos.x === x && mins[m].pos.y === y) return false;
   }
   if (room.controller && room.controller.pos.x === x && room.controller.pos.y === y) return false;
+  if (opts && opts.plannerReservationsEnabled && opts.plannerReservationsAffectStampBuild &&
+    type !== STRUCTURE_ROAD && type !== STRUCTURE_RAMPART &&
+    PlannerReservations.isReserved(reservations, x, y)) return false;
   return true;
 }
 
-function ensureStampLayoutSites(room, anchor, stamp, snapshot, allowedFn, rcl, slotsLeft, globalCapLeft) {
+function ensureStampLayoutSites(room, anchor, stamp, snapshot, allowedFn, rcl, slotsLeft, globalCapLeft, reservations, opts) {
   var placed = 0;
   var skippedBlocked = 0;
   var skippedCap = 0;
   var skippedType = 0;
+  var skippedReserved = 0;
   if (!room || !anchor || !stamp) return { placed: 0, skippedBlocked: 0, skippedCap: 0, skippedType: 0 };
   if (slotsLeft <= 0 || globalCapLeft <= 0) return { placed: 0, skippedBlocked: 0, skippedCap: 0, skippedType: 0 };
 
@@ -309,7 +314,10 @@ function ensureStampLayoutSites(room, anchor, stamp, snapshot, allowedFn, rcl, s
       continue;
     }
 
-    if (!canPlaceStampStructure(room, snapshot, t.x, t.y, t.type)) {
+    if (!canPlaceStampStructure(room, snapshot, t.x, t.y, t.type, reservations, opts)) {
+      if (opts && opts.plannerReservationsEnabled && opts.plannerReservationsAffectStampBuild &&
+        t.type !== STRUCTURE_ROAD && t.type !== STRUCTURE_RAMPART &&
+        PlannerReservations.isReserved(reservations, t.x, t.y)) skippedReserved++;
       skippedBlocked++;
       continue;
     }
@@ -328,7 +336,7 @@ function ensureStampLayoutSites(room, anchor, stamp, snapshot, allowedFn, rcl, s
     }
   }
 
-  return { placed: placed, skippedBlocked: skippedBlocked, skippedCap: skippedCap, skippedType: skippedType };
+  return { placed: placed, skippedBlocked: skippedBlocked, skippedCap: skippedCap, skippedType: skippedType, skippedReserved: skippedReserved };
 }
 
 function orderedBaseOffsetsForRcl(rcl) {
@@ -391,6 +399,20 @@ function ensureSites(room) {
 
   var snapshot = scanRoomState(room);
   var allowedFn = function (type) { return allowedCount(type, room); };
+  var buildCfg = stampBuildConfig();
+  var shouldBuildReservations = !!(buildCfg.plannerReservationsEnabled || buildCfg.plannerReservationVisualsEnabled);
+  var reservations = shouldBuildReservations ? PlannerReservations.buildReservations(room, buildCfg) : null;
+  if (shouldBuildReservations) {
+    mem.lastReservations = {
+      t: Game.time,
+      count: reservations.count,
+      byReason: reservations.byReason
+    };
+    if (buildCfg.plannerReservationVisualsEnabled &&
+      (!buildCfg.plannerReservationVisualRoom || buildCfg.plannerReservationVisualRoom === room.name)) {
+      PlannerReservations.drawReservations(room, reservations, buildCfg);
+    }
+  }
   var placed = 0;
   var cCount = globalCount;
 
@@ -412,7 +434,6 @@ function ensureSites(room) {
     return;
   }
 
-  var buildCfg = stampBuildConfig();
   var stampBuildActive = shouldUseStampBuild(room);
   if (stampBuildActive) {
     var stamp = PlannerStamps.getDefaultCoreStamp();
@@ -436,7 +457,9 @@ function ensureSites(room) {
         allowedFn,
         stampRcl,
         Math.min(CFG.maxSitesPerTick - placed, stampPerTick),
-        CFG.csiteSafetyLimit - cCount
+        CFG.csiteSafetyLimit - cCount,
+        reservations,
+        buildCfg
       );
       placed += stampResult.placed;
       cCount += stampResult.placed;
@@ -447,8 +470,11 @@ function ensureSites(room) {
         stampRcl: stampRcl,
         placed: stampResult.placed,
         skippedBlocked: stampResult.skippedBlocked,
+        skippedReserved: stampResult.skippedReserved,
         skippedCap: stampResult.skippedCap,
         skippedType: stampResult.skippedType,
+        reservationCount: reservations ? reservations.count : 0,
+        reservationReasons: reservations ? reservations.byReason : {},
         allowedTypes: {
           extension: isStampBuildTypeAllowed(STRUCTURE_EXTENSION, stampRcl),
           tower: isStampBuildTypeAllowed(STRUCTURE_TOWER, stampRcl),
@@ -463,9 +489,12 @@ function ensureSites(room) {
         anchor: null,
         placed: 0,
         skippedBlocked: 0,
+        skippedReserved: 0,
         skippedCap: 0,
         skippedType: 0,
-        skippedNoAnchor: 1
+        skippedNoAnchor: 1,
+        reservationCount: reservations ? reservations.count : 0,
+        reservationReasons: reservations ? reservations.byReason : {}
       };
     }
   }
@@ -480,7 +509,9 @@ function ensureSites(room) {
       allowedFn,
       rcl,
       CFG.maxSitesPerTick - placed,
-      CFG.csiteSafetyLimit - cCount
+      CFG.csiteSafetyLimit - cCount,
+      reservations,
+      buildCfg
     );
     placed += basePlaced;
     cCount += basePlaced;
@@ -494,7 +525,7 @@ function ensureSites(room) {
  * place whatever is still missing. Everything is kept tiny and linear so
  * new contributors can trace the decision making.
  */
-function ensureBaseLayout(room, anchor, snapshot, allowedFn, rcl, slotsLeft, globalCapLeft) {
+function ensureBaseLayout(room, anchor, snapshot, allowedFn, rcl, slotsLeft, globalCapLeft, reservations, opts) {
   if (!anchor) return 0;
   if (slotsLeft <= 0 || globalCapLeft <= 0) return 0;
   let placed = 0;
@@ -519,6 +550,9 @@ function ensureBaseLayout(room, anchor, snapshot, allowedFn, rcl, slotsLeft, glo
     if (snapshot.terrain.get(tx, ty) === TERRAIN_MASK_WALL) continue;
     if (room.lookForAt(LOOK_STRUCTURES, tx, ty).length) continue;
     if (room.lookForAt(LOOK_CONSTRUCTION_SITES, tx, ty).length) continue;
+    if (opts && opts.plannerReservationsEnabled && opts.plannerReservationsAffectLegacyBaseLayout &&
+      plan.type !== STRUCTURE_ROAD && plan.type !== STRUCTURE_RAMPART &&
+      PlannerReservations.isReserved(reservations, tx, ty)) continue;
 
     const have = (snapshot.built[plan.type] || 0) + (snapshot.sites[plan.type] || 0);
     const cap = allowedFn(plan.type);
