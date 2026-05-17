@@ -18,6 +18,9 @@ var CFG = Object.freeze({
 });
 
 // Hard caps (upper bounds). Still clamped by CONTROLLER_STRUCTURES per RCL.
+// Note: the rampart cap here applies to legacy/static base-offset counting.
+// Dynamic rampart placement uses Planner.Ramparts preview geometry together
+// with plannerRampartBuild* gates/caps; it is not globally capped to 2.
 const STRUCTURE_LIMITS = (() => {
   const limits = {};
   limits[STRUCTURE_TOWER] = 6;
@@ -152,6 +155,39 @@ function resolvePlannerStampAnchor(room, fallbackAnchor, stamp, cfg, opts) {
     chosen: chosen || null,
     source: (chosen && chosen.pos) ? 'layout' : 'fallback'
   };
+}
+
+function shouldLogPlannerInvariant(room, mem, cfg) {
+  if (!room || !mem || !cfg) return false;
+  var interval = Math.max(1, Number(cfg.plannerInvariantLogInterval || 250));
+  var last = Number(mem.lastInvariantWarnAt || 0);
+  if ((Game.time - last) < interval) return false;
+  mem.lastInvariantWarnAt = Game.time;
+  return true;
+}
+
+function checkPlannerAnchorParity(room, mem, cfg) {
+  if (!room || !mem || !cfg || !cfg.plannerInvariantChecksEnabled) return;
+  var stamp = mem.lastStampBuild;
+  var rampart = mem.lastRampartBuild;
+  if (!stamp || !rampart || !stamp.anchor || !rampart.anchor) return;
+  var stampTick = Number(stamp.t || 0);
+  var rampartTick = Number(rampart.t || 0);
+  if (stampTick <= 0 || rampartTick <= 0) return;
+  if (Math.abs(stampTick - rampartTick) > 2) return;
+
+  var anchorMismatch = (
+    stamp.anchor.x !== rampart.anchor.x ||
+    stamp.anchor.y !== rampart.anchor.y ||
+    stamp.anchor.roomName !== rampart.anchor.roomName
+  );
+  var sourceMismatch = (stamp.anchorSource || 'fallback') !== (rampart.anchorSource || 'fallback');
+  if (!anchorMismatch && !sourceMismatch) return;
+  if (!shouldLogPlannerInvariant(room, mem, cfg)) return;
+
+  console.log('[PlannerInvariant][' + room.name + '] anchor parity mismatch @' + Game.time +
+    ' stamp=' + JSON.stringify({ t: stampTick, anchor: stamp.anchor, source: stamp.anchorSource || 'fallback' }) +
+    ' rampart=' + JSON.stringify({ t: rampartTick, anchor: rampart.anchor, source: rampart.anchorSource || 'fallback' }));
 }
 
 function maybeDrawPlannerPreviews(room, anchor) {
@@ -519,18 +555,31 @@ function ensureSites(room) {
   var snapshot = scanRoomState(room);
   var allowedFn = function (type) { return allowedCount(type, room); };
   var buildCfg = stampBuildConfig();
+  var reservationsBecause = {
+    reservationsEnabled: !!buildCfg.plannerReservationsEnabled,
+    reservationVisuals: !!buildCfg.plannerReservationVisualsEnabled,
+    rampartPreviewNeedsReservations: !!(
+      isRampartPreviewActiveForRoom(room, buildCfg) &&
+      buildCfg.plannerRampartPreviewUseReservations
+    ),
+    rampartBuildNeedsReservations: !!(
+      isRampartBuildActiveForRoom(room, buildCfg) &&
+      buildCfg.plannerRampartBuildUseReservations !== false
+    )
+  };
   var shouldBuildReservations = !!(
-    buildCfg.plannerReservationsEnabled ||
-    buildCfg.plannerReservationVisualsEnabled ||
-    (isRampartPreviewActiveForRoom(room, buildCfg) && buildCfg.plannerRampartPreviewUseReservations) ||
-    (isRampartBuildActiveForRoom(room, buildCfg) && buildCfg.plannerRampartBuildUseReservations !== false)
+    reservationsBecause.reservationsEnabled ||
+    reservationsBecause.reservationVisuals ||
+    reservationsBecause.rampartPreviewNeedsReservations ||
+    reservationsBecause.rampartBuildNeedsReservations
   );
   var reservations = shouldBuildReservations ? PlannerReservations.buildReservations(room, buildCfg) : null;
   if (shouldBuildReservations) {
     mem.lastReservations = {
       t: Game.time,
       count: reservations.count,
-      byReason: reservations.byReason
+      byReason: reservations.byReason,
+      builtBecause: reservationsBecause
     };
     if (buildCfg.plannerReservationVisualsEnabled &&
       (!buildCfg.plannerReservationVisualRoom || buildCfg.plannerReservationVisualRoom === room.name)) {
@@ -680,6 +729,8 @@ function ensureSites(room) {
 
   var skipLegacy = stampBuildActive && buildCfg.plannerStampBuildSkipLegacyBaseLayout === true;
   if (!skipLegacy) {
+    // Audit scope note: dynamic planner construction is centralized here;
+    // other systems may still intentionally place their own construction sites.
     // Phase 2/3: follow the legacy base offsets as long as we have placements left.
     const basePlaced = ensureBaseLayout(
       room,
@@ -696,6 +747,7 @@ function ensureSites(room) {
     cCount += basePlaced;
   }
 
+  checkPlannerAnchorParity(room, mem, buildCfg);
   mem.nextPlanTick = Game.time + (placed ? CFG.noPlacementCooldownPlaced : CFG.noPlacementCooldownNone);
 }
 
