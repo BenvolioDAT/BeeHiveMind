@@ -17,6 +17,7 @@ var CoreConfig  = require('core.config');
 var spawnLogic  = require('spawn.logic');
 var LunaConfig  = require('role.Luna.Config');
 var TruckerConfig = require('role.Trucker.Config');
+var RepairConfig = require('role.Repair.Config');
 var RemoteHarvestManager = require('RemoteHarvest.Manager');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -768,6 +769,74 @@ function computeTruckerQuotaForHome(roomName) {
   return { activeRequests: active, urgentRequests: urgent, desiredTruckers: desired };
 }
 
+function hasMeaningfulRepairTarget(target) {
+  if (!target || !target.id) return false;
+  var obj = Game.getObjectById(target.id);
+  if (!obj || typeof obj.hits !== 'number' || typeof obj.hitsMax !== 'number' || obj.hitsMax <= 0) return false;
+  if (obj.hits >= obj.hitsMax) return false;
+  var pct = obj.hits / obj.hitsMax;
+  var type = obj.structureType;
+  if (type === STRUCTURE_ROAD) return pct < 0.60;
+  if (type === STRUCTURE_CONTAINER) return pct < 0.80;
+  if (type === STRUCTURE_SPAWN || type === STRUCTURE_EXTENSION || type === STRUCTURE_TOWER || type === STRUCTURE_STORAGE || type === STRUCTURE_TERMINAL) return pct < 0.90;
+  if (type === STRUCTURE_RAMPART || type === STRUCTURE_WALL) return true;
+  return false;
+}
+
+function computeRepairQuotaForRoom(room) {
+  if (!room) return 0;
+  var towers = room.find(FIND_MY_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_TOWER; } });
+  if (towers && towers.length > 0) return 0;
+  var mem = (Memory.rooms && Memory.rooms[room.name]) || {};
+  var queue = Array.isArray(mem.repairTargets) ? mem.repairTargets : [];
+  for (var i = 0; i < queue.length; i++) {
+    if (hasMeaningfulRepairTarget(queue[i])) return 1;
+  }
+  return 0;
+}
+
+function isRepairAlreadyAssignedToContainer(roomName, containerId) {
+  if (!roomName || !containerId) return false;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    if (canonicalRole(creep.memory.role) !== 'Repair') continue;
+    if (creep.memory.task !== 'remoteContainerEmergencyRepair') continue;
+    if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
+    if (creep.memory.containerId === containerId) return true;
+  }
+  var q = ensureRoomQueue(roomName);
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (!item || item.role !== 'Repair') continue;
+    if (item.task !== 'remoteContainerEmergencyRepair') continue;
+    if (item.containerId === containerId) return true;
+  }
+  return false;
+}
+
+function findRemoteContainerEmergencyRepairRequest(roomName) {
+  if (!RepairConfig.remoteContainerEmergencyRepairEnabled) return null;
+  var requests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
+  var staleTicks = (TruckerConfig && TruckerConfig.REQUEST_STALE_TICKS) || 100;
+  var startPct = RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40;
+  for (var id in requests) {
+    if (!Object.prototype.hasOwnProperty.call(requests, id)) continue;
+    var req = requests[id];
+    if (!req || req.homeRoom !== roomName) continue;
+    if (!req.containerId) continue;
+    if (typeof req.containerHitsPct !== 'number') continue;
+    if (req.containerHitsPct > startPct) continue;
+    if ((Game.time - (req.updated || 0)) > staleTicks) continue;
+    if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
+    if (req.maintenanceUntil && req.maintenanceUntil > Game.time && req.maintenanceBy) continue;
+    if (isRepairAlreadyAssignedToContainer(roomName, req.containerId)) continue;
+    return req;
+  }
+  return null;
+}
+
 function computeRoomQuotas(C, room) {
   var localDefense = computeLocalDefenseQuotas(room);
   var sourceCount = room ? room.find(FIND_SOURCES).length : 0;
@@ -784,7 +853,7 @@ function computeRoomQuotas(C, room) {
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
     Luna:         determineLunaQuota(C, room),
-    Repair:       0,
+    Repair:       computeRepairQuotaForRoom(room),
     Trucker:      computeTruckerQuotaForHome(room.name).desiredTruckers,
     Claimer:      0,
     CombatMelee:  localDefense.CombatMelee,
@@ -844,6 +913,22 @@ function fillQueueForRoom(C, room) {
         'active=', active, 'queued=', queued, 'deficit=', deficit);
     }
     for (var j = 0; j < deficit; j++) {
+      if (role === 'Repair') {
+        var emergencyReq = findRemoteContainerEmergencyRepairRequest(roomName);
+        if (emergencyReq) {
+          enqueue(roomName, role, {
+            task: 'remoteContainerEmergencyRepair',
+            home: roomName,
+            targetRoom: emergencyReq.remoteRoom || emergencyReq.roomName,
+            containerId: emergencyReq.containerId,
+            sourceId: emergencyReq.sourceId,
+            requestId: emergencyReq.id,
+            x: emergencyReq.x,
+            y: emergencyReq.y
+          });
+          continue;
+        }
+      }
       if (role !== 'Luna') {
         enqueue(roomName, role);
         continue;

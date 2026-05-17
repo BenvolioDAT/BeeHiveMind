@@ -47,10 +47,96 @@ function getRepairQueue(room){ Memory.rooms = Memory.rooms || {}; Memory.rooms[r
 function getNextRepairTarget(queue){ while (queue.length){ var head = queue[0]; if (!head || !head.id){ queue.shift(); continue; } var obj = Game.getObjectById(head.id); if (!obj || !obj.hits || obj.hits >= obj.hitsMax){ queue.shift(); continue; } return obj; } return null; }
 function findDroppedEnergy(creep){ return creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, { filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount || 0) > 0; } }); }
 function findWithdrawSource(creep){ return creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function(s){ if (!s.store) return false; var t = s.structureType; if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN) return false; return (s.store[RESOURCE_ENERGY] || 0) > 0; } }); }
+function getRemoteHaulRequestById(id){
+  var root = Memory.__BHM && Memory.__BHM.remoteHaulRequests;
+  if (!root || !id) return null;
+  return root[id] || null;
+}
+function clearRemoteTask(creep){
+  if (!creep || !creep.memory) return;
+  delete creep.memory.task;
+  delete creep.memory.targetRoom;
+  delete creep.memory.containerId;
+  delete creep.memory.sourceId;
+  delete creep.memory.requestId;
+  delete creep.memory.x;
+  delete creep.memory.y;
+}
+function runRemoteContainerEmergencyRepair(creep){
+  if (!creep || !creep.memory) return;
+  var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
+  creep.memory.home = home;
+  var stopPct = CFG.remoteContainerEmergencyRepairStopPct || 0.85;
+  var holdTicks = CFG.remoteContainerEmergencyRepairHoldTicks || 50;
+  var minContainerEnergy = CFG.remoteContainerEmergencyRepairMinContainerEnergy || 100;
+  var withdrawAmount = CFG.remoteContainerEmergencyRepairWithdrawAmount || 100;
+
+  var container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
+  if (!container) {
+    var tx = creep.memory.x;
+    var ty = creep.memory.y;
+    var tr = creep.memory.targetRoom;
+    if (tr && typeof tx === 'number' && typeof ty === 'number') {
+      go(creep, new RoomPosition(tx, ty, tr), 1);
+    }
+    return;
+  }
+
+  var hitsPct = container.hitsMax > 0 ? (container.hits / container.hitsMax) : 1;
+  if (hitsPct >= stopPct) {
+    clearRemoteTask(creep);
+    if (creep.room.name !== home) go(creep, new RoomPosition(25, 25, home), 20);
+    return;
+  }
+
+  var req = getRemoteHaulRequestById(creep.memory.requestId || container.id);
+  if (req) {
+    req.maintenanceUntil = Game.time + holdTicks;
+    req.maintenanceBy = creep.name;
+    req.maintenanceReason = 'emergencyRemoteRepair';
+  }
+
+  var energy = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
+  if (energy > 0) {
+    var rr = creep.repair(container);
+    if (rr === ERR_NOT_IN_RANGE) go(creep, container, 3);
+    return;
+  }
+
+  var available = (container.store && container.store[RESOURCE_ENERGY]) || 0;
+  var spare = Math.max(0, available - minContainerEnergy);
+  var need = Math.min(withdrawAmount, creep.store.getFreeCapacity(RESOURCE_ENERGY), spare);
+  if (need > 0) {
+    var wr = creep.withdraw(container, RESOURCE_ENERGY, need);
+    if (wr === ERR_NOT_IN_RANGE) go(creep, container, 1);
+    return;
+  }
+
+  var source = creep.memory.sourceId ? Game.getObjectById(creep.memory.sourceId) : null;
+  if (source) {
+    var hr = creep.harvest(source);
+    if (hr === ERR_NOT_IN_RANGE) go(creep, source, 1);
+    return;
+  }
+
+  if (creep.room.name === home) {
+    var localSource = findWithdrawSource(creep);
+    if (localSource) {
+      var lwr = creep.withdraw(localSource, RESOURCE_ENERGY);
+      if (lwr === ERR_NOT_IN_RANGE) go(creep, localSource, 1);
+      return;
+    }
+  }
+
+  if (creep.room.name !== home) go(creep, new RoomPosition(25, 25, home), 20);
+}
 
 function run(creep){
   if (!creep) return;
   if (creep.memory && !creep.memory.role) creep.memory.role = 'Repair';
+  if (creep.memory && creep.memory.task === 'remoteContainerEmergencyRepair') {
+    return runRemoteContainerEmergencyRepair(creep);
+  }
   var e = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
   hud(creep, "🔧 " + e + "/" + creep.store.getCapacity(RESOURCE_ENERGY));
 
