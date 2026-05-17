@@ -228,6 +228,7 @@ function isStampBuildTypeAllowed(type, rcl) {
   if (type === STRUCTURE_EXTENSION) return lvl >= 2;
   if (type === STRUCTURE_TOWER) return lvl >= 3;
   if (type === STRUCTURE_STORAGE) return lvl >= 4;
+  if (type === STRUCTURE_LINK) return lvl >= 5;
   return false;
 }
 
@@ -451,7 +452,8 @@ function ensureSites(room) {
         allowedTypes: {
           extension: isStampBuildTypeAllowed(STRUCTURE_EXTENSION, stampRcl),
           tower: isStampBuildTypeAllowed(STRUCTURE_TOWER, stampRcl),
-          storage: isStampBuildTypeAllowed(STRUCTURE_STORAGE, stampRcl)
+          storage: isStampBuildTypeAllowed(STRUCTURE_STORAGE, stampRcl),
+          link: isStampBuildTypeAllowed(STRUCTURE_LINK, stampRcl)
         }
       };
     } else {
