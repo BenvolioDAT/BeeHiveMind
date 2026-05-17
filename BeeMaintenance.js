@@ -252,6 +252,77 @@ function _removeDeadCreepMemory() {
 // Source assignment bookkeeping toggles between arrays (ordered creep lists)
 // and objects (per-role slots).  Walk both forms carefully so we do not throw
 // away valid claims just because a different role wrote the data.
+function isSourceMetadataRecord(sourceRecord) {
+  if (!_isObject(sourceRecord) || Array.isArray(sourceRecord)) return false;
+
+  // Remote source entries now carry scouting/build intel (PR #309+), not just
+  // role-slot assignments.  If any intel-ish key exists, treat the record as
+  // metadata and preserve it during cleanup.
+  var metadataKeys = {
+    x: true,
+    y: true,
+    pos: true,
+    flagName: true,
+    lastActive: true,
+    lastSeen: true,
+    containerId: true,
+    container: true,
+    entrySteps: true,
+    roomName: true,
+    sourceId: true
+  };
+
+  for (var key in sourceRecord) {
+    if (_hasOwn(sourceRecord, key) && metadataKeys[key]) return true;
+  }
+  return false;
+}
+
+function isLikelyAssignmentMap(sourceRecord) {
+  if (!_isObject(sourceRecord) || Array.isArray(sourceRecord)) return false;
+  if (isSourceMetadataRecord(sourceRecord)) return false;
+
+  var assignmentLikeKeys = {
+    miner: true,
+    harvester: true,
+    baseharvest: true,
+    baseHarvest: true,
+    luna: true,
+    remoteharvest: true,
+    remoteHarvest: true,
+    hauler: true,
+    trucker: true,
+    courier: true,
+    builder: true,
+    repair: true,
+    upgrader: true,
+    queen: true,
+    scout: true,
+    claimer: true,
+    owner: true,
+    assigned: true,
+    assignedCreep: true,
+    creep: true
+  };
+
+  var hasAssignmentSignal = false;
+  for (var key in sourceRecord) {
+    if (!_hasOwn(sourceRecord, key)) continue;
+    var value = sourceRecord[key];
+
+    if (value == null) {
+      if (assignmentLikeKeys[key]) hasAssignmentSignal = true;
+      continue;
+    }
+
+    if (typeof value !== 'string') return false;
+    if (assignmentLikeKeys[key]) hasAssignmentSignal = true;
+    if (Game.creeps[value]) hasAssignmentSignal = true;
+  }
+
+  return hasAssignmentSignal;
+}
+
 function _pruneSourceAssignments(roomMemory) {
   if (!_isObject(roomMemory.sources)) return;
   for (var sourceId in roomMemory.sources) {
@@ -269,17 +340,31 @@ function _pruneSourceAssignments(roomMemory) {
     }
 
     if (_isObject(assignedCreeps)) {
-      // Object form: drop role slots that point at dead creeps so reassignment can happen.
-      var keptSlots = {};
-      for (var role in assignedCreeps) {
-        if (!assignedCreeps.hasOwnProperty(role)) continue;
-        var creepName = assignedCreeps[role];
-        if (creepName && Game.creeps[creepName]) {
-          keptSlots[role] = creepName;
-        }
+      if (isSourceMetadataRecord(assignedCreeps)) {
+        // Metadata-shaped records are consumed by Luna/RemoteHarvest (including
+        // source container/build progress state). Do not prune top-level keys.
+        continue;
       }
-      if (_isEmptyObject(keptSlots)) delete roomMemory.sources[sourceId];
-      else roomMemory.sources[sourceId] = keptSlots;
+
+      if (isLikelyAssignmentMap(assignedCreeps)) {
+        // Assignment-map form: drop role slots that point at dead creeps so
+        // reassignment can happen.
+        var keptSlots = {};
+        for (var role in assignedCreeps) {
+          if (!assignedCreeps.hasOwnProperty(role)) continue;
+          var creepName = assignedCreeps[role];
+          if (creepName && Game.creeps[creepName]) {
+            keptSlots[role] = creepName;
+          }
+        }
+        if (_isEmptyObject(keptSlots)) delete roomMemory.sources[sourceId];
+        else roomMemory.sources[sourceId] = keptSlots;
+        continue;
+      }
+
+      // Unknown source object shapes are preserved deliberately. Source memory
+      // now stores intel/build metadata, and future fields should survive
+      // cleanup even if this maintenance pass does not recognize them yet.
     }
   }
 
