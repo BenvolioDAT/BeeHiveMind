@@ -1,3 +1,7 @@
+var CoreConfig = require('core.config');
+var PlannerStamps = require('Planner.Stamps');
+var PlannerVisuals = require('Planner.Visuals');
+
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
 // Teaching note: top-level planner config lives here so new contributors can
@@ -121,6 +125,26 @@ function pickAnchor(room) {
 }
 
 /** Snapshot the room once so we do not repeatedly scan structures/sites. */
+
+function maybeDrawStampPreview(room, anchor) {
+  if (!room || !anchor) return;
+  if (typeof RoomVisual === 'undefined') return;
+  if (!CoreConfig || !CoreConfig.settings || !CoreConfig.settings.visuals) return;
+
+  var vc = CoreConfig.settings.visuals;
+  if (!vc.plannerStampPreviewEnabled) return;
+  if (vc.plannerStampPreviewRoom && vc.plannerStampPreviewRoom !== room.name) return;
+
+  var stampId = vc.plannerStampPreviewStampId || 'core_v1';
+  var stamp = PlannerStamps.getStampById(stampId) || PlannerStamps.getDefaultCoreStamp();
+  if (!stamp) return;
+
+  PlannerVisuals.drawStampPreview(room, stamp, anchor, {
+    rcl: (room.controller && room.controller.level) || 0,
+    showFutureRcl: vc.plannerStampPreviewShowFutureRcl !== false
+  });
+}
+
 function scanRoomState(room) {
   const built = Object.create(null);
   const sites = Object.create(null);
@@ -213,6 +237,9 @@ function ensureSites(room) {
 
   var anchor = pickAnchor(room);
   if (!anchor) return;
+
+  // Phase 2B stamp planner: preview only (no construction placement).
+  maybeDrawStampPreview(room, anchor);
 
   var globalCount = Object.keys(Game.constructionSites).length;
   if (globalCount >= CFG.csiteSafetyLimit) {
