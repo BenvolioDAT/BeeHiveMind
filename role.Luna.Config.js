@@ -59,5 +59,12 @@ module.exports = Object.freeze({
   REMOTE_CONTAINER_REQUEST_MIN: 300,
   REMOTE_CONTAINER_REQUEST_URGENT: 1600,
   REMOTE_REQUEST_STALE_TICKS: 50,
-  REMOTE_CONTAINER_BUILD_RANGE: 1
+  REMOTE_CONTAINER_BUILD_RANGE: 1,
+  remoteContainerRepairEnabled: true,
+  remoteContainerRepairStartPct: 0.50,
+  remoteContainerRepairStopPct: 0.85,
+  remoteContainerRepairCriticalPct: 0.25,
+  remoteContainerRepairWithdrawAmount: 50,
+  remoteContainerRepairMinContainerEnergy: 100,
+  remoteContainerRepairHoldTicks: 25
 });
