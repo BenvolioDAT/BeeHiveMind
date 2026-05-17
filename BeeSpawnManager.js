@@ -839,11 +839,8 @@ function isRepairAlreadyAssignedToContainer(roomName, containerId) {
   return false;
 }
 
-function findRemoteContainerEmergencyRepairRequest(roomName) {
-  if (!RepairConfig.remoteContainerEmergencyRepairEnabled) return null;
-  var statusRequests = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : null;
-  var haulRequests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
-  var requests = statusRequests || haulRequests;
+function findEmergencyRepairRequestInBucket(requests, roomName) {
+  if (!requests) return null;
   var staleTicks = (TruckerConfig && TruckerConfig.REQUEST_STALE_TICKS) || 100;
   var startPct = RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40;
   for (var id in requests) {
@@ -864,6 +861,15 @@ function findRemoteContainerEmergencyRepairRequest(roomName) {
     return req;
   }
   return null;
+}
+
+function findRemoteContainerEmergencyRepairRequest(roomName) {
+  if (!RepairConfig.remoteContainerEmergencyRepairEnabled) return null;
+  var statusRequests = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : null;
+  var haulRequests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : null;
+  var statusReq = findEmergencyRepairRequestInBucket(statusRequests, roomName);
+  if (statusReq) return statusReq;
+  return findEmergencyRepairRequestInBucket(haulRequests, roomName);
 }
 
 function computeRoomQuotas(C, room) {

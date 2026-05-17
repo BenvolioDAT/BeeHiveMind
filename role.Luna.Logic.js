@@ -1619,6 +1619,7 @@ function isLunaRoomUnsafe(roomName) {
         creep.memory.seatX = container.pos.x;
         creep.memory.seatY = container.pos.y;
         creep.memory.seatRoom = container.pos.roomName;
+        upsertRemoteContainerStatus(creep, src, container);
         debugRing(creep.room, container.pos, CFG.DRAW.SEAT, 'SEAT');
       } else if (site) {
         delete creep.memory.assignedContainer;
@@ -1687,10 +1688,7 @@ function isLunaRoomUnsafe(roomName) {
       } else if (!container && !site && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
         creep.drop(RESOURCE_ENERGY);
       }
-      if (container) {
-        upsertRemoteContainerStatus(creep, src, container);
-        upsertRemoteHaulRequest(creep, src, container);
-      }
+      if (container) upsertRemoteHaulRequest(creep, src, container);
     }
   };
 
