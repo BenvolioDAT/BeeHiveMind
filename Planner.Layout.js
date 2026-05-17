@@ -2,6 +2,7 @@ var CoreConfig = require('core.config');
 var PlannerStamps = require('Planner.Stamps');
 
 var LAYOUT_VERSION = 1;
+var INVALID_SCORE = -1000;
 var DEFAULTS = Object.freeze({
   scanStep: 2,
   maxChecks: 250,
@@ -55,13 +56,23 @@ function getCandidateAnchors(room, stamp, opts) {
   var maxX = Math.min(48 - b.maxX, 45);
   var minY = Math.max(1 - b.minY, 4);
   var maxY = Math.min(48 - b.maxY, 45);
-  var out = [];
-  var checks = 0;
-  for (var y = minY; y <= maxY && checks < maxChecks; y += step) {
-    for (var x = minX; x <= maxX && checks < maxChecks; x += step) {
-      checks++;
-      out.push(new RoomPosition(x, y, room.name));
+  var all = [];
+  for (var y = minY; y <= maxY; y += step) {
+    for (var x = minX; x <= maxX; x += step) {
+      all.push(new RoomPosition(x, y, room.name));
     }
+  }
+
+  if (all.length <= maxChecks) return all;
+
+  // Evenly sample from the full stepped grid to avoid top-left bias when
+  // maxChecks truncates the candidate set.
+  var out = [];
+  var stride = all.length / maxChecks;
+  for (var i = 0; i < maxChecks; i++) {
+    var idx = Math.floor(i * stride);
+    if (idx >= all.length) idx = all.length - 1;
+    out.push(all[idx]);
   }
   return out;
 }
@@ -119,8 +130,7 @@ function pathLen(room, fromPos, toPos, maxOps) {
   if (!fromPos || !toPos || typeof PathFinder === 'undefined') return 25;
   var ret = PathFinder.search(fromPos, { pos: toPos, range: 1 }, {
     maxRooms: 1,
-    maxOps: maxOps,
-    roomCallback: function () { return false; }
+    maxOps: maxOps
   });
   var len = (ret.path && ret.path.length) || 25;
   if (ret.incomplete) len += 20;
@@ -130,7 +140,7 @@ function pathLen(room, fromPos, toPos, maxOps) {
 function scoreAnchorCandidate(room, stamp, anchorPos, opts) {
   var cfg = getConfig(opts);
   var fits = stampFitsAt(room, stamp, anchorPos, cfg);
-  if (!fits) return -1000;
+  if (!fits) return INVALID_SCORE;
 
   var score = 200;
   var terrain = room.getTerrain();
@@ -176,6 +186,7 @@ function planBestAnchor(room, stamp, opts) {
   for (var i = 0; i < candidates.length; i++) {
     var p = candidates[i];
     var score = scoreAnchorCandidate(room, stamp, p, opts);
+    if (score <= INVALID_SCORE) continue;
     if (!best || score > best.score) best = { pos: p, score: score };
   }
   return best;
@@ -207,6 +218,8 @@ function getChosenAnchor(room, stamp, opts) {
       rcl: (room.controller && room.controller.level) || 0,
       version: LAYOUT_VERSION
     };
+  } else {
+    mem.layout = null;
   }
   mem.forceLayoutReplan = false;
   return best;
