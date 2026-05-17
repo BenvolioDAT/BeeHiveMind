@@ -3,6 +3,7 @@ var PlannerStamps = require('Planner.Stamps');
 var PlannerVisuals = require('Planner.Visuals');
 var PlannerLayout = require('Planner.Layout');
 var PlannerReservations = require('Planner.Reservations');
+var PlannerRamparts = require('Planner.Ramparts');
 
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
@@ -128,22 +129,21 @@ function pickAnchor(room) {
 
 /** Snapshot the room once so we do not repeatedly scan structures/sites. */
 
-function maybeDrawStampPreview(room, anchor) {
-  if (!room || !anchor) return;
-  if (typeof RoomVisual === 'undefined') return;
-  if (!CoreConfig || !CoreConfig.settings || !CoreConfig.settings.visuals) return;
 
-  var vc = CoreConfig.settings.visuals;
-  if (!vc.plannerStampPreviewEnabled) return;
-  if (vc.plannerStampPreviewRoom && vc.plannerStampPreviewRoom !== room.name) return;
+function isRampartPreviewActiveForRoom(room, cfg) {
+  if (!room || !cfg) return false;
+  return !!(cfg.plannerRampartPreviewEnabled &&
+    (!cfg.plannerRampartPreviewRoom || cfg.plannerRampartPreviewRoom === room.name));
+}
 
+function getPreviewStampAndAnchor(room, fallbackAnchor, vc) {
+  if (!room || !fallbackAnchor || !vc) return null;
   var stampId = vc.plannerStampPreviewStampId || 'core_v1';
   var stamp = PlannerStamps.getStampById(stampId) || PlannerStamps.getDefaultCoreStamp();
-  if (!stamp) return;
+  if (!stamp) return null;
 
   var chosen = null;
-  var previewAnchor = anchor;
-
+  var previewAnchor = fallbackAnchor;
   if (vc.plannerStampCandidatePreviewEnabled) {
     chosen = PlannerLayout.getChosenAnchor(room, stamp, {
       scanStep: vc.plannerStampCandidateScanStep,
@@ -154,15 +154,50 @@ function maybeDrawStampPreview(room, anchor) {
     if (chosen && chosen.pos) previewAnchor = chosen.pos;
   }
 
-  PlannerVisuals.drawStampPreview(room, stamp, previewAnchor, {
-    rcl: (room.controller && room.controller.level) || 0,
-    showFutureRcl: vc.plannerStampPreviewShowFutureRcl !== false
-  });
+  return { stamp: stamp, previewAnchor: previewAnchor, chosen: chosen };
+}
 
-  if (vc.plannerStampCandidatePreviewEnabled && chosen && chosen.pos) {
-    PlannerVisuals.drawChosenAnchor(room, chosen.pos, chosen.score, {
-      showScores: vc.plannerStampCandidateShowScores
+function maybeDrawPlannerPreviews(room, anchor) {
+  if (!room || !anchor) return;
+  if (typeof RoomVisual === 'undefined') return;
+  if (!CoreConfig || !CoreConfig.settings || !CoreConfig.settings.visuals) return;
+
+  var vc = CoreConfig.settings.visuals;
+  var preview = getPreviewStampAndAnchor(room, anchor, vc);
+  if (!preview || !preview.stamp || !preview.previewAnchor) return;
+
+  var stampPreviewAllowed = !!(vc.plannerStampPreviewEnabled &&
+    (!vc.plannerStampPreviewRoom || vc.plannerStampPreviewRoom === room.name));
+
+  if (stampPreviewAllowed) {
+    PlannerVisuals.drawStampPreview(room, preview.stamp, preview.previewAnchor, {
+      rcl: (room.controller && room.controller.level) || 0,
+      showFutureRcl: vc.plannerStampPreviewShowFutureRcl !== false
     });
+
+    if (vc.plannerStampCandidatePreviewEnabled && preview.chosen && preview.chosen.pos) {
+      PlannerVisuals.drawChosenAnchor(room, preview.chosen.pos, preview.chosen.score, {
+        showScores: vc.plannerStampCandidateShowScores
+      });
+    }
+  }
+
+  var rampartPreviewAllowed = isRampartPreviewActiveForRoom(room, vc);
+  if (rampartPreviewAllowed) {
+    var rampartReservations = null;
+    if (vc.plannerRampartPreviewUseReservations) rampartReservations = PlannerReservations.buildReservations(room, vc);
+    var rampartPlan = PlannerRamparts.buildRampartPreview(room, preview.stamp, preview.previewAnchor, rampartReservations, {
+      useReservations: vc.plannerRampartPreviewUseReservations !== false,
+      range: vc.plannerRampartPreviewRange,
+      maxTiles: vc.plannerRampartPreviewMaxTiles,
+      showLabels: vc.plannerRampartPreviewShowLabels === true,
+      rcl: vc.plannerRampartPreviewRcl
+    });
+    PlannerRamparts.drawRampartPreview(room, rampartPlan, {
+      showLabels: vc.plannerRampartPreviewShowLabels === true
+    });
+  } else {
+    PlannerRamparts.clearRampartPreview(room);
   }
 }
 
@@ -374,7 +409,7 @@ function ensureSites(room) {
   // Phase 2B stamp planner: draw preview every tick when enabled.
   // Preview is pure visuals and never places construction sites.
   var anchor = pickAnchor(room);
-  maybeDrawStampPreview(room, anchor);
+  maybeDrawPlannerPreviews(room, anchor);
 
   if (shouldSkipTick(room)) return;
 
@@ -400,7 +435,7 @@ function ensureSites(room) {
   var snapshot = scanRoomState(room);
   var allowedFn = function (type) { return allowedCount(type, room); };
   var buildCfg = stampBuildConfig();
-  var shouldBuildReservations = !!(buildCfg.plannerReservationsEnabled || buildCfg.plannerReservationVisualsEnabled);
+  var shouldBuildReservations = !!(buildCfg.plannerReservationsEnabled || buildCfg.plannerReservationVisualsEnabled || (isRampartPreviewActiveForRoom(room, buildCfg) && buildCfg.plannerRampartPreviewUseReservations));
   var reservations = shouldBuildReservations ? PlannerReservations.buildReservations(room, buildCfg) : null;
   if (shouldBuildReservations) {
     mem.lastReservations = {
