@@ -114,8 +114,8 @@ function clearTruckerHandoff(creep, room, reason, diag) {
   var name = creep.memory.energyHandoffTarget;
   if (name && mem && mem.requests && mem.requests[name]) {
     var req = mem.requests[name];
-    req.assignedCourierName = null; req.assignedAt = null; req.waitUntil = null;
-    var rc = Game.creeps[name]; if (rc && rc.memory) rc.memory.energyHandoffCourier = null;
+    Handoff.clearAssignedHauler(req);
+    var rc = Game.creeps[name]; if (rc && rc.memory) { rc.memory.energyHandoffHauler = null; delete rc.memory.energyHandoffCourier; }
   }
   creep.memory.energyHandoffTarget = null;
   creep.memory.energyHandoffFailCount = 0;
@@ -139,7 +139,8 @@ function findClaimableEnergyHandoffRequest(trucker, diag) {
   for (var i = 0; i < keys.length; i++) {
     var req = reqs[keys[i]]; if (!req) continue;
     if (req.roomName !== trucker.room.name) continue;
-    if (req.assignedCourierName && req.assignedCourierName !== trucker.name) continue;
+    Handoff.migrateHandoffRequestSchema(req, trucker.room.name);
+    if (Handoff.getAssignedHaulerName(req) && Handoff.getAssignedHaulerName(req) !== trucker.name) continue;
     var receiver = Game.creeps[req.receiverName];
     if (!isCreepEnergyReceiver(receiver)) continue;
     if (receiver.pos.roomName !== trucker.room.name) continue;
@@ -159,7 +160,9 @@ function getCurrentAssignedHandoffRequest(trucker) {
   var mem = Handoff.ensureHandoffMemory(trucker.room);
   if (!mem || !mem.requests) return null;
   var req = mem.requests[targetName];
-  if (!req || req.assignedCourierName !== trucker.name) return null;
+  if (!req) return null;
+  Handoff.migrateHandoffRequestSchema(req, trucker.room.name);
+  if (Handoff.getAssignedHaulerName(req) !== trucker.name) return null;
   var receiver = Game.creeps[req.receiverName];
   if (!isCreepEnergyReceiver(receiver)) return null;
   if (receiver.pos.roomName !== trucker.room.name) return null;
@@ -176,16 +179,17 @@ function claimEnergyHandoffRequest(trucker, req, diag) {
     clearTruckerHandoff(trucker, trucker.room, 'switch_target', diag);
   }
   var live = mem.requests[req.receiverName];
-  if (live.assignedCourierName && live.assignedCourierName !== trucker.name) return false;
-  if (!live.assignedCourierName) {
-    live.assignedCourierName = trucker.name;
+  Handoff.migrateHandoffRequestSchema(live, trucker.room.name);
+  if (Handoff.getAssignedHaulerName(live) && Handoff.getAssignedHaulerName(live) !== trucker.name) return false;
+  if (!Handoff.getAssignedHaulerName(live)) {
+    Handoff.setAssignedHaulerName(live, trucker.name);
     live.assignedAt = Game.time;
     live.expiresAt = Game.time + CFG.HANDOFF_ASSIGN_TTL;
     live.waitUntil = Game.time + CFG.HANDOFF_WAIT_TTL;
     if (diag) diag.handoffClaimed = true;
   }
   trucker.memory.energyHandoffTarget = live.receiverName;
-  var receiver = Game.creeps[live.receiverName]; if (receiver && receiver.memory) receiver.memory.energyHandoffCourier = trucker.name;
+  var receiver = Game.creeps[live.receiverName]; if (receiver && receiver.memory) { receiver.memory.energyHandoffHauler = trucker.name; delete receiver.memory.energyHandoffCourier; }
   return true;
 }
 

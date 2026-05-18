@@ -157,8 +157,8 @@ function maybePublishBuilderRequest(creep, targetInfo) {
   if (!shouldBuilderRequestEnergy(creep, targetInfo)) { Handoff.clearEnergyHandoffRequest(creep); return false; }
   var req = Handoff.publishEnergyHandoffRequest(creep, 'Builder', targetInfo.target, creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0);
   if (!req) return false;
-  if (req.assignedCourierName) {
-    creep.memory.energyHandoffCourier = req.assignedCourierName;
+  if (req.assignedHaulerName) {
+    creep.memory.energyHandoffHauler = req.assignedHaulerName;
     return req.waitUntil && Game.time <= req.waitUntil;
   }
   return false;

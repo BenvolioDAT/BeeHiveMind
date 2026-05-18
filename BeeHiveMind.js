@@ -131,10 +131,6 @@ function createRoleAliasMap() {
   map.worker_bee = 'Idle';
   map['Worker_Bee'] = 'Idle';
   map.remoteharvest = 'Luna';
-  // Courier role is retired; route legacy creeps to Trucker for crash safety.
-  map.Courier = 'Trucker';
-  map.courier = 'Trucker';
-
   return map;
 }
 
