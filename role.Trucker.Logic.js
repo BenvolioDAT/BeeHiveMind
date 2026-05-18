@@ -326,13 +326,16 @@ function runLocal(creep, job, diag) {
     return;
   }
 
+  var urgentTargetExists = hasUrgentLocalDeliveryTarget(creep);
   var dst = creep.memory.deliveryTargetId ? Game.getObjectById(creep.memory.deliveryTargetId) : null;
-  if (!dst) dst = findLocalDeliverTarget(creep, diag);
-  if (!dst) {
-    clearDeliveryReservation(creep);
+  if (!urgentTargetExists) {
+    diag.handoffBeforeStorage = true;
     if (tryTruckerEnergyHandoff(creep, diag)) return;
-    return;
+  } else {
+    diag.handoffBeforeStorage = false;
   }
+  if (!dst) dst = findLocalDeliverTarget(creep, diag);
+  if (!dst) { clearDeliveryReservation(creep); return; }
 
   var carried = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
   var reservedAmount = reserveFill(creep, dst, carried, RESOURCE_ENERGY);
@@ -374,6 +377,7 @@ function run(creep) {
   var diag = ensureTruckerDiagnostics();
   diag.tick = Game.time; diag.deliveryTargetsSeen = 0; diag.deliveryTargetsReserved = 0; diag.skippedReservedCapacity = 0;
   diag.handoffRequestsSeen = 0; diag.handoffClaimed = false; diag.handoffTarget = null; diag.handoffResult = null; diag.handoffClearedReason = null;
+  diag.handoffBeforeStorage = false; diag.lastDeliveryResult = null;
 
   var active = creep.memory.dispatchJob || null;
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && creep.room.name !== creep.memory.home) active = { type: 'REMOTE_RETURN', id: active ? active.id : ('return:' + creep.name) };
