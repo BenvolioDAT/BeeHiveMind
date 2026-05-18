@@ -32,7 +32,6 @@ var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
 var BaseHarvest          = require('role.BaseHarvest');
 var Builder              = require('role.Builder');
-var Courier              = require('role.Courier');
 var Queen                = require('role.Queen');
 var Upgrader             = require('role.Upgrader');
 var Luna                 = require('role.Luna');
@@ -55,7 +54,6 @@ var CoreConfig          = require('core.config');
 var roleModules = {
   BaseHarvest: BaseHarvest,
   Builder: Builder,
-  Courier: Courier,
   Repair: roleRepair,
   Upgrader: Upgrader,
   Dismantler: roleDismantler,
@@ -70,12 +68,11 @@ var roleModules = {
 };
 
 // Map role -> run fn (extend as you add roles)
-// Default role map; specific roles (queen, courier etc.) may be registered
+// Default role map; specific roles may be registered
 // elsewhere by mutating this object.
 var creepRoles = {
   BaseHarvest: roleModules.BaseHarvest && roleModules.BaseHarvest.run,
   Builder: roleModules.Builder && roleModules.Builder.run,
-  Courier: roleModules.Courier && roleModules.Courier.run,
   Repair: roleModules.Repair && roleModules.Repair.run,
   Upgrader: roleModules.Upgrader && roleModules.Upgrader.run,
   Dismantler: roleModules.Dismantler && roleModules.Dismantler.run,
@@ -108,7 +105,6 @@ function createRoleAliasMap() {
     'Idle',
     'BaseHarvest',
     'Builder',
-    'Courier',
     'Repair',
     'Upgrader',
     'Dismantler',
@@ -135,6 +131,9 @@ function createRoleAliasMap() {
   map.worker_bee = 'Idle';
   map['Worker_Bee'] = 'Idle';
   map.remoteharvest = 'Luna';
+  // Courier role is retired; route legacy creeps to Trucker for crash safety.
+  map.Courier = 'Trucker';
+  map.courier = 'Trucker';
 
   return map;
 }

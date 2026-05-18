@@ -14,8 +14,8 @@
 - **Visual/debug helpers**: `BeeRoleVisuals.js`
 
 ## Logistics roles split
-- **Courier** orchestrator: `role.Courier.js`
-- Courier helpers: `Courier.Config/Memory/Cache/Reservations/Targets/Actions.js`
+- **Trucker** orchestrator: `role.Trucker.js` (handles local + remote hauling)
+- Trucker helpers: `role.Trucker.Config.js`, `role.Trucker.Logic.js`, `Trucker.Dispatcher.js`
 - **Queen** orchestrator: `role.Queen.js`
 - Queen helpers: `Queen.Config/Memory/Reservations/TerminalJob/Tasks/Actions.js`
 
