@@ -68,6 +68,11 @@ function canCreepSafelyTakeRemoteJob(creep, remoteRoom) {
   return creep.ticksToLive >= required;
 }
 
+function isRemoteRequestReservedByOther(req, creepName) {
+  if (!req) return false;
+  return !!(req.assignedTo && req.assignedTo !== creepName && (req.assignedUntil || 0) > Game.time);
+}
+
 function claimJob(creep, job, ttl) {
   var d = ensureDispatchMemory();
   if (!job || !job.id || !creep) return false;
@@ -101,7 +106,7 @@ function cleanupDispatchMemory() {
 function chooseJobForTrucker(creep) {
   var d = cleanupDispatchMemory();
   var home = creep.memory.home || creep.room.name;
-  var diag = { tick: Game.time, jobsSeen: 0, jobsClaimed: 0, localJobs: 0, remoteJobs: 0, skippedRemoteTTL: 0, skippedNoVision: 0, skippedUnsafe: 0, assignedByCreep: d.assignedByCreep || {} };
+  var diag = { tick: Game.time, jobsSeen: 0, jobsClaimed: 0, localJobs: 0, remoteJobs: 0, skippedRemoteTTL: 0, skippedReserved: 0, skippedNoVision: 0, skippedUnsafe: 0, assignedByCreep: d.assignedByCreep || {} };
 
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
     return { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: home };
@@ -113,6 +118,7 @@ function chooseJobForTrucker(creep) {
     if (!reqs.hasOwnProperty(id)) continue;
     var r = reqs[id];
     if (!r || r.homeRoom !== home) continue;
+    if (isRemoteRequestReservedByOther(r, creep.name)) { diag.skippedReserved++; continue; }
     if ((r.amount || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) continue;
     if ((Game.time - (r.updated || 0)) > CFG.REQUEST_STALE_TICKS) continue;
     var remoteRoom = r.roomName || r.remoteRoom;
@@ -140,6 +146,7 @@ module.exports = {
   refreshContainerRecordFromVision: refreshContainerRecordFromVision,
   estimateRemoteRoundTripTicks: estimateRemoteRoundTripTicks,
   canCreepSafelyTakeRemoteJob: canCreepSafelyTakeRemoteJob,
+  isRemoteRequestReservedByOther: isRemoteRequestReservedByOther,
   claimJob: claimJob,
   releaseJob: releaseJob,
   cleanupDispatchMemory: cleanupDispatchMemory,

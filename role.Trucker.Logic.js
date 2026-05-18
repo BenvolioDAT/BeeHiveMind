@@ -31,6 +31,11 @@ function isActiveRemoteRequest(req, homeName) {
   return true;
 }
 
+function isRemoteRequestReservedByOther(req, creepName) {
+  if (!req) return false;
+  return !!(req.assignedTo && req.assignedTo !== creepName && (req.assignedUntil || 0) > Game.time);
+}
+
 function hasUrgentLocalDeliveryTarget(creep) {
   if (!creep || !creep.room) return false;
   var room = creep.room;
@@ -44,6 +49,7 @@ function claimRemoteRequestForJob(creep, job) {
   var reqs = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
   var req = reqs[job.requestId];
   if (!req) return null;
+  if (isRemoteRequestReservedByOther(req, creep.name)) return null;
   req.assignedTo = creep.name;
   req.assignedUntil = Game.time + CFG.RESERVATION_TTL;
   creep.memory.requestId = job.requestId;
@@ -134,7 +140,7 @@ function runRemote(creep, job) {
     var reqY = creep.memory.requestY;
     if (reqRoom && typeof reqX === 'number' && typeof reqY === 'number') {
       if (creep.room.name !== reqRoom) creep.travelTo(new RoomPosition(reqX, reqY, reqRoom), { range: 1, reusePath: CFG.PATH_REUSE });
-      else { clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); }
+      else { clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; }
     }
     return;
   }
