@@ -13,6 +13,46 @@ function ensureBuilderIdentity(creep) { if (!creep || !creep.memory) return; cre
 function needsEnergy(creep) { var stored = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0; return stored === 0; }
 function setBuilderState(creep, state) { creep.memory.builderState = state; }
 function getBuilderState(creep) { if (!creep.memory.builderState) setBuilderState(creep, CFG.BUILDER_STATES.HARVEST); return creep.memory.builderState; }
+function hasWorkPart(creep) { return creep.getActiveBodyparts && creep.getActiveBodyparts(WORK) > 0; }
+function setBuilderAssistDiag(creep, patch) {
+  if (!creep || !creep.room) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[creep.room.name]) Memory.rooms[creep.room.name] = {};
+  var base = Memory.rooms[creep.room.name].lastBuilderEnergyAssist || {};
+  base.tick = Game.time;
+  base.builderName = creep.name;
+  for (var k in patch) base[k] = patch[k];
+  Memory.rooms[creep.room.name].lastBuilderEnergyAssist = base;
+}
+function hasStoredEnergyAvailable(creep) {
+  var room = creep.room;
+  var tomb = room.find(FIND_TOMBSTONES, { filter: function(t){ return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (tomb.length) return true;
+  var ruin = room.find(FIND_RUINS, { filter: function(r){ return r.store && (r.store[RESOURCE_ENERGY] || 0) > 0; } }); if (ruin.length) return true;
+  var drop = room.find(FIND_DROPPED_RESOURCES, { filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount || 0) >= CFG.PICKUP_MIN; } }); if (drop.length) return true;
+  var st = room.find(FIND_STRUCTURES, { filter: function(s){ if (!s.store) return false; var t=s.structureType; if (t!==STRUCTURE_CONTAINER && t!==STRUCTURE_STORAGE && t!==STRUCTURE_TERMINAL && t!==STRUCTURE_LINK) return false; return (s.store[RESOURCE_ENERGY] || 0) > 0; } });
+  return st.length > 0;
+}
+function hasLocalTruckerWithEnergy(creep) {
+  var cr = creep.room.find(FIND_MY_CREEPS, { filter: function(c){ return c.memory && c.memory.role === 'Trucker' && (c.store[RESOURCE_ENERGY] || 0) > 0; } });
+  return cr.length > 0;
+}
+function clearBuilderHandoffWaitMemory(creep) {
+  delete creep.memory.builderHandoffWaitTargetId;
+  delete creep.memory.builderHandoffWaitStartedAt;
+  delete creep.memory.builderHandoffWaitUntil;
+}
+function tryEmergencySelfHarvest(creep, targetInfo) {
+  if (!CFG.EMERGENCY_SELF_HARVEST_ENABLED || !hasWorkPart(creep)) return false;
+  if (CFG.SELF_HARVEST_ONLY_WITHOUT_STORAGE && creep.room.storage) return false;
+  var source = creep.pos.findClosestByRange(FIND_SOURCES, { filter: function(s){ return (s.energy || 0) >= CFG.SELF_HARVEST_MIN_SOURCE_ENERGY; } });
+  if (!source) return false;
+  clearBuilderHandoffWaitMemory(creep);
+  setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: targetInfo && targetInfo.target ? targetInfo.target.id : null, selfHarvestUsed: true, reason: 'emergency_self_harvest', sourceId: source.id });
+  if ((creep.store[RESOURCE_ENERGY] || 0) >= CFG.SELF_HARVEST_DELIVER_AT_ENERGY) { setBuilderState(creep, CFG.BUILDER_STATES.BUILD); return false; }
+  var hr = creep.harvest(source);
+  if (hr === ERR_NOT_IN_RANGE) creep.moveTo(source, { range: 1, reusePath: 10 });
+  return true;
+}
 
 function collectEnergy(creep) {
   var homeName = (typeof getHomeName === 'function') ? getHomeName(creep) : null;
@@ -163,6 +203,33 @@ function maybePublishBuilderRequest(creep, targetInfo) {
   }
   return false;
 }
+function maybeWaitForUnassignedHandoff(creep, targetInfo) {
+  if (!targetInfo || !targetInfo.target) return false;
+  if (!CFG.HANDOFF_ENABLED) return false;
+  var mem = Handoff.ensureHandoffMemory(creep.room);
+  var req = mem && mem.requests ? mem.requests[creep.name] : null;
+  var assigned = !!(req && req.assignedHaulerName);
+  var targetId = targetInfo.target.id;
+  var waitUntil = creep.memory.builderHandoffWaitUntil || 0;
+  if (assigned) return false;
+
+  var shouldWait = hasLocalTruckerWithEnergy(creep) || !hasStoredEnergyAvailable(creep);
+  if (!shouldWait) return false;
+  if (creep.memory.builderHandoffWaitTargetId !== targetId) {
+    creep.memory.builderHandoffWaitTargetId = targetId;
+    creep.memory.builderHandoffWaitStartedAt = Game.time;
+    creep.memory.builderHandoffWaitUntil = Game.time + CFG.BUILDER_HANDOFF_WAIT_UNASSIGNED_TICKS;
+    waitUntil = creep.memory.builderHandoffWaitUntil;
+  }
+  if (Game.time > waitUntil) {
+    setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: targetId, handoffPublished: true, handoffAssigned: false, waitedForHandoff: true, selfHarvestUsed: false, reason: 'handoff_wait_expired', collectTargetFound: false });
+    return false;
+  }
+  var range = creep.pos.getRangeTo(targetInfo.target);
+  setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: targetId, handoffPublished: true, handoffAssigned: false, waitedForHandoff: true, selfHarvestUsed: false, reason: 'wait_unassigned_handoff', collectTargetFound: false });
+  if (range > CFG.BUILDER_HANDOFF_WAIT_IF_NEAR_TARGET_RANGE) creep.moveTo(targetInfo.target, { range: CFG.BUILDER_HANDOFF_WAIT_IF_NEAR_TARGET_RANGE, reusePath: 10 });
+  return true;
+}
 
 function run(creep) {
   ensureBuilderIdentity(creep);
@@ -171,9 +238,16 @@ function run(creep) {
 
   if (state === CFG.BUILDER_STATES.HARVEST) {
     var lowTargetInfo = getBuilderTarget(creep);
-    if (lowTargetInfo && maybePublishBuilderRequest(creep, lowTargetInfo)) { debugSay(creep, '⏳'); return; }
-    if (collectEnergy(creep) && creep.store.getFreeCapacity() > 0) return;
-    if (creep.store.getFreeCapacity() === 0) { Handoff.clearEnergyHandoffRequest(creep); setBuilderState(creep, CFG.BUILDER_STATES.IDLE); }
+    var assignedWait = lowTargetInfo && maybePublishBuilderRequest(creep, lowTargetInfo);
+    if (assignedWait) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo.target.id, handoffPublished: true, handoffAssigned: true, waitedForHandoff: true, selfHarvestUsed: false, reason: 'assigned_handoff_wait' }); debugSay(creep, '⏳'); return; }
+    if (lowTargetInfo && maybeWaitForUnassignedHandoff(creep, lowTargetInfo)) { debugSay(creep, '⏳'); return; }
+    var gotEnergy = collectEnergy(creep);
+    if (gotEnergy && creep.store.getFreeCapacity() > 0) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'collect_energy', collectTargetFound: true }); return; }
+    if (!gotEnergy && lowTargetInfo && (!CFG.SELF_HARVEST_AFTER_HANDOFF_WAIT || (creep.memory.builderHandoffWaitUntil || 0) < Game.time)) {
+      if (tryEmergencySelfHarvest(creep, lowTargetInfo)) return;
+    }
+    if (creep.store.getFreeCapacity() === 0) { clearBuilderHandoffWaitMemory(creep); Handoff.clearEnergyHandoffRequest(creep); setBuilderState(creep, CFG.BUILDER_STATES.IDLE); }
+    setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'idle_no_energy', collectTargetFound: false });
     return;
   }
 
@@ -181,7 +255,7 @@ function run(creep) {
   if (!targetInfo) { Handoff.clearEnergyHandoffRequest(creep); if (dumpEnergyToSink(creep)) return; setBuilderState(creep, CFG.BUILDER_STATES.IDLE); idleNearAnchor(creep); return; }
   if (state === CFG.BUILDER_STATES.IDLE) { setBuilderState(creep, CFG.BUILDER_STATES.TRAVEL); state = CFG.BUILDER_STATES.TRAVEL; }
   if (state === CFG.BUILDER_STATES.TRAVEL) { if (handleTravel(creep, targetInfo)) return; state = getBuilderState(creep); }
-  if (state === CFG.BUILDER_STATES.BUILD) { if (handleBuild(creep, targetInfo.target)) return; return; }
+  if (state === CFG.BUILDER_STATES.BUILD) { clearBuilderHandoffWaitMemory(creep); if (handleBuild(creep, targetInfo.target)) return; return; }
   setBuilderState(creep, CFG.BUILDER_STATES.IDLE);
   idleNearAnchor(creep);
 }
