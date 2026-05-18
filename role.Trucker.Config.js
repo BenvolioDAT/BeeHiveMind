@@ -1,5 +1,7 @@
 'use strict';
 
+var Handoff = require('role.EnergyHandoff');
+
 module.exports = Object.freeze({
   DEBUG_SAY: false,
   DEBUG_DRAW: false,
@@ -11,6 +13,13 @@ module.exports = Object.freeze({
   MAX_TRUCKERS_PER_HOME: 3,
   MAX_TRUCKERS_PER_REMOTE: 2,
   TOWER_REFILL_AT_OR_BELOW: 0.70,
+  HANDOFF_ENABLED: true,
+  HANDOFF_MIN_TRUCKER_ENERGY: 25,
+  HANDOFF_MIN_RECEIVER_FREE: 25,
+  HANDOFF_MAX_RANGE: 30,
+  HANDOFF_MAX_FAILS: 3,
+  HANDOFF_ASSIGN_TTL: Handoff.HANDOFF.HANDOFF_ASSIGN_TTL,
+  HANDOFF_WAIT_TTL: Handoff.HANDOFF.HANDOFF_WAIT_TTL,
   DELIVERY_STORAGE_FIRST: true,
   IDLE_RANGE: 3
 });
