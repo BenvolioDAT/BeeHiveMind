@@ -411,6 +411,18 @@ function roomCenter(roomName) {
   return { x: 25, y: 25, roomName: roomName };
 }
 
+function roomNameFromBinding(binding) {
+  // Backward-compatible normalizer for squad flag bindings. We accept the
+  // legacy string form plus object forms used by newer planners.
+  if (!binding) return null;
+  if (typeof binding === 'string') return binding;
+  if (typeof binding !== 'object') return null;
+  if (typeof binding.targetRoom === 'string') return binding.targetRoom;
+  if (binding.target && typeof binding.target.roomName === 'string') return binding.target.roomName;
+  if (typeof binding.roomName === 'string') return binding.roomName;
+  return null;
+}
+
 function resolveDisplayPosition(plan) {
   if (!plan) return null;
   if (plan.displayPos) return plan.displayPos;
@@ -419,7 +431,8 @@ function resolveDisplayPosition(plan) {
   if (plan.rally) return plan.rally;
   var intel = Memory.squadFlags;
   if (intel && intel.bindings && intel.bindings[plan.name]) {
-    return roomCenter(intel.bindings[plan.name]);
+    var boundRoom = roomNameFromBinding(intel.bindings[plan.name]);
+    if (boundRoom) return roomCenter(boundRoom);
   }
   if (Game.flags && Game.flags[plan.name] && Game.flags[plan.name].pos) {
     return serializePos(Game.flags[plan.name].pos);
@@ -488,13 +501,7 @@ function resolveSquadTarget(identifier) {
       // 2) Object: bindings[flagName] = { targetRoom: "W8S57" } or
       //            { target: { roomName: "W8S57" }, ... }
       var binding = bindings[candidate];
-      if (typeof binding === 'string') {
-        targetRoom = binding;
-      } else if (binding && typeof binding === 'object') {
-        if (typeof binding.targetRoom === 'string') targetRoom = binding.targetRoom;
-        else if (binding.target && typeof binding.target.roomName === 'string') targetRoom = binding.target.roomName;
-        else if (typeof binding.roomName === 'string') targetRoom = binding.roomName;
-      }
+      targetRoom = roomNameFromBinding(binding);
       resolvedName = resolvedName || candidate;
     }
   }
@@ -558,7 +565,7 @@ function ensureSquadFlags() {
     if (!isSquadFlag(name)) continue;
     var flag = Game.flags[name];
     seen[name] = true;
-    mem.bindings[name] = flag.pos.roomName;
+    mem.bindings[name] = { targetRoom: flag.pos.roomName };
 
     ensureSquadMemoryFromFlag(flag);
 
@@ -687,7 +694,7 @@ function resolveTargetRoomForSquad(flagName, bucket, intel) {
     if (rallyPos && rallyPos.roomName) return rallyPos.roomName;
   }
   var mem = intel || ensureSquadFlagMemory();
-  if (mem && mem.bindings && mem.bindings[flagName]) return mem.bindings[flagName];
+  if (mem && mem.bindings && mem.bindings[flagName]) return roomNameFromBinding(mem.bindings[flagName]);
   return null;
 }
 

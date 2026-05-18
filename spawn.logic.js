@@ -383,6 +383,7 @@ function spawnMissingSquadRole(spawn, layout, id, targetRoom, avail, S, squadFla
         role: plan.role,
         targetRoom: targetRoom,
         squadFlag: squadFlag,
+        home: spawn.room.name,
         skipTaskMemory: true
       };
       var ok = spawnRole(spawn, plan.role, avail, extraMemory);
