@@ -256,6 +256,27 @@ function hasUrgentLocalDeliveryTarget(creep) {
   var towers = room.find(FIND_STRUCTURES, { filter: function(s){ if (s.structureType !== STRUCTURE_TOWER || !s.store) return false; var cap = s.store.getCapacity(RESOURCE_ENERGY) || 0; if (cap <= 0) return false; var cur = s.store[RESOURCE_ENERGY] || 0; if (cur >= Math.floor(cap * CFG.TOWER_REFILL_AT_OR_BELOW)) return false; return getEffectiveFreeCapacity(s, RESOURCE_ENERGY) > 0; } });
   return towers.length > 0;
 }
+function isUrgentDeliveryTarget(target) {
+  if (!target || !target.store) return false;
+  if (target.structureType === STRUCTURE_SPAWN || target.structureType === STRUCTURE_EXTENSION) {
+    return getEffectiveFreeCapacity(target, RESOURCE_ENERGY) > 0;
+  }
+  if (target.structureType === STRUCTURE_TOWER) {
+    var cap = target.store.getCapacity(RESOURCE_ENERGY) || 0;
+    if (cap <= 0) return false;
+    var cur = target.store[RESOURCE_ENERGY] || 0;
+    if (cur >= Math.floor(cap * CFG.TOWER_REFILL_AT_OR_BELOW)) return false;
+    return getEffectiveFreeCapacity(target, RESOURCE_ENERGY) > 0;
+  }
+  return false;
+}
+function isNonUrgentStorageLikeTarget(target) {
+  if (!target) return false;
+  return target.structureType === STRUCTURE_STORAGE ||
+    target.structureType === STRUCTURE_TERMINAL ||
+    target.structureType === STRUCTURE_CONTAINER ||
+    target.structureType === STRUCTURE_LINK;
+}
 
 function claimRemoteRequestForJob(creep, job) { /* unchanged */
   var reqs = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
@@ -328,6 +349,12 @@ function runLocal(creep, job, diag) {
 
   var urgentTargetExists = hasUrgentLocalDeliveryTarget(creep);
   var dst = creep.memory.deliveryTargetId ? Game.getObjectById(creep.memory.deliveryTargetId) : null;
+  if (urgentTargetExists && dst && isNonUrgentStorageLikeTarget(dst) && !isUrgentDeliveryTarget(dst)) {
+    clearDeliveryReservation(creep, dst);
+    dst = null;
+    delete creep.memory.deliveryTargetId;
+    diag.urgentRetarget = true;
+  }
   if (!urgentTargetExists) {
     diag.handoffBeforeStorage = true;
     if (tryTruckerEnergyHandoff(creep, diag)) return;
@@ -378,6 +405,7 @@ function run(creep) {
   diag.tick = Game.time; diag.deliveryTargetsSeen = 0; diag.deliveryTargetsReserved = 0; diag.skippedReservedCapacity = 0;
   diag.handoffRequestsSeen = 0; diag.handoffClaimed = false; diag.handoffTarget = null; diag.handoffResult = null; diag.handoffClearedReason = null;
   diag.handoffBeforeStorage = false; diag.lastDeliveryResult = null;
+  diag.urgentRetarget = false;
 
   var active = creep.memory.dispatchJob || null;
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && creep.room.name !== creep.memory.home) active = { type: 'REMOTE_RETURN', id: active ? active.id : ('return:' + creep.name) };

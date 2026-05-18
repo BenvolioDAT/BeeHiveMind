@@ -36,11 +36,17 @@ function hasLocalTruckerWithEnergy(creep) {
   var cr = creep.room.find(FIND_MY_CREEPS, { filter: function(c){ return c.memory && c.memory.role === 'Trucker' && (c.store[RESOURCE_ENERGY] || 0) > 0; } });
   return cr.length > 0;
 }
+function clearBuilderHandoffWaitMemory(creep) {
+  delete creep.memory.builderHandoffWaitTargetId;
+  delete creep.memory.builderHandoffWaitStartedAt;
+  delete creep.memory.builderHandoffWaitUntil;
+}
 function tryEmergencySelfHarvest(creep, targetInfo) {
   if (!CFG.EMERGENCY_SELF_HARVEST_ENABLED || !hasWorkPart(creep)) return false;
   if (CFG.SELF_HARVEST_ONLY_WITHOUT_STORAGE && creep.room.storage) return false;
   var source = creep.pos.findClosestByRange(FIND_SOURCES, { filter: function(s){ return (s.energy || 0) >= CFG.SELF_HARVEST_MIN_SOURCE_ENERGY; } });
   if (!source) return false;
+  clearBuilderHandoffWaitMemory(creep);
   setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: targetInfo && targetInfo.target ? targetInfo.target.id : null, selfHarvestUsed: true, reason: 'emergency_self_harvest', sourceId: source.id });
   if ((creep.store[RESOURCE_ENERGY] || 0) >= CFG.SELF_HARVEST_DELIVER_AT_ENERGY) { setBuilderState(creep, CFG.BUILDER_STATES.BUILD); return false; }
   var hr = creep.harvest(source);
@@ -203,15 +209,24 @@ function maybeWaitForUnassignedHandoff(creep, targetInfo) {
   var mem = Handoff.ensureHandoffMemory(creep.room);
   var req = mem && mem.requests ? mem.requests[creep.name] : null;
   var assigned = !!(req && req.assignedHaulerName);
+  var targetId = targetInfo.target.id;
   var waitUntil = creep.memory.builderHandoffWaitUntil || 0;
   if (assigned) return false;
 
   var shouldWait = hasLocalTruckerWithEnergy(creep) || !hasStoredEnergyAvailable(creep);
   if (!shouldWait) return false;
-  if (!waitUntil || waitUntil < Game.time) creep.memory.builderHandoffWaitUntil = Game.time + CFG.BUILDER_HANDOFF_WAIT_UNASSIGNED_TICKS;
-  if (Game.time > creep.memory.builderHandoffWaitUntil) return false;
+  if (creep.memory.builderHandoffWaitTargetId !== targetId) {
+    creep.memory.builderHandoffWaitTargetId = targetId;
+    creep.memory.builderHandoffWaitStartedAt = Game.time;
+    creep.memory.builderHandoffWaitUntil = Game.time + CFG.BUILDER_HANDOFF_WAIT_UNASSIGNED_TICKS;
+    waitUntil = creep.memory.builderHandoffWaitUntil;
+  }
+  if (Game.time > waitUntil) {
+    setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: targetId, handoffPublished: true, handoffAssigned: false, waitedForHandoff: true, selfHarvestUsed: false, reason: 'handoff_wait_expired', collectTargetFound: false });
+    return false;
+  }
   var range = creep.pos.getRangeTo(targetInfo.target);
-  setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: targetInfo.target.id, handoffPublished: true, handoffAssigned: false, waitedForHandoff: true, selfHarvestUsed: false, reason: 'wait_unassigned_handoff', collectTargetFound: false });
+  setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: targetId, handoffPublished: true, handoffAssigned: false, waitedForHandoff: true, selfHarvestUsed: false, reason: 'wait_unassigned_handoff', collectTargetFound: false });
   if (range > CFG.BUILDER_HANDOFF_WAIT_IF_NEAR_TARGET_RANGE) creep.moveTo(targetInfo.target, { range: CFG.BUILDER_HANDOFF_WAIT_IF_NEAR_TARGET_RANGE, reusePath: 10 });
   return true;
 }
@@ -224,14 +239,14 @@ function run(creep) {
   if (state === CFG.BUILDER_STATES.HARVEST) {
     var lowTargetInfo = getBuilderTarget(creep);
     var assignedWait = lowTargetInfo && maybePublishBuilderRequest(creep, lowTargetInfo);
-    if (assignedWait) { setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo.target.id, handoffPublished: true, handoffAssigned: true, waitedForHandoff: true, selfHarvestUsed: false, reason: 'assigned_handoff_wait' }); debugSay(creep, '⏳'); return; }
+    if (assignedWait) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo.target.id, handoffPublished: true, handoffAssigned: true, waitedForHandoff: true, selfHarvestUsed: false, reason: 'assigned_handoff_wait' }); debugSay(creep, '⏳'); return; }
     if (lowTargetInfo && maybeWaitForUnassignedHandoff(creep, lowTargetInfo)) { debugSay(creep, '⏳'); return; }
     var gotEnergy = collectEnergy(creep);
-    if (gotEnergy && creep.store.getFreeCapacity() > 0) { setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'collect_energy', collectTargetFound: true }); return; }
+    if (gotEnergy && creep.store.getFreeCapacity() > 0) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'collect_energy', collectTargetFound: true }); return; }
     if (!gotEnergy && lowTargetInfo && (!CFG.SELF_HARVEST_AFTER_HANDOFF_WAIT || (creep.memory.builderHandoffWaitUntil || 0) < Game.time)) {
       if (tryEmergencySelfHarvest(creep, lowTargetInfo)) return;
     }
-    if (creep.store.getFreeCapacity() === 0) { Handoff.clearEnergyHandoffRequest(creep); setBuilderState(creep, CFG.BUILDER_STATES.IDLE); }
+    if (creep.store.getFreeCapacity() === 0) { clearBuilderHandoffWaitMemory(creep); Handoff.clearEnergyHandoffRequest(creep); setBuilderState(creep, CFG.BUILDER_STATES.IDLE); }
     setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'idle_no_energy', collectTargetFound: false });
     return;
   }
@@ -240,7 +255,7 @@ function run(creep) {
   if (!targetInfo) { Handoff.clearEnergyHandoffRequest(creep); if (dumpEnergyToSink(creep)) return; setBuilderState(creep, CFG.BUILDER_STATES.IDLE); idleNearAnchor(creep); return; }
   if (state === CFG.BUILDER_STATES.IDLE) { setBuilderState(creep, CFG.BUILDER_STATES.TRAVEL); state = CFG.BUILDER_STATES.TRAVEL; }
   if (state === CFG.BUILDER_STATES.TRAVEL) { if (handleTravel(creep, targetInfo)) return; state = getBuilderState(creep); }
-  if (state === CFG.BUILDER_STATES.BUILD) { if (handleBuild(creep, targetInfo.target)) return; return; }
+  if (state === CFG.BUILDER_STATES.BUILD) { clearBuilderHandoffWaitMemory(creep); if (handleBuild(creep, targetInfo.target)) return; return; }
   setBuilderState(creep, CFG.BUILDER_STATES.IDLE);
   idleNearAnchor(creep);
 }
