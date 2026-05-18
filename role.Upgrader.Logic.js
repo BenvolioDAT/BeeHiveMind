@@ -79,7 +79,7 @@ function maybePublishUpgraderRequest(creep) {
   if (!shouldUpgraderRequestEnergy(creep)) { Handoff.clearEnergyHandoffRequest(creep); return false; }
   var req = Handoff.publishEnergyHandoffRequest(creep, 'Upgrader', creep.room.controller, creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0);
   if (!req) return false;
-  if (req.assignedCourierName && req.waitUntil && Game.time <= req.waitUntil) { creep.memory.energyHandoffCourier = req.assignedCourierName; return true; }
+  if (req.assignedHaulerName && req.waitUntil && Game.time <= req.waitUntil) { creep.memory.energyHandoffHauler = req.assignedHaulerName; return true; }
   return false;
 }
 

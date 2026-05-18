@@ -88,9 +88,6 @@ var ROLE_ALIAS_MAP = (function () {
     map[name.toLowerCase()] = name;
   }
   map.remoteharvest = 'Luna';
-  // Courier role retired: normalize legacy references to Trucker.
-  map.Courier = 'Trucker';
-  map.courier = 'Trucker';
   return map;
 })();
 
@@ -254,6 +251,44 @@ function ensureRoomQueue(roomName) {
     Memory.rooms[roomName].spawnQueue = [];
   }
   return Memory.rooms[roomName].spawnQueue;
+}
+
+function cleanupRetiredCourierState(roomName) {
+  var q = ensureRoomQueue(roomName);
+  var removedQueueItems = 0;
+  var kept = [];
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (!item) continue;
+    var itemRole = item.role == null ? '' : String(item.role).toLowerCase();
+    if (itemRole === 'courier') {
+      removedQueueItems++;
+      continue;
+    }
+    kept.push(item);
+  }
+  Memory.rooms[roomName].spawnQueue = kept;
+
+  var migratedCreeps = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    var home = creep.memory.home || (creep.room && creep.room.name);
+    if (home !== roomName) continue;
+    var creepRole = creep.memory.role == null ? '' : String(creep.memory.role).toLowerCase();
+    if (creepRole === 'courier') {
+      creep.memory.role = 'Trucker';
+      migratedCreeps++;
+    }
+  }
+
+  Memory.rooms[roomName].lastCourierCleanup = {
+    tick: Game.time,
+    removedQueueItems: removedQueueItems,
+    migratedCreeps: migratedCreeps,
+    notes: 'retired role cleanup'
+  };
 }
 
 function queuedCount(roomName, role) {
@@ -991,14 +1026,10 @@ function computeRoomQuotas(C, room) {
   // (builder need, remote miners, etc.) so every change is a single diff.
   var truckerQuotaMeta = computeTruckerQuotaForHome(room.name);
   var remoteDesired = truckerQuotaMeta.desiredTruckers;
-  var useTruckerPrimary = !!TruckerConfig.USE_TRUCKER_AS_PRIMARY_HAULER;
   var localTruckerBaseQuota = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
   var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
-  var truckerQuota = remoteDesired;
-  if (useTruckerPrimary) {
-    truckerQuota = localTruckerBaseQuota + remoteDesired;
-    if (maxTotalTruckers > 0) truckerQuota = Math.min(truckerQuota, maxTotalTruckers);
-  }
+  var truckerQuota = localTruckerBaseQuota + remoteDesired;
+  if (maxTotalTruckers > 0) truckerQuota = Math.min(truckerQuota, maxTotalTruckers);
 
   var quotas = {
     // One BaseHarvest per owned source keeps mining stable without over-spawning.
@@ -1024,6 +1055,7 @@ function computeRoomQuotas(C, room) {
 function fillQueueForRoom(C, room) {
   var quotas = computeRoomQuotas(C, room);
   var roomName = room.name;
+  cleanupRetiredCourierState(roomName);
 
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
@@ -1032,8 +1064,7 @@ function fillQueueForRoom(C, room) {
     tick: Game.time,
     quotas: quotas
   };
-  var useTruckerPrimary = !!TruckerConfig.USE_TRUCKER_AS_PRIMARY_HAULER;
-  var localTruckerBaseQuota = useTruckerPrimary ? Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0) : 0;
+  var localTruckerBaseQuota = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
   var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
   var remoteTruckerQuota = truckerQuotaMeta.desiredTruckers;
   var liveTruckers = getRoomLocalLiveCount(C, roomName, "Trucker");

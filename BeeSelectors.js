@@ -158,7 +158,7 @@ function buildSnapshot(room) {
         snapshot.repairs.push({ target: s, goalHits: goal });
       }
     }
-    // Dropped energy piles (role.Queen/role.Courier read this list).
+    // Dropped energy piles (role.Queen/role.Trucker read this list).
     var drops = room.find(FIND_DROPPED_RESOURCES, {
       filter: function (r) { return r.resourceType === RESOURCE_ENERGY && r.amount > 0; }
     });
@@ -332,7 +332,7 @@ function collectSourceFlags() {
 // Output: array of remote source entries {sourceId, roomName, container, ...}
 // Side-effects: reads Memory.__BHM.remotesByHome[home], scans visible remote
 //               rooms, merges intel from Memory.rooms when fogged.
-// Consumers: role.Luna (remote miners), role.Courier/Trucker.
+// Consumers: role.Luna (remote miners), role.Trucker.
 function buildRemoteSourcesSnapshot(homeRoomName) {
   ensureRemoteMemory();
   var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
@@ -522,7 +522,7 @@ var BeeSelectors = {
   // -----------------------------------------------------------------------
   pickBestHaulTarget: function (containers, homeRoomName) {
     // Choose container entry by energy minus distance penalty (linear distance).
-    // Used by role.Courier/role.Trucker to pick next haul job.
+    // Used by role.Trucker to pick next haul job.
     if (!containers || !containers.length) return null;
     var best = null;
     var bestScore = -999999;
