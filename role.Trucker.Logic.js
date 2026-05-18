@@ -21,6 +21,25 @@ function clearRemoteRequestAssignment(creep) {
   delete creep.memory.requestRoom; delete creep.memory.requestX; delete creep.memory.requestY; delete creep.memory.targetRoom;
 }
 
+
+function isActiveRemoteRequest(req, homeName) {
+  if (!req || !req.id || !homeName) return false;
+  if (req.homeRoom !== homeName) return false;
+  if (req.maintenanceUntil && req.maintenanceUntil > Game.time) return false;
+  if ((req.amount || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) return false;
+  if ((Game.time - (req.updated || 0)) > CFG.REQUEST_STALE_TICKS) return false;
+  return true;
+}
+
+function hasUrgentLocalDeliveryTarget(creep) {
+  if (!creep || !creep.room) return false;
+  var room = creep.room;
+  var spExt = room.find(FIND_STRUCTURES, { filter: function(s){ return (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) && s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0; } });
+  if (spExt.length > 0) return true;
+  var towers = room.find(FIND_STRUCTURES, { filter: function(s){ if (s.structureType !== STRUCTURE_TOWER || !s.store) return false; var cap = s.store.getCapacity(RESOURCE_ENERGY) || 0; if (cap <= 0) return false; var cur = s.store[RESOURCE_ENERGY] || 0; return cur < Math.floor(cap * 0.7); } });
+  return towers.length > 0;
+}
+
 function claimRemoteRequestForJob(creep, job) {
   var reqs = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
   var req = reqs[job.requestId];
@@ -68,9 +87,16 @@ function runLocal(creep, job) {
     creep.travelTo(new RoomPosition(25, 25, creep.memory.home), { range: 20, reusePath: CFG.PATH_REUSE });
     return;
   }
+  if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && hasUrgentLocalDeliveryTarget(creep)) {
+    creep.memory.dispatchJob = { id: 'localDeliver:' + creep.memory.home, type: 'LOCAL_DELIVER', homeRoom: creep.memory.home };
+    return;
+  }
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0 || job.type === 'LOCAL_COLLECT') {
     var src = findLocalCollectTarget(creep);
-    if (!src) return;
+    if (!src) {
+      if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) creep.memory.dispatchJob = { id: 'localDeliver:' + creep.memory.home, type: 'LOCAL_DELIVER', homeRoom: creep.memory.home };
+      return;
+    }
     var pr = src.amount ? creep.pickup(src) : creep.withdraw(src, RESOURCE_ENERGY);
     if (pr === ERR_NOT_IN_RANGE) creep.travelTo(src, { range: 1, reusePath: CFG.PATH_REUSE });
     return;
@@ -83,7 +109,23 @@ function runLocal(creep, job) {
 
 function runRemote(creep, job) {
   var req = claimRemoteRequestForJob(creep, job);
-  if (!req) return;
+  if (!req) {
+    clearRemoteRequestAssignment(creep);
+    Dispatcher.releaseJob(creep, job.id);
+    delete creep.memory.dispatchJob;
+    return;
+  }
+
+  if (!isActiveRemoteRequest(req, creep.memory.home)) {
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home };
+      return;
+    }
+    clearRemoteRequestAssignment(creep);
+    Dispatcher.releaseJob(creep, job.id);
+    delete creep.memory.dispatchJob;
+    return;
+  }
 
   var container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
   if (!container) {

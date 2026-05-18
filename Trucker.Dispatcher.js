@@ -84,8 +84,22 @@ function releaseJob(creep, jobId) {
   if (d.assignedByCreep[creep.name]) delete d.assignedByCreep[creep.name];
 }
 
-function chooseJobForTrucker(creep) {
+function cleanupDispatchMemory() {
   var d = ensureDispatchMemory();
+  var id;
+  for (id in d.claims) {
+    if (!d.claims.hasOwnProperty(id)) continue;
+    if (!d.claims[id] || d.claims[id].until <= Game.time) delete d.claims[id];
+  }
+  for (id in d.assignedByCreep) {
+    if (!d.assignedByCreep.hasOwnProperty(id)) continue;
+    if (!Game.creeps[id]) delete d.assignedByCreep[id];
+  }
+  return d;
+}
+
+function chooseJobForTrucker(creep) {
+  var d = cleanupDispatchMemory();
   var home = creep.memory.home || creep.room.name;
   var diag = { tick: Game.time, jobsSeen: 0, jobsClaimed: 0, localJobs: 0, remoteJobs: 0, skippedRemoteTTL: 0, skippedNoVision: 0, skippedUnsafe: 0, assignedByCreep: d.assignedByCreep || {} };
 
@@ -128,5 +142,6 @@ module.exports = {
   canCreepSafelyTakeRemoteJob: canCreepSafelyTakeRemoteJob,
   claimJob: claimJob,
   releaseJob: releaseJob,
+  cleanupDispatchMemory: cleanupDispatchMemory,
   chooseJobForTrucker: chooseJobForTrucker
 };
