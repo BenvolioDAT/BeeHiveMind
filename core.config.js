@@ -43,6 +43,11 @@ CoreConfig.settings = Object.freeze({
      * temporary while local autonomous defense is being built.
      */
     ENABLE_SQUAD_SPAWNING: false,
+    /**
+     * Narrow toggle for memory-backed remote defense squads only.
+     * This does not enable the old manual Squad flag spawning system.
+     */
+    ENABLE_REMOTE_DEFENSE_SPAWNING: true,
     IDLE_STAGING_ENABLED: true,
     DEBUG_STAGING_VISUALS: false,
     STAGING_MIN_RANGE_FROM_SPAWN: 5,

@@ -148,6 +148,103 @@ function squadSpawningEnabled() {
   );
 }
 
+function remoteDefenseSpawningEnabled() {
+  return Boolean(
+    CoreConfig &&
+    CoreConfig.settings &&
+    CoreConfig.settings.combat &&
+    CoreConfig.settings.combat.ENABLE_REMOTE_DEFENSE_SPAWNING === true
+  );
+}
+
+function ensureRoomMemory(roomName) {
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  return Memory.rooms[roomName];
+}
+
+function getCheapestCombatRoleEnergy() {
+  var roles = ['CombatMelee', 'CombatArcher', 'CombatMedic'];
+  var cheapest = null;
+  for (var i = 0; i < roles.length; i++) {
+    var cost = minEnergyFor(roles[i]);
+    if (typeof cost !== 'number' || cost <= 0) continue;
+    if (cheapest === null || cost < cheapest) cheapest = cost;
+  }
+  return cheapest === null ? 200 : cheapest;
+}
+
+function hasBaseRoleDeficit(C, roomName) {
+  var baseharvest = getRoomLocalLiveCount(C, roomName, 'BaseHarvest');
+  var courier = getRoomLocalLiveCount(C, roomName, 'Courier');
+  var queen = getRoomLocalLiveCount(C, roomName, 'Queen');
+  return baseharvest < 1 || courier < 1 || queen < 1;
+}
+
+function isRemoteDefenseTargetAllowed(targetRoom) {
+  var myName = getMyUsernameForSpawnManager();
+  var allowPvp = Boolean(CoreConfig && CoreConfig.ALLOW_PVP);
+  var mem = Memory.rooms && Memory.rooms[targetRoom] ? Memory.rooms[targetRoom] : null;
+  var intel = mem && mem.intel ? mem.intel : null;
+  var owner = intel && intel.owner ? intel.owner : null;
+  var reservation = intel && intel.reservation ? intel.reservation : null;
+  if (owner && myName && owner !== myName && !allowPvp) return false;
+  if (reservation && myName && reservation !== myName && !allowPvp) return false;
+  return true;
+}
+
+function evaluateRemoteDefensePlan(squadName) {
+  var key = normalizedSquadName(squadName);
+  var bucket = Memory.squads && Memory.squads[key] ? Memory.squads[key] : null;
+  var out = {
+    squadName: key,
+    targetRoom: null,
+    score: 0,
+    hasThreat: false,
+    skippedReasons: []
+  };
+  if (!bucket || bucket.remoteDefense !== true) {
+    out.skippedReasons.push('notRemoteDefense');
+    return out;
+  }
+  if (!bucket.targetRoom) {
+    out.skippedReasons.push('missingTargetRoom');
+    return out;
+  }
+  out.targetRoom = bucket.targetRoom;
+  var score = bucket.lastKnownScore || 0;
+  if (SquadFlagIntel && typeof SquadFlagIntel.threatScoreForRoom === 'function') {
+    var intelScore = SquadFlagIntel.threatScoreForRoom(bucket.targetRoom) || 0;
+    if (intelScore > score) score = intelScore;
+  }
+  var live = null;
+  if (BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
+    live = BeeCombatSquads.getLiveThreatForRoom(bucket.targetRoom);
+    if (live && typeof live.score === 'number' && live.score > score) score = live.score;
+  }
+  out.score = score;
+  out.hasThreat = score > 0 || Boolean(live && live.hasThreat);
+  if (!out.hasThreat) out.skippedReasons.push('noThreat');
+  return out;
+}
+
+function gatherRemoteDefensePlans() {
+  var picks = [];
+  if (!Memory.squads) return picks;
+  for (var squadName in Memory.squads) {
+    if (!Object.prototype.hasOwnProperty.call(Memory.squads, squadName)) continue;
+    var plan = evaluateRemoteDefensePlan(squadName);
+    if (plan.hasThreat) picks.push(plan);
+  }
+  picks.sort(function (a, b) { return b.score - a.score; });
+  return picks;
+}
+
+function writeRemoteDefenseDiag(roomName, diag) {
+  var roomMem = ensureRoomMemory(roomName);
+  roomMem.lastRemoteDefenseSpawnEval = diag;
+}
+
 // ------------------------------ Spawn Queue ------------------------------
 function ensureRoomQueue(roomName) {
   if (!Memory.rooms) Memory.rooms = {};
@@ -1179,9 +1276,62 @@ function trySpawnSquad(spawner, squadState) {
 function runSpawnPass(C) {
   var spawns = C.spawns;
   var squadState = { handled: false };
+  var remoteDefenseHandled = false;
   for (var i = 0; i < spawns.length; i++) {
     var spawner = spawns[i];
     if (!spawner || spawner.spawning) continue;
+    var roomName = spawner.room && spawner.room.name;
+    var diag = {
+      tick: Game.time,
+      chosenSquad: null,
+      targetRoom: null,
+      score: 0,
+      skippedReasons: [],
+      spawnAttempted: false
+    };
+    if (remoteDefenseSpawningEnabled() && !remoteDefenseHandled) {
+      var cheapestCombat = getCheapestCombatRoleEnergy();
+      if ((spawner.room.energyAvailable || 0) < cheapestCombat) {
+        diag.skippedReasons.push('insufficientEnergy');
+      } else if (hasBaseRoleDeficit(C, roomName)) {
+        diag.skippedReasons.push('baseRoleDeficit');
+      } else {
+        var remotePlans = gatherRemoteDefensePlans();
+        if (!remotePlans.length) {
+          diag.skippedReasons.push('noEligiblePlans');
+        } else {
+          var chosen = null;
+          for (var rp = 0; rp < remotePlans.length; rp++) {
+            if (isRemoteDefenseTargetAllowed(remotePlans[rp].targetRoom)) {
+              chosen = remotePlans[rp];
+              break;
+            }
+          }
+          if (!chosen) {
+            diag.skippedReasons.push('pvpDisallowedTarget');
+          } else {
+            diag.chosenSquad = chosen.squadName;
+            diag.targetRoom = chosen.targetRoom;
+            diag.score = chosen.score;
+            diag.spawnAttempted = true;
+            var remoteOk = spawnLogic && typeof spawnLogic.Spawn_Squad === 'function'
+              ? spawnLogic.Spawn_Squad(spawner, chosen.squadName)
+              : false;
+            diag.result = remoteOk ? 'spawned' : 'spawnSkipped';
+            if (remoteOk) {
+              remoteDefenseHandled = true;
+              if (roomName) writeRemoteDefenseDiag(roomName, diag);
+              continue;
+            }
+          }
+        }
+      }
+    } else if (!remoteDefenseSpawningEnabled()) {
+      diag.skippedReasons.push('remoteDefenseDisabled');
+    } else if (remoteDefenseHandled) {
+      diag.skippedReasons.push('alreadySpawnedThisTick');
+    }
+    if (roomName) writeRemoteDefenseDiag(roomName, diag);
     if (squadSpawningEnabled() && trySpawnSquad(spawner, squadState)) {
       continue;
     }

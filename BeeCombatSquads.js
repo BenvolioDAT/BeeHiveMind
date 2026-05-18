@@ -504,6 +504,12 @@ function resolveSquadTarget(identifier) {
       targetRoom = roomNameFromBinding(binding);
       resolvedName = resolvedName || candidate;
     }
+    if (!resolvedName && Memory.squads && Memory.squads[candidate]) {
+      // Memory-only remote defense plans may not have a flag or binding yet.
+      // If the squad bucket exists, treat this candidate as the canonical id
+      // and allow targetRoom to resolve from Memory.squads directly.
+      resolvedName = candidate;
+    }
   }
 
   // Fill in missing pieces from the resolved flag, even if only bindings
