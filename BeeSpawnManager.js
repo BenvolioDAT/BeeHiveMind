@@ -18,6 +18,7 @@ var spawnLogic  = require('spawn.logic');
 var LunaConfig  = require('role.Luna.Config');
 var TruckerConfig = require('role.Trucker.Config');
 var RepairConfig = require('role.Repair.Config');
+var QueenConfig = require('role.Queen.Config');
 var RemoteHarvestManager = require('RemoteHarvest.Manager');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -1006,6 +1007,23 @@ function findRemoteContainerEmergencyRepairRequest(roomName) {
   return findEmergencyRepairRequestInBucket(haulRequests, roomName);
 }
 
+function determineQueenQuota(room) {
+  var roomMem = ensureRoomMemory(room.name);
+  var roomHasStorage = !!(room && room.storage);
+  var backupEnabled = !!(QueenConfig && QueenConfig.BACKUP_HARVEST_ENABLED);
+  var bootstrapQuota = Math.max(1, (QueenConfig && QueenConfig.QUEEN_BOOTSTRAP_QUOTA_WITHOUT_STORAGE) || 2);
+  var normalQuota = Math.max(1, (QueenConfig && QueenConfig.QUEEN_NORMAL_QUOTA) || 1);
+  var useBootstrap = backupEnabled && !roomHasStorage;
+  var queenQuota = useBootstrap ? bootstrapQuota : normalQuota;
+  roomMem.lastQueenQuota = {
+    tick: Game.time,
+    queenQuota: queenQuota,
+    roomHasStorage: roomHasStorage,
+    mode: useBootstrap ? 'bootstrap-backup-harvest' : 'normal-logistics'
+  };
+  return queenQuota;
+}
+
 function computeRoomQuotas(C, room) {
   var localDefense = computeLocalDefenseQuotas(room);
   var sourceCount = room ? room.find(FIND_SOURCES).length : 0;
@@ -1034,7 +1052,7 @@ function computeRoomQuotas(C, room) {
   var quotas = {
     // One BaseHarvest per owned source keeps mining stable without over-spawning.
     Baseharvest:  safeBaseHarvestQuota,
-    Queen:        1,
+    Queen:        determineQueenQuota(room),
     Upgrader:     computeEarlyUpgraderQuota(room),
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
