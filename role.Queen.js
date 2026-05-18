@@ -3,6 +3,7 @@
 const BeeSelectors = require('BeeSelectors');
 const BeeActions = require('BeeActions');
 const MovementManager = require('Movement.Manager');
+const QueenConfig = require('role.Queen.Config');
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -346,6 +347,10 @@ function drawLine(creep, target, color, label) {
       if (!target) return true;
       if ((creep.store[RESOURCE_ENERGY] || 0) === 0) return true;
       if (getFreeEnergyCapacity(target) === 0) return true;
+    } else if (task.type === 'harvest') {
+      if (!target) return true;
+      if (creep.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) return true;
+      if ((target.energy || 0) < Math.max(0, QueenConfig.BACKUP_HARVEST_MIN_SOURCE_ENERGY || 0)) return true;
     } else if (task.type === 'idle') {
       // Idle continues until a better option arrives.
     }
@@ -525,10 +530,117 @@ function drawLine(creep, target, color, label) {
     return null;
   }
 
+
+function roomNeedsCriticalFill(room) {
+  if (!room) return false;
+  var spawnLike = BeeSelectors.findSpawnLikeNeedingEnergy(room);
+  if (spawnLike && spawnLike.length) return true;
+  var towers = BeeSelectors.findTowersNeedingEnergy(room);
+  if (towers && towers.length) return true;
+  return false;
+}
+
+function hasWorkPart(creep) {
+  return creep && creep.getActiveBodyparts && creep.getActiveBodyparts(WORK) > 0;
+}
+
+function ensureRoomQueenAssignmentMemory(room) {
+  if (!room || !room.name) return null;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+  var mem = Memory.rooms[room.name];
+  if (!mem.queenSourceAssignments) mem.queenSourceAssignments = {};
+  return mem;
+}
+
+function cleanupQueenSourceAssignments(room) {
+  var mem = ensureRoomQueenAssignmentMemory(room);
+  if (!mem) return {};
+  var out = mem.queenSourceAssignments || {};
+  for (var sourceId in out) {
+    if (!Object.prototype.hasOwnProperty.call(out, sourceId)) continue;
+    var rec = out[sourceId];
+    var dead = !rec || !rec.creepName || !Game.creeps[rec.creepName];
+    var expired = !rec || typeof rec.until !== 'number' || rec.until < Game.time;
+    if (dead || expired) delete out[sourceId];
+  }
+  mem.queenSourceAssignments = out;
+  return out;
+}
+
+function writeQueenBackupHarvestDiag(creep, diag) {
+  if (!creep || !creep.room || !diag) return;
+  var mem = ensureRoomQueenAssignmentMemory(creep.room);
+  if (!mem) return;
+  mem.lastQueenBackupHarvest = diag;
+}
+
+function getBackupHarvestTask(creep) {
+  var room = creep && creep.room;
+  var diag = {
+    tick: Game.time,
+    enabled: !!QueenConfig.BACKUP_HARVEST_ENABLED,
+    allowed: false,
+    reason: 'unknown',
+    assignedSourceId: null,
+    assignedCreep: creep ? creep.name : null,
+    activeAssignments: 0,
+    roomHasStorage: !!(room && room.storage),
+    criticalFillExists: roomNeedsCriticalFill(room)
+  };
+
+  if (!QueenConfig.BACKUP_HARVEST_ENABLED) { diag.reason = 'disabled'; writeQueenBackupHarvestDiag(creep, diag); return null; }
+  if (!hasWorkPart(creep)) { diag.reason = 'no_work_part'; writeQueenBackupHarvestDiag(creep, diag); return null; }
+  if (QueenConfig.BACKUP_HARVEST_ONLY_WITHOUT_STORAGE && room && room.storage) { diag.reason = 'storage_present'; writeQueenBackupHarvestDiag(creep, diag); return null; }
+  if (QueenConfig.BACKUP_HARVEST_ONLY_WHEN_CRITICAL_FILL_EXISTS && !diag.criticalFillExists) { diag.reason = 'no_critical_fill'; writeQueenBackupHarvestDiag(creep, diag); return null; }
+  if (!creep || creep.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) { diag.reason = 'no_free_capacity'; writeQueenBackupHarvestDiag(creep, diag); return null; }
+
+  var assignments = cleanupQueenSourceAssignments(room);
+  var activeAssignments = 0;
+  for (var k in assignments) if (Object.prototype.hasOwnProperty.call(assignments, k)) activeAssignments++;
+  diag.activeAssignments = activeAssignments;
+
+  var sources = room ? room.find(FIND_SOURCES) : [];
+  if (!sources || !sources.length) { diag.reason = 'no_sources'; writeQueenBackupHarvestDiag(creep, diag); return null; }
+
+  var minEnergy = Math.max(0, QueenConfig.BACKUP_HARVEST_MIN_SOURCE_ENERGY || 0);
+  var assignedSource = null;
+  var unclaimed = [];
+  var fallback = [];
+  for (var i = 0; i < sources.length; i++) {
+    var src = sources[i];
+    if (!src || (src.energy || 0) < minEnergy) continue;
+    var rec = assignments[src.id];
+    if (rec && rec.creepName === creep.name) assignedSource = src;
+    if (!rec) unclaimed.push(src);
+    fallback.push(src);
+  }
+
+  var chosen = assignedSource;
+  if (!chosen && unclaimed.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, unclaimed);
+  if (!chosen && fallback.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, fallback);
+
+  if (!chosen) { diag.reason = 'no_eligible_source'; writeQueenBackupHarvestDiag(creep, diag); return null; }
+
+  assignments[chosen.id] = {
+    creepName: creep.name,
+    until: Game.time + Math.max(1, QueenConfig.BACKUP_HARVEST_ASSIGN_TTL || 15)
+  };
+
+  diag.allowed = true;
+  diag.reason = 'assigned';
+  diag.assignedSourceId = chosen.id;
+  writeQueenBackupHarvestDiag(creep, diag);
+
+  return createTask('harvest', chosen.id, { source: 'backup_harvest', sourceId: chosen.id });
+}
+
   function chooseNextTask(creep) {
     if ((creep.store[RESOURCE_ENERGY] || 0) === 0) {
       var withdrawTask = pickWithdrawTask(creep);
       if (withdrawTask) return withdrawTask;
+      var harvestTask = getBackupHarvestTask(creep);
+      if (harvestTask) return harvestTask;
     } else {
       var deliverTask = pickDeliverTask(creep);
       if (deliverTask) return deliverTask;
@@ -625,6 +737,31 @@ function drawLine(creep, target, color, label) {
     }
   }
 
+  function runQueenHarvestState(creep) {
+    var task = creep.memory._task;
+    var source = getQueenTaskTarget(task);
+    if (!task || !source) { clearTask(creep); return; }
+    if (creep.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) { clearTask(creep); return; }
+    var rc = creep.harvest(source);
+    if (rc === ERR_NOT_IN_RANGE) {
+      var priority = getQueenTaskPriority(task);
+      var moved = MovementManager.request(creep, source, priority, { range: 1, reusePath: 10 });
+      if (!moved || moved < 0) {
+        creep.moveTo(source, { reusePath: 10 });
+      }
+      return;
+    }
+    if (rc === OK) {
+      var carryNow = creep.store[RESOURCE_ENERGY] || 0;
+      var deliverAt = Math.max(1, QueenConfig.BACKUP_HARVEST_DELIVER_AT_ENERGY || 50);
+      if (carryNow >= deliverAt || creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) clearTask(creep);
+      return;
+    }
+    if (rc === ERR_NOT_ENOUGH_RESOURCES || rc === ERR_INVALID_TARGET || rc === ERR_NO_BODYPART) {
+      clearTask(creep);
+    }
+  }
+
   function runQueenIdleState(creep) {
     var task = creep.memory._task;
     if (!task || task.type !== 'idle') return;
@@ -649,6 +786,7 @@ function drawLine(creep, target, color, label) {
       if (state === 'WITHDRAW') { runQueenWithdrawState(creep); return; }
       if (state === 'PICKUP')   { runQueenPickupState(creep);   return; }
       if (state === 'DELIVER')  { runQueenDeliverState(creep);  return; }
+      if (state === 'HARVEST')  { runQueenHarvestState(creep);  return; }
       runQueenIdleState(creep);
     }
   };
