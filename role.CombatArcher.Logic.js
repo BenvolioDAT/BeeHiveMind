@@ -27,10 +27,31 @@ function setIdleMemory(creep) {
   creep.memory.combatTargetRoom = creep.room ? creep.room.name : null;
 }
 
+function getAssignedTargetRoom(creep) {
+  if (!creep || !creep.memory) return null;
+  if (creep.memory.targetRoom) return creep.memory.targetRoom;
+  if (creep.memory.squadFlag && Memory.squads && Memory.squads[creep.memory.squadFlag]) {
+    return Memory.squads[creep.memory.squadFlag].targetRoom || null;
+  }
+  return null;
+}
+
 function run(creep) {
   if (!creep) return;
   var target = findClosestHostile(creep);
   if (!target) {
+    var remoteRoom = getAssignedTargetRoom(creep);
+    // Beginner note: ranged defenders should also travel to their assigned
+    // remote room before giving up and returning to idle staging.
+    if (remoteRoom && creep.room && creep.room.name !== remoteRoom) {
+      creep.memory.combatStatus = 'traveling';
+      creep.memory.combatTargetRoom = remoteRoom;
+      creep.travelTo(new RoomPosition(25, 25, remoteRoom), {
+        range: 20,
+        ignoreCreeps: CFG.IGNORE_CREEPS
+      });
+      return;
+    }
     setIdleMemory(creep);
     CombatStaging.moveToStaging(creep);
     return;
