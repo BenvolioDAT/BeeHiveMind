@@ -988,17 +988,30 @@ function computeRoomQuotas(C, room) {
 
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
+  var truckerQuotaMeta = computeTruckerQuotaForHome(room.name);
+  var remoteDesired = truckerQuotaMeta.desiredTruckers;
+  var useTruckerPrimary = !!TruckerConfig.USE_TRUCKER_AS_PRIMARY_HAULER;
+  var localTruckerBaseQuota = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
+  var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
+  var courierQuota = 2;
+  var truckerQuota = remoteDesired;
+  if (useTruckerPrimary) {
+    if (TruckerConfig.DISABLE_COURIER_SPAWNING_WHEN_TRUCKER_PRIMARY) courierQuota = 0;
+    truckerQuota = localTruckerBaseQuota + remoteDesired;
+    if (maxTotalTruckers > 0) truckerQuota = Math.min(truckerQuota, maxTotalTruckers);
+  }
+
   var quotas = {
     // One BaseHarvest per owned source keeps mining stable without over-spawning.
     Baseharvest:  safeBaseHarvestQuota,
-    Courier:      2,
+    Courier:      courierQuota,
     Queen:        1,
     Upgrader:     computeEarlyUpgraderQuota(room),
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
     Luna:         determineLunaQuota(C, room),
     Repair:       repairQuota,
-    Trucker:      computeTruckerQuotaForHome(room.name).desiredTruckers,
+    Trucker:      truckerQuota,
     Claimer:      0,
     CombatMelee:  localDefense.CombatMelee,
     CombatArcher: localDefense.CombatArcher,
@@ -1021,13 +1034,35 @@ function fillQueueForRoom(C, room) {
     tick: Game.time,
     quotas: quotas
   };
+  var useTruckerPrimary = !!TruckerConfig.USE_TRUCKER_AS_PRIMARY_HAULER;
+  var localTruckerBaseQuota = useTruckerPrimary ? Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0) : 0;
+  var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
+  var remoteTruckerQuota = truckerQuotaMeta.desiredTruckers;
+  var liveCouriers = getRoomLocalLiveCount(C, roomName, "Courier");
+  var liveTruckers = getRoomLocalLiveCount(C, roomName, "Trucker");
+  var queuedCouriers = queuedCount(roomName, "Courier");
+  var queuedTruckers = queuedCount(roomName, "Trucker");
+  Memory.rooms[roomName].lastLocalHaulerMode = {
+    tick: Game.time,
+    mode: useTruckerPrimary ? 'trucker-primary' : 'courier',
+    courierQuota: quotas.Courier || 0,
+    truckerQuota: quotas.Trucker || 0,
+    localTruckerQuota: localTruckerBaseQuota,
+    remoteTruckerQuota: remoteTruckerQuota,
+    maxTotalTruckers: maxTotalTruckers,
+    liveCouriers: liveCouriers,
+    liveTruckers: liveTruckers,
+    queuedCouriers: queuedCouriers,
+    queuedTruckers: queuedTruckers
+  };
   Memory.rooms[roomName].lastTruckerQuota = {
     tick: Game.time,
     activeRequests: truckerQuotaMeta.activeRequests,
     urgentRequests: truckerQuotaMeta.urgentRequests,
     desiredTruckers: truckerQuotaMeta.desiredTruckers,
-    liveTruckers: getRoomLocalLiveCount(C, roomName, "Trucker"),
-    queuedTruckers: queuedCount(roomName, "Trucker"),
+    remoteDesiredTruckers: truckerQuotaMeta.desiredTruckers,
+    liveTruckers: liveTruckers,
+    queuedTruckers: queuedTruckers,
     reasons: truckerQuotaMeta.desiredTruckers > 0 ? "active remote haul requests" : "no active remote haul requests"
   };
 
