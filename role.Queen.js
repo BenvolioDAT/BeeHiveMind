@@ -50,7 +50,7 @@ var CFG = Object.freeze({
 
   //--- Pathing (used by Queen)----
   STUCK_TICKS: 6,
-  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, idle: 5 },
+  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, harvest: 55, idle: 5 },
 
   // --- Pathing (used by Courier & any others that want it) ---
   PATH_REUSE: 40,
@@ -745,8 +745,8 @@ function getBackupHarvestTask(creep) {
     var rc = creep.harvest(source);
     if (rc === ERR_NOT_IN_RANGE) {
       var priority = getQueenTaskPriority(task);
-      var moved = MovementManager.request(creep, source, priority, { range: 1, reusePath: 10 });
-      if (!moved || moved < 0) {
+      var moveResult = MovementManager.request(creep, source, priority, { range: 1, reusePath: 10, intentType: 'harvest' });
+      if (moveResult !== OK && moveResult < 0) {
         creep.moveTo(source, { reusePath: 10 });
       }
       return;
