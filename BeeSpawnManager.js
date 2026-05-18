@@ -44,7 +44,7 @@ var ROLE_PRIORITY = {
   Repair:       60,
   Claimer:      55,
   Scout:        40,
-  Trucker:      35,
+  Trucker:      95,
   Dismantler:   30,
   
 };
@@ -176,8 +176,10 @@ function getCheapestCombatRoleEnergy() {
 
 function hasBaseRoleDeficit(C, roomName) {
   var baseharvest = getRoomLocalLiveCount(C, roomName, 'BaseHarvest');
+  // Trucker replaced Courier as the protected base hauler role.
+  var trucker = getRoomLocalLiveCount(C, roomName, 'Trucker');
   var queen = getRoomLocalLiveCount(C, roomName, 'Queen');
-  return baseharvest < 1 || queen < 1;
+  return baseharvest < 1 || trucker < 1 || queen < 1;
 }
 
 function isRemoteDefenseTargetAllowed(targetRoom) {
