@@ -7,7 +7,7 @@
 
 ## Orchestrator vs helpers
 Some roles are split into helper files:
-- `role.Courier.js` calls Courier helper modules.
+- `role.Trucker.js` calls Trucker helper modules and owns hauling (local + remote).
 - `role.Queen.js` calls Queen helper modules.
 
 This keeps the top-level role file easy to read:

@@ -36,7 +36,6 @@ var ROLE_CONFIGS = BodyConfig.ROLE_CONFIGS;
 
 var ROLE_CANONICAL = [
   'BaseHarvest',
-  'Courier',
   'Builder',
   'Repair',
   'Upgrader',
@@ -59,6 +58,8 @@ var ROLE_NORMALIZE_MAP = (function () {
     map[role.toLowerCase()] = role;
   }
   map.remoteharvest = 'Luna';
+  // Courier role retired: stale queue/memory entries should spawn as Trucker.
+  map.courier = 'Trucker';
   map.trucker = 'Trucker';
   map.worker = 'BaseHarvest';
   map.harvester = 'BaseHarvest';

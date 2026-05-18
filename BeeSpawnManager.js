@@ -34,7 +34,6 @@ var REPLACEMENT_TTL = {
 
 var ROLE_PRIORITY = {
   Baseharvest: 100,
-  Courier:      95,
   Queen:        90,
   CombatMelee:  88,
   CombatArcher: 87,
@@ -45,14 +44,13 @@ var ROLE_PRIORITY = {
   Repair:       60,
   Claimer:      55,
   Scout:        40,
-  Trucker:      35,
+  Trucker:      95,
   Dismantler:   30,
   
 };
 
 var ROLE_MIN_ENERGY = {
   Baseharvest: 200,
-  Courier:     150,
   Queen:       200,
   Upgrader:    200,
   Builder:     200,
@@ -72,7 +70,6 @@ var ROLE_ALIAS_MAP = (function () {
   var canon = [
     'BaseHarvest',
     'Builder',
-    'Courier',
     'Repair',
     'Upgrader',
     'Dismantler',
@@ -91,6 +88,9 @@ var ROLE_ALIAS_MAP = (function () {
     map[name.toLowerCase()] = name;
   }
   map.remoteharvest = 'Luna';
+  // Courier role retired: normalize legacy references to Trucker.
+  map.Courier = 'Trucker';
+  map.courier = 'Trucker';
   return map;
 })();
 
@@ -176,9 +176,10 @@ function getCheapestCombatRoleEnergy() {
 
 function hasBaseRoleDeficit(C, roomName) {
   var baseharvest = getRoomLocalLiveCount(C, roomName, 'BaseHarvest');
-  var courier = getRoomLocalLiveCount(C, roomName, 'Courier');
+  // Trucker replaced Courier as the protected base hauler role.
+  var trucker = getRoomLocalLiveCount(C, roomName, 'Trucker');
   var queen = getRoomLocalLiveCount(C, roomName, 'Queen');
-  return baseharvest < 1 || courier < 1 || queen < 1;
+  return baseharvest < 1 || trucker < 1 || queen < 1;
 }
 
 function isRemoteDefenseTargetAllowed(targetRoom) {
@@ -993,10 +994,8 @@ function computeRoomQuotas(C, room) {
   var useTruckerPrimary = !!TruckerConfig.USE_TRUCKER_AS_PRIMARY_HAULER;
   var localTruckerBaseQuota = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
   var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
-  var courierQuota = 2;
   var truckerQuota = remoteDesired;
   if (useTruckerPrimary) {
-    if (TruckerConfig.DISABLE_COURIER_SPAWNING_WHEN_TRUCKER_PRIMARY) courierQuota = 0;
     truckerQuota = localTruckerBaseQuota + remoteDesired;
     if (maxTotalTruckers > 0) truckerQuota = Math.min(truckerQuota, maxTotalTruckers);
   }
@@ -1004,7 +1003,6 @@ function computeRoomQuotas(C, room) {
   var quotas = {
     // One BaseHarvest per owned source keeps mining stable without over-spawning.
     Baseharvest:  safeBaseHarvestQuota,
-    Courier:      courierQuota,
     Queen:        1,
     Upgrader:     computeEarlyUpgraderQuota(room),
     Builder:      getBuilderNeed(C, room),
@@ -1038,22 +1036,19 @@ function fillQueueForRoom(C, room) {
   var localTruckerBaseQuota = useTruckerPrimary ? Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0) : 0;
   var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
   var remoteTruckerQuota = truckerQuotaMeta.desiredTruckers;
-  var liveCouriers = getRoomLocalLiveCount(C, roomName, "Courier");
   var liveTruckers = getRoomLocalLiveCount(C, roomName, "Trucker");
-  var queuedCouriers = queuedCount(roomName, "Courier");
   var queuedTruckers = queuedCount(roomName, "Trucker");
   Memory.rooms[roomName].lastLocalHaulerMode = {
     tick: Game.time,
-    mode: useTruckerPrimary ? 'trucker-primary' : 'courier',
-    courierQuota: quotas.Courier || 0,
+    mode: 'trucker-primary',
+    courierQuota: 0,
     truckerQuota: quotas.Trucker || 0,
     localTruckerQuota: localTruckerBaseQuota,
     remoteTruckerQuota: remoteTruckerQuota,
     maxTotalTruckers: maxTotalTruckers,
-    liveCouriers: liveCouriers,
     liveTruckers: liveTruckers,
-    queuedCouriers: queuedCouriers,
-    queuedTruckers: queuedTruckers
+    queuedTruckers: queuedTruckers,
+    courierRoleRetired: true
   };
   Memory.rooms[roomName].lastTruckerQuota = {
     tick: Game.time,

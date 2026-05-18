@@ -279,7 +279,7 @@ BeeVisuals.drawEnergyBar = function () {
 // Teach-by-example constants live at module scope so they are easy to tweak.
 var WORKER_MAX_TASKS = {
   BaseHarvest: 2, Builder: 1, Upgrader: 1, Repair: 0,
-  Courier: 1, Luna: null, Trucker: null, Scout: 1, Queen: 2,
+  Luna: null, Trucker: null, Scout: 1, Queen: 2,
   CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
   Dismantler: 0, Claimer: 2
 };
@@ -289,7 +289,6 @@ var WORKER_ROLE_ALIAS = {
   builder: 'Builder',
   upgrader: 'Upgrader',
   repair: 'Repair',
-  courier: 'Courier',
   luna: 'Luna',
   remoteharvest: 'Luna',
   trucker: 'Trucker',
