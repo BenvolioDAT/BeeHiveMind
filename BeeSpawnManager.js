@@ -260,7 +260,8 @@ function cleanupRetiredCourierState(roomName) {
   for (var i = 0; i < q.length; i++) {
     var item = q[i];
     if (!item) continue;
-    if (item.role === 'Courier' || item.role === 'courier') {
+    var itemRole = item.role == null ? '' : String(item.role).toLowerCase();
+    if (itemRole === 'courier') {
       removedQueueItems++;
       continue;
     }
@@ -275,7 +276,8 @@ function cleanupRetiredCourierState(roomName) {
     if (!creep || !creep.memory) continue;
     var home = creep.memory.home || (creep.room && creep.room.name);
     if (home !== roomName) continue;
-    if (creep.memory.role === 'Courier' || creep.memory.role === 'courier') {
+    var creepRole = creep.memory.role == null ? '' : String(creep.memory.role).toLowerCase();
+    if (creepRole === 'courier') {
       creep.memory.role = 'Trucker';
       migratedCreeps++;
     }

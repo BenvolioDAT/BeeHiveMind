@@ -180,6 +180,27 @@ function ensureCreepRole(creep) {
   if (!creep) return 'Idle';
   var mem = creep.memory || (creep.memory = {});
 
+  // Retired-role migration must run before canonical validation because
+  // runCreeps() executes before manageSpawns() each tick.
+  var roleLower = mem.role ? String(mem.role).toLowerCase() : '';
+  var taskLower = mem.task ? String(mem.task).toLowerCase() : '';
+  var migratedRetiredCourier = false;
+  if (roleLower === 'courier' || taskLower === 'courier') {
+    mem.role = 'Trucker';
+    if (taskLower === 'courier') mem.task = 'haulUnified';
+    mem.retiredCourierMigratedAt = Game.time;
+    migratedRetiredCourier = true;
+  }
+
+  if (migratedRetiredCourier) {
+    if (!Memory.__BHM) Memory.__BHM = {};
+    var diag = Memory.__BHM.retiredCourierMigration || { tick: Game.time, migratedCreeps: 0, lastCreepName: null };
+    diag.tick = Game.time;
+    diag.migratedCreeps = (diag.migratedCreeps || 0) + 1;
+    diag.lastCreepName = creep.name || null;
+    Memory.__BHM.retiredCourierMigration = diag;
+  }
+
   // Prefer deterministic values; canonicalRoleName normalises any
   // mis-capitalised or legacy entries.
   var canonical = canonicalRoleName(mem.role) || canonicalRoleName(mem.task);
