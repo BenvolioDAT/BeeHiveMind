@@ -153,7 +153,10 @@ function runRemote(creep, job) {
   var wr = creep.withdraw(container, RESOURCE_ENERGY);
   if (wr === ERR_NOT_IN_RANGE) creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE });
   if (wr === ERR_NOT_ENOUGH_RESOURCES && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
-    clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id);
+    clearRemoteRequestAssignment(creep);
+    Dispatcher.releaseJob(creep, job.id);
+    delete creep.memory.dispatchJob;
+    return;
   }
 }
 
