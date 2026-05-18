@@ -2,6 +2,7 @@
 
 var CFG = require('role.Trucker.Config');
 var Dispatcher = require('Trucker.Dispatcher');
+var Handoff = require('role.EnergyHandoff');
 
 function ensureIdentity(creep) {
   creep.memory.role = 'Trucker';
@@ -107,6 +108,122 @@ function clearDeliveryReservation(creep, target, resourceType) {
   delete creep.memory.deliveryReservedAmount;
 }
 
+
+function clearTruckerHandoff(creep, room, reason, diag) {
+  var mem = Handoff.ensureHandoffMemory(room || creep.room);
+  var name = creep.memory.energyHandoffTarget;
+  if (name && mem && mem.requests && mem.requests[name]) {
+    var req = mem.requests[name];
+    req.assignedCourierName = null; req.assignedAt = null; req.waitUntil = null;
+    var rc = Game.creeps[name]; if (rc && rc.memory) rc.memory.energyHandoffCourier = null;
+  }
+  creep.memory.energyHandoffTarget = null;
+  creep.memory.energyHandoffFailCount = 0;
+  if (diag && reason) diag.handoffClearedReason = reason;
+}
+
+function isCreepEnergyReceiver(target) {
+  if (!target || !target.pos || !target.store) return false;
+  if (!target.my || target.spawning) return false;
+  if (!target.name) return false;
+  return typeof target.store.getFreeCapacity === 'function';
+}
+
+function findClaimableEnergyHandoffRequest(trucker, diag) {
+  if (!CFG.HANDOFF_ENABLED) return null;
+  Handoff.cleanupEnergyHandoffRequests(trucker.room);
+  var mem = Handoff.ensureHandoffMemory(trucker.room); if (!mem) return null;
+  var reqs = mem.requests || {}; var best = null; var bestScore = -99999;
+  var keys = Object.keys(reqs);
+  if (diag) diag.handoffRequestsSeen = keys.length;
+  for (var i = 0; i < keys.length; i++) {
+    var req = reqs[keys[i]]; if (!req) continue;
+    if (req.roomName !== trucker.room.name) continue;
+    if (req.assignedCourierName && req.assignedCourierName !== trucker.name) continue;
+    var receiver = Game.creeps[req.receiverName];
+    if (!isCreepEnergyReceiver(receiver)) continue;
+    if (receiver.pos.roomName !== trucker.room.name) continue;
+    var free = receiver.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+    if (free < CFG.HANDOFF_MIN_RECEIVER_FREE) continue;
+    var d = trucker.pos.getRangeTo(receiver);
+    if (d > CFG.HANDOFF_MAX_RANGE) continue;
+    var score = (req.jobTargetId ? 200 : 0) + free - d;
+    if (score > bestScore) { bestScore = score; best = req; }
+  }
+  return best;
+}
+
+function getCurrentAssignedHandoffRequest(trucker) {
+  var targetName = trucker.memory.energyHandoffTarget;
+  if (!targetName) return null;
+  var mem = Handoff.ensureHandoffMemory(trucker.room);
+  if (!mem || !mem.requests) return null;
+  var req = mem.requests[targetName];
+  if (!req || req.assignedCourierName !== trucker.name) return null;
+  var receiver = Game.creeps[req.receiverName];
+  if (!isCreepEnergyReceiver(receiver)) return null;
+  if (receiver.pos.roomName !== trucker.room.name) return null;
+  var free = receiver.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+  if (free < CFG.HANDOFF_MIN_RECEIVER_FREE) return null;
+  if (trucker.pos.getRangeTo(receiver) > CFG.HANDOFF_MAX_RANGE) return null;
+  return req;
+}
+
+function claimEnergyHandoffRequest(trucker, req, diag) {
+  if (!req) return false;
+  var mem = Handoff.ensureHandoffMemory(trucker.room); if (!mem || !mem.requests[req.receiverName]) return false;
+  if (trucker.memory.energyHandoffTarget && trucker.memory.energyHandoffTarget !== req.receiverName) {
+    clearTruckerHandoff(trucker, trucker.room, 'switch_target', diag);
+  }
+  var live = mem.requests[req.receiverName];
+  if (live.assignedCourierName && live.assignedCourierName !== trucker.name) return false;
+  if (!live.assignedCourierName) {
+    live.assignedCourierName = trucker.name;
+    live.assignedAt = Game.time;
+    live.expiresAt = Game.time + CFG.HANDOFF_ASSIGN_TTL;
+    live.waitUntil = Game.time + CFG.HANDOFF_WAIT_TTL;
+    if (diag) diag.handoffClaimed = true;
+  }
+  trucker.memory.energyHandoffTarget = live.receiverName;
+  var receiver = Game.creeps[live.receiverName]; if (receiver && receiver.memory) receiver.memory.energyHandoffCourier = trucker.name;
+  return true;
+}
+
+function tryTruckerEnergyHandoff(creep, diag) {
+  if (!CFG.HANDOFF_ENABLED) return false;
+  var carryAmt = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
+  if (carryAmt < CFG.HANDOFF_MIN_TRUCKER_ENERGY) { clearTruckerHandoff(creep, creep.room, 'low_energy', diag); if (diag) diag.handoffResult = 'below_min'; return false; }
+
+  Handoff.cleanupEnergyHandoffRequests(creep.room);
+  var req = getCurrentAssignedHandoffRequest(creep);
+  if (!req) req = findClaimableEnergyHandoffRequest(creep, diag);
+  if (!req) { clearTruckerHandoff(creep, creep.room, 'no_request', diag); if (diag) diag.handoffResult = 'none'; return false; }
+  if (!claimEnergyHandoffRequest(creep, req, diag)) { if (diag) diag.handoffResult = 'claim_failed'; return false; }
+
+  var receiver = Game.creeps[req.receiverName];
+  if (!isCreepEnergyReceiver(receiver)) { clearTruckerHandoff(creep, creep.room, 'invalid_receiver', diag); if (diag) diag.handoffResult = 'invalid_receiver'; return false; }
+  var free = receiver.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+  if (free < CFG.HANDOFF_MIN_RECEIVER_FREE) { clearTruckerHandoff(creep, creep.room, 'receiver_free_low', diag); if (diag) diag.handoffResult = 'receiver_low'; return false; }
+
+  clearDeliveryReservation(creep);
+  var amount = Math.min(carryAmt, free, req.amountWanted || free);
+  var tr = creep.transfer(receiver, RESOURCE_ENERGY, amount);
+  if (diag) diag.handoffTarget = req.receiverName;
+  if (tr === ERR_NOT_IN_RANGE) { creep.travelTo(receiver, { range: 1, reusePath: CFG.PATH_REUSE }); if (diag) diag.handoffResult = 'moving'; return true; }
+  if (tr === OK) {
+    if (diag) diag.handoffResult = 'ok';
+    if ((creep.store[RESOURCE_ENERGY] || 0) === 0 || (receiver.store.getFreeCapacity(RESOURCE_ENERGY) || 0) === 0) clearTruckerHandoff(creep, creep.room, 'handoff_complete', diag);
+    return true;
+  }
+  if (tr === ERR_FULL || tr === ERR_INVALID_TARGET || tr === ERR_NOT_ENOUGH_RESOURCES) {
+    clearTruckerHandoff(creep, creep.room, 'transfer_' + tr, diag); if (diag) diag.handoffResult = 'clear_' + tr; return true;
+  }
+  creep.memory.energyHandoffFailCount = (creep.memory.energyHandoffFailCount || 0) + 1;
+  if (creep.memory.energyHandoffFailCount >= CFG.HANDOFF_MAX_FAILS) clearTruckerHandoff(creep, creep.room, 'max_fails', diag);
+  if (diag) diag.handoffResult = 'code_' + tr;
+  return true;
+}
+
 function clearRemoteRequestAssignment(creep) {
   var requests = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
   var id = creep.memory.requestId;
@@ -207,7 +324,11 @@ function runLocal(creep, job, diag) {
 
   var dst = creep.memory.deliveryTargetId ? Game.getObjectById(creep.memory.deliveryTargetId) : null;
   if (!dst) dst = findLocalDeliverTarget(creep, diag);
-  if (!dst) { clearDeliveryReservation(creep); return; }
+  if (!dst) {
+    clearDeliveryReservation(creep);
+    if (tryTruckerEnergyHandoff(creep, diag)) return;
+    return;
+  }
 
   var carried = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
   var reservedAmount = reserveFill(creep, dst, carried, RESOURCE_ENERGY);
@@ -248,11 +369,17 @@ function run(creep) {
   ensureIdentity(creep);
   var diag = ensureTruckerDiagnostics();
   diag.tick = Game.time; diag.deliveryTargetsSeen = 0; diag.deliveryTargetsReserved = 0; diag.skippedReservedCapacity = 0;
+  diag.handoffRequestsSeen = 0; diag.handoffClaimed = false; diag.handoffTarget = null; diag.handoffResult = null; diag.handoffClearedReason = null;
 
   var active = creep.memory.dispatchJob || null;
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && creep.room.name !== creep.memory.home) active = { type: 'REMOTE_RETURN', id: active ? active.id : ('return:' + creep.name) };
   if (!active) active = Dispatcher.chooseJobForTrucker(creep);
   creep.memory.dispatchJob = active;
+
+  if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) clearTruckerHandoff(creep, creep.room, 'empty_store', diag);
+  else if (creep.memory.energyHandoffTarget && !hasUrgentLocalDeliveryTarget(creep)) {
+    if (tryTruckerEnergyHandoff(creep, diag)) return;
+  }
 
   if (!active) { if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) clearDeliveryReservation(creep); return; }
   if (active.type === 'REMOTE_PICKUP') return runRemote(creep, active);
@@ -260,7 +387,10 @@ function run(creep) {
   if (active.type === 'REMOTE_RETURN') {
     if (creep.room.name !== creep.memory.home) { creep.travelTo(new RoomPosition(25, 25, creep.memory.home), { range: 20, reusePath: CFG.PATH_REUSE }); return; }
     var sink = findLocalDeliverTarget(creep, diag) || creep.room.storage || creep.room.terminal;
-    if (!sink) return;
+    if (!sink) {
+      if (tryTruckerEnergyHandoff(creep, diag)) return;
+      return;
+    }
     var reserveAmt = reserveFill(creep, sink, creep.store.getUsedCapacity(RESOURCE_ENERGY), RESOURCE_ENERGY);
     if (reserveAmt <= 0) { clearDeliveryReservation(creep, sink); return; }
     var rc = creep.transfer(sink, RESOURCE_ENERGY);
