@@ -1,6 +1,7 @@
 'use strict';
 
 var LunaConfig = require('role.Luna.Config');
+var RoadPlanner = require('Planner.Road');
 
 var RESERVE_TTL = 100;
 
@@ -87,6 +88,96 @@ function getRemoteIntelTick(remoteName) {
 }
 
 
+
+
+function getRouteDistanceBetweenRooms(homeName, remoteName) {
+  if (!homeName || !remoteName) return Infinity;
+  if (homeName === remoteName) return 0;
+  var route = null;
+  try { route = Game.map.findRoute(homeName, remoteName); } catch (e) { route = ERR_NO_PATH; }
+  if (route === ERR_NO_PATH || !route || !Array.isArray(route)) return Infinity;
+  return route.length;
+}
+
+function addUniqueRoomName(list, seen, roomName) {
+  if (!roomName || seen[roomName]) return;
+  seen[roomName] = true;
+  list.push(roomName);
+}
+
+function gatherCandidateRemoteRoomsForHome(homeRoom) {
+  var out = { candidateRemoteRooms: [], acceptedRemoteRooms: [], rejectedRemoteRooms: [] };
+  if (!homeRoom) return out;
+  var homeName = typeof homeRoom === 'string' ? homeRoom : homeRoom.name;
+  var homeObj = typeof homeRoom === 'string' ? Game.rooms[homeRoom] : homeRoom;
+  if (!homeName) return out;
+
+  var ttl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
+  var radius = (LunaConfig && LunaConfig.REMOTE_RADIUS) || 3;
+  var myName = getMyUsername();
+  var discovered = [];
+  var seen = Object.create(null);
+  var sourceTags = Object.create(null);
+
+  if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function' && homeObj) {
+    var active = RoadPlanner.getActiveRemoteRooms(homeObj) || [];
+    for (var i = 0; i < active.length; i++) {
+      addUniqueRoomName(discovered, seen, active[i]);
+      sourceTags[active[i]] = 'roadPlanner';
+    }
+  }
+
+  var memRooms = Memory.rooms || {};
+  for (var rn in memRooms) {
+    if (!Object.prototype.hasOwnProperty.call(memRooms, rn)) continue;
+    var mem = memRooms[rn] || {};
+    var hasMemSources = false;
+    if (mem.sources) for (var sid in mem.sources) { if (Object.prototype.hasOwnProperty.call(mem.sources, sid)) { hasMemSources = true; break; } }
+    if (!hasMemSources && !(mem.intel && typeof mem.intel.sources === 'number' && mem.intel.sources > 0)) continue;
+    if (Game.map.getRoomLinearDistance(homeName, rn) > radius) continue;
+    addUniqueRoomName(discovered, seen, rn);
+    if (!sourceTags[rn]) sourceTags[rn] = 'memory';
+  }
+
+  for (var visibleName in Game.rooms) {
+    if (!Object.prototype.hasOwnProperty.call(Game.rooms, visibleName)) continue;
+    var visible = Game.rooms[visibleName];
+    if (!visible || !visible.find) continue;
+    if (Game.map.getRoomLinearDistance(homeName, visibleName) > radius) continue;
+    var foundSources = visible.find(FIND_SOURCES) || [];
+    if (!foundSources.length) continue;
+    addUniqueRoomName(discovered, seen, visibleName);
+    if (!sourceTags[visibleName]) sourceTags[visibleName] = 'visible';
+  }
+
+  out.candidateRemoteRooms = discovered.slice(0);
+  for (var j = 0; j < discovered.length; j++) {
+    var remoteName = discovered[j];
+    var reason = null;
+    var remoteMem = (Memory.rooms && Memory.rooms[remoteName]) || {};
+    var remoteVisible = Game.rooms[remoteName];
+    var intel = remoteMem.intel || {};
+
+    if (remoteName === homeName) reason = 'home-room';
+    else if (Game.map.getRoomLinearDistance(homeName, remoteName) > radius) reason = 'beyond-radius';
+    else if (getRouteDistanceBetweenRooms(homeName, remoteName) === Infinity) reason = 'no-route';
+    else if (isRemoteUnsafe(remoteName)) reason = 'unsafe';
+    else if (remoteMem.lunaBlocked) reason = 'luna-blocked';
+    else if (remoteVisible && remoteVisible.controller && remoteVisible.controller.owner && (!myName || remoteVisible.controller.owner.username !== myName)) reason = 'owned-by-other';
+    else if (remoteVisible && remoteVisible.controller && remoteVisible.controller.reservation && (!myName || remoteVisible.controller.reservation.username !== myName)) reason = 'reserved-by-other';
+    else if (intel.owner && (!myName || intel.owner !== myName)) reason = 'intel-owned-by-other';
+    else if (intel.reservation && (!myName || intel.reservation !== myName)) reason = 'intel-reserved-by-other';
+    else {
+      var intelTick = getRemoteIntelTick(remoteName);
+      if (!remoteVisible && (intelTick == null || (Game.time - intelTick) > ttl)) reason = 'stale-intel';
+    }
+
+    if (reason) out.rejectedRemoteRooms.push({ room: remoteName, reason: reason, source: sourceTags[remoteName] || 'unknown' });
+    else out.acceptedRemoteRooms.push(remoteName);
+  }
+
+  return out;
+}
 
 function ensureRemoteContainerBuildsMemory() {
   if (!Memory.__BHM) Memory.__BHM = {};
@@ -360,6 +451,7 @@ function releaseSource(creep) {
 module.exports = {
   ensureMemory: ensureMemory,
   ensureHomeMemory: ensureHomeMemory,
+  gatherCandidateRemoteRoomsForHome: gatherCandidateRemoteRoomsForHome,
   buildSourcePlanForHome: buildSourcePlanForHome,
   auditAssignmentsForHome: auditAssignmentsForHome,
   reserveSourceForQueue: reserveSourceForQueue,
