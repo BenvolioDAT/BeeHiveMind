@@ -29,6 +29,10 @@ var ASSIGN_STICKY_TTL = CFG.ASSIGN_STICKY_TTL;
 var STUCK_WINDOW = CFG.STUCK_WINDOW;
 var FLAG_PRUNE_PERIOD = CFG.FLAG_PRUNE_PERIOD;
 var FLAG_RETENTION_TTL = CFG.FLAG_RETENTION_TTL;
+var LUNA_BLOCKED_SOURCE_TTL = CFG.LUNA_BLOCKED_SOURCE_TTL || 10000;
+var LUNA_BLOCKED_ROOM_TTL = CFG.LUNA_BLOCKED_ROOM_TTL || 10000;
+var LUNA_PATH_FAIL_LIMIT = CFG.LUNA_PATH_FAIL_LIMIT || 3;
+var LUNA_STUCK_SOURCE_BLOCK_TICKS = CFG.LUNA_STUCK_SOURCE_BLOCK_TICKS || 8;
 
 // =========================
 // Debug helpers
@@ -292,6 +296,95 @@ function softenRemoteDefensePlan(roomName) {
     rm.sources = rm.sources || {};
     return (rm.sources[sid] = (rm.sources[sid] || {}));
   }
+  function shouldLogLunaBlock(key, interval) {
+    var step = interval || 250;
+    if (!Memory.__BHM) Memory.__BHM = {};
+    if (!Memory.__BHM.lunaBlockLog) Memory.__BHM.lunaBlockLog = {};
+    var last = Memory.__BHM.lunaBlockLog[key] || 0;
+    if ((Game.time - last) < step) return false;
+    Memory.__BHM.lunaBlockLog[key] = Game.time;
+    return true;
+  }
+  function clearExpiredLunaSourceBlock(roomName, sourceId) {
+    if (!roomName || !sourceId) return;
+    var srec = getSourceMemory(roomName, sourceId);
+    if (srec && srec.lunaBlockedUntil && srec.lunaBlockedUntil <= Game.time) {
+      delete srec.lunaBlockedUntil; delete srec.lunaBlockedReason;
+    }
+  }
+  function isLunaSourceBlocked(roomName, sourceId) {
+    if (!roomName || !sourceId) return false;
+    clearExpiredLunaSourceBlock(roomName, sourceId);
+    var srec = getSourceMemory(roomName, sourceId);
+    return !!(srec && srec.lunaBlockedUntil && srec.lunaBlockedUntil > Game.time);
+  }
+  function markLunaSourceBlocked(roomName, sourceId, reason, ttl) {
+    if (!roomName || !sourceId) return;
+    var until = Game.time + Math.max(1, ttl || LUNA_BLOCKED_SOURCE_TTL);
+    var srec = getSourceMemory(roomName, sourceId);
+    srec.lunaBlockedUntil = until;
+    srec.lunaBlockedReason = reason || 'blocked-source';
+    var rm = getRoomMemoryBucket(roomName);
+    rm.lastLunaBlock = { tick: Game.time, type: 'source', sourceId: sourceId, reason: srec.lunaBlockedReason, until: until };
+    if (shouldLogLunaBlock('src:' + roomName + ':' + sourceId, 250)) {
+      console.log('🚫 Luna source blocked ' + roomName + ' ' + sourceId.slice(-6) + ' reason=' + srec.lunaBlockedReason + ' until=' + until);
+    }
+  }
+  function markLunaRoomBlocked(roomName, reason, ttl) {
+    if (!roomName) return;
+    var rm = getRoomMemoryBucket(roomName);
+    rm.lunaBlockedUntil = Game.time + Math.max(1, ttl || LUNA_BLOCKED_ROOM_TTL);
+    rm.lunaBlockedReason = reason || 'blocked-room';
+    rm.lastLunaBlock = { tick: Game.time, type: 'room', reason: rm.lunaBlockedReason, until: rm.lunaBlockedUntil };
+    if (shouldLogLunaBlock('room:' + roomName, 250)) {
+      console.log('🚫 Luna room blocked ' + roomName + ' reason=' + rm.lunaBlockedReason + ' until=' + rm.lunaBlockedUntil);
+    }
+  }
+function recordLunaPathFailure(creep, sourceId, reason) {
+    if (!creep || !creep.memory) return 0;
+    var sid = sourceId || creep.memory.sourceId;
+    var roomName = creep.memory.targetRoom || creep.pos.roomName;
+    if (creep.memory._pathFailSid !== sid) creep.memory._pathFailCount = 0;
+    creep.memory._pathFailSid = sid;
+    creep.memory._pathFailCount = (creep.memory._pathFailCount || 0) + 1;
+    if (shouldLogLunaBlock('fail:' + creep.name + ':' + sid, 250)) {
+      console.log('⚠️ Luna path fail ' + creep.name + ' sid=' + (sid ? sid.slice(-6) : 'none') + ' count=' + creep.memory._pathFailCount + ' reason=' + reason);
+    }
+    if (creep.memory._pathFailCount >= LUNA_PATH_FAIL_LIMIT && sid && roomName) {
+      markLunaSourceBlocked(roomName, sid, reason || 'path-fail', LUNA_BLOCKED_SOURCE_TTL);
+      if (creep.pos.roomName !== roomName) markLunaRoomBlocked(roomName, 'path-to-room-failed', LUNA_BLOCKED_ROOM_TTL);
+      releaseAssignment(creep);
+    }
+  return creep.memory._pathFailCount;
+}
+function clearLunaPathFailure(creep, sourceId) {
+  if (!creep || !creep.memory) return;
+  var sid = sourceId || creep.memory.sourceId;
+  if (!sid) return;
+  if (creep.memory._pathFailSid === sid) {
+    creep.memory._pathFailCount = 0;
+  }
+}
+function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
+  if (!creep || !target) return ERR_INVALID_TARGET;
+  var travelOpts = {};
+  var k;
+  if (opts) {
+    for (k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) travelOpts[k] = opts[k];
+  }
+  var returnData = {};
+  travelOpts.maxOps = CFG.TRAVEL_MAX_OPS || 4000;
+  travelOpts.returnData = returnData;
+  var rc = creep.travelTo(target, travelOpts);
+  if (rc === ERR_NO_PATH) {
+    recordLunaPathFailure(creep, sourceId, failReason || 'no-path');
+    return rc;
+  }
+  if (returnData.pathfinderReturn && returnData.pathfinderReturn.incomplete && creep.memory && creep.memory._stuck >= STUCK_WINDOW) {
+    recordLunaPathFailure(creep, sourceId, (failReason || 'path') + '-incomplete');
+  }
+  return rc;
+}
 
   // mark activity each time we touch/own/harvest a source
   function touchSourceActive(roomName, sid) {
@@ -803,6 +896,7 @@ function softenRemoteDefensePlan(roomName) {
       var sources = room.find(FIND_SOURCES);
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
+        if (isLunaSourceBlocked(rn, s.id)) continue;
         var e=ensureMiningAssignment(memAssign[s.id], rn);
         // Teaching note: remember which home owns this remote assignment so
         // replacements can be spawned even after a wipe.
@@ -944,6 +1038,7 @@ function logLunaNoSafeSource(creep, details) {
       var sources = room.find(FIND_SOURCES);
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
+        if (isLunaSourceBlocked(rn, s.id)) continue;
         var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
         var lin = Game.map.getRoomLinearDistance(homeName, rn);
 
@@ -973,6 +1068,7 @@ function logLunaNoSafeSource(creep, details) {
         rn=neighborRooms[i]; if (isLunaRoomUnsafe(rn)) continue;
         var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
         for (var sid in rm.sources){
+          if (isLunaSourceBlocked(rn, sid)) continue;
           if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
           var cap2 = getSourceMaxSlots(sid);
           var assigned2 = maCount(memAssign, sid);
@@ -1112,7 +1208,7 @@ function logLunaNoSafeSource(creep, details) {
     var anchor = getAnchorPos(getHomeName(creep));
     debugSay(creep, label || 'IDLE');
     debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, label || 'IDLE');
-    creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
+    creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE, maxOps: CFG.TRAVEL_MAX_OPS || 4000 });
   }
 
   function shouldReleaseForEndOfLife(creep) {
@@ -1167,10 +1263,7 @@ function logLunaNoSafeSource(creep, details) {
     debugSay(creep, '➡️'+creep.memory.targetRoom);
     debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
 
-    creep.travelTo(dest, {
-       range: 20,
-        reusePath: 20,
-        });
+    lunaTravelToAssigned(creep, dest, { range: 20, reusePath: 20 }, creep.memory.sourceId, 'path-to-room');
 
     return true;
   }
@@ -1660,6 +1753,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       var free=[], sticky=[], rest=[];
       for (var i=0;i<sids.length;i++){
         var sid=sids[i];
+        if (isLunaSourceBlocked(creep.memory.targetRoom, sid)) continue;
         var owners = maOwners(memAssign, sid);
         var cnt   = maCount(memAssign, sid);
         var cap = getSourceMaxSlots(sid);
@@ -1698,7 +1792,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var dest = new RoomPosition(25,25,creep.memory.targetRoom);
         debugSay(creep, '➡️'+creep.memory.targetRoom);
         debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-        creep.travelTo(dest, { range: 20, reusePath: 20});
+        lunaTravelToAssigned(creep, dest, { range: 20, reusePath: 20 }, creep.memory.sourceId, 'room-travel');
         return;
       }
 
@@ -1725,9 +1819,11 @@ function upsertRemoteContainerStatus(creep, source, container) {
       }
 
       var stuckTicks = typeof creep.memory._stuck === 'number' ? creep.memory._stuck : 0;
-      if (stuckTicks >= STUCK_WINDOW){
-        creep.travelTo(src, { range: 1, reusePath: 3,  });
-        debugSay(creep, '🚧');
+      if (stuckTicks >= LUNA_STUCK_SOURCE_BLOCK_TICKS){
+        markLunaSourceBlocked(creep.memory.targetRoom, sid, 'stuck-source-path', LUNA_BLOCKED_SOURCE_TTL);
+        releaseAssignment(creep);
+        idleAtAnchor(creep, 'STUCK');
+        return;
       }
 
       var infra = ensureSourceContainerOrSite(src);
@@ -1773,9 +1869,10 @@ function upsertRemoteContainerStatus(creep, source, container) {
         creep.memory.lunaRepairingContainer = true;
       }
 
-      if (container && !creep.pos.isEqualTo(container.pos)) { debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT'); creep.travelTo(container, { range: 0, reusePath: 10 }); return; }
-      if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); creep.travelTo(site, { range: 0, reusePath: 10 }); return; }
-      if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); creep.travelTo(src, { range: 1, reusePath: 10 }); return; }
+      if (container && !creep.pos.isEqualTo(container.pos)) { debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT'); lunaTravelToAssigned(creep, container, { range: 0, reusePath: 10 }, sid, 'seat-travel'); return; }
+      if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); lunaTravelToAssigned(creep, site, { range: 0, reusePath: 10 }, sid, 'site-travel'); return; }
+      if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); lunaTravelToAssigned(creep, src, { range: 1, reusePath: 10 }, sid, 'source-travel'); return; }
+      clearLunaPathFailure(creep, sid);
 
       if (container && creep.memory.lunaRepairingContainer) {
         markContainerRepairMaintenanceHold(creep, container, src);
@@ -1783,7 +1880,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var withdrawAmount = CFG.remoteContainerRepairWithdrawAmount || 50;
         if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
           if (creep.pos.getRangeTo(container) > 3) {
-            creep.travelTo(container, { range: 3, reusePath: 5 });
+            lunaTravelToAssigned(creep, container, { range: 3, reusePath: 5 }, sid, 'repair-position');
             return;
           }
           creep.repair(container);
@@ -1804,6 +1901,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       debugSay(creep, '⛏️SRC');
       var rc = creep.harvest(src);
       if (rc === OK) touchSourceActive(creep.room.name, sid);
+      if (rc === OK) clearLunaPathFailure(creep, sid);
       debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, 'SRC');
 
       if (container && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {

@@ -234,9 +234,17 @@ function buildSourcePlanForHome(homeRoom, remoteRooms) {
       }
     }
 
+    var blockedInRoom = 0;
+    var totalInRoom = 0;
     for (var j = 0; j < list.length; j++) {
       var src = list[j];
       if (!src || !src.id) continue;
+      totalInRoom++;
+      var srcMem = (Memory.rooms && Memory.rooms[remoteRoom] && Memory.rooms[remoteRoom].sources && Memory.rooms[remoteRoom].sources[src.id]) || {};
+      if (srcMem.lunaBlockedUntil && srcMem.lunaBlockedUntil > Game.time) {
+        blockedInRoom++;
+        continue;
+      }
       var prev = oldSources[src.id] || {};
       var x = src.pos && typeof src.pos.x === 'number' ? src.pos.x : (typeof prev.x === 'number' ? prev.x : null);
       var y = src.pos && typeof src.pos.y === 'number' ? src.pos.y : (typeof prev.y === 'number' ? prev.y : null);
@@ -254,6 +262,7 @@ function buildSourcePlanForHome(homeRoom, remoteRooms) {
         reason: 'planned'
       };
     }
+    if (totalInRoom > 0 && blockedInRoom >= totalInRoom) home.unsafeSources.push(remoteRoom + ':all-sources-blocked');
   }
 
   return home;
@@ -297,6 +306,12 @@ function auditAssignmentsForHome(homeRoom) {
     if (!Object.prototype.hasOwnProperty.call(home.sources, sid)) continue;
     var rec = home.sources[sid];
     if (!rec) continue;
+    var rmem = (Memory.rooms && Memory.rooms[rec.remoteRoom] && Memory.rooms[rec.remoteRoom].sources && Memory.rooms[rec.remoteRoom].sources[sid]) || {};
+    if (rmem.lunaBlockedUntil && rmem.lunaBlockedUntil > Game.time) {
+      rec.status = 'blocked';
+      rec.reason = rmem.lunaBlockedReason || 'source-blocked';
+      continue;
+    }
 
     if (rec.reservedUntil && rec.reservedUntil <= Game.time) {
       rec.reservedBy = null;
@@ -368,6 +383,11 @@ function auditAssignmentsForHome(homeRoom) {
     unsafeSources: home.unsafeSources.slice(0),
     staleSources: home.staleSources.slice(0),
     duplicateSources: home.duplicateSources.slice(0),
+    blockedSources: Object.keys(home.sources).filter(function (sid) {
+      var src = home.sources[sid];
+      var rs = src && Memory.rooms && Memory.rooms[src.remoteRoom] && Memory.rooms[src.remoteRoom].sources && Memory.rooms[src.remoteRoom].sources[sid];
+      return !!(rs && rs.lunaBlockedUntil && rs.lunaBlockedUntil > Game.time);
+    }),
     notes: 'one Luna per approved source'
   };
 
@@ -405,6 +425,9 @@ function reserveSourceForQueue(homeRoom) {
     var sid = orderedMissing[i];
     var rec = home.sources[sid];
     if (!rec || rec.assignedLuna) continue;
+    if (isRemoteUnsafe(rec.remoteRoom)) continue;
+    var roomSourceMem = (Memory.rooms && Memory.rooms[rec.remoteRoom] && Memory.rooms[rec.remoteRoom].sources && Memory.rooms[rec.remoteRoom].sources[sid]) || {};
+    if (roomSourceMem.lunaBlockedUntil && roomSourceMem.lunaBlockedUntil > Game.time) continue;
     if (rec.reservedBy && rec.reservedUntil > Game.time) continue;
     pick = rec; break;
   }
