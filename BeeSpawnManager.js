@@ -1263,8 +1263,14 @@ function prepareRoomQueues(C) {
   for (var i = 0; i < rooms.length; i++) {
     var room = rooms[i];
     if (!room.find(FIND_MY_SPAWNS).length) continue;
-    RemoteHarvestManager.buildSourcePlanForHome(room.name, C.remotesByHome[room.name] || []);
+    var remoteDiscovery = RemoteHarvestManager.gatherCandidateRemoteRoomsForHome(room);
+    RemoteHarvestManager.buildSourcePlanForHome(room.name, remoteDiscovery.acceptedRemoteRooms || []);
     RemoteHarvestManager.auditAssignmentsForHome(room.name);
+    if (Memory.rooms && Memory.rooms[room.name] && Memory.rooms[room.name].lastRemoteHarvestPlan) {
+      Memory.rooms[room.name].lastRemoteHarvestPlan.candidateRemoteRooms = remoteDiscovery.candidateRemoteRooms || [];
+      Memory.rooms[room.name].lastRemoteHarvestPlan.acceptedRemoteRooms = remoteDiscovery.acceptedRemoteRooms || [];
+      Memory.rooms[room.name].lastRemoteHarvestPlan.rejectedRemoteRooms = remoteDiscovery.rejectedRemoteRooms || [];
+    }
     ensureRoomQueue(room.name);
     fillQueueForRoom(C, room);
   }
