@@ -29,6 +29,10 @@ var ASSIGN_STICKY_TTL = CFG.ASSIGN_STICKY_TTL;
 var STUCK_WINDOW = CFG.STUCK_WINDOW;
 var FLAG_PRUNE_PERIOD = CFG.FLAG_PRUNE_PERIOD;
 var FLAG_RETENTION_TTL = CFG.FLAG_RETENTION_TTL;
+var LUNA_BLOCKED_SOURCE_TTL = CFG.LUNA_BLOCKED_SOURCE_TTL || 10000;
+var LUNA_BLOCKED_ROOM_TTL = CFG.LUNA_BLOCKED_ROOM_TTL || 10000;
+var LUNA_PATH_FAIL_LIMIT = CFG.LUNA_PATH_FAIL_LIMIT || 3;
+var LUNA_STUCK_SOURCE_BLOCK_TICKS = CFG.LUNA_STUCK_SOURCE_BLOCK_TICKS || 8;
 
 // =========================
 // Debug helpers
@@ -291,6 +295,67 @@ function softenRemoteDefensePlan(roomName) {
     var rm = getRoomMemoryBucket(roomName);
     rm.sources = rm.sources || {};
     return (rm.sources[sid] = (rm.sources[sid] || {}));
+  }
+  function shouldLogLunaBlock(key, interval) {
+    var step = interval || 250;
+    if (!Memory.__BHM) Memory.__BHM = {};
+    if (!Memory.__BHM.lunaBlockLog) Memory.__BHM.lunaBlockLog = {};
+    var last = Memory.__BHM.lunaBlockLog[key] || 0;
+    if ((Game.time - last) < step) return false;
+    Memory.__BHM.lunaBlockLog[key] = Game.time;
+    return true;
+  }
+  function clearExpiredLunaSourceBlock(roomName, sourceId) {
+    if (!roomName || !sourceId) return;
+    var srec = getSourceMemory(roomName, sourceId);
+    if (srec && srec.lunaBlockedUntil && srec.lunaBlockedUntil <= Game.time) {
+      delete srec.lunaBlockedUntil; delete srec.lunaBlockedReason;
+    }
+  }
+  function isLunaSourceBlocked(roomName, sourceId) {
+    if (!roomName || !sourceId) return false;
+    clearExpiredLunaSourceBlock(roomName, sourceId);
+    var srec = getSourceMemory(roomName, sourceId);
+    return !!(srec && srec.lunaBlockedUntil && srec.lunaBlockedUntil > Game.time);
+  }
+  function markLunaSourceBlocked(roomName, sourceId, reason, ttl) {
+    if (!roomName || !sourceId) return;
+    var until = Game.time + Math.max(1, ttl || LUNA_BLOCKED_SOURCE_TTL);
+    var srec = getSourceMemory(roomName, sourceId);
+    srec.lunaBlockedUntil = until;
+    srec.lunaBlockedReason = reason || 'blocked-source';
+    var rm = getRoomMemoryBucket(roomName);
+    rm.lastLunaBlock = { tick: Game.time, type: 'source', sourceId: sourceId, reason: srec.lunaBlockedReason, until: until };
+    if (shouldLogLunaBlock('src:' + roomName + ':' + sourceId, 250)) {
+      console.log('🚫 Luna source blocked ' + roomName + ' ' + sourceId.slice(-6) + ' reason=' + srec.lunaBlockedReason + ' until=' + until);
+    }
+  }
+  function markLunaRoomBlocked(roomName, reason, ttl) {
+    if (!roomName) return;
+    var rm = getRoomMemoryBucket(roomName);
+    rm.lunaBlockedUntil = Game.time + Math.max(1, ttl || LUNA_BLOCKED_ROOM_TTL);
+    rm.lunaBlockedReason = reason || 'blocked-room';
+    rm.lastLunaBlock = { tick: Game.time, type: 'room', reason: rm.lunaBlockedReason, until: rm.lunaBlockedUntil };
+    if (shouldLogLunaBlock('room:' + roomName, 250)) {
+      console.log('🚫 Luna room blocked ' + roomName + ' reason=' + rm.lunaBlockedReason + ' until=' + rm.lunaBlockedUntil);
+    }
+  }
+  function recordLunaPathFailure(creep, sourceId, reason) {
+    if (!creep || !creep.memory) return 0;
+    var sid = sourceId || creep.memory.sourceId;
+    var roomName = creep.memory.targetRoom || creep.pos.roomName;
+    if (creep.memory._pathFailSid !== sid) creep.memory._pathFailCount = 0;
+    creep.memory._pathFailSid = sid;
+    creep.memory._pathFailCount = (creep.memory._pathFailCount || 0) + 1;
+    if (shouldLogLunaBlock('fail:' + creep.name + ':' + sid, 250)) {
+      console.log('⚠️ Luna path fail ' + creep.name + ' sid=' + (sid ? sid.slice(-6) : 'none') + ' count=' + creep.memory._pathFailCount + ' reason=' + reason);
+    }
+    if (creep.memory._pathFailCount >= LUNA_PATH_FAIL_LIMIT && sid && roomName) {
+      markLunaSourceBlocked(roomName, sid, reason || 'path-fail', LUNA_BLOCKED_SOURCE_TTL);
+      if (creep.pos.roomName !== roomName) markLunaRoomBlocked(roomName, 'path-to-room-failed', LUNA_BLOCKED_ROOM_TTL);
+      releaseAssignment(creep);
+    }
+    return creep.memory._pathFailCount;
   }
 
   // mark activity each time we touch/own/harvest a source
@@ -803,6 +868,7 @@ function softenRemoteDefensePlan(roomName) {
       var sources = room.find(FIND_SOURCES);
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
+        if (isLunaSourceBlocked(rn, s.id)) continue;
         var e=ensureMiningAssignment(memAssign[s.id], rn);
         // Teaching note: remember which home owns this remote assignment so
         // replacements can be spawned even after a wipe.
@@ -973,6 +1039,7 @@ function logLunaNoSafeSource(creep, details) {
         rn=neighborRooms[i]; if (isLunaRoomUnsafe(rn)) continue;
         var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
         for (var sid in rm.sources){
+          if (isLunaSourceBlocked(rn, sid)) continue;
           if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
           var cap2 = getSourceMaxSlots(sid);
           var assigned2 = maCount(memAssign, sid);
@@ -1112,7 +1179,7 @@ function logLunaNoSafeSource(creep, details) {
     var anchor = getAnchorPos(getHomeName(creep));
     debugSay(creep, label || 'IDLE');
     debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, label || 'IDLE');
-    creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE });
+    creep.travelTo(anchor, { range: 2, reusePath: CFG.PATH_REUSE, maxOps: CFG.TRAVEL_MAX_OPS || 4000 });
   }
 
   function shouldReleaseForEndOfLife(creep) {
@@ -1167,10 +1234,17 @@ function logLunaNoSafeSource(creep, details) {
     debugSay(creep, '➡️'+creep.memory.targetRoom);
     debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
 
-    creep.travelTo(dest, {
-       range: 20,
-        reusePath: 20,
-        });
+    var returnData = {};
+    var rc = creep.travelTo(dest, {
+      range: 20,
+      reusePath: 20,
+      maxOps: CFG.TRAVEL_MAX_OPS || 4000,
+      returnData: returnData
+    });
+    if (rc === ERR_NO_PATH) recordLunaPathFailure(creep, creep.memory.sourceId, 'no-path-to-room');
+    if (returnData.pathfinderReturn && returnData.pathfinderReturn.incomplete && creep.memory._stuck >= STUCK_WINDOW) {
+      recordLunaPathFailure(creep, creep.memory.sourceId, 'incomplete-path-to-room');
+    }
 
     return true;
   }
@@ -1660,6 +1734,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       var free=[], sticky=[], rest=[];
       for (var i=0;i<sids.length;i++){
         var sid=sids[i];
+        if (isLunaSourceBlocked(creep.memory.targetRoom, sid)) continue;
         var owners = maOwners(memAssign, sid);
         var cnt   = maCount(memAssign, sid);
         var cap = getSourceMaxSlots(sid);
@@ -1698,7 +1773,12 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var dest = new RoomPosition(25,25,creep.memory.targetRoom);
         debugSay(creep, '➡️'+creep.memory.targetRoom);
         debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-        creep.travelTo(dest, { range: 20, reusePath: 20});
+        var roomTravelData = {};
+        var roomTravelRc = creep.travelTo(dest, { range: 20, reusePath: 20, maxOps: CFG.TRAVEL_MAX_OPS || 4000, returnData: roomTravelData });
+        if (roomTravelRc === ERR_NO_PATH) recordLunaPathFailure(creep, creep.memory.sourceId, 'no-path-room-travel');
+        if (roomTravelData.pathfinderReturn && roomTravelData.pathfinderReturn.incomplete && creep.memory._stuck >= STUCK_WINDOW) {
+          recordLunaPathFailure(creep, creep.memory.sourceId, 'incomplete-room-travel');
+        }
         return;
       }
 
@@ -1725,9 +1805,11 @@ function upsertRemoteContainerStatus(creep, source, container) {
       }
 
       var stuckTicks = typeof creep.memory._stuck === 'number' ? creep.memory._stuck : 0;
-      if (stuckTicks >= STUCK_WINDOW){
-        creep.travelTo(src, { range: 1, reusePath: 3,  });
-        debugSay(creep, '🚧');
+      if (stuckTicks >= LUNA_STUCK_SOURCE_BLOCK_TICKS){
+        markLunaSourceBlocked(creep.memory.targetRoom, sid, 'stuck-source-path', LUNA_BLOCKED_SOURCE_TTL);
+        releaseAssignment(creep);
+        idleAtAnchor(creep, 'STUCK');
+        return;
       }
 
       var infra = ensureSourceContainerOrSite(src);
@@ -1773,9 +1855,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
         creep.memory.lunaRepairingContainer = true;
       }
 
-      if (container && !creep.pos.isEqualTo(container.pos)) { debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT'); creep.travelTo(container, { range: 0, reusePath: 10 }); return; }
-      if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); creep.travelTo(site, { range: 0, reusePath: 10 }); return; }
-      if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); creep.travelTo(src, { range: 1, reusePath: 10 }); return; }
+      if (container && !creep.pos.isEqualTo(container.pos)) { debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT'); creep.travelTo(container, { range: 0, reusePath: 10, maxOps: CFG.TRAVEL_MAX_OPS || 4000 }); return; }
+      if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); creep.travelTo(site, { range: 0, reusePath: 10, maxOps: CFG.TRAVEL_MAX_OPS || 4000 }); return; }
+      if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); creep.travelTo(src, { range: 1, reusePath: 10, maxOps: CFG.TRAVEL_MAX_OPS || 4000 }); return; }
 
       if (container && creep.memory.lunaRepairingContainer) {
         markContainerRepairMaintenanceHold(creep, container, src);
@@ -1783,7 +1865,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var withdrawAmount = CFG.remoteContainerRepairWithdrawAmount || 50;
         if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
           if (creep.pos.getRangeTo(container) > 3) {
-            creep.travelTo(container, { range: 3, reusePath: 5 });
+            creep.travelTo(container, { range: 3, reusePath: 5, maxOps: CFG.TRAVEL_MAX_OPS || 4000 });
             return;
           }
           creep.repair(container);

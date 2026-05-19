@@ -635,6 +635,8 @@ function collectApprovedLunaSourcesFromRemote(remoteName, out) {
   if (live) {
     var found = live.find(FIND_SOURCES) || [];
     for (var i = 0; i < found.length; i++) {
+      var srcLiveMem = mem.sources && mem.sources[found[i].id] ? mem.sources[found[i].id] : null;
+      if (srcLiveMem && srcLiveMem.lunaBlockedUntil && srcLiveMem.lunaBlockedUntil > Game.time) continue;
       out.push({ sourceId: found[i].id, targetRoom: remoteName });
     }
     return;
@@ -643,9 +645,31 @@ function collectApprovedLunaSourcesFromRemote(remoteName, out) {
   if (mem.sources) {
     for (var sid in mem.sources) {
       if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
+      var srcMem = mem.sources[sid];
+      if (srcMem && srcMem.lunaBlockedUntil && srcMem.lunaBlockedUntil > Game.time) continue;
       out.push({ sourceId: sid, targetRoom: remoteName });
     }
   }
+}
+
+function pruneBlockedLunaQueueItems(roomName) {
+  var q = ensureRoomQueue(roomName);
+  var kept = [];
+  for (var i = 0; i < q.length; i++) {
+    var it = q[i];
+    if (!it || it.role !== 'Luna') { kept.push(it); continue; }
+    if (!it.targetRoom || isLunaRemoteRoomUnsafe(it.targetRoom)) {
+      if (it.sourceId) RemoteHarvestManager.unreserveSourceForQueue(roomName, it.sourceId);
+      continue;
+    }
+    var sMem = Memory.rooms && Memory.rooms[it.targetRoom] && Memory.rooms[it.targetRoom].sources && Memory.rooms[it.targetRoom].sources[it.sourceId];
+    if (sMem && sMem.lunaBlockedUntil && sMem.lunaBlockedUntil > Game.time) {
+      RemoteHarvestManager.unreserveSourceForQueue(roomName, it.sourceId);
+      continue;
+    }
+    kept.push(it);
+  }
+  Memory.rooms[roomName].spawnQueue = kept;
 }
 
 function getSourceMaxSlotsForSpawn(sourceId, targetRoom) {
@@ -1073,6 +1097,7 @@ function computeRoomQuotas(C, room) {
 function fillQueueForRoom(C, room) {
   var quotas = computeRoomQuotas(C, room);
   var roomName = room.name;
+  pruneBlockedLunaQueueItems(roomName);
   cleanupRetiredCourierState(roomName);
 
   if (!Memory.rooms) Memory.rooms = {};
