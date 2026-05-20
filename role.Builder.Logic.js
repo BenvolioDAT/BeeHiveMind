@@ -178,14 +178,10 @@ function isRoomUnsafeForRemoteBuild(roomName, homeRoom) {
 
 function getRemoteContainerBuildTargets(creep) {
   var out = { targets: [], skippedUnsafe: 0, remoteContainerMemoryCandidates: 0, visibleRemoteContainerSites: 0 };
-  var root = Memory.__BHM && Memory.__BHM.remoteContainerBuilds;
-  if (!root) root = {};
-  var seenSourceIds = {};
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
+  var root = Memory.__BHM.remoteContainerBuilds;
   var home = getHomeName(creep);
-  for (var sourceId in root) {
-    if (!Object.prototype.hasOwnProperty.call(root, sourceId)) continue;
-    seenSourceIds[sourceId] = true;
-  }
   for (var id in root) {
     if (!Object.prototype.hasOwnProperty.call(root, id)) continue;
     var rec = root[id];
@@ -246,10 +242,11 @@ function getRemoteContainerBuildTargets(creep) {
       if (!Object.prototype.hasOwnProperty.call(Game.rooms, remoteName)) continue;
       if (remoteName === home) continue;
       if (isRoomUnsafeForRemoteBuild(remoteName, home)) { out.skippedUnsafe++; continue; }
-      var roomMem = Memory.rooms[remoteName] || {};
-      if (!roomMem.sources) continue;
-      for (var sid in roomMem.sources) {
-        if (!Object.prototype.hasOwnProperty.call(roomMem.sources, sid)) continue;
+      var approved = Memory.__BHM && Memory.__BHM.remoteHarvest && Memory.__BHM.remoteHarvest.homes && Memory.__BHM.remoteHarvest.homes[home] && Memory.__BHM.remoteHarvest.homes[home].sources;
+      if (!approved) continue;
+      for (var sid in approved) {
+        if (!Object.prototype.hasOwnProperty.call(approved, sid)) continue;
+        if (!approved[sid] || approved[sid].remoteRoom !== remoteName) continue;
         var src = Game.getObjectById(sid);
         if (!src || !src.pos || src.pos.roomName !== remoteName) continue;
         var nearbySites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function(s){ return s.structureType === STRUCTURE_CONTAINER; } });
@@ -260,26 +257,24 @@ function getRemoteContainerBuildTargets(creep) {
         if (exists) continue;
         out.visibleRemoteContainerSites++;
         out.targets.push({ site: nearSite, reason: 'remoteSourceContainerVisibleFallback' });
-        if (Memory.__BHM && Memory.__BHM.remoteContainerBuilds) {
-          var prev = Memory.__BHM.remoteContainerBuilds[sid] || {};
-          Memory.__BHM.remoteContainerBuilds[sid] = {
-            sourceId: sid,
-            homeRoom: home,
-            remoteRoom: remoteName,
-            roomName: nearSite.pos.roomName,
-            x: nearSite.pos.x,
-            y: nearSite.pos.y,
-            siteId: nearSite.id,
-            containerId: null,
-            status: 'building',
-            progress: nearSite.progress || 0,
-            progressTotal: nearSite.progressTotal || 0,
-            progressPct: (nearSite.progressTotal > 0 ? Math.floor((nearSite.progress / nearSite.progressTotal) * 100) : 0),
-            assignedLuna: prev.assignedLuna || null,
-            updated: Game.time,
-            lastSeen: Game.time
-          };
-        }
+        var prev = Memory.__BHM.remoteContainerBuilds[sid] || {};
+        Memory.__BHM.remoteContainerBuilds[sid] = {
+          sourceId: sid,
+          homeRoom: home,
+          remoteRoom: remoteName,
+          roomName: nearSite.pos.roomName,
+          x: nearSite.pos.x,
+          y: nearSite.pos.y,
+          siteId: nearSite.id,
+          containerId: null,
+          status: 'building',
+          progress: nearSite.progress || 0,
+          progressTotal: nearSite.progressTotal || 0,
+          progressPct: (nearSite.progressTotal > 0 ? Math.floor((nearSite.progress / nearSite.progressTotal) * 100) : 0),
+          assignedLuna: prev.assignedLuna || null,
+          updated: Game.time,
+          lastSeen: Game.time
+        };
       }
     }
   }
@@ -308,7 +303,7 @@ function getBuilderTarget(creep) {
     if (cachedSite) {
       var unsafeCachedRoom = isRoomUnsafeForRemoteBuild(cachedSite.pos.roomName, getHomeName(creep));
       var shouldOverrideRoad = cachedSite.structureType === STRUCTURE_ROAD && remoteData.targets.length > 0;
-      if (!unsafeCachedRoom && !shouldOverrideRoad) return { target: cachedSite, type: 'build' };
+      if (!unsafeCachedRoom && !shouldOverrideRoad) return { target: cachedSite, type: 'build', reason: 'cached', home: getHomeName(creep) };
       creep.memory.builderTargetId = null;
       creep.memory.builderTargetType = null;
     } else { creep.memory.builderTargetId = null; creep.memory.builderTargetType = null; }
@@ -360,7 +355,7 @@ function getBuilderTarget(creep) {
       visibleRemoteContainerSites: remoteData.visibleRemoteContainerSites,
       skippedUnsafe: remoteData.skippedUnsafe
     });
-    return { target: best, type: 'build' };
+    return { target: best, type: 'build', reason: reason, home: getHomeName(creep) };
   }
   writeBuilderTargetDecision(creep, {
     selectedTargetId: null,
@@ -373,6 +368,15 @@ function getBuilderTarget(creep) {
     skippedUnsafe: remoteData.skippedUnsafe
   });
   return null;
+}
+function isRemoteContainerBuildTarget(targetInfo) {
+  if (!targetInfo || !targetInfo.target) return false;
+  if (targetInfo.target.structureType !== STRUCTURE_CONTAINER) return false;
+  if (targetInfo.reason === 'remoteSourceContainer' || targetInfo.reason === 'remoteSourceContainerVisibleFallback') return true;
+  var roomName = targetInfo.target.pos && targetInfo.target.pos.roomName;
+  var home = targetInfo.home || null;
+  if (!roomName || !home || roomName === home) return false;
+  return true;
 }
 
 function isOnBorder(pos) { return pos.x === 0 || pos.x === 49 || pos.y === 0 || pos.y === 49; }
@@ -435,10 +439,31 @@ function run(creep) {
 
   if (state === CFG.BUILDER_STATES.HARVEST) {
     var lowTargetInfo = getBuilderTarget(creep);
+    var carried = creep.store[RESOURCE_ENERGY] || 0;
+    var free = creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+    var nearTarget = !!(lowTargetInfo && lowTargetInfo.target && creep.pos.roomName === lowTargetInfo.target.pos.roomName && creep.pos.getRangeTo(lowTargetInfo.target) <= 3);
+    var remoteContainerTarget = isRemoteContainerBuildTarget(lowTargetInfo);
+    var shouldAllowPartialBuild = remoteContainerTarget && carried > 0;
+
     var assignedWait = lowTargetInfo && maybePublishBuilderRequest(creep, lowTargetInfo);
-    if (assignedWait) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo.target.id, handoffPublished: true, handoffAssigned: true, waitedForHandoff: true, selfHarvestUsed: false, reason: 'assigned_handoff_wait' }); debugSay(creep, '⏳'); return; }
-    if (lowTargetInfo && maybeWaitForUnassignedHandoff(creep, lowTargetInfo)) { debugSay(creep, '⏳'); return; }
+    if (assignedWait && !shouldAllowPartialBuild) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo.target.id, handoffPublished: true, handoffAssigned: true, waitedForHandoff: true, selfHarvestUsed: false, reason: 'assigned_handoff_wait' }); debugSay(creep, '⏳'); return; }
+    if (!shouldAllowPartialBuild && lowTargetInfo && maybeWaitForUnassignedHandoff(creep, lowTargetInfo)) { debugSay(creep, '⏳'); return; }
     var gotEnergy = collectEnergy(creep);
+    if (shouldAllowPartialBuild && (!gotEnergy || nearTarget)) {
+      clearBuilderHandoffWaitMemory(creep);
+      Handoff.clearEnergyHandoffRequest(creep);
+      setBuilderState(creep, CFG.BUILDER_STATES.BUILD);
+      setBuilderAssistDiag(creep, {
+        state: 'BUILD',
+        targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null,
+        partialEnergyBuildAllowed: true,
+        carriedEnergy: carried,
+        freeCapacity: free,
+        targetReason: lowTargetInfo ? lowTargetInfo.reason : null,
+        reason: 'partial_energy_remote_container_build'
+      });
+      return;
+    }
     if (gotEnergy && creep.store.getFreeCapacity() > 0) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'collect_energy', collectTargetFound: true }); return; }
     if (!gotEnergy && lowTargetInfo && (!CFG.SELF_HARVEST_AFTER_HANDOFF_WAIT || (creep.memory.builderHandoffWaitUntil || 0) < Game.time)) {
       if (tryEmergencySelfHarvest(creep, lowTargetInfo)) return;
