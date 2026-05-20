@@ -944,6 +944,7 @@ function hasMeaningfulRepairTarget(target) {
 
 function computeLocalRepairQuotaForRoom(room) {
   if (!room) return 0;
+  if (hasRemoteContainerRepairDemand(room.name)) return 1;
   var towers = room.find(FIND_MY_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_TOWER; } });
   if (towers && towers.length > 0) return 0;
   var mem = (Memory.rooms && Memory.rooms[room.name]) || {};
@@ -951,7 +952,6 @@ function computeLocalRepairQuotaForRoom(room) {
   for (var i = 0; i < queue.length; i++) {
     if (hasMeaningfulRepairTarget(queue[i])) return 1;
   }
-  if (hasRemoteContainerRepairDemand(room.name)) return 1;
   return 0;
 }
 

@@ -47,18 +47,29 @@ function getRepairQueue(room){ Memory.rooms = Memory.rooms || {}; Memory.rooms[r
 function getNextRepairTarget(queue){ while (queue.length){ var head = queue[0]; if (!head || !head.id){ queue.shift(); continue; } var obj = Game.getObjectById(head.id); if (!obj || !obj.hits || obj.hits >= obj.hitsMax){ queue.shift(); continue; } return obj; } return null; }
 function findDroppedEnergy(creep){ return creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, { filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount || 0) > 0; } }); }
 function findWithdrawSource(creep){ return creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function(s){ if (!s.store) return false; var t = s.structureType; if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN) return false; return (s.store[RESOURCE_ENERGY] || 0) > 0; } }); }
+function getMyUsernameForRepair(){
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (spawn && spawn.owner && spawn.owner.username) return spawn.owner.username;
+  }
+  return null;
+}
 function isRoomUnsafeForRemoteRepair(roomName, homeRoom){
   if (!roomName || roomName === homeRoom) return false;
+  var myName = getMyUsernameForRepair();
   var mem = Memory.rooms && Memory.rooms[roomName];
   if (mem) {
     if (mem.hostile) return true;
     if (typeof mem.lunaBlockedUntil === 'number' && mem.lunaBlockedUntil > Game.time) return true;
-    if (mem._invaderLock && mem._invaderLock.locked && (Game.time - (mem._invaderLock.lastSeenAt || 0) <= 1500)) return true;
+    if (mem._invaderLock && mem._invaderLock.locked) {
+      var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+      if (lockTick == null || (Game.time - lockTick) <= 1500) return true;
+    }
     if (mem.intel) {
       var intel = mem.intel;
-      var myName = (Memory.__BHM && Memory.__BHM.me) || null;
-      if (intel.owner && myName && intel.owner !== myName) return true;
-      if (intel.reservation && myName && intel.reservation !== myName) return true;
+      if (intel.owner && (!myName || intel.owner !== myName)) return true;
+      if (intel.reservation && (!myName || intel.reservation !== myName)) return true;
     }
   }
   var room = Game.rooms[roomName];
@@ -68,9 +79,8 @@ function isRoomUnsafeForRemoteRepair(roomName, homeRoom){
     if (room.controller) {
       var owner = room.controller.owner && room.controller.owner.username;
       var reserver = room.controller.reservation && room.controller.reservation.username;
-      var me = (Memory.__BHM && Memory.__BHM.me) || null;
-      if (owner && me && owner !== me) return true;
-      if (reserver && me && reserver !== me) return true;
+      if (owner && (!myName || owner !== myName)) return true;
+      if (reserver && (!myName || reserver !== myName)) return true;
     }
   }
   return false;
