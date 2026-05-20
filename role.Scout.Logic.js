@@ -197,6 +197,60 @@ function getOwnedHomeRooms() {
   }
   return homes;
 }
+
+function scoutRoomCostMatrix(roomName) {
+  var room = Game.rooms[roomName]; if (!room) return;
+  var m = new PathFinder.CostMatrix();
+  var structs = room.find(FIND_STRUCTURES) || [];
+  for (var i = 0; i < structs.length; i++) {
+    var st = structs[i]; if (!st) continue;
+    if (st.structureType === STRUCTURE_ROAD) m.set(st.pos.x, st.pos.y, 1);
+    else if (st.structureType !== STRUCTURE_CONTAINER && (st.structureType !== STRUCTURE_RAMPART || !st.my)) m.set(st.pos.x, st.pos.y, 0xff);
+  }
+  var sites = room.find(FIND_CONSTRUCTION_SITES) || [];
+  for (var j = 0; j < sites.length; j++) {
+    var cs = sites[j]; if (!cs) continue;
+    if (cs.structureType !== STRUCTURE_ROAD && cs.structureType !== STRUCTURE_CONTAINER) m.set(cs.pos.x, cs.pos.y, 0xff);
+  }
+  return m;
+}
+function evaluateScoutSourceAccessibility(homeRoom, room, sourceObj) {
+  if (!room || !sourceObj || !sourceObj.pos) return { accessible: false, blockedReason: 'source-missing', checkedAt: Game.time };
+  var terrain = room.getTerrain();
+  var openTiles = 0;
+  var hasHarvestTile = false;
+  for (var dx=-1; dx<=1; dx++) for (var dy=-1; dy<=1; dy++) {
+    if (!dx && !dy) continue;
+    var x = sourceObj.pos.x + dx, y = sourceObj.pos.y + dy;
+    if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+    if (terrain.get(x,y) === TERRAIN_MASK_WALL) continue;
+    openTiles++;
+    var blocked = false;
+    var look = room.lookForAt(LOOK_STRUCTURES, x, y) || [];
+    for (var i = 0; i < look.length; i++) {
+      var st = look[i]; if (!st) continue;
+      if (st.structureType === STRUCTURE_ROAD || st.structureType === STRUCTURE_CONTAINER) continue;
+      if (st.structureType === STRUCTURE_RAMPART && st.my) continue;
+      blocked = true; break;
+    }
+    if (!blocked) {
+      var sites = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y) || [];
+      for (var j = 0; j < sites.length; j++) {
+        var cs = sites[j]; if (!cs) continue;
+        if (cs.structureType === STRUCTURE_ROAD || cs.structureType === STRUCTURE_CONTAINER) continue;
+        blocked = true; break;
+      }
+    }
+    if (!blocked) hasHarvestTile = true;
+  }
+  if (!openTiles) return { accessible: false, blockedReason: 'no-open-harvest-tiles', checkedAt: Game.time };
+  if (!hasHarvestTile) return { accessible: false, blockedReason: 'harvest-tiles-blocked-by-structures', checkedAt: Game.time };
+  var start = new RoomPosition(25, 25, homeRoom);
+  var ret = PathFinder.search(start, { pos: sourceObj.pos, range: 1 }, { maxOps: 2000, plainCost: 2, swampCost: 10, roomCallback: scoutRoomCostMatrix });
+  if (ret.incomplete || !ret.path || !ret.path.length) return { accessible: false, blockedReason: 'path-to-source-incomplete', checkedAt: Game.time };
+  return { accessible: true, blockedReason: null, checkedAt: Game.time };
+}
+
 function updateScoutHomeIntelForRoom(room) {
   if (!room || !room.name) return;
   var root = ensureScoutIntelRoot();
@@ -214,7 +268,12 @@ function updateScoutHomeIntelForRoom(room) {
     var invaderCore = room.find(FIND_STRUCTURES, { filter: function (st) { return st.structureType === STRUCTURE_INVADER_CORE; } }) || [];
     var sources = room.find(FIND_SOURCES) || [];
     var srcList = []; var inaccessible = 0;
-    for (var s = 0; s < sources.length; s++) { var src = sources[s]; var open = 0; for (var dx=-1;dx<=1;dx++) for (var dy=-1;dy<=1;dy++) { if (!dx&&!dy) continue; var tx=src.pos.x+dx, ty=src.pos.y+dy; if (tx<0||tx>49||ty<0||ty>49) continue; if (room.getTerrain().get(tx,ty)!==TERRAIN_MASK_WALL) open++; } var accessible = open > 0; if (!accessible) inaccessible++; srcList.push({ id: src.id, x: src.pos.x, y: src.pos.y, accessible: accessible }); }
+    for (var s = 0; s < sources.length; s++) {
+      var src = sources[s];
+      var access = evaluateScoutSourceAccessibility(homeRoom, room, src);
+      if (!access.accessible) inaccessible++;
+      srcList.push({ id: src.id, x: src.pos.x, y: src.pos.y, accessible: access.accessible, blockedReason: access.blockedReason, checkedAt: access.checkedAt });
+    }
     var remoteEligible = true; var remoteBlockedReason = null;
     if (hostiles.length > 0) { remoteEligible = false; remoteBlockedReason = 'unsafe-room'; }
     else if (invaderCore.length > 0) { remoteEligible = false; remoteBlockedReason = 'invader-core'; }

@@ -900,6 +900,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
       var sources = room.find(FIND_SOURCES);
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
+        if (approvedSourceFilterUsed && !approvedSources[rn + ':' + s.id]) continue;
         if (isLunaSourceBlocked(rn, s.id)) continue;
         var e=ensureMiningAssignment(memAssign[s.id], rn);
         // Teaching note: remember which home owns this remote assignment so
@@ -1130,7 +1131,18 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     var anchor = getAnchorPos(homeName);
 
     var scoutPlan = (RemoteHarvestManager && typeof RemoteHarvestManager.getApprovedRemotesFromScout === 'function') ? RemoteHarvestManager.getApprovedRemotesFromScout(homeName) : null;
-    var neighborRooms = (scoutPlan && scoutPlan.approvedRooms && scoutPlan.approvedRooms.length) ? scoutPlan.approvedRooms.slice(0) : bfsNeighborRooms(homeName, REMOTE_RADIUS);
+    var scoutPlanUsed = !!(scoutPlan && scoutPlan.approvedRooms && scoutPlan.approvedRooms.length);
+    var approvedSourceFilterUsed = false;
+    var approvedSources = Object.create(null);
+    if (scoutPlanUsed && scoutPlan.approvedSources && scoutPlan.approvedSources.length) {
+      approvedSourceFilterUsed = true;
+      for (var asi = 0; asi < scoutPlan.approvedSources.length; asi++) {
+        var ap = scoutPlan.approvedSources[asi];
+        if (!ap || !ap.sourceId || !ap.targetRoom) continue;
+        approvedSources[ap.targetRoom + ':' + ap.sourceId] = true;
+      }
+    }
+    var neighborRooms = scoutPlanUsed ? scoutPlan.approvedRooms.slice(0) : bfsNeighborRooms(homeName, REMOTE_RADIUS);
     var roomRanks = [];
     for (i = 0; i < neighborRooms.length; i++) { rn = neighborRooms[i]; roomRanks.push({ roomName: rn, routeDistance: getRouteDistanceBetweenRooms(homeName, rn), linearDistance: Game.map.getRoomLinearDistance(homeName, rn) }); }
     roomRanks.sort(function (a, b) { if (a.routeDistance !== b.routeDistance) return a.routeDistance - b.routeDistance; if (a.linearDistance !== b.linearDistance) return a.linearDistance - b.linearDistance; return a.roomName < b.roomName ? -1 : 1; });
@@ -1151,6 +1163,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       var roomInaccessible = 0;
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
+        if (approvedSourceFilterUsed && !approvedSources[rn + ':' + s.id]) continue;
         if (isLunaSourceBlocked(rn, s.id)) continue;
         var access = evaluateVisibleSourceAccessibility(homeName, rn, s);
         recordLunaAccessibility(rn, s.id, access.accessible, access.reason);
@@ -1207,6 +1220,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       if (!roomVisible && (intelTick == null || (Game.time - intelTick) > LUNA_REMOTE_INTEL_TTL)) continue;
       for (var sid in rm.sources){
         if (candidateBySid[sid]) continue;
+        if (approvedSourceFilterUsed && !approvedSources[rn + ':' + sid]) continue;
         if (isLunaSourceBlocked(rn, sid)) continue;
         if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
         var cap2 = getSourceMaxSlots(sid);
@@ -1233,7 +1247,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         if (Memory.rooms && Memory.rooms[homeName]) {
           Memory.rooms[homeName].lastLunaSelection = {
             tick: Game.time, creep: creep.name, selectedRoom: null, selectedSourceId: null, selectedDistance: null,
-            candidateRoomsSorted: neighborRooms.slice(0), scoutPlanUsed: !!(scoutPlan && scoutPlan.approvedRooms && scoutPlan.approvedRooms.length), rejectedCloserRooms: rejectedCloserRooms, topCandidates: [], fallback: (!scoutPlan || !scoutPlan.approvedRooms || !scoutPlan.approvedRooms.length) ? 'bfs-diagnostics-fallback' : null
+            candidateRoomsSorted: neighborRooms.slice(0), scoutPlanUsed: scoutPlanUsed, approvedSourceFilterUsed: approvedSourceFilterUsed, approvedSourcesCount: scoutPlan && scoutPlan.approvedSources ? scoutPlan.approvedSources.length : 0, rejectedCloserRooms: rejectedCloserRooms, topCandidates: [], fallback: (!scoutPlan || !scoutPlan.approvedRooms || !scoutPlan.approvedRooms.length) ? 'bfs-diagnostics-fallback' : null
           };
         }
         logLunaNoSafeSource(creep, 'home=' + homeName + ' inaccessibleSources=' + inaccessibleSources + ' candidates=0');
@@ -1326,7 +1340,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
           selectedRoom: best.roomName,
           selectedSourceId: best.id,
           selectedDistance: best.routeDistance,
-          candidateRoomsSorted: neighborRooms.slice(0), scoutPlanUsed: !!(scoutPlan && scoutPlan.approvedRooms && scoutPlan.approvedRooms.length),
+          candidateRoomsSorted: neighborRooms.slice(0), scoutPlanUsed: scoutPlanUsed, approvedSourceFilterUsed: approvedSourceFilterUsed, approvedSourcesCount: scoutPlan && scoutPlan.approvedSources ? scoutPlan.approvedSources.length : 0,
           rejectedCloserRooms: rejectedCloserRooms,
           topCandidates: topCandidateScores
         };
