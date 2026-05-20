@@ -242,7 +242,7 @@ function clearRemoteRequestAssignment(creep) {
 function isActiveRemoteRequest(req, homeName) { /* unchanged */
   if (!req || !req.id || !homeName) return false;
   if (req.homeRoom !== homeName) return false;
-  if (req.maintenanceUntil && req.maintenanceUntil > Game.time) return false;
+  if (CFG.shouldBlockRemoteHaulForMaintenance(req)) return false;
   if ((req.amount || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) return false;
   if ((Game.time - (req.updated || 0)) > CFG.REQUEST_STALE_TICKS) return false;
   return true;
