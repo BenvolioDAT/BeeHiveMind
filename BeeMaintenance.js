@@ -472,19 +472,27 @@ function _ensurePriorityTable(bucket) {
   if (bucket.priorityOrder) return bucket.priorityOrder;
   var order = {};
   order[STRUCTURE_CONTAINER] = 1;
-  order[STRUCTURE_RAMPART]   = 3;
-  order[STRUCTURE_WALL]      = 4;
+  order[STRUCTURE_SPAWN]     = 2;
+  order[STRUCTURE_EXTENSION] = 3;
+  order[STRUCTURE_TOWER]     = 4;
   order[STRUCTURE_STORAGE]   = 5;
-  order[STRUCTURE_SPAWN]     = 6;
-  order[STRUCTURE_EXTENSION] = 7;
-  order[STRUCTURE_TOWER]     = 8;
-  order[STRUCTURE_LINK]      = 9;
-  order[STRUCTURE_TERMINAL]  = 10;
-  order[STRUCTURE_LAB]       = 11;
-  order[STRUCTURE_OBSERVER]  = 12;
-  order[STRUCTURE_ROAD]      = 13;
+  order[STRUCTURE_TERMINAL]  = 6;
+  order[STRUCTURE_LINK]      = 7;
+  order[STRUCTURE_LAB]       = 8;
+  order[STRUCTURE_OBSERVER]  = 9;
+  order[STRUCTURE_RAMPART]   = 10;
+  order[STRUCTURE_WALL]      = 11;
+  order[STRUCTURE_ROAD]      = 99; // Roads are always last, but still repaired eventually.
   bucket.priorityOrder = order;
   return order;
+}
+
+function getRepairPriority(entryOrStructure) {
+  if (!entryOrStructure) return 999;
+  var type = entryOrStructure.type || entryOrStructure.structureType;
+  if (!type) return 999;
+  var table = _ensurePriorityTable(_ensureMaintBucket('global'));
+  return table[type] != null ? table[type] : 50;
 }
 
 // Cache entries outlive a single tick, so trim them against current hits to
@@ -526,6 +534,9 @@ function _scanRepairTargets(room, bucket, priorityOrder) {
       if (s.structureType === STRUCTURE_WALL) {
         return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_WALL);
       }
+      if (s.structureType === STRUCTURE_CONTAINER) {
+        return s.hits < (s.hitsMax * 0.80);
+      }
       return s.hits < s.hitsMax;
     }
   });
@@ -533,12 +544,12 @@ function _scanRepairTargets(room, bucket, priorityOrder) {
   var targets = [];
   for (var i = 0; i < list.length; i++) {
     var s = list[i];
-    targets.push({ id: s.id, hits: s.hits, hitsMax: s.hitsMax, type: s.structureType });
+    targets.push({ id: s.id, hits: s.hits, hitsMax: s.hitsMax, type: s.structureType, priority: getRepairPriority(s) });
   }
 
   targets.sort(function (a, b) {
-    var pa = priorityOrder[a.type] != null ? priorityOrder[a.type] : 99;
-    var pb = priorityOrder[b.type] != null ? priorityOrder[b.type] : 99;
+    var pa = getRepairPriority(a);
+    var pb = getRepairPriority(b);
     if (pa !== pb) return pa - pb;
     return a.hits - b.hits;
   });
@@ -568,7 +579,8 @@ function findStructuresNeedingRepair(room) {
 var BeeMaintenance = {
   cleanStaleRooms: cleanStaleRooms,
   cleanUpMemory: cleanUpMemory,
-  findStructuresNeedingRepair: findStructuresNeedingRepair
+  findStructuresNeedingRepair: findStructuresNeedingRepair,
+  getRepairPriority: getRepairPriority
 };
 
 module.exports = BeeMaintenance;

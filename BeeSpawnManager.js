@@ -937,13 +937,14 @@ function hasMeaningfulRepairTarget(target) {
   var type = obj.structureType;
   if (type === STRUCTURE_ROAD) return pct < 0.60;
   if (type === STRUCTURE_CONTAINER) return pct < 0.80;
-  if (type === STRUCTURE_SPAWN || type === STRUCTURE_EXTENSION || type === STRUCTURE_TOWER || type === STRUCTURE_STORAGE || type === STRUCTURE_TERMINAL) return pct < 0.90;
+  if (type === STRUCTURE_SPAWN || type === STRUCTURE_EXTENSION || type === STRUCTURE_TOWER || type === STRUCTURE_STORAGE || type === STRUCTURE_TERMINAL || type === STRUCTURE_LINK || type === STRUCTURE_LAB) return pct < 0.90;
   if (type === STRUCTURE_RAMPART || type === STRUCTURE_WALL) return true;
   return false;
 }
 
 function computeLocalRepairQuotaForRoom(room) {
   if (!room) return 0;
+  if (hasRemoteContainerRepairDemand(room.name)) return 1;
   var towers = room.find(FIND_MY_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_TOWER; } });
   if (towers && towers.length > 0) return 0;
   var mem = (Memory.rooms && Memory.rooms[room.name]) || {};
@@ -954,6 +955,21 @@ function computeLocalRepairQuotaForRoom(room) {
   return 0;
 }
 
+
+function hasRemoteContainerRepairDemand(roomName) {
+  var root = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : null;
+  if (!root || !roomName) return false;
+  for (var id in root) {
+    if (!Object.prototype.hasOwnProperty.call(root, id)) continue;
+    var st = root[id];
+    if (!st || st.homeRoom !== roomName) continue;
+    if (typeof st.containerHitsPct !== 'number') continue;
+    if (st.containerHitsPct <= 0.75 && st.containerHitsPct > (RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40)) {
+      if (!isLunaRemoteRoomUnsafe(st.remoteRoom || st.roomName)) return true;
+    }
+  }
+  return false;
+}
 function countRemoteEmergencyRepairAssignments(roomName) {
   if (!roomName) return 0;
   var count = 0;
