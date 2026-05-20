@@ -166,6 +166,80 @@ function runRemoteContainerEmergencyRepair(creep){
   if (creep.room.name !== home) go(creep, new RoomPosition(25, 25, home), 20);
 }
 
+
+function ensureRepairClaimsMemory(){
+  Memory.__BHM = Memory.__BHM || {};
+  Memory.__BHM.repairClaims = Memory.__BHM.repairClaims || {};
+  return Memory.__BHM.repairClaims;
+}
+function cleanupRepairClaims(){
+  var claims = ensureRepairClaimsMemory();
+  for (var targetId in claims){
+    if (!Object.prototype.hasOwnProperty.call(claims, targetId)) continue;
+    var c = claims[targetId];
+    if (!c || c.until <= Game.time || !Game.creeps[c.creepName]) delete claims[targetId];
+  }
+}
+function isRepairTargetClaimedByOther(creep, targetId){
+  var claims = ensureRepairClaimsMemory();
+  var c = claims[targetId];
+  if (!c) return false;
+  if (c.until <= Game.time) { delete claims[targetId]; return false; }
+  return c.creepName !== creep.name && Game.creeps[c.creepName];
+}
+function claimRepairTarget(creep, targetInfo){
+  if (!creep || !targetInfo || !targetInfo.id) return;
+  var claims = ensureRepairClaimsMemory();
+  claims[targetInfo.id] = { creepName: creep.name, until: Game.time + 15, roomName: targetInfo.roomName, targetType: targetInfo.type };
+  creep.memory.repairTargetId = targetInfo.id;
+  creep.memory.repairTargetInfo = targetInfo;
+  // This claim tells other Repair creeps: I am already handling this target, please pick another one.
+}
+function releaseRepairTarget(creep){
+  var claims = ensureRepairClaimsMemory();
+  var id = creep.memory && creep.memory.repairTargetId;
+  if (id && claims[id] && claims[id].creepName === creep.name) delete claims[id];
+  if (creep.memory){ delete creep.memory.repairTargetId; delete creep.memory.repairTargetInfo; }
+}
+function getLocalTargets(creep){
+  Memory.rooms = Memory.rooms || {}; var rm = Memory.rooms[creep.room.name] || {};
+  var queue = Array.isArray(rm.repairTargets) ? rm.repairTargets : [];
+  var out = [];
+  for (var i=0;i<queue.length;i++){
+    var t = queue[i]; if (!t || !t.id) continue;
+    var hitsPct = (t.hitsMax>0) ? (t.hits/t.hitsMax) : null;
+    out.push({id:t.id, roomName:creep.room.name, type:t.type, priority:t.priority, hitsPct:hitsPct});
+  }
+  return out;
+}
+function getRemoteContainerTargets(creep){
+  var out = []; var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
+  var root = Memory.__BHM && Memory.__BHM.remoteContainerStatus;
+  if (!root) return out;
+  for (var id in root){
+    if (!Object.prototype.hasOwnProperty.call(root,id)) continue;
+    var r = root[id]; if (!r || r.homeRoom !== home) continue;
+    if (typeof r.containerHitsPct !== 'number' || r.containerHitsPct > 0.75) continue;
+    if (r.remoteRoom && typeof isLunaRemoteRoomUnsafe === 'function' && isLunaRemoteRoomUnsafe(r.remoteRoom)) continue;
+    out.push({id:id, roomName:r.remoteRoom || r.roomName, x:r.x, y:r.y, type:STRUCTURE_CONTAINER, priority:0, hitsPct:r.containerHitsPct});
+  }
+  return out;
+}
+function getBestRepairTargetForCreep(creep){
+  cleanupRepairClaims();
+  var candidates = getLocalTargets(creep).concat(getRemoteContainerTargets(creep));
+  var nonRoad = []; var roads = [];
+  for (var i=0;i<candidates.length;i++){
+    var c=candidates[i];
+    if (isRepairTargetClaimedByOther(creep, c.id)) continue;
+    if (c.type === STRUCTURE_ROAD) roads.push(c); else nonRoad.push(c);
+  }
+  var list = nonRoad.length ? nonRoad : roads;
+  if (!list.length) return null;
+  list.sort(function(a,b){ var pa=(a.priority!=null)?a.priority:50; var pb=(b.priority!=null)?b.priority:50; if (pa!==pb) return pa-pb; return (a.hitsPct||1)-(b.hitsPct||1); });
+  return list[0];
+}
+
 function run(creep){
   if (!creep) return;
   if (creep.memory && !creep.memory.role) creep.memory.role = 'Repair';
@@ -185,18 +259,32 @@ function run(creep){
     return;
   }
 
-  var queue = getRepairQueue(creep.room);
-  var target = getNextRepairTarget(queue);
-  if (!target){ if (creep.memory) creep.memory.task = undefined; debugSay(creep, "✅ done"); return; }
+  var targetInfo = creep.memory.repairTargetInfo || getBestRepairTargetForCreep(creep);
+  if (!targetInfo){ releaseRepairTarget(creep); if (creep.memory) creep.memory.task = undefined; debugSay(creep, "✅ done"); return; }
+  if (!creep.memory.repairTargetId || creep.memory.repairTargetId !== targetInfo.id) {
+    releaseRepairTarget(creep);
+    claimRepairTarget(creep, targetInfo);
+  } else {
+    claimRepairTarget(creep, targetInfo);
+  }
+
+  var target = Game.getObjectById(targetInfo.id);
+  if (!target) {
+    if (targetInfo.roomName && typeof targetInfo.x === 'number' && typeof targetInfo.y === 'number') {
+      go(creep, new RoomPosition(targetInfo.x, targetInfo.y, targetInfo.roomName), 1);
+      return;
+    }
+    releaseRepairTarget(creep);
+    return;
+  }
 
   creep.room.visual.text("Repair " + target.structureType + " " + target.hits + "/" + target.hitsMax, target.pos.x, target.pos.y - 1, { align: 'center', color: '#ffffff', opacity: 0.9 });
   debugRing(target, CFG.COLORS.REPAIR, "fix");
 
   var rr = creep.repair(target);
-  if (rr === OK){ if (CFG.CURRENT_LOG_LEVEL >= CFG.LOG_LEVEL.DEBUG) console.log("Creep "+creep.name+" repairing "+target.structureType+" @("+target.pos.x+","+target.pos.y+")"); debugSay(creep, "🔧"); if (target.hits >= target.hitsMax){ queue.shift(); debugSay(creep, "✔"); } return; }
-  if (rr === ERR_NOT_IN_RANGE){ debugLine(creep, target, CFG.COLORS.REPAIR, "to repair"); go(creep, target, 3); return; }
-  if (CFG.CURRENT_LOG_LEVEL >= CFG.LOG_LEVEL.DEBUG) console.log("Repair error for "+creep.name+": "+rr);
-  queue.shift();
+  if (rr === OK){ debugSay(creep, "🔧"); claimRepairTarget(creep, targetInfo); if (target.hits >= target.hitsMax){ releaseRepairTarget(creep); debugSay(creep, "✔"); } return; }
+  if (rr === ERR_NOT_IN_RANGE){ claimRepairTarget(creep, targetInfo); debugLine(creep, target, CFG.COLORS.REPAIR, "to repair"); go(creep, target, 3); return; }
+  releaseRepairTarget(creep);
 }
 
 module.exports = { run: run };
