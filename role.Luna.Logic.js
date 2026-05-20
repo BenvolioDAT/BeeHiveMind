@@ -18,7 +18,7 @@ var ALLOW_MULTI_LUNA_PER_SOURCE = CFG.ALLOW_MULTI_LUNA_PER_SOURCE !== false;
 var MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA = CFG.MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA || 2;
 var PREFER_EMPTY_SOURCES_BEFORE_STACKING = CFG.PREFER_EMPTY_SOURCES_BEFORE_STACKING !== false;
 var LUNA_SECONDARY_SOURCE_SCORE_PENALTY = CFG.LUNA_SECONDARY_SOURCE_SCORE_PENALTY || 150;
-var LUNA_FIRST_OPEN_BONUS = CFG.LUNA_FIRST_OPEN_BONUS || -120;
+var LUNA_FIRST_OPEN_BONUS = (typeof CFG.LUNA_FIRST_OPEN_BONUS === 'number') ? CFG.LUNA_FIRST_OPEN_BONUS : -120;
 var LUNA_UNDERHARVEST_ENERGY_THRESHOLD = CFG.LUNA_UNDERHARVEST_ENERGY_THRESHOLD || 800;
 var LUNA_RESERVED_SOURCE_SECOND_MIN_WORK = CFG.LUNA_RESERVED_SOURCE_SECOND_MIN_WORK || 4;
 var PF_CACHE_TTL = CFG.PF_CACHE_TTL;
@@ -36,6 +36,7 @@ var LUNA_REJECT_INACCESSIBLE_SOURCES = CFG.LUNA_REJECT_INACCESSIBLE_SOURCES !== 
 var LUNA_INACCESSIBLE_BLOCK_TTL = CFG.LUNA_INACCESSIBLE_BLOCK_TTL || LUNA_BLOCKED_SOURCE_TTL;
 var LUNA_PATH_FAIL_LIMIT = CFG.LUNA_PATH_FAIL_LIMIT || 3;
 var LUNA_STUCK_SOURCE_BLOCK_TICKS = CFG.LUNA_STUCK_SOURCE_BLOCK_TICKS || 8;
+var LUNA_REMOTE_INTEL_TTL = CFG.LUNA_REMOTE_INTEL_TTL || 3000;
 
 // =========================
 // Debug helpers
@@ -1146,11 +1147,12 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     neighborRooms = [];
     for (i = 0; i < roomRanks.length; i++) neighborRooms.push(roomRanks[i].roomName);
     var candidates=[], avoided=[], i, rn;
+    var candidateBySid = {};
     var inaccessibleSources = 0;
     var rejectedCloserRooms = [];
     var topCandidateScores = [];
 
-    // 1) With vision
+    // 1) Visible candidates
     for (i=0;i<neighborRooms.length;i++){
       rn=neighborRooms[i];
       if (isLunaRoomUnsafe(rn)) continue;
@@ -1192,38 +1194,48 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         candidates.push({
           id:s.id, roomName:rn, routeDistance: routeDistance, lin:lin, pathCost: cost,
           firstOpenBonus: firstOpenBonus, stackPenalty: stackPenalty, underHarvestBonus: underHarvestBonus,
-          sticky:sticky, assigned: assignedNow
+          sticky:sticky, assigned: assignedNow, candidateKind: 'visible'
         });
+        candidateBySid[s.id] = true;
       }
       if (sources.length > 0 && roomInaccessible >= sources.length) {
         markLunaRoomBlocked(rn, 'all-sources-inaccessible', LUNA_INACCESSIBLE_BLOCK_TTL);
       }
     }
 
-    // 2) No vision → use Memory.rooms.*.sources
-    if (!candidates.length){
-      for (i=0;i<neighborRooms.length;i++){
-        rn=neighborRooms[i]; if (isLunaRoomUnsafe(rn)) continue;
-        var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
-        for (var sid in rm.sources){
-          if (isLunaSourceBlocked(rn, sid)) continue;
-          if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
-          var cap2 = getSourceMaxSlots(sid);
-          var assigned2 = maCount(memAssign, sid);
-          if (assigned2 >= cap2) continue;
+    // 2) Memory-known candidates (always merged with visible list)
+    for (i=0;i<neighborRooms.length;i++){
+      rn=neighborRooms[i]; if (isLunaRoomUnsafe(rn)) continue;
+      var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
+      var roomVisible = Game.rooms[rn];
+      var intelTick = null;
+      if (rm.intel) {
+        if (typeof rm.intel.lastScanAt === 'number') intelTick = rm.intel.lastScanAt;
+        if (typeof rm.intel.lastVisited === 'number') intelTick = Math.max(intelTick || 0, rm.intel.lastVisited);
+        if (typeof rm.intel.t === 'number') intelTick = Math.max(intelTick || 0, rm.intel.t);
+      }
+      if (rm.scout && typeof rm.scout.lastVisited === 'number') intelTick = Math.max(intelTick || 0, rm.scout.lastVisited);
+      if (!roomVisible && (intelTick == null || (Game.time - intelTick) > LUNA_REMOTE_INTEL_TTL)) continue;
+      for (var sid in rm.sources){
+        if (candidateBySid[sid]) continue;
+        if (isLunaSourceBlocked(rn, sid)) continue;
+        if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
+        var cap2 = getSourceMaxSlots(sid);
+        var assigned2 = maCount(memAssign, sid);
+        if (assigned2 >= cap2) continue;
 
-          var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
-          var routeDistance2 = getRouteDistanceBetweenRooms(homeName, rn);
-          var synth = (lin2*350)+800;
-          var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
-          var stackPenalty2 = assigned2 > 0 ? LUNA_SECONDARY_SOURCE_SCORE_PENALTY : 0;
-          var firstOpenBonus2 = assigned2 === 0 ? LUNA_FIRST_OPEN_BONUS : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 50);
-          candidates.push({
-            id:sid, roomName:rn, routeDistance: routeDistance2, lin:lin2, pathCost: synth,
-            firstOpenBonus: firstOpenBonus2, stackPenalty: stackPenalty2, underHarvestBonus: 0,
-            sticky:sticky2, assigned: assigned2
-          });
-        }
+        var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
+        var routeDistance2 = getRouteDistanceBetweenRooms(homeName, rn);
+        if (routeDistance2 === Infinity) continue;
+        var synth = (lin2*350)+800;
+        var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
+        var stackPenalty2 = assigned2 > 0 ? LUNA_SECONDARY_SOURCE_SCORE_PENALTY : 0;
+        var firstOpenBonus2 = assigned2 === 0 ? LUNA_FIRST_OPEN_BONUS : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 50);
+        candidates.push({
+          id:sid, roomName:rn, routeDistance: routeDistance2, lin:lin2, pathCost: synth,
+          firstOpenBonus: firstOpenBonus2, stackPenalty: stackPenalty2, underHarvestBonus: 0,
+          sticky:sticky2, assigned: assigned2, candidateKind: 'memory'
+        });
       }
     }
 
@@ -1268,6 +1280,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         firstOpenBonus: candidates[i].firstOpenBonus,
         stackPenalty: candidates[i].stackPenalty,
         underHarvestBonus: candidates[i].underHarvestBonus
+        , candidateKind: candidates[i].candidateKind
       });
     }
 
@@ -1283,7 +1296,15 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
           rejectedCloserRooms.push({
             roomName: cand.roomName,
             sourceId: cand.id,
-            reason: cand.sticky ? 'sticky-preferred' : 'ranked-lower-by-criteria'
+            reason: cand.sticky ? 'sticky-preferred' : 'distance-rank-lower',
+            candidateKind: cand.candidateKind
+          });
+        } else if (cand.routeDistance === best.routeDistance && cand.lin === best.lin && cand.assigned > best.assigned) {
+          rejectedCloserRooms.push({
+            roomName: cand.roomName,
+            sourceId: cand.id,
+            reason: 'less-availability',
+            candidateKind: cand.candidateKind
           });
         }
       }
