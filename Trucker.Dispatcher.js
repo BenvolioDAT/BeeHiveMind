@@ -155,6 +155,23 @@ function countHomeTruckers(homeRoom) {
   return count;
 }
 
+function countHomeTruckersOnLocalJobs(homeRoom) {
+  var d = ensureDispatchMemory();
+  var assigned = d.assignedByCreep || {};
+  var count = 0;
+  for (var name in assigned) {
+    if (!assigned.hasOwnProperty(name)) continue;
+    var rec = assigned[name];
+    if (!rec || !rec.type) continue;
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (c.memory.role !== 'Trucker') continue;
+    if ((c.memory.home || c.room.name) !== homeRoom) continue;
+    if (rec.type === 'LOCAL_COLLECT' || rec.type === 'LOCAL_DELIVER') count++;
+  }
+  return count;
+}
+
 function chooseJobForTrucker(creep) {
   var d = cleanupDispatchMemory();
   var home = creep.memory.home || creep.room.name;
@@ -162,9 +179,15 @@ function chooseJobForTrucker(creep) {
   var localContainerPressure = getLocalContainerPressure(home);
   var localBaseQuota = Math.max(0, CFG.LOCAL_TRUCKER_BASE_QUOTA || 0);
   var homeTruckers = countHomeTruckers(home);
-  var protectLocalBase = localContainerPressure.containersOverPickup > 0 && homeTruckers <= localBaseQuota;
+  var localAssignedTruckers = countHomeTruckersOnLocalJobs(home);
+  var protectLocalBase = localContainerPressure.containersOverPickup > 0 && localAssignedTruckers < localBaseQuota;
   var forceLocalCollect = localContainerPressure.localPressure === 'urgent' || localContainerPressure.localPressure === 'critical' || protectLocalBase;
   if (protectLocalBase) localContainerPressure.reason = 'protect_local_base_quota';
+  localContainerPressure.homeTruckers = homeTruckers;
+  localContainerPressure.localAssignedTruckers = localAssignedTruckers;
+  localContainerPressure.localBaseQuota = localBaseQuota;
+  localContainerPressure.protectLocalBase = protectLocalBase;
+  localContainerPressure.forceLocalCollect = forceLocalCollect;
   diag.localContainerPressure = localContainerPressure;
 
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
@@ -172,7 +195,9 @@ function chooseJobForTrucker(creep) {
   }
 
   diag.jobsSeen++; diag.localJobs++;
-  var localCollect = { id: 'localCollect:' + home, type: 'LOCAL_COLLECT', homeRoom: home };
+  // Keep this claim id per-creep so urgent/critical local pressure can fan out
+  // across multiple Truckers in the same tick without a shared claim collision.
+  var localCollect = { id: 'localCollect:' + home + ':' + creep.name, type: 'LOCAL_COLLECT', homeRoom: home };
   if (forceLocalCollect && claimJob(creep, localCollect, 10)) { diag.jobsClaimed++; d.lastRun = diag; return localCollect; }
 
   var reqs = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
