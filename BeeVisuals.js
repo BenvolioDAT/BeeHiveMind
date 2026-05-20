@@ -895,7 +895,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
   var statusRoot = root && root.remoteContainerStatus ? root.remoteContainerStatus : {};
   if (!requests && !statusRoot) return;
 
-  var staleTicks = vc.remoteHaulTableStaleTicks || 150;
+  var staleTicks = vc.remoteContainerStatusVisualStaleTicks || vc.remoteHaulTableStaleTicks || 150;
   var showStale = vc.remoteHaulTableShowStale === true;
   var maxRows = vc.maxRemoteHaulTableRows || 8;
 
@@ -950,7 +950,6 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (typeof req.updated === 'number' && staleTicks > 0) {
         stale = (Game.time - req.updated) > staleTicks;
       }
-      if (stale && !showStale) continue;
 
       var remoteRoomName = req.remoteRoom || req.roomName || '?';
       var energyAmount = amount;
@@ -983,17 +982,19 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       var hitsPct = Number(req.containerHitsPct);
       if (!(hitsPct >= 0)) hitsPct = null;
       var status = 'READY';
-      if (stale && showStale) {
-        status = 'STALE';
-      } else if (maintenanceReason === 'emergencyRemoteRepair' && maintenanceUntil > Game.time) {
-        status = 'EMERGENCY';
+      if (maintenanceReason === 'emergencyRemoteRepair' && maintenanceUntil > Game.time) {
+        status = 'REPAIRING';
       } else if (maintenanceReason === 'containerRepair' && maintenanceUntil > Game.time) {
         status = 'LUNA FIX';
       } else if (hitsPct != null && hitsPct <= emergencyRepairStartPct) {
         status = 'CRITICAL';
       } else if (hitsPct != null && hitsPct <= lunaRepairStartPct) {
         status = 'LOW HP';
-      } else if (assigned) {
+      }
+      if (req.status === 'missing') status = 'MISSING';
+      if (stale && (status === 'READY' || status === 'LOW HP' || status === 'CRITICAL')) status = 'NEEDS VISION';
+      if (stale && !showStale && status === 'READY') status = 'STALE';
+      if (assigned) {
         status = req.assignedTo;
       } else if (req.urgent) {
         status = 'URGENT';
@@ -1018,6 +1019,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
         containerHealth = Math.floor(hitsPct * 100) + '%';
       }
 
+      var seenAge = (typeof req.updated === 'number') ? (Game.time - req.updated) : null;
       rows.push({
         roomName: remoteRoomName,
         energy: energyAmount,
@@ -1026,7 +1028,8 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
         status: status,
         urgent: !!req.urgent,
         assigned: assigned,
-        amount: energyAmount
+        amount: energyAmount,
+        lastSeen: seenAge
       });
     }
 
@@ -1044,7 +1047,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
     var panelX = 1.0;
     var panelY = 1.2;
     var rowHeight = 0.55;
-    var panelWidth = 17.2;
+    var panelWidth = 21.0;
     var totalRows = 1 + shownRows.length + (hiddenCount > 0 ? 1 : 0);
     var panelHeight = 0.55 + (totalRows * rowHeight);
 
@@ -1061,7 +1064,8 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
     text(v, 'Energy', panelX + 3.9, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
     text(v, 'Full', panelX + 7.5, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
     text(v, 'HP', panelX + 9.8, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
-    text(v, 'Status', panelX + 11.6, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'Seen', panelX + 11.8, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'Status', panelX + 14.2, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
 
     for (var r = 0; r < shownRows.length; r++) {
       var line = shownRows[r];
@@ -1070,13 +1074,17 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (line.status === 'URGENT') statusColor = '#ff8c42';
       if (line.status === 'STALE' || line.status === 'CRITICAL' || line.status === 'EMERGENCY') statusColor = '#ff5555';
       if (line.status === 'LOW HP' || line.status === 'LUNA FIX') statusColor = '#ffd166';
+      if (line.status === 'NEEDS VISION') statusColor = '#f7c948';
+      if (line.status === 'MISSING') statusColor = '#ff4d6d';
+      if (line.status === 'REPAIRING') statusColor = '#4dd0e1';
       if (line.assigned && line.status !== 'EMERGENCY' && line.status !== 'CRITICAL' && line.status !== 'STALE' && line.status !== 'LUNA FIX' && line.status !== 'LOW HP' && line.status !== 'URGENT' && line.status !== 'READY') statusColor = '#66ccff';
 
       text(v, line.roomName, panelX, y, 0.42, 'left', 1, '#ffffff');
       text(v, String(line.energy), panelX + 3.9, y, 0.42, 'left', 1, '#ffffff');
       text(v, line.fillPct + '%', panelX + 7.5, y, 0.42, 'left', 1, '#ffffff');
       text(v, line.health, panelX + 9.8, y, 0.42, 'left', 1, '#ffffff');
-      text(v, line.status, panelX + 11.6, y, 0.42, 'left', 1, statusColor);
+      text(v, (line.lastSeen == null ? '?' : String(line.lastSeen)), panelX + 11.8, y, 0.42, 'left', 1, '#cccccc');
+      text(v, line.status, panelX + 14.2, y, 0.42, 'left', 1, statusColor);
     }
 
     if (hiddenCount > 0) {

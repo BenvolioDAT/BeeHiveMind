@@ -17,7 +17,9 @@ var CFG = {
   BLOCK_MARK_TTL:         10000, // drop old "blocked" stamps after this long
   REPAIR_SCAN_INTERVAL:       maintCfg.repairScanInterval || 5,
   REMOTE_CONTAINER_STATUS_SWEEP_INTERVAL: maintCfg.remoteContainerStatusSweepInterval || 500,
-  REMOTE_CONTAINER_STATUS_STALE_TICKS: maintCfg.remoteContainerStatusStaleTicks || 1500,
+  REMOTE_CONTAINER_STATUS_STALE_TICKS: maintCfg.remoteContainerStatusStaleTicks || 150,
+  REMOTE_CONTAINER_STATUS_MEMORY_TTL: maintCfg.remoteContainerStatusMemoryTtl || 20000,
+  REMOTE_CONTAINER_STATUS_CRITICAL_MEMORY_TTL: maintCfg.remoteContainerStatusCriticalMemoryTtl || 50000,
   REPAIR_MAX_RAMPART:      30000,
   REPAIR_MAX_WALL:         30000,
   LOG: Logger.shouldLog(LOG_LEVEL.DEBUG)
@@ -435,14 +437,21 @@ function _pruneRemoteContainerStatus(now) {
   if (interval > 1 && (now % interval) !== 0) return;
   var root = Memory.__BHM;
   if (!root || !_isObject(root.remoteContainerStatus)) return;
-  var staleTicks = CFG.REMOTE_CONTAINER_STATUS_STALE_TICKS || 1500;
+  var staleTicks = CFG.REMOTE_CONTAINER_STATUS_STALE_TICKS || 150;
+  var defaultTtl = CFG.REMOTE_CONTAINER_STATUS_MEMORY_TTL || 20000;
+  var criticalTtl = CFG.REMOTE_CONTAINER_STATUS_CRITICAL_MEMORY_TTL || 50000;
   for (var id in root.remoteContainerStatus) {
     if (!Object.prototype.hasOwnProperty.call(root.remoteContainerStatus, id)) continue;
     var entry = root.remoteContainerStatus[id];
+    if (!entry || typeof entry !== 'object') { delete root.remoteContainerStatus[id]; continue; }
     var updated = entry && typeof entry.updated === 'number' ? entry.updated : 0;
-    if ((now - updated) > staleTicks) {
-      delete root.remoteContainerStatus[id];
-    }
+    var age = now - updated;
+    entry.lastSeenAgo = age;
+    entry.stale = age > staleTicks;
+    var hitsPct = typeof entry.containerHitsPct === 'number' ? entry.containerHitsPct : null;
+    var isCritical = entry.status === 'missing' || entry.status === 'critical' || entry.status === 'lowHp' || (hitsPct != null && hitsPct <= 0.40);
+    var ttl = isCritical ? criticalTtl : defaultTtl;
+    if (age > ttl) delete root.remoteContainerStatus[id];
   }
 }
 
