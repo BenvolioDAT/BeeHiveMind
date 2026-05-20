@@ -170,21 +170,28 @@ function countHomeTruckersOnLocalJobs(homeRoom) {
   return count;
 }
 
+function getLocalDesiredTruckers(localContainerPressure) {
+  var base = Math.max(0, CFG.LOCAL_TRUCKER_BASE_QUOTA || 0);
+  var desired = base;
+  if (localContainerPressure && (localContainerPressure.localPressure === 'urgent' || localContainerPressure.localPressure === 'critical')) desired += 1;
+  var maxTotal = Math.max(0, CFG.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
+  if (maxTotal > 0) desired = Math.min(desired, maxTotal);
+  return desired;
+}
+
 function chooseJobForTrucker(creep) {
   var d = cleanupDispatchMemory();
   var home = creep.memory.home || creep.room.name;
   var diag = { tick: Game.time, jobsSeen: 0, jobsClaimed: 0, localJobs: 0, remoteJobs: 0, skippedRemoteTTL: 0, skippedReserved: 0, skippedNoVision: 0, skippedUnsafe: 0, assignedByCreep: d.assignedByCreep || {} };
   var localContainerPressure = getLocalContainerPressure(home);
-  var localBaseQuota = Math.max(0, CFG.LOCAL_TRUCKER_BASE_QUOTA || 0);
   var homeTruckers = countHomeTruckers(home);
   var localAssignedTruckers = countHomeTruckersOnLocalJobs(home);
-  var protectLocalBase = localContainerPressure.containersOverPickup > 0 && localAssignedTruckers < localBaseQuota;
-  var forceLocalCollect = localContainerPressure.localPressure === 'urgent' || localContainerPressure.localPressure === 'critical' || protectLocalBase;
-  if (protectLocalBase) localContainerPressure.reason = 'protect_local_base_quota';
+  var localDesiredTruckers = getLocalDesiredTruckers(localContainerPressure);
+  var forceLocalCollect = localAssignedTruckers < localDesiredTruckers;
+  if (forceLocalCollect) localContainerPressure.reason = 'protect_local_desired_quota';
   localContainerPressure.homeTruckers = homeTruckers;
   localContainerPressure.localAssignedTruckers = localAssignedTruckers;
-  localContainerPressure.localBaseQuota = localBaseQuota;
-  localContainerPressure.protectLocalBase = protectLocalBase;
+  localContainerPressure.localDesiredTruckers = localDesiredTruckers;
   localContainerPressure.forceLocalCollect = forceLocalCollect;
   diag.localContainerPressure = localContainerPressure;
 

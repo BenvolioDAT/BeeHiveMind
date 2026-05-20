@@ -904,28 +904,118 @@ function computeLocalDefenseQuotas(room) {
   };
 }
 
+function getLocalContainerPressure(roomName) {
+  var out = { localPressure: 'none', containersOverUrgent: 0, containersOverCritical: 0 };
+  var room = Game.rooms[roomName];
+  if (!room) return out;
+  var pickupAt = Math.max(0, TruckerConfig.LOCAL_CONTAINER_PICKUP_AT || 1000);
+  var urgentAt = Math.max(pickupAt, TruckerConfig.LOCAL_CONTAINER_URGENT_AT || 1600);
+  var criticalAt = Math.max(urgentAt, TruckerConfig.LOCAL_CONTAINER_CRITICAL_AT || 1900);
+  var containers = room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store; } });
+  for (var i = 0; i < containers.length; i++) {
+    var energy = containers[i].store[RESOURCE_ENERGY] || 0;
+    if (energy >= urgentAt) out.containersOverUrgent++;
+    if (energy >= criticalAt) out.containersOverCritical++;
+  }
+  if (out.containersOverCritical > 0) out.localPressure = 'critical';
+  else if (out.containersOverUrgent > 0) out.localPressure = 'urgent';
+  return out;
+}
+
+function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
+  if (!homeRoom || !remoteRoom) return 9999;
+  var rooms = 0;
+  try {
+    var route = Game.map.findRoute(homeRoom, remoteRoom);
+    if (route && route !== ERR_NO_PATH && typeof route.length === 'number') rooms = route.length;
+  } catch (e) {}
+  if (!rooms || rooms < 1) rooms = Game.map.getRoomLinearDistance(homeRoom, remoteRoom) || 1;
+  var estimatedTravelTicks = rooms * 50 + 100;
+  return estimatedTravelTicks * 2 + 100;
+}
+
+function countHomeTruckersByAssignment(roomName) {
+  var local = 0;
+  var remote = 0;
+  var remoteCapable = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (canonicalRole(c.memory.role) !== 'Trucker') continue;
+    if ((c.memory.home || (c.room && c.room.name)) !== roomName) continue;
+    var job = c.memory.dispatchJob;
+    if (job && job.type === 'REMOTE_PICKUP') {
+      remote++;
+      var remoteRoom = job.roomName || c.memory.requestRoom || c.memory.targetRoom;
+      var required = estimateRemoteRoundTripTicks(roomName, remoteRoom);
+      if (typeof c.ticksToLive !== 'number' || c.ticksToLive >= required || (c.store && c.store.getUsedCapacity(RESOURCE_ENERGY) > 0)) remoteCapable++;
+    } else {
+      local++;
+    }
+  }
+  return { truckersOnLocalJobs: local, truckersOnRemoteJobs: remote, remoteCapableTruckers: remoteCapable };
+}
+
 
 function computeTruckerQuotaForHome(roomName) {
   var requests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
   var active = 0;
   var urgent = 0;
+  var remoteEnergyWaiting = 0;
+  var remoteRoomsSeen = {};
+  var staleSkipped = 0;
+  var unsafeSkipped = 0;
+  var lowEnergySkipped = 0;
+  var maintenanceSkipped = 0;
+  var wrongHomeSkipped = 0;
   for (var id in requests) {
     if (!Object.prototype.hasOwnProperty.call(requests, id)) continue;
     var req = requests[id];
-    if (!req || req.homeRoom !== roomName) continue;
-    if (TruckerConfig.shouldBlockRemoteHaulForMaintenance(req)) continue;
-    if ((req.amount || 0) < TruckerConfig.MIN_HAUL_REQUEST_ENERGY) continue;
-    if ((Game.time - (req.updated || 0)) > TruckerConfig.REQUEST_STALE_TICKS) continue;
-    if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
+    if (!req || req.homeRoom !== roomName) { wrongHomeSkipped++; continue; }
+    if (TruckerConfig.shouldBlockRemoteHaulForMaintenance(req)) { maintenanceSkipped++; continue; }
+    if ((req.amount || 0) < TruckerConfig.MIN_HAUL_REQUEST_ENERGY) { lowEnergySkipped++; continue; }
+    if ((Game.time - (req.updated || 0)) > TruckerConfig.REQUEST_STALE_TICKS) { staleSkipped++; continue; }
+    if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) { unsafeSkipped++; continue; }
     active++;
     if (req.urgent) urgent++;
+    remoteEnergyWaiting += Math.max(0, req.amount || 0);
+    remoteRoomsSeen[req.remoteRoom || req.roomName || ('unknown:' + id)] = true;
   }
-  var desired = 0;
-  if (active > 0) desired = 1;
-  if (active > 1 || urgent > 1) desired = 2;
-  if (active > 2 || urgent > 2) desired = 3;
-  desired = Math.min(desired, TruckerConfig.MAX_TRUCKERS_PER_HOME || 3);
-  return { activeRequests: active, urgentRequests: urgent, desiredTruckers: desired };
+  var activeRemoteRooms = Object.keys(remoteRoomsSeen).length;
+  var localPressure = getLocalContainerPressure(roomName);
+  var localDesiredTruckers = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
+  if (localPressure.localPressure === 'urgent' || localPressure.localPressure === 'critical') localDesiredTruckers += 1;
+  var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
+  if (maxTotalTruckers > 0) localDesiredTruckers = Math.min(localDesiredTruckers, maxTotalTruckers);
+
+  var remoteByEnergy = Math.ceil(remoteEnergyWaiting / 1600);
+  var remoteByRooms = activeRemoteRooms > 1 ? (activeRemoteRooms - 1) : 0;
+  var remoteByUrgency = urgent > 0 ? 1 : 0;
+  var remoteDesired = 0;
+  if (active > 0) remoteDesired = Math.max(1, remoteByEnergy + remoteByRooms + remoteByUrgency);
+  remoteDesired = Math.min(remoteDesired, Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0));
+
+  var finalTruckerQuota = localDesiredTruckers + remoteDesired;
+  if (maxTotalTruckers > 0) finalTruckerQuota = Math.min(finalTruckerQuota, maxTotalTruckers);
+
+  return {
+    activeRequests: active,
+    urgentRequests: urgent,
+    remoteEnergyWaiting: remoteEnergyWaiting,
+    activeRemoteRooms: activeRemoteRooms,
+    localDesiredTruckers: localDesiredTruckers,
+    remoteDesiredTruckers: remoteDesired,
+    desiredTruckers: remoteDesired,
+    finalTruckerQuota: finalTruckerQuota,
+    skipped: {
+      stale: staleSkipped,
+      unsafe: unsafeSkipped,
+      lowEnergy: lowEnergySkipped,
+      maintenance: maintenanceSkipped,
+      wrongHome: wrongHomeSkipped
+    }
+  };
 }
 
 function hasMeaningfulRepairTarget(target) {
@@ -1185,11 +1275,7 @@ function computeRoomQuotas(C, room) {
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
   var truckerQuotaMeta = computeTruckerQuotaForHome(room.name);
-  var remoteDesired = truckerQuotaMeta.desiredTruckers;
-  var localTruckerBaseQuota = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
-  var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
-  var truckerQuota = localTruckerBaseQuota + remoteDesired;
-  if (maxTotalTruckers > 0) truckerQuota = Math.min(truckerQuota, maxTotalTruckers);
+  var truckerQuota = truckerQuotaMeta.finalTruckerQuota || 0;
 
   var quotas = {
     // One BaseHarvest per owned source keeps mining stable without over-spawning.
@@ -1228,30 +1314,44 @@ function fillQueueForRoom(C, room) {
   };
   var localTruckerBaseQuota = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
   var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
-  var remoteTruckerQuota = truckerQuotaMeta.desiredTruckers;
+  var remoteTruckerQuota = truckerQuotaMeta.remoteDesiredTruckers || 0;
   var liveTruckers = getRoomLocalLiveCount(C, roomName, "Trucker");
   var queuedTruckers = queuedCount(roomName, "Trucker");
+  var assignmentCounts = countHomeTruckersByAssignment(roomName);
   Memory.rooms[roomName].lastLocalHaulerMode = {
     tick: Game.time,
     mode: 'trucker-primary',
     courierQuota: 0,
     truckerQuota: quotas.Trucker || 0,
     localTruckerQuota: localTruckerBaseQuota,
-    remoteTruckerQuota: remoteTruckerQuota,
+    localDesiredTruckers: truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota,
+    remoteDesiredTruckers: remoteTruckerQuota,
+    finalTruckerQuota: truckerQuotaMeta.finalTruckerQuota || (quotas.Trucker || 0),
     maxTotalTruckers: maxTotalTruckers,
     liveTruckers: liveTruckers,
     queuedTruckers: queuedTruckers,
+    truckersOnLocalJobs: assignmentCounts.truckersOnLocalJobs,
+    truckersOnRemoteJobs: assignmentCounts.truckersOnRemoteJobs,
+    remoteCapableTruckers: assignmentCounts.remoteCapableTruckers,
     courierRoleRetired: true
   };
   Memory.rooms[roomName].lastTruckerQuota = {
     tick: Game.time,
     activeRequests: truckerQuotaMeta.activeRequests,
     urgentRequests: truckerQuotaMeta.urgentRequests,
+    remoteEnergyWaiting: truckerQuotaMeta.remoteEnergyWaiting || 0,
+    activeRemoteRooms: truckerQuotaMeta.activeRemoteRooms || 0,
+    localDesiredTruckers: truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota,
+    remoteDesiredTruckers: truckerQuotaMeta.remoteDesiredTruckers || 0,
+    finalTruckerQuota: truckerQuotaMeta.finalTruckerQuota || (quotas.Trucker || 0),
     desiredTruckers: truckerQuotaMeta.desiredTruckers,
-    remoteDesiredTruckers: truckerQuotaMeta.desiredTruckers,
     liveTruckers: liveTruckers,
     queuedTruckers: queuedTruckers,
-    reasons: truckerQuotaMeta.desiredTruckers > 0 ? "active remote haul requests" : "no active remote haul requests"
+    truckersOnLocalJobs: assignmentCounts.truckersOnLocalJobs,
+    truckersOnRemoteJobs: assignmentCounts.truckersOnRemoteJobs,
+    remoteCapableTruckers: assignmentCounts.remoteCapableTruckers,
+    skipped: truckerQuotaMeta.skipped || {},
+    reasons: (truckerQuotaMeta.remoteDesiredTruckers || 0) > 0 ? "workload-based remote demand" : "no active remote haul workload"
   };
 
   pruneOverfilledQueue(roomName, quotas, C);
