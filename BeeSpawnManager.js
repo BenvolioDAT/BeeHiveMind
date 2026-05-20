@@ -1024,7 +1024,10 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
     if (!req.containerId) continue;
     if (typeof req.containerHitsPct !== 'number') continue;
     if (req.containerHitsPct > startPct) continue;
-    if ((Game.time - (req.updated || 0)) > staleTicks) continue;
+    if ((Game.time - (req.updated || 0)) > staleTicks) {
+      if (req.containerHitsPct <= startPct) ensureRemoteVisionRequestFromStatus(req, roomName);
+      continue;
+    }
     if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
     var heldByEmergencyRepair =
       req.maintenanceUntil &&
@@ -1044,6 +1047,34 @@ function findRemoteContainerEmergencyRepairRequest(roomName) {
   var statusReq = findEmergencyRepairRequestInBucket(statusRequests, roomName);
   if (statusReq) return statusReq;
   return findEmergencyRepairRequestInBucket(haulRequests, roomName);
+}
+
+
+function ensureRemoteVisionRequests() { Memory.__BHM = Memory.__BHM || {}; Memory.__BHM.remoteVisionRequests = Memory.__BHM.remoteVisionRequests || {}; return Memory.__BHM.remoteVisionRequests; }
+function ensureRemoteVisionRequestFromStatus(req, homeRoom) {
+  if (!req || !homeRoom) return null;
+  var map = ensureRemoteVisionRequests();
+  var key = (req.containerId || req.sourceId || (req.remoteRoom + ':' + req.x + ':' + req.y));
+  var existing = map[key] || {};
+  map[key] = {
+    reason: 'staleRemoteContainer', homeRoom: homeRoom, targetRoom: req.remoteRoom || req.roomName,
+    x: req.x, y: req.y, containerId: req.containerId || null, sourceId: req.sourceId || null,
+    priority: Math.max(Number(existing.priority)||0, (req.containerHitsPct != null && req.containerHitsPct <= 0.4) ? 100 : 60),
+    requestedAt: existing.requestedAt || Game.time
+  };
+  return map[key];
+}
+function queueEmergencyVisionScoutIfNeeded(roomName) {
+  var roomMem = ensureRoomMemory(roomName);
+  var maxPerHome = ((CoreConfig.settings && CoreConfig.settings.visuals && CoreConfig.settings.visuals.remoteVisionRequestMaxEmergencyScoutsPerHome) || 1);
+  var reqs = ensureRemoteVisionRequests();
+  var pending = 0; var selected = null;
+  for (var k in reqs) { if (!Object.prototype.hasOwnProperty.call(reqs,k)) continue; var r=reqs[k]; if (r && r.homeRoom===roomName) { pending++; if (!selected || (r.priority||0)>(selected.priority||0)) selected=r; } }
+  var liveScout = 0; for (var n in Game.creeps) { var c=Game.creeps[n]; if (c && c.memory && canonicalRole(c.memory.role)==='Scout' && (c.memory.home===roomName || (c.memory.scout && c.memory.scout.home===roomName))) liveScout++; }
+  var queuedScout = queuedCount(roomName, 'Scout');
+  var shouldQueue = pending>0 && liveScout===0 && queuedScout===0 && maxPerHome>0;
+  if (shouldQueue) enqueue(roomName, 'Scout', { task: 'remoteVisionEmergency', home: roomName });
+  roomMem.lastRemoteVision = { pendingRequests: pending, selectedRequest: selected ? (selected.containerId || selected.sourceId || selected.targetRoom) : null, liveScoutAssigned: liveScout, queuedScout: shouldQueue || queuedScout>0, reason: shouldQueue ? 'queuedEmergencyScout' : 'none' };
 }
 
 function determineQueenQuota(room) {
@@ -1129,6 +1160,7 @@ function computeRoomQuotas(C, room) {
 
 function fillQueueForRoom(C, room) {
   var quotas = computeRoomQuotas(C, room);
+  queueEmergencyVisionScoutIfNeeded(room.name);
   var roomName = room.name;
   pruneBlockedLunaQueueItems(roomName);
   cleanupRetiredCourierState(roomName);

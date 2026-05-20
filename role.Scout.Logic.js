@@ -207,8 +207,49 @@ function shouldRetreat(creep, threatInfo) { if (threatInfo && threatInfo.threat 
 function wanderRoom(creep) { if (creep.room && creep.room.controller) { creep.travelTo(creep.room.controller, { range: 3, reusePath: 10 }); return; } var center = new RoomPosition(25, 25, creep.pos.roomName); creep.travelTo(center, { range: 10, reusePath: 10 }); }
 function returnHome(creep, mem) { var homeRoom = mem.home || creep.pos.roomName; var anchor = new RoomPosition(25, 25, homeRoom); creep.travelTo(anchor, { range: 20, reusePath: CFG.PATH_REUSE }); if (creep.pos.roomName === homeRoom) { mem.state = STATE_IDLE; mem.targetRoom = null; mem.arrivedAt = null; creep.memory.targetRoom = null; } creep.memory.state = mem.state; }
 
+
+function ensureRemoteVisionRoot() { Memory.__BHM = Memory.__BHM || {}; Memory.__BHM.remoteVisionRequests = Memory.__BHM.remoteVisionRequests || {}; return Memory.__BHM.remoteVisionRequests; }
+function pickRemoteVisionRequest(mem) {
+  var reqs = ensureRemoteVisionRoot();
+  var bestKey = null; var best = null;
+  for (var k in reqs) {
+    if (!Object.prototype.hasOwnProperty.call(reqs, k)) continue;
+    var r = reqs[k]; if (!r) continue;
+    if (r.homeRoom && mem.home && r.homeRoom !== mem.home) continue;
+    if (r.resolvedAt) continue;
+    var pri = Number(r.priority) || 0;
+    if (!best || pri > (Number(best.priority)||0) || ((pri === (Number(best.priority)||0)) && (r.requestedAt||0) < (best.requestedAt||0))) { best = r; bestKey = k; }
+  }
+  return best ? { key: bestKey, req: best } : null;
+}
+function serviceRemoteVisionRequest(creep, mem) {
+  var pick = pickRemoteVisionRequest(mem);
+  if (!pick) return false;
+  var req = pick.req; Memory.rooms = Memory.rooms || {}; Memory.rooms[mem.home] = Memory.rooms[mem.home] || {}; Memory.rooms[mem.home].lastRemoteVision = { pendingRequests: Object.keys(ensureRemoteVisionRoot()).length, selectedRequest: req.containerId || pick.key, liveScoutAssigned: creep.name, queuedScout: false, reason: 'scoutServingVisionRequest' };
+  var targetRoom = req.targetRoom || req.roomName; if (!targetRoom) return false;
+  if (creep.pos.roomName !== targetRoom) { creep.travelTo(new RoomPosition(req.x || 25, req.y || 25, targetRoom), { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
+  var root = Memory.__BHM = Memory.__BHM || {}; root.remoteContainerStatus = root.remoteContainerStatus || {};
+  var id = req.containerId || pick.key;
+  var obj = req.containerId ? Game.getObjectById(req.containerId) : null;
+  if (!obj && typeof req.x === 'number' && typeof req.y === 'number' && creep.room) {
+    var at = creep.room.lookForAt(LOOK_STRUCTURES, req.x, req.y) || [];
+    for (var i=0;i<at.length;i++) if (at[i].structureType === STRUCTURE_CONTAINER) { obj = at[i]; break; }
+  }
+  var rec = root.remoteContainerStatus[id] || { containerId: req.containerId, sourceId: req.sourceId, homeRoom: req.homeRoom, remoteRoom: targetRoom, x: req.x, y: req.y };
+  if (obj && obj.structureType === STRUCTURE_CONTAINER) {
+    rec.updated = Game.time; rec.lastSeen = Game.time; rec.amount = obj.store[RESOURCE_ENERGY] || 0; rec.capacity = obj.store.getCapacity(RESOURCE_ENERGY) || obj.store.getCapacity() || 2000;
+    rec.containerHits = obj.hits; rec.containerHitsMax = obj.hitsMax; rec.containerHitsPct = obj.hitsMax > 0 ? (obj.hits / obj.hitsMax) : null; rec.status = 'built'; rec.stale = false; rec.lastSeenAgo = 0;
+  } else {
+    rec.updated = Game.time; rec.lastSeen = Game.time; rec.status = 'missing'; rec.missingSeenAt = Game.time; rec.stale = false; rec.lastSeenAgo = 0;
+  }
+  root.remoteContainerStatus[id] = rec;
+  delete ensureRemoteVisionRoot()[pick.key];
+  return true;
+}
+
 function run(creep) {
   var mem = ensureScoutMem(creep);
+  if (serviceRemoteVisionRequest(creep, mem)) return;
   if (!mem.targetRoom) chooseTargetRoom(creep, mem);
   var state = refreshState(creep, mem);
   if (state === STATE_RETURN) { returnHome(creep, mem); return; }

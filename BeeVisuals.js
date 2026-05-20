@@ -895,7 +895,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
   var statusRoot = root && root.remoteContainerStatus ? root.remoteContainerStatus : {};
   if (!requests && !statusRoot) return;
 
-  var staleTicks = vc.remoteHaulTableStaleTicks || 150;
+  var staleTicks = vc.remoteContainerStatusVisualStaleTicks || vc.remoteHaulTableStaleTicks || 150;
   var showStale = vc.remoteHaulTableShowStale === true;
   var maxRows = vc.maxRemoteHaulTableRows || 8;
 
@@ -950,7 +950,6 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (typeof req.updated === 'number' && staleTicks > 0) {
         stale = (Game.time - req.updated) > staleTicks;
       }
-      if (stale && !showStale) continue;
 
       var remoteRoomName = req.remoteRoom || req.roomName || '?';
       var energyAmount = amount;
@@ -983,17 +982,19 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       var hitsPct = Number(req.containerHitsPct);
       if (!(hitsPct >= 0)) hitsPct = null;
       var status = 'READY';
-      if (stale && showStale) {
-        status = 'STALE';
-      } else if (maintenanceReason === 'emergencyRemoteRepair' && maintenanceUntil > Game.time) {
-        status = 'EMERGENCY';
+      if (maintenanceReason === 'emergencyRemoteRepair' && maintenanceUntil > Game.time) {
+        status = 'REPAIRING';
       } else if (maintenanceReason === 'containerRepair' && maintenanceUntil > Game.time) {
         status = 'LUNA FIX';
       } else if (hitsPct != null && hitsPct <= emergencyRepairStartPct) {
         status = 'CRITICAL';
       } else if (hitsPct != null && hitsPct <= lunaRepairStartPct) {
         status = 'LOW HP';
-      } else if (assigned) {
+      }
+      if (req.status === 'missing') status = 'MISSING';
+      if (stale && (status === 'READY' || status === 'LOW HP' || status === 'CRITICAL')) status = 'NEEDS VISION';
+      if (stale && !showStale && status === 'READY') status = 'STALE';
+      if (assigned) {
         status = req.assignedTo;
       } else if (req.urgent) {
         status = 'URGENT';
@@ -1018,6 +1019,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
         containerHealth = Math.floor(hitsPct * 100) + '%';
       }
 
+      var seenAge = (typeof req.updated === 'number') ? (Game.time - req.updated) : null;
       rows.push({
         roomName: remoteRoomName,
         energy: energyAmount,
@@ -1026,7 +1028,8 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
         status: status,
         urgent: !!req.urgent,
         assigned: assigned,
-        amount: energyAmount
+        amount: energyAmount,
+        lastSeen: seenAge
       });
     }
 
