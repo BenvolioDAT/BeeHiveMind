@@ -47,6 +47,34 @@ function getRepairQueue(room){ Memory.rooms = Memory.rooms || {}; Memory.rooms[r
 function getNextRepairTarget(queue){ while (queue.length){ var head = queue[0]; if (!head || !head.id){ queue.shift(); continue; } var obj = Game.getObjectById(head.id); if (!obj || !obj.hits || obj.hits >= obj.hitsMax){ queue.shift(); continue; } return obj; } return null; }
 function findDroppedEnergy(creep){ return creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, { filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount || 0) > 0; } }); }
 function findWithdrawSource(creep){ return creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function(s){ if (!s.store) return false; var t = s.structureType; if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN) return false; return (s.store[RESOURCE_ENERGY] || 0) > 0; } }); }
+function isRoomUnsafeForRemoteRepair(roomName, homeRoom){
+  if (!roomName || roomName === homeRoom) return false;
+  var mem = Memory.rooms && Memory.rooms[roomName];
+  if (mem) {
+    if (mem.hostile) return true;
+    if (typeof mem.lunaBlockedUntil === 'number' && mem.lunaBlockedUntil > Game.time) return true;
+    if (mem._invaderLock && mem._invaderLock.locked && (Game.time - (mem._invaderLock.lastSeenAt || 0) <= 1500)) return true;
+    if (mem.intel) {
+      var intel = mem.intel;
+      var myName = (Memory.__BHM && Memory.__BHM.me) || null;
+      if (intel.owner && myName && intel.owner !== myName) return true;
+      if (intel.reservation && myName && intel.reservation !== myName) return true;
+    }
+  }
+  var room = Game.rooms[roomName];
+  if (room) {
+    var hostiles = room.find(FIND_HOSTILE_CREEPS);
+    if (hostiles && hostiles.length > 0) return true;
+    if (room.controller) {
+      var owner = room.controller.owner && room.controller.owner.username;
+      var reserver = room.controller.reservation && room.controller.reservation.username;
+      var me = (Memory.__BHM && Memory.__BHM.me) || null;
+      if (owner && me && owner !== me) return true;
+      if (reserver && me && reserver !== me) return true;
+    }
+  }
+  return false;
+}
 function getRemoteHaulRequestById(id){
   var root = Memory.__BHM && Memory.__BHM.remoteHaulRequests;
   if (!root || !id) return null;
@@ -207,8 +235,11 @@ function getLocalTargets(creep){
   var out = [];
   for (var i=0;i<queue.length;i++){
     var t = queue[i]; if (!t || !t.id) continue;
-    var hitsPct = (t.hitsMax>0) ? (t.hits/t.hitsMax) : null;
-    out.push({id:t.id, roomName:creep.room.name, type:t.type, priority:t.priority, hitsPct:hitsPct});
+    var obj = Game.getObjectById(t.id);
+    if (!obj || typeof obj.hits !== 'number' || typeof obj.hitsMax !== 'number' || obj.hitsMax <= 0) continue;
+    if (obj.hits >= obj.hitsMax) continue;
+    var hitsPct = obj.hits / obj.hitsMax;
+    out.push({id:t.id, roomName:obj.pos.roomName, x:obj.pos.x, y:obj.pos.y, type:obj.structureType, priority:t.priority, hitsPct:hitsPct});
   }
   return out;
 }
@@ -220,8 +251,9 @@ function getRemoteContainerTargets(creep){
     if (!Object.prototype.hasOwnProperty.call(root,id)) continue;
     var r = root[id]; if (!r || r.homeRoom !== home) continue;
     if (typeof r.containerHitsPct !== 'number' || r.containerHitsPct > 0.75) continue;
-    if (r.remoteRoom && typeof isLunaRemoteRoomUnsafe === 'function' && isLunaRemoteRoomUnsafe(r.remoteRoom)) continue;
-    out.push({id:id, roomName:r.remoteRoom || r.roomName, x:r.x, y:r.y, type:STRUCTURE_CONTAINER, priority:0, hitsPct:r.containerHitsPct});
+    var targetRoom = r.remoteRoom || r.roomName;
+    if (isRoomUnsafeForRemoteRepair(targetRoom, home)) continue;
+    out.push({id:id, roomName:targetRoom, x:r.x, y:r.y, type:STRUCTURE_CONTAINER, priority:0, hitsPct:r.containerHitsPct, sourceId:r.sourceId || null});
   }
   return out;
 }
@@ -250,6 +282,41 @@ function run(creep){
   hud(creep, "🔧 " + e + "/" + creep.store.getCapacity(RESOURCE_ENERGY));
 
   if (e <= 0) {
+    var activeTarget = creep.memory.repairTargetInfo || null;
+    if (activeTarget && activeTarget.roomName && activeTarget.roomName !== creep.room.name) {
+      go(creep, new RoomPosition(25, 25, activeTarget.roomName), 20);
+      claimRepairTarget(creep, activeTarget);
+      return;
+    }
+    if (activeTarget && activeTarget.type === STRUCTURE_CONTAINER) {
+      var targetContainer = activeTarget.id ? Game.getObjectById(activeTarget.id) : null;
+      if (!targetContainer && activeTarget.roomName && typeof activeTarget.x === 'number' && typeof activeTarget.y === 'number') {
+        go(creep, new RoomPosition(activeTarget.x, activeTarget.y, activeTarget.roomName), 1);
+        claimRepairTarget(creep, activeTarget);
+        return;
+      }
+      if (targetContainer && targetContainer.store && (targetContainer.store[RESOURCE_ENERGY] || 0) > 0) {
+        var wrt = creep.withdraw(targetContainer, RESOURCE_ENERGY);
+        if (wrt === ERR_NOT_IN_RANGE) go(creep, targetContainer, 1);
+        claimRepairTarget(creep, activeTarget);
+        return;
+      }
+      if (activeTarget.sourceId) {
+        var emergencySource = Game.getObjectById(activeTarget.sourceId);
+        if (emergencySource) {
+          var hr = creep.harvest(emergencySource);
+          if (hr === ERR_NOT_IN_RANGE) go(creep, emergencySource, 1);
+          claimRepairTarget(creep, activeTarget);
+          return;
+        }
+      }
+      releaseRepairTarget(creep);
+      var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
+      if (creep.room.name !== home) {
+        go(creep, new RoomPosition(25, 25, home), 20);
+        return;
+      }
+    }
     var pile = findDroppedEnergy(creep);
     if (pile){ debugRing(pile, CFG.COLORS.ENERGY, "💧"+(pile.amount || 0)); debugLine(creep, pile, CFG.COLORS.ENERGY, "pickup"); var pr = creep.pickup(pile); if (pr === ERR_NOT_IN_RANGE) go(creep, pile, 1); else if (pr === OK) debugSay(creep, "💼"); return; }
     var source = findWithdrawSource(creep);
@@ -259,7 +326,19 @@ function run(creep){
     return;
   }
 
-  var targetInfo = creep.memory.repairTargetInfo || getBestRepairTargetForCreep(creep);
+  var targetInfo = creep.memory.repairTargetInfo || null;
+  var needsRefresh = !targetInfo || (Game.time % 5 === 0) || (targetInfo && targetInfo.type === STRUCTURE_ROAD);
+  if (needsRefresh) {
+    var better = getBestRepairTargetForCreep(creep);
+    if (!targetInfo) {
+      targetInfo = better;
+    } else if (targetInfo.type === STRUCTURE_ROAD && better && better.type !== STRUCTURE_ROAD) {
+      releaseRepairTarget(creep);
+      targetInfo = better;
+    } else if (!better) {
+      targetInfo = null;
+    }
+  }
   if (!targetInfo){ releaseRepairTarget(creep); if (creep.memory) creep.memory.task = undefined; debugSay(creep, "✅ done"); return; }
   if (!creep.memory.repairTargetId || creep.memory.repairTargetId !== targetInfo.id) {
     releaseRepairTarget(creep);

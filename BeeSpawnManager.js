@@ -535,7 +535,6 @@ function countApprovedLunaSourcesForRemote(remoteName) {
     return mem.intel.sources || 0;
   }
 
-  if (hasRemoteContainerRepairDemand(room.name)) return 1;
   return 0;
 }
 
