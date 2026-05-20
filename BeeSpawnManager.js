@@ -937,6 +937,8 @@ function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
 function countHomeTruckersByAssignment(roomName) {
   var local = 0;
   var remote = 0;
+  var remotePickup = 0;
+  var remoteReturn = 0;
   var remoteCapable = 0;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
@@ -945,16 +947,30 @@ function countHomeTruckersByAssignment(roomName) {
     if (canonicalRole(c.memory.role) !== 'Trucker') continue;
     if ((c.memory.home || (c.room && c.room.name)) !== roomName) continue;
     var job = c.memory.dispatchJob;
-    if (job && job.type === 'REMOTE_PICKUP') {
+    if (job && (job.type === 'REMOTE_PICKUP' || job.type === 'REMOTE_RETURN')) {
       remote++;
-      var remoteRoom = job.roomName || c.memory.requestRoom || c.memory.targetRoom;
-      var required = estimateRemoteRoundTripTicks(roomName, remoteRoom);
-      if (typeof c.ticksToLive !== 'number' || c.ticksToLive >= required || (c.store && c.store.getUsedCapacity(RESOURCE_ENERGY) > 0)) remoteCapable++;
+      if (job.type === 'REMOTE_PICKUP') remotePickup++;
+      if (job.type === 'REMOTE_RETURN') remoteReturn++;
+      if (job.type === 'REMOTE_RETURN') {
+        // Already returning with energy from remote pipeline; count as fulfilling remote side
+        // even if TTL is below full outbound round-trip estimate.
+        remoteCapable++;
+      } else {
+        var remoteRoom = job.roomName || c.memory.requestRoom || c.memory.targetRoom;
+        var required = estimateRemoteRoundTripTicks(roomName, remoteRoom);
+        if (typeof c.ticksToLive !== 'number' || c.ticksToLive >= required || (c.store && c.store.getUsedCapacity(RESOURCE_ENERGY) > 0)) remoteCapable++;
+      }
     } else {
       local++;
     }
   }
-  return { truckersOnLocalJobs: local, truckersOnRemoteJobs: remote, remoteCapableTruckers: remoteCapable };
+  return {
+    truckersOnLocalJobs: local,
+    truckersOnRemoteJobs: remote,
+    truckersOnRemotePickup: remotePickup,
+    truckersOnRemoteReturn: remoteReturn,
+    remoteCapableTruckers: remoteCapable
+  };
 }
 
 
@@ -1339,6 +1355,8 @@ function fillQueueForRoom(C, room) {
     queuedTruckers: queuedTruckers,
     truckersOnLocalJobs: assignmentCounts.truckersOnLocalJobs,
     truckersOnRemoteJobs: assignmentCounts.truckersOnRemoteJobs,
+    truckersOnRemotePickup: assignmentCounts.truckersOnRemotePickup,
+    truckersOnRemoteReturn: assignmentCounts.truckersOnRemoteReturn,
     remoteCapableTruckers: assignmentCounts.remoteCapableTruckers,
     effectiveActiveTruckers: effectiveActiveTruckers,
     courierRoleRetired: true
@@ -1357,6 +1375,8 @@ function fillQueueForRoom(C, room) {
     queuedTruckers: queuedTruckers,
     truckersOnLocalJobs: assignmentCounts.truckersOnLocalJobs,
     truckersOnRemoteJobs: assignmentCounts.truckersOnRemoteJobs,
+    truckersOnRemotePickup: assignmentCounts.truckersOnRemotePickup,
+    truckersOnRemoteReturn: assignmentCounts.truckersOnRemoteReturn,
     remoteCapableTruckers: assignmentCounts.remoteCapableTruckers,
     effectiveActiveTruckers: effectiveActiveTruckers,
     skipped: truckerQuotaMeta.skipped || {},
@@ -1391,6 +1411,12 @@ function fillQueueForRoom(C, room) {
     }
     var effectiveLimit = limit + replacementNeed;
     var deficit = Math.max(0, effectiveLimit - active - queued);
+    if (role === 'Trucker') {
+      var truckerHardCap = truckerQuotaMeta.finalTruckerQuota || limit || 0;
+      if (maxTotalTruckers > 0) truckerHardCap = Math.min(truckerHardCap, maxTotalTruckers);
+      var spareUnderCap = Math.max(0, truckerHardCap - liveTruckers - queuedTruckers);
+      deficit = Math.min(deficit, spareUnderCap);
+    }
     if (deficit > 0 && tickEvery(DBG_EVERY)) {
       dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit,
         'active=', active, 'queued=', queued, 'deficit=', deficit);
