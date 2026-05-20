@@ -294,6 +294,7 @@ function auditAssignmentsForHome(homeRoom) {
   var duplicateQueuedSources = [];
   var assignedSources = [];
   var unfinishedContainerSources = [];
+  var sourceQueueDecisions = {};
   var queued = 0;
   var spawnQueue = (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].spawnQueue) || [];
   for (var q = 0; q < spawnQueue.length; q++) {
@@ -318,6 +319,11 @@ function auditAssignmentsForHome(homeRoom) {
       rec.reservedUntil = 0;
     }
     var hasQueueItemsForSource = queuedBySource[sid] > 0;
+    if (rec.reservedBy && rec.reservedUntil > Game.time && !hasQueueItemsForSource && String(rec.reservedBy).indexOf('queue:') === 0) {
+      rec.reservedBy = null;
+      rec.reservedUntil = 0;
+      sourceQueueDecisions[sid] = 'cleared-stale-reservation-no-queue-item';
+    }
     if (rec.reservedBy && rec.reservedUntil > Game.time && !hasQueueItemsForSource) queued++;
     if (hasQueueItemsForSource) {
       rec.reservedBy = rec.reservedBy || ('queue:spawnQueue:' + sid);
@@ -349,9 +355,11 @@ function auditAssignmentsForHome(homeRoom) {
       assignedSources.push(sid);
       rec.reservedBy = null;
       rec.reservedUntil = 0;
+      sourceQueueDecisions[sid] = 'assigned-live-luna';
     } else if ((rec.reservedBy && rec.reservedUntil > Game.time) || hasQueueItemsForSource) {
       rec.status = 'queued';
       rec.reason = rec.reservedBy;
+      sourceQueueDecisions[sid] = hasQueueItemsForSource ? 'queued-spawnQueue' : 'queued-reserved';
     } else {
       rec.status = 'open';
       rec.reason = 'missing-luna';
@@ -359,6 +367,9 @@ function auditAssignmentsForHome(homeRoom) {
         rec.reason = 'unfinished-container';
         if (rec.container) rec.container.status = rec.container.status || 'missing';
         unfinishedContainerSources.push(sid);
+        sourceQueueDecisions[sid] = 'missing-luna-unfinished-container';
+      } else {
+        sourceQueueDecisions[sid] = 'missing-luna';
       }
       home.missingSources.push(sid);
     }
@@ -388,6 +399,7 @@ function auditAssignmentsForHome(homeRoom) {
       var rs = src && Memory.rooms && Memory.rooms[src.remoteRoom] && Memory.rooms[src.remoteRoom].sources && Memory.rooms[src.remoteRoom].sources[sid];
       return !!(rs && rs.lunaBlockedUntil && rs.lunaBlockedUntil > Game.time);
     }),
+    sourceQueueDecisions: sourceQueueDecisions,
     notes: 'one Luna per approved source'
   };
 
