@@ -20,7 +20,7 @@ module.exports = [
   BodyParts.WorkBody(3, 2, 5),
   BodyParts.WorkBody(3, 2, 4),
   BodyParts.WorkBody(2, 2, 4),
-  BodyParts.WorkBody(2, 2, 3,
+  BodyParts.WorkBody(2, 2, 3),
   BodyParts.WorkBody(2, 1, 3),
   BodyParts.WorkBody(2, 1, 2),
   BodyParts.WorkBody(1, 1, 2),
