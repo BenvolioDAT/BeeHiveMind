@@ -161,7 +161,10 @@ function gatherCandidateRemoteRoomsForHome(homeRoom) {
     if (remoteName === homeName) reason = 'home-room';
     else if (Game.map.getRoomLinearDistance(homeName, remoteName) > radius) reason = 'beyond-radius';
     else if (getRouteDistanceBetweenRooms(homeName, remoteName) === Infinity) reason = 'no-route';
-    else if (isRemoteUnsafe(remoteName)) reason = 'unsafe';
+    else if (isRemoteUnsafe(remoteName)) {
+      if (remoteMem.lunaBlockedReason === 'all-sources-inaccessible') reason = 'all-sources-inaccessible';
+      else reason = 'unsafe';
+    }
     else if (remoteMem.lunaBlocked) reason = 'luna-blocked';
     else if (remoteVisible && remoteVisible.controller && remoteVisible.controller.owner && (!myName || remoteVisible.controller.owner.username !== myName)) reason = 'owned-by-other';
     else if (remoteVisible && remoteVisible.controller && remoteVisible.controller.reservation && (!myName || remoteVisible.controller.reservation.username !== myName)) reason = 'reserved-by-other';
