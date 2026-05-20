@@ -192,6 +192,31 @@ function gatherCandidateRemoteRoomsForHome(homeRoom) {
   return out;
 }
 
+
+function getApprovedRemotesFromScout(homeRoom) {
+  var out = { approvedRooms: [], approvedSources: [], rejected: [] };
+  var intel = Memory.__BHM && Memory.__BHM.scoutIntel && Memory.__BHM.scoutIntel.homes && Memory.__BHM.scoutIntel.homes[homeRoom];
+  var rooms = intel && intel.rooms ? intel.rooms : null;
+  if (!rooms) return out;
+  for (var rn in rooms) {
+    if (!Object.prototype.hasOwnProperty.call(rooms, rn)) continue;
+    var rec = rooms[rn]; if (!rec) continue;
+    if (rn === homeRoom) { out.rejected.push({ room: rn, reason: 'home-room' }); continue; }
+    if (!rec.remoteEligible) { out.rejected.push({ room: rn, reason: rec.remoteBlockedReason || 'blocked' }); continue; }
+    if (isRemoteUnsafe(rn)) { out.rejected.push({ room: rn, reason: 'unsafe' }); continue; }
+    out.approvedRooms.push(rn);
+    var srcs = rec.sources || [];
+    for (var i = 0; i < srcs.length; i++) {
+      var src = srcs[i];
+      if (!src || !src.id || src.accessible === false) continue;
+      out.approvedSources.push({ sourceId: src.id, targetRoom: rn, routeDistance: rec.routeDistance, linearDistance: rec.linearDistance });
+    }
+  }
+  out.approvedRooms.sort(function(a,b){ return getRouteDistanceBetweenRooms(homeRoom,a)-getRouteDistanceBetweenRooms(homeRoom,b); });
+  out.approvedSources.sort(function(a,b){ if (a.routeDistance!==b.routeDistance) return a.routeDistance-b.routeDistance; return a.linearDistance-b.linearDistance; });
+  return out;
+}
+
 function ensureRemoteContainerBuildsMemory() {
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
@@ -497,6 +522,7 @@ function releaseSource(creep) {
 }
 
 module.exports = {
+  getApprovedRemotesFromScout: getApprovedRemotesFromScout,
   ensureMemory: ensureMemory,
   ensureHomeMemory: ensureHomeMemory,
   gatherCandidateRemoteRoomsForHome: gatherCandidateRemoteRoomsForHome,

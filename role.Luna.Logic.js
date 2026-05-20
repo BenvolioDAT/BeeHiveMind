@@ -1129,23 +1129,12 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     if ((Game.time + creep.name.charCodeAt(0)) % 50 === 0) markValidRemoteSourcesForHome(homeName);
     var anchor = getAnchorPos(homeName);
 
-    var neighborRooms = bfsNeighborRooms(homeName, REMOTE_RADIUS);
+    var scoutPlan = (RemoteHarvestManager && typeof RemoteHarvestManager.getApprovedRemotesFromScout === 'function') ? RemoteHarvestManager.getApprovedRemotesFromScout(homeName) : null;
+    var neighborRooms = (scoutPlan && scoutPlan.approvedRooms && scoutPlan.approvedRooms.length) ? scoutPlan.approvedRooms.slice(0) : bfsNeighborRooms(homeName, REMOTE_RADIUS);
     var roomRanks = [];
-    for (i = 0; i < neighborRooms.length; i++) {
-      rn = neighborRooms[i];
-      roomRanks.push({
-        roomName: rn,
-        routeDistance: getRouteDistanceBetweenRooms(homeName, rn),
-        linearDistance: Game.map.getRoomLinearDistance(homeName, rn)
-      });
-    }
-    roomRanks.sort(function (a, b) {
-      if (a.routeDistance !== b.routeDistance) return a.routeDistance - b.routeDistance;
-      if (a.linearDistance !== b.linearDistance) return a.linearDistance - b.linearDistance;
-      return a.roomName < b.roomName ? -1 : 1;
-    });
-    neighborRooms = [];
-    for (i = 0; i < roomRanks.length; i++) neighborRooms.push(roomRanks[i].roomName);
+    for (i = 0; i < neighborRooms.length; i++) { rn = neighborRooms[i]; roomRanks.push({ roomName: rn, routeDistance: getRouteDistanceBetweenRooms(homeName, rn), linearDistance: Game.map.getRoomLinearDistance(homeName, rn) }); }
+    roomRanks.sort(function (a, b) { if (a.routeDistance !== b.routeDistance) return a.routeDistance - b.routeDistance; if (a.linearDistance !== b.linearDistance) return a.linearDistance - b.linearDistance; return a.roomName < b.roomName ? -1 : 1; });
+    neighborRooms = []; for (i = 0; i < roomRanks.length; i++) neighborRooms.push(roomRanks[i].roomName);
     var candidates=[], avoided=[], i, rn;
     var candidateBySid = {};
     var inaccessibleSources = 0;
@@ -1244,7 +1233,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         if (Memory.rooms && Memory.rooms[homeName]) {
           Memory.rooms[homeName].lastLunaSelection = {
             tick: Game.time, creep: creep.name, selectedRoom: null, selectedSourceId: null, selectedDistance: null,
-            candidateRoomsSorted: neighborRooms.slice(0), rejectedCloserRooms: rejectedCloserRooms, topCandidates: []
+            candidateRoomsSorted: neighborRooms.slice(0), scoutPlanUsed: !!(scoutPlan && scoutPlan.approvedRooms && scoutPlan.approvedRooms.length), rejectedCloserRooms: rejectedCloserRooms, topCandidates: [], fallback: (!scoutPlan || !scoutPlan.approvedRooms || !scoutPlan.approvedRooms.length) ? 'bfs-diagnostics-fallback' : null
           };
         }
         logLunaNoSafeSource(creep, 'home=' + homeName + ' inaccessibleSources=' + inaccessibleSources + ' candidates=0');
@@ -1337,7 +1326,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
           selectedRoom: best.roomName,
           selectedSourceId: best.id,
           selectedDistance: best.routeDistance,
-          candidateRoomsSorted: neighborRooms.slice(0),
+          candidateRoomsSorted: neighborRooms.slice(0), scoutPlanUsed: !!(scoutPlan && scoutPlan.approvedRooms && scoutPlan.approvedRooms.length),
           rejectedCloserRooms: rejectedCloserRooms,
           topCandidates: topCandidateScores
         };
