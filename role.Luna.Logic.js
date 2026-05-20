@@ -900,7 +900,6 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
       var sources = room.find(FIND_SOURCES);
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
-        if (approvedSourceFilterUsed && !approvedSources[rn + ':' + s.id]) continue;
         if (isLunaSourceBlocked(rn, s.id)) continue;
         var e=ensureMiningAssignment(memAssign[s.id], rn);
         // Teaching note: remember which home owns this remote assignment so
