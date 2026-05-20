@@ -69,6 +69,9 @@ CoreConfig.settings = Object.freeze({
     repairScanInterval: 5,
     /** How long before the stale room sweep runs. */
     roomSweepInterval: 50,
+    remoteContainerStatusStaleTicks: 150,
+    remoteContainerStatusMemoryTtl: 20000,
+    remoteContainerStatusCriticalMemoryTtl: 50000,
   }),
   cpuProfiler: Object.freeze({
     enabled: false,
@@ -98,8 +101,6 @@ CoreConfig.settings = Object.freeze({
     remoteHaulTableShowStale: false,
     remoteHaulTableStaleTicks: 150,
     remoteContainerStatusVisualStaleTicks: 150,
-    remoteContainerStatusMemoryTtl: 20000,
-    remoteContainerStatusCriticalMemoryTtl: 50000,
     remoteVisionRequestMaxEmergencyScoutsPerHome: 1,
     remoteHaulMapEnabled: false,
     remoteHaulRoomOverlayEnabled: false,

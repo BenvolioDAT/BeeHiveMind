@@ -1047,7 +1047,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
     var panelX = 1.0;
     var panelY = 1.2;
     var rowHeight = 0.55;
-    var panelWidth = 17.2;
+    var panelWidth = 21.0;
     var totalRows = 1 + shownRows.length + (hiddenCount > 0 ? 1 : 0);
     var panelHeight = 0.55 + (totalRows * rowHeight);
 
@@ -1064,7 +1064,8 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
     text(v, 'Energy', panelX + 3.9, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
     text(v, 'Full', panelX + 7.5, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
     text(v, 'HP', panelX + 9.8, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
-    text(v, 'Status', panelX + 11.6, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'Seen', panelX + 11.8, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
+    text(v, 'Status', panelX + 14.2, panelY + rowHeight, 0.45, 'left', 0.9, '#cccccc');
 
     for (var r = 0; r < shownRows.length; r++) {
       var line = shownRows[r];
@@ -1079,7 +1080,8 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       text(v, String(line.energy), panelX + 3.9, y, 0.42, 'left', 1, '#ffffff');
       text(v, line.fillPct + '%', panelX + 7.5, y, 0.42, 'left', 1, '#ffffff');
       text(v, line.health, panelX + 9.8, y, 0.42, 'left', 1, '#ffffff');
-      text(v, line.status, panelX + 11.6, y, 0.42, 'left', 1, statusColor);
+      text(v, (line.lastSeen == null ? '?' : String(line.lastSeen)), panelX + 11.8, y, 0.42, 'left', 1, '#cccccc');
+      text(v, line.status, panelX + 14.2, y, 0.42, 'left', 1, statusColor);
     }
 
     if (hiddenCount > 0) {

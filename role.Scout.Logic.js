@@ -209,24 +209,49 @@ function returnHome(creep, mem) { var homeRoom = mem.home || creep.pos.roomName;
 
 
 function ensureRemoteVisionRoot() { Memory.__BHM = Memory.__BHM || {}; Memory.__BHM.remoteVisionRequests = Memory.__BHM.remoteVisionRequests || {}; return Memory.__BHM.remoteVisionRequests; }
-function pickRemoteVisionRequest(mem) {
+function canClaimRemoteVisionRequest(creep, req) {
+  if (!creep || !req) return false;
+  if (!req.assignedTo) return true;
+  if (req.assignedTo === creep.name) return true;
+  return !req.assignedUntil || req.assignedUntil <= Game.time;
+}
+function pickRemoteVisionRequest(creep, mem) {
   var reqs = ensureRemoteVisionRoot();
   var bestKey = null; var best = null;
   for (var k in reqs) {
     if (!Object.prototype.hasOwnProperty.call(reqs, k)) continue;
-    var r = reqs[k]; if (!r) continue;
+    var r = reqs[k]; if (!r || r.resolvedAt) continue;
     if (r.homeRoom && mem.home && r.homeRoom !== mem.home) continue;
-    if (r.resolvedAt) continue;
+    if (!canClaimRemoteVisionRequest(creep, r)) continue;
     var pri = Number(r.priority) || 0;
     if (!best || pri > (Number(best.priority)||0) || ((pri === (Number(best.priority)||0)) && (r.requestedAt||0) < (best.requestedAt||0))) { best = r; bestKey = k; }
   }
   return best ? { key: bestKey, req: best } : null;
 }
+function claimRemoteVisionRequest(creep, pick) {
+  if (!creep || !pick) return false;
+  var reqs = ensureRemoteVisionRoot();
+  var req = reqs[pick.key];
+  if (!req || !canClaimRemoteVisionRequest(creep, req)) return false;
+  req.assignedTo = creep.name;
+  req.assignedUntil = Game.time + 35;
+  req.lastAttemptAt = Game.time;
+  req.attempts = (req.attempts || 0) + 1;
+  reqs[pick.key] = req;
+  creep.memory.remoteVisionRequestId = pick.key;
+  creep.memory.task = creep.memory.task === 'remoteVisionEmergency' ? 'remoteVisionEmergency' : creep.memory.task;
+  return true;
+}
 function serviceRemoteVisionRequest(creep, mem) {
-  var pick = pickRemoteVisionRequest(mem);
-  if (!pick) return false;
-  var req = pick.req; Memory.rooms = Memory.rooms || {}; Memory.rooms[mem.home] = Memory.rooms[mem.home] || {}; Memory.rooms[mem.home].lastRemoteVision = { pendingRequests: Object.keys(ensureRemoteVisionRoot()).length, selectedRequest: req.containerId || pick.key, liveScoutAssigned: creep.name, queuedScout: false, reason: 'scoutServingVisionRequest' };
-  var targetRoom = req.targetRoom || req.roomName; if (!targetRoom) return false;
+  var existingId = creep.memory.remoteVisionRequestId;
+  var reqs = ensureRemoteVisionRoot();
+  var pick = null;
+  if (existingId && reqs[existingId] && canClaimRemoteVisionRequest(creep, reqs[existingId])) pick = { key: existingId, req: reqs[existingId] };
+  if (!pick) pick = pickRemoteVisionRequest(creep, mem);
+  if (!pick || !claimRemoteVisionRequest(creep, pick)) return false;
+  var req = ensureRemoteVisionRoot()[pick.key];
+  var targetRoom = req.targetRoom || req.roomName;
+  if (!targetRoom) return false;
   if (creep.pos.roomName !== targetRoom) { creep.travelTo(new RoomPosition(req.x || 25, req.y || 25, targetRoom), { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
   var root = Memory.__BHM = Memory.__BHM || {}; root.remoteContainerStatus = root.remoteContainerStatus || {};
   var id = req.containerId || pick.key;
@@ -236,16 +261,23 @@ function serviceRemoteVisionRequest(creep, mem) {
     for (var i=0;i<at.length;i++) if (at[i].structureType === STRUCTURE_CONTAINER) { obj = at[i]; break; }
   }
   var rec = root.remoteContainerStatus[id] || { containerId: req.containerId, sourceId: req.sourceId, homeRoom: req.homeRoom, remoteRoom: targetRoom, x: req.x, y: req.y };
+  rec.updated = Game.time; rec.lastSeen = Game.time; rec.stale = false; rec.lastSeenAgo = 0;
   if (obj && obj.structureType === STRUCTURE_CONTAINER) {
-    rec.updated = Game.time; rec.lastSeen = Game.time; rec.amount = obj.store[RESOURCE_ENERGY] || 0; rec.capacity = obj.store.getCapacity(RESOURCE_ENERGY) || obj.store.getCapacity() || 2000;
-    rec.containerHits = obj.hits; rec.containerHitsMax = obj.hitsMax; rec.containerHitsPct = obj.hitsMax > 0 ? (obj.hits / obj.hitsMax) : null; rec.status = 'built'; rec.stale = false; rec.lastSeenAgo = 0;
-  } else {
-    rec.updated = Game.time; rec.lastSeen = Game.time; rec.status = 'missing'; rec.missingSeenAt = Game.time; rec.stale = false; rec.lastSeenAgo = 0;
-  }
+    rec.amount = obj.store[RESOURCE_ENERGY] || 0; rec.capacity = obj.store.getCapacity(RESOURCE_ENERGY) || obj.store.getCapacity() || 2000;
+    rec.containerHits = obj.hits; rec.containerHitsMax = obj.hitsMax; rec.containerHitsPct = obj.hitsMax > 0 ? (obj.hits / obj.hitsMax) : null; rec.status = 'built';
+  } else { rec.status = 'missing'; rec.missingSeenAt = Game.time; }
   root.remoteContainerStatus[id] = rec;
+  req.resolvedAt = Game.time;
   delete ensureRemoteVisionRoot()[pick.key];
+  delete creep.memory.remoteVisionRequestId;
+  if (creep.memory.task === 'remoteVisionEmergency') {
+    delete creep.memory.targetRoom;
+    if (creep.memory.scout) creep.memory.scout.targetRoom = null;
+    creep.memory.task = 'scout';
+  }
   return true;
 }
+
 
 function run(creep) {
   var mem = ensureScoutMem(creep);

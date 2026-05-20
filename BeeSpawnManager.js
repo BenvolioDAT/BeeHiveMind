@@ -1017,6 +1017,7 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
   if (!requests) return null;
   var staleTicks = (TruckerConfig && TruckerConfig.REQUEST_STALE_TICKS) || 100;
   var startPct = RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40;
+  var lunaPct = (LunaConfig && LunaConfig.remoteContainerRepairStartPct) || 0.50;
   for (var id in requests) {
     if (!Object.prototype.hasOwnProperty.call(requests, id)) continue;
     var req = requests[id];
@@ -1025,7 +1026,7 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
     if (typeof req.containerHitsPct !== 'number') continue;
     if (req.containerHitsPct > startPct) continue;
     if ((Game.time - (req.updated || 0)) > staleTicks) {
-      if (req.containerHitsPct <= startPct) ensureRemoteVisionRequestFromStatus(req, roomName);
+      if (req.containerHitsPct <= lunaPct) ensureRemoteVisionRequestFromStatus(req, roomName);
       continue;
     }
     if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
@@ -1064,18 +1065,54 @@ function ensureRemoteVisionRequestFromStatus(req, homeRoom) {
   };
   return map[key];
 }
+function findScoutAssignedToRemoteVisionRequest(roomName, requestKey) {
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    if (canonicalRole(creep.memory.role) !== 'Scout') continue;
+    var scoutHome = creep.memory.home || (creep.memory.scout && creep.memory.scout.home) || (creep.room && creep.room.name);
+    if (scoutHome !== roomName) continue;
+    if (creep.memory.remoteVisionRequestId === requestKey) return creep;
+  }
+  return null;
+}
+function isScoutSuitableForRequest(creep, roomName, requestKey, selected) {
+  if (!creep || !creep.memory || canonicalRole(creep.memory.role) !== 'Scout') return false;
+  var scoutHome = creep.memory.home || (creep.memory.scout && creep.memory.scout.home) || (creep.room && creep.room.name);
+  if (scoutHome !== roomName) return false;
+  var currentReq = creep.memory.remoteVisionRequestId || null;
+  if (currentReq && currentReq !== requestKey) return false;
+  if (currentReq === requestKey) return true;
+  var targetRoom = selected && selected.targetRoom;
+  if (!targetRoom || !creep.pos || !creep.pos.roomName) return true;
+  var dist = Game.map.getRoomLinearDistance(creep.pos.roomName, targetRoom);
+  return dist <= 2;
+}
 function queueEmergencyVisionScoutIfNeeded(roomName) {
   var roomMem = ensureRoomMemory(roomName);
   var maxPerHome = ((CoreConfig.settings && CoreConfig.settings.visuals && CoreConfig.settings.visuals.remoteVisionRequestMaxEmergencyScoutsPerHome) || 1);
   var reqs = ensureRemoteVisionRequests();
-  var pending = 0; var selected = null;
-  for (var k in reqs) { if (!Object.prototype.hasOwnProperty.call(reqs,k)) continue; var r=reqs[k]; if (r && r.homeRoom===roomName) { pending++; if (!selected || (r.priority||0)>(selected.priority||0)) selected=r; } }
-  var liveScout = 0; for (var n in Game.creeps) { var c=Game.creeps[n]; if (c && c.memory && canonicalRole(c.memory.role)==='Scout' && (c.memory.home===roomName || (c.memory.scout && c.memory.scout.home===roomName))) liveScout++; }
-  var queuedScout = queuedCount(roomName, 'Scout');
-  var shouldQueue = pending>0 && liveScout===0 && queuedScout===0 && maxPerHome>0;
-  if (shouldQueue) enqueue(roomName, 'Scout', { task: 'remoteVisionEmergency', home: roomName });
-  roomMem.lastRemoteVision = { pendingRequests: pending, selectedRequest: selected ? (selected.containerId || selected.sourceId || selected.targetRoom) : null, liveScoutAssigned: liveScout, queuedScout: shouldQueue || queuedScout>0, reason: shouldQueue ? 'queuedEmergencyScout' : 'none' };
+  var pending = 0; var selected = null; var selectedKey = null;
+  for (var k in reqs) { if (!Object.prototype.hasOwnProperty.call(reqs,k)) continue; var r=reqs[k]; if (!r || r.resolvedAt) continue; if (r.homeRoom===roomName) { pending++; if (!selected || (r.priority||0)>(selected.priority||0)) { selected=r; selectedKey=k; } } }
+  var assignedScout = selectedKey ? findScoutAssignedToRemoteVisionRequest(roomName, selectedKey) : null;
+  var suitableScoutFound = !!assignedScout;
+  if (!suitableScoutFound && selectedKey) {
+    for (var n in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, n)) continue;
+      if (isScoutSuitableForRequest(Game.creeps[n], roomName, selectedKey, selected)) { assignedScout = Game.creeps[n]; suitableScoutFound = true; break; }
+    }
+  }
+  var queuedScout = false;
+  if (selectedKey && !suitableScoutFound && maxPerHome > 0) {
+    var q = ensureRoomQueue(roomName);
+    var alreadyQueued = false;
+    for (var i=0;i<q.length;i++) { var item=q[i]; if (item && item.role==='Scout' && item.task==='remoteVisionEmergency' && item.remoteVisionRequestId===selectedKey) { alreadyQueued=true; break; } }
+    if (!alreadyQueued) queuedScout = enqueue(roomName, 'Scout', { task:'remoteVisionEmergency', home: roomName, remoteVisionRequestId: selectedKey, targetRoom: selected.targetRoom });
+  }
+  roomMem.lastRemoteVision = { pendingRequests: pending, selectedRequest: selectedKey, assignedScout: assignedScout ? assignedScout.name : null, suitableScoutFound: suitableScoutFound, queuedScout: queuedScout, reason: selectedKey ? (suitableScoutFound ? 'existingScoutSuitable' : (queuedScout ? 'queuedEmergencyScout' : 'queueSkipped')) : 'noPendingRequest' };
 }
+
 
 function determineQueenQuota(room) {
   var roomMem = ensureRoomMemory(room.name);
