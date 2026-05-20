@@ -179,6 +179,16 @@ function gatherCandidateRemoteRoomsForHome(homeRoom) {
     else out.acceptedRemoteRooms.push(remoteName);
   }
 
+  out.acceptedRemoteRooms.sort(function (a, b) {
+    var routeA = getRouteDistanceBetweenRooms(homeName, a);
+    var routeB = getRouteDistanceBetweenRooms(homeName, b);
+    if (routeA !== routeB) return routeA - routeB;
+    var linA = Game.map.getRoomLinearDistance(homeName, a);
+    var linB = Game.map.getRoomLinearDistance(homeName, b);
+    if (linA !== linB) return linA - linB;
+    return a < b ? -1 : (a > b ? 1 : 0);
+  });
+
   return out;
 }
 
