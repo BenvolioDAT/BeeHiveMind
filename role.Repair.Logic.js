@@ -261,8 +261,10 @@ function getLocalTargets(creep){
     var obj = Game.getObjectById(t.id);
     if (!obj || typeof obj.hits !== 'number' || typeof obj.hitsMax !== 'number' || obj.hitsMax <= 0) continue;
     if (obj.hits >= obj.hitsMax) continue;
+    var repairGoalHits = getRepairGoalHits(obj, t);
+    if (obj.hits >= repairGoalHits) continue;
     var hitsPct = obj.hits / obj.hitsMax;
-    out.push({id:t.id, roomName:obj.pos.roomName, x:obj.pos.x, y:obj.pos.y, type:obj.structureType, priority:t.priority, hitsPct:hitsPct, repairGoalHits:getRepairGoalHits(obj, t)});
+    out.push({id:t.id, roomName:obj.pos.roomName, x:obj.pos.x, y:obj.pos.y, type:obj.structureType, priority:t.priority, hitsPct:hitsPct, repairGoalHits:repairGoalHits});
   }
   return out;
 }
@@ -394,11 +396,16 @@ function run(creep){
   creep.room.visual.text("Repair " + target.structureType + " " + target.hits + "/" + target.hitsMax, target.pos.x, target.pos.y - 1, { align: 'center', color: '#ffffff', opacity: 0.9 });
   debugRing(target, CFG.COLORS.REPAIR, "fix");
 
+  var goalHits = getRepairGoalHits(target, targetInfo);
+  if (target.hits >= goalHits){
+    releaseRepairTarget(creep);
+    debugSay(creep, "✔");
+    return;
+  }
   var rr = creep.repair(target);
   if (rr === OK){
     debugSay(creep, "🔧");
     claimRepairTarget(creep, targetInfo);
-    var goalHits = getRepairGoalHits(target, targetInfo);
     if (target.hits >= goalHits){ releaseRepairTarget(creep); debugSay(creep, "✔"); }
     return;
   }
