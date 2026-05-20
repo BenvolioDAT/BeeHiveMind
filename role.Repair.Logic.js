@@ -3,6 +3,7 @@
 // Repair behavior implementation only. Public role wiring stays in role.Repair.js.
 var BeeToolbox = require('BeeToolbox');
 var CFG = require('role.Repair.Config');
+var CoreConfig = require('core.config');
 
 function _posOf(t){ return t && t.pos ? t.pos : t; }
 function _roomOf(p){ return p && Game.rooms[p.roomName]; }
@@ -94,6 +95,18 @@ function getRemoteContainerStatusById(id){
   var root = Memory.__BHM && Memory.__BHM.remoteContainerStatus;
   if (!root || !id) return null;
   return root[id] || null;
+}
+function getRepairGoalHits(target, targetInfo){
+  if (!target || typeof target.hitsMax !== 'number') return 0;
+  var maint = CoreConfig && CoreConfig.settings && CoreConfig.settings.maintenance ? CoreConfig.settings.maintenance : {};
+  var maxRampart = maint.repairMaxRampart || 30000;
+  var maxWall = maint.repairMaxWall || 30000;
+  if (targetInfo && typeof targetInfo.repairGoalHits === 'number' && targetInfo.repairGoalHits > 0) {
+    return Math.min(target.hitsMax, targetInfo.repairGoalHits);
+  }
+  if (target.structureType === STRUCTURE_RAMPART) return Math.min(target.hitsMax, maxRampart);
+  if (target.structureType === STRUCTURE_WALL) return Math.min(target.hitsMax, maxWall);
+  return target.hitsMax;
 }
 function clearRemoteTask(creep){
   if (!creep || !creep.memory) return;
@@ -249,7 +262,7 @@ function getLocalTargets(creep){
     if (!obj || typeof obj.hits !== 'number' || typeof obj.hitsMax !== 'number' || obj.hitsMax <= 0) continue;
     if (obj.hits >= obj.hitsMax) continue;
     var hitsPct = obj.hits / obj.hitsMax;
-    out.push({id:t.id, roomName:obj.pos.roomName, x:obj.pos.x, y:obj.pos.y, type:obj.structureType, priority:t.priority, hitsPct:hitsPct});
+    out.push({id:t.id, roomName:obj.pos.roomName, x:obj.pos.x, y:obj.pos.y, type:obj.structureType, priority:t.priority, hitsPct:hitsPct, repairGoalHits:getRepairGoalHits(obj, t)});
   }
   return out;
 }
@@ -293,6 +306,12 @@ function run(creep){
 
   if (e <= 0) {
     var activeTarget = creep.memory.repairTargetInfo || null;
+    var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
+    if (activeTarget && activeTarget.roomName && isRoomUnsafeForRemoteRepair(activeTarget.roomName, home)) {
+      releaseRepairTarget(creep);
+      if (creep.room.name !== home) go(creep, new RoomPosition(25, 25, home), 20);
+      return;
+    }
     if (activeTarget && activeTarget.roomName && activeTarget.roomName !== creep.room.name) {
       go(creep, new RoomPosition(25, 25, activeTarget.roomName), 20);
       claimRepairTarget(creep, activeTarget);
@@ -321,7 +340,6 @@ function run(creep){
         }
       }
       releaseRepairTarget(creep);
-      var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
       if (creep.room.name !== home) {
         go(creep, new RoomPosition(25, 25, home), 20);
         return;
@@ -350,6 +368,12 @@ function run(creep){
     }
   }
   if (!targetInfo){ releaseRepairTarget(creep); if (creep.memory) creep.memory.task = undefined; debugSay(creep, "✅ done"); return; }
+  var homeRoom = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
+  if (targetInfo.roomName && isRoomUnsafeForRemoteRepair(targetInfo.roomName, homeRoom)) {
+    releaseRepairTarget(creep);
+    if (creep.room.name !== homeRoom) go(creep, new RoomPosition(25, 25, homeRoom), 20);
+    return;
+  }
   if (!creep.memory.repairTargetId || creep.memory.repairTargetId !== targetInfo.id) {
     releaseRepairTarget(creep);
     claimRepairTarget(creep, targetInfo);
@@ -371,7 +395,13 @@ function run(creep){
   debugRing(target, CFG.COLORS.REPAIR, "fix");
 
   var rr = creep.repair(target);
-  if (rr === OK){ debugSay(creep, "🔧"); claimRepairTarget(creep, targetInfo); if (target.hits >= target.hitsMax){ releaseRepairTarget(creep); debugSay(creep, "✔"); } return; }
+  if (rr === OK){
+    debugSay(creep, "🔧");
+    claimRepairTarget(creep, targetInfo);
+    var goalHits = getRepairGoalHits(target, targetInfo);
+    if (target.hits >= goalHits){ releaseRepairTarget(creep); debugSay(creep, "✔"); }
+    return;
+  }
   if (rr === ERR_NOT_IN_RANGE){ claimRepairTarget(creep, targetInfo); debugLine(creep, target, CFG.COLORS.REPAIR, "to repair"); go(creep, target, 3); return; }
   releaseRepairTarget(creep);
 }
