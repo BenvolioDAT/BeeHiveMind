@@ -1009,7 +1009,7 @@ function roomCostMatrixForLuna(roomName) {
     else if (s.structureType !== STRUCTURE_CONTAINER && (s.structureType !== STRUCTURE_RAMPART || !s.my)) m.set(s.pos.x, s.pos.y, 0xff);
   });
   room.find(FIND_CONSTRUCTION_SITES).forEach(function (cs) {
-    if (cs.structureType !== STRUCTURE_ROAD) m.set(cs.pos.x, cs.pos.y, 0xff);
+    if (cs.structureType !== STRUCTURE_ROAD && cs.structureType !== STRUCTURE_CONTAINER) m.set(cs.pos.x, cs.pos.y, 0xff);
   });
   return m;
 }
@@ -1018,6 +1018,13 @@ function recordLunaAccessibility(remoteRoom, sourceId, accessible, reason) {
   if (!remoteRoom || !sourceId) return;
   var rm = getRoomMemoryBucket(remoteRoom);
   rm.lastLunaAccessibility = {
+    sourceId: sourceId,
+    accessible: !!accessible,
+    reason: reason || (accessible ? 'ok' : 'unknown'),
+    checkedAt: Game.time
+  };
+  if (!rm.lastLunaAccessibilityBySource) rm.lastLunaAccessibilityBySource = {};
+  rm.lastLunaAccessibilityBySource[sourceId] = {
     sourceId: sourceId,
     accessible: !!accessible,
     reason: reason || (accessible ? 'ok' : 'unknown'),
@@ -1041,6 +1048,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
       openTiles++;
       var look = room.lookForAt(LOOK_STRUCTURES, x, y) || [];
+      var sites = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y) || [];
       var blocked = false;
       for (var i = 0; i < look.length; i++) {
         var st = look[i];
@@ -1048,6 +1056,14 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         if (st.structureType === STRUCTURE_ROAD || st.structureType === STRUCTURE_CONTAINER) continue;
         if (st.structureType === STRUCTURE_RAMPART && st.my) continue;
         blocked = true; break;
+      }
+      if (!blocked) {
+        for (var s = 0; s < sites.length; s++) {
+          var site = sites[s];
+          if (!site) continue;
+          if (site.structureType === STRUCTURE_ROAD || site.structureType === STRUCTURE_CONTAINER) continue;
+          blocked = true; break;
+        }
       }
       if (!blocked) hasHarvestTile = true;
     }
