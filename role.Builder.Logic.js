@@ -137,44 +137,154 @@ function getBuilderBuildPriority(site) {
   return 1;
 }
 
+function getMyUsernameForBuilder() {
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (spawn && spawn.owner && spawn.owner.username) return spawn.owner.username;
+  }
+  return null;
+}
+
+function isRoomUnsafeForRemoteBuild(roomName, homeRoom) {
+  if (!roomName || roomName === homeRoom) return false;
+  var myName = getMyUsernameForBuilder();
+  var mem = Memory.rooms && Memory.rooms[roomName];
+  if (mem) {
+    if (mem.hostile) return true;
+    if (typeof mem.lunaBlockedUntil === 'number' && mem.lunaBlockedUntil > Game.time) return true;
+    if (mem._invaderLock && mem._invaderLock.locked) {
+      var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+      if (lockTick == null || (Game.time - lockTick) <= 1500) return true;
+    }
+    if (mem.intel) {
+      if (mem.intel.owner && (!myName || mem.intel.owner !== myName)) return true;
+      if (mem.intel.reservation && (!myName || mem.intel.reservation !== myName)) return true;
+    }
+  }
+  var room = Game.rooms[roomName];
+  if (room) {
+    var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+    if (hostiles.length > 0) return true;
+    if (room.controller) {
+      var owner = room.controller.owner && room.controller.owner.username;
+      var reserver = room.controller.reservation && room.controller.reservation.username;
+      if (owner && (!myName || owner !== myName)) return true;
+      if (reserver && (!myName || reserver !== myName)) return true;
+    }
+  }
+  return false;
+}
+
+function getRemoteContainerBuildTargets(creep) {
+  var out = { targets: [], skippedUnsafe: 0 };
+  var root = Memory.__BHM && Memory.__BHM.remoteContainerBuilds;
+  if (!root) return out;
+  var home = getHomeName(creep);
+  for (var id in root) {
+    if (!Object.prototype.hasOwnProperty.call(root, id)) continue;
+    var rec = root[id];
+    if (!rec) continue;
+    if (rec.homeRoom !== home) continue;
+    if (rec.containerId && Game.getObjectById(rec.containerId)) continue;
+    var roomName = rec.roomName || rec.remoteRoom;
+    if (!roomName) continue;
+    if (isRoomUnsafeForRemoteBuild(roomName, home)) { out.skippedUnsafe++; continue; }
+    var site = null;
+    if (rec.siteId && Game.constructionSites[rec.siteId]) site = Game.constructionSites[rec.siteId];
+    if (!site && rec.status === 'building' && rec.x != null && rec.y != null && Game.rooms[roomName]) {
+      var pos = new RoomPosition(rec.x, rec.y, roomName);
+      var nearSites = pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function(s){ return s.structureType === STRUCTURE_CONTAINER; } });
+      if (nearSites && nearSites.length) site = nearSites[0];
+    }
+    if (!site) continue;
+    out.targets.push({ site: site, reason: 'remoteSourceContainer' });
+  }
+  return out;
+}
+
+function writeBuilderTargetDecision(creep, patch) {
+  var home = getHomeName(creep);
+  if (!home) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[home]) Memory.rooms[home] = {};
+  var diag = Memory.rooms[home].lastBuilderTargetDecision || {};
+  diag.tick = Game.time;
+  for (var k in patch) diag[k] = patch[k];
+  Memory.rooms[home].lastBuilderTargetDecision = diag;
+}
+
 function getBuilderTarget(creep) {
+  var remoteData = getRemoteContainerBuildTargets(creep);
+  var remoteContainerById = {};
+  for (var r = 0; r < remoteData.targets.length; r++) remoteContainerById[remoteData.targets[r].site.id] = true;
   var cachedId = creep.memory.builderTargetId;
   var cachedType = creep.memory.builderTargetType;
-  if (cachedId && cachedType === 'construction') { var cachedSite = Game.constructionSites[cachedId]; if (cachedSite) return { target: cachedSite, type: 'build' }; creep.memory.builderTargetId = null; creep.memory.builderTargetType = null; }
-  var localSites = creep.room.find(FIND_CONSTRUCTION_SITES);
-  if (localSites && localSites.length > 0) {
-    var bestLocal = null; var bestPriority = -1; var bestRange = 1e9;
-    for (var i = 0; i < localSites.length; i++) {
-      var site = localSites[i];
-      var priority = getBuilderBuildPriority(site);
-      var range = creep.pos.getRangeTo(site.pos);
-      if (priority > bestPriority || (priority === bestPriority && range < bestRange)) {
-        bestLocal = site; bestPriority = priority; bestRange = range;
-      }
-    }
-    if (bestLocal) { creep.memory.builderTargetId = bestLocal.id; creep.memory.builderTargetType = 'construction'; debugRing(creep.room, bestLocal.pos, CFG.DRAW.BUILD_COLOR, 'BUILD'); return { target: bestLocal, type: 'build' }; }
+  if (cachedId && cachedType === 'construction') {
+    var cachedSite = Game.constructionSites[cachedId];
+    if (cachedSite) {
+      var unsafeCachedRoom = isRoomUnsafeForRemoteBuild(cachedSite.pos.roomName, getHomeName(creep));
+      var shouldOverrideRoad = cachedSite.structureType === STRUCTURE_ROAD && remoteData.targets.length > 0;
+      if (!unsafeCachedRoom && !shouldOverrideRoad) return { target: cachedSite, type: 'build' };
+      creep.memory.builderTargetId = null;
+      creep.memory.builderTargetType = null;
+    } else { creep.memory.builderTargetId = null; creep.memory.builderTargetType = null; }
   }
 
-  var bestRemoteSite = null; var bestRemotePriority = -1; var bestRoomDistance = 1e9; var bestVisibleRange = 1e9;
+  var allSites = [];
   for (var sid in Game.constructionSites) {
-    if (!Game.constructionSites.hasOwnProperty(sid)) continue;
-    var s2 = Game.constructionSites[sid];
-    var priority2 = getBuilderBuildPriority(s2);
-    var roomDistance = Game.map.getRoomLinearDistance(creep.pos.roomName, s2.pos.roomName);
-    var visibleRange = (s2.pos.roomName === creep.pos.roomName) ? creep.pos.getRangeTo(s2.pos) : 1e9;
+    if (!Object.prototype.hasOwnProperty.call(Game.constructionSites, sid)) continue;
+    var cs = Game.constructionSites[sid];
+    if (!cs || isRoomUnsafeForRemoteBuild(cs.pos.roomName, getHomeName(creep))) continue;
+    allSites.push(cs);
+  }
 
+  var best = null; var bestScore = -1; var bestRoomDistance = 1e9; var bestVisibleRange = 1e9;
+  var reason = 'localPriority';
+  for (var i = 0; i < allSites.length; i++) {
+    var site = allSites[i];
+    var score = getBuilderBuildPriority(site);
+    // Roads are useful, but remote source containers unlock remote income, so source containers should beat road work.
+    if (remoteContainerById[site.id]) score = Math.max(score, 65);
+    var roomDistance = Game.map.getRoomLinearDistance(creep.pos.roomName, site.pos.roomName);
+    var visibleRange = (site.pos.roomName === creep.pos.roomName) ? creep.pos.getRangeTo(site.pos) : 1e9;
     if (
-      priority2 > bestRemotePriority ||
-      (priority2 === bestRemotePriority && roomDistance < bestRoomDistance) ||
-      (priority2 === bestRemotePriority && roomDistance === bestRoomDistance && visibleRange < bestVisibleRange)
+      score > bestScore ||
+      (score === bestScore && roomDistance < bestRoomDistance) ||
+      (score === bestScore && roomDistance === bestRoomDistance && visibleRange < bestVisibleRange)
     ) {
-      bestRemoteSite = s2;
-      bestRemotePriority = priority2;
+      best = site;
+      bestScore = score;
       bestRoomDistance = roomDistance;
       bestVisibleRange = visibleRange;
+      if (remoteContainerById[site.id]) reason = 'remoteSourceContainer';
+      else if (site.structureType === STRUCTURE_ROAD) reason = 'roadFallback';
+      else reason = 'localPriority';
     }
   }
-  if (bestRemoteSite) { creep.memory.builderTargetId = bestRemoteSite.id; creep.memory.builderTargetType = 'construction'; debugRing(creep.room, bestRemoteSite.pos, CFG.DRAW.BUILD_COLOR, 'REMOTE'); return { target: bestRemoteSite, type: 'build' }; }
+
+  if (best) {
+    creep.memory.builderTargetId = best.id;
+    creep.memory.builderTargetType = 'construction';
+    debugRing(creep.room, best.pos, CFG.DRAW.BUILD_COLOR, 'BUILD');
+    writeBuilderTargetDecision(creep, {
+      selectedTargetId: best.id,
+      selectedStructureType: best.structureType,
+      selectedRoom: best.pos.roomName,
+      selectedReason: reason,
+      remoteContainerCandidates: remoteData.targets.length,
+      skippedUnsafe: remoteData.skippedUnsafe
+    });
+    return { target: best, type: 'build' };
+  }
+  writeBuilderTargetDecision(creep, {
+    selectedTargetId: null,
+    selectedStructureType: null,
+    selectedRoom: null,
+    selectedReason: 'none',
+    remoteContainerCandidates: remoteData.targets.length,
+    skippedUnsafe: remoteData.skippedUnsafe
+  });
   return null;
 }
 
