@@ -103,14 +103,100 @@ function cleanupDispatchMemory() {
   return d;
 }
 
+function getLocalContainerPressure(homeRoom) {
+  var out = {
+    containersSeen: 0,
+    containersOverPickup: 0,
+    containersOverUrgent: 0,
+    containersOverCritical: 0,
+    localPressure: 'none',
+    reason: 'no_vision'
+  };
+  if (!homeRoom) return out;
+  var room = Game.rooms[homeRoom];
+  if (!room) return out;
+  out.reason = 'no_containers';
+  var pickupAt = Math.max(0, CFG.LOCAL_CONTAINER_PICKUP_AT || 1000);
+  var urgentAt = Math.max(pickupAt, CFG.LOCAL_CONTAINER_URGENT_AT || 1600);
+  var criticalAt = Math.max(urgentAt, CFG.LOCAL_CONTAINER_CRITICAL_AT || 1900);
+  var containers = room.find(FIND_STRUCTURES, {
+    filter: function(s) { return s.structureType === STRUCTURE_CONTAINER && s.store; }
+  });
+  out.containersSeen = containers.length;
+  for (var i = 0; i < containers.length; i++) {
+    var energy = containers[i].store[RESOURCE_ENERGY] || 0;
+    if (energy >= pickupAt) out.containersOverPickup++;
+    if (energy >= urgentAt) out.containersOverUrgent++;
+    if (energy >= criticalAt) out.containersOverCritical++;
+  }
+  if (out.containersOverCritical > 0) {
+    out.localPressure = 'critical';
+    out.reason = 'containers_over_critical';
+  } else if (out.containersOverUrgent > 0) {
+    out.localPressure = 'urgent';
+    out.reason = 'containers_over_urgent';
+  } else if (out.containersOverPickup > 0) {
+    out.localPressure = 'pickup';
+    out.reason = 'containers_over_pickup';
+  }
+  return out;
+}
+
+function countHomeTruckers(homeRoom) {
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Game.creeps.hasOwnProperty(name)) continue;
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (c.memory.role !== 'Trucker') continue;
+    if ((c.memory.home || c.room.name) !== homeRoom) continue;
+    count++;
+  }
+  return count;
+}
+
+function countHomeTruckersOnLocalJobs(homeRoom) {
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Game.creeps.hasOwnProperty(name)) continue;
+    var c = Game.creeps[name];
+    if (!c || !c.memory) continue;
+    if (c.memory.role !== 'Trucker') continue;
+    if ((c.memory.home || c.room.name) !== homeRoom) continue;
+    var job = c.memory.dispatchJob;
+    if (!job || !job.type) continue;
+    if (job.type === 'LOCAL_COLLECT' || job.type === 'LOCAL_DELIVER') count++;
+  }
+  return count;
+}
+
 function chooseJobForTrucker(creep) {
   var d = cleanupDispatchMemory();
   var home = creep.memory.home || creep.room.name;
   var diag = { tick: Game.time, jobsSeen: 0, jobsClaimed: 0, localJobs: 0, remoteJobs: 0, skippedRemoteTTL: 0, skippedReserved: 0, skippedNoVision: 0, skippedUnsafe: 0, assignedByCreep: d.assignedByCreep || {} };
+  var localContainerPressure = getLocalContainerPressure(home);
+  var localBaseQuota = Math.max(0, CFG.LOCAL_TRUCKER_BASE_QUOTA || 0);
+  var homeTruckers = countHomeTruckers(home);
+  var localAssignedTruckers = countHomeTruckersOnLocalJobs(home);
+  var protectLocalBase = localContainerPressure.containersOverPickup > 0 && localAssignedTruckers < localBaseQuota;
+  var forceLocalCollect = localContainerPressure.localPressure === 'urgent' || localContainerPressure.localPressure === 'critical' || protectLocalBase;
+  if (protectLocalBase) localContainerPressure.reason = 'protect_local_base_quota';
+  localContainerPressure.homeTruckers = homeTruckers;
+  localContainerPressure.localAssignedTruckers = localAssignedTruckers;
+  localContainerPressure.localBaseQuota = localBaseQuota;
+  localContainerPressure.protectLocalBase = protectLocalBase;
+  localContainerPressure.forceLocalCollect = forceLocalCollect;
+  diag.localContainerPressure = localContainerPressure;
 
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
     return { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: home };
   }
+
+  diag.jobsSeen++; diag.localJobs++;
+  // Keep this claim id per-creep so urgent/critical local pressure can fan out
+  // across multiple Truckers in the same tick without a shared claim collision.
+  var localCollect = { id: 'localCollect:' + home + ':' + creep.name, type: 'LOCAL_COLLECT', homeRoom: home };
+  if (forceLocalCollect && claimJob(creep, localCollect, 10)) { diag.jobsClaimed++; d.lastRun = diag; return localCollect; }
 
   var reqs = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
   var best = null;
@@ -118,6 +204,7 @@ function chooseJobForTrucker(creep) {
     if (!reqs.hasOwnProperty(id)) continue;
     var r = reqs[id];
     if (!r || r.homeRoom !== home) continue;
+    if (r.maintenanceUntil && r.maintenanceUntil > Game.time) continue;
     if (isRemoteRequestReservedByOther(r, creep.name)) { diag.skippedReserved++; continue; }
     if ((r.amount || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) continue;
     if ((Game.time - (r.updated || 0)) > CFG.REQUEST_STALE_TICKS) continue;
@@ -129,8 +216,6 @@ function chooseJobForTrucker(creep) {
   }
   if (best && claimJob(creep, best, CFG.RESERVATION_TTL)) { diag.jobsClaimed++; d.lastRun = diag; return best; }
 
-  diag.jobsSeen++; diag.localJobs++;
-  var localCollect = { id: 'localCollect:' + home, type: 'LOCAL_COLLECT', homeRoom: home };
   if (claimJob(creep, localCollect, 10)) { diag.jobsClaimed++; d.lastRun = diag; return localCollect; }
 
   diag.jobsSeen++; diag.localJobs++;
@@ -150,5 +235,6 @@ module.exports = {
   claimJob: claimJob,
   releaseJob: releaseJob,
   cleanupDispatchMemory: cleanupDispatchMemory,
+  getLocalContainerPressure: getLocalContainerPressure,
   chooseJobForTrucker: chooseJobForTrucker
 };
