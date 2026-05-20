@@ -152,6 +152,7 @@ function logRoomIntel(room) {
   var spArr = []; var twArr = []; for (var si = 0; si < enemySpawns.length; si++) spArr.push({ x: enemySpawns[si].pos.x, y: enemySpawns[si].pos.y }); for (var ti = 0; ti < enemyTowers.length; ti++) twArr.push({ x: enemyTowers[ti].pos.x, y: enemyTowers[ti].pos.y }); intel.enemySpawns = spArr; intel.enemyTowers = twArr;
   intel.hostiles = room.find(FIND_HOSTILE_CREEPS).length;
   seedSourcesFromVision(room);
+  updateScoutHomeIntelForRoom(room);
   evaluateRoomThreat(room, 'Scout');
   if (CFG.DEBUG_DRAW) { var tag = (intel.owner ? ('👑 ' + intel.owner) : (intel.reservation ? ('📌 ' + intel.reservation) : 'free')); var extras = []; if (intel.invaderCore && intel.invaderCore.present) extras.push('IC'); if (intel.powerBank) extras.push('PB'); if (intel.keeperLairs) extras.push('SK:' + intel.keeperLairs); var text = tag + ' • src:' + intel.sources + (extras.length ? ' • ' + extras.join(',') : ''); var center = new RoomPosition(25,25,room.name); debugLabel(room, center, text, CFG.DRAW.INTEL); }
 }
@@ -178,6 +179,111 @@ function ensureScoutMem(creep) {
 }
 
 
+
+function ensureScoutIntelRoot() {
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Memory.__BHM.scoutIntel) Memory.__BHM.scoutIntel = { homes: {} };
+  if (!Memory.__BHM.scoutIntel.homes) Memory.__BHM.scoutIntel.homes = {};
+  return Memory.__BHM.scoutIntel;
+}
+function getOwnedHomeRooms() {
+  var seen = {}; var homes = [];
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (!spawn || !spawn.my || !spawn.room || !spawn.room.name) continue;
+    if (seen[spawn.room.name]) continue;
+    seen[spawn.room.name] = true; homes.push(spawn.room.name);
+  }
+  return homes;
+}
+
+function scoutRoomCostMatrix(roomName) {
+  var room = Game.rooms[roomName]; if (!room) return;
+  var m = new PathFinder.CostMatrix();
+  var structs = room.find(FIND_STRUCTURES) || [];
+  for (var i = 0; i < structs.length; i++) {
+    var st = structs[i]; if (!st) continue;
+    if (st.structureType === STRUCTURE_ROAD) m.set(st.pos.x, st.pos.y, 1);
+    else if (st.structureType !== STRUCTURE_CONTAINER && (st.structureType !== STRUCTURE_RAMPART || !st.my)) m.set(st.pos.x, st.pos.y, 0xff);
+  }
+  var sites = room.find(FIND_CONSTRUCTION_SITES) || [];
+  for (var j = 0; j < sites.length; j++) {
+    var cs = sites[j]; if (!cs) continue;
+    if (cs.structureType !== STRUCTURE_ROAD && cs.structureType !== STRUCTURE_CONTAINER) m.set(cs.pos.x, cs.pos.y, 0xff);
+  }
+  return m;
+}
+function evaluateScoutSourceAccessibility(homeRoom, room, sourceObj) {
+  if (!room || !sourceObj || !sourceObj.pos) return { accessible: false, blockedReason: 'source-missing', checkedAt: Game.time };
+  var terrain = room.getTerrain();
+  var openTiles = 0;
+  var hasHarvestTile = false;
+  for (var dx=-1; dx<=1; dx++) for (var dy=-1; dy<=1; dy++) {
+    if (!dx && !dy) continue;
+    var x = sourceObj.pos.x + dx, y = sourceObj.pos.y + dy;
+    if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+    if (terrain.get(x,y) === TERRAIN_MASK_WALL) continue;
+    openTiles++;
+    var blocked = false;
+    var look = room.lookForAt(LOOK_STRUCTURES, x, y) || [];
+    for (var i = 0; i < look.length; i++) {
+      var st = look[i]; if (!st) continue;
+      if (st.structureType === STRUCTURE_ROAD || st.structureType === STRUCTURE_CONTAINER) continue;
+      if (st.structureType === STRUCTURE_RAMPART && st.my) continue;
+      blocked = true; break;
+    }
+    if (!blocked) {
+      var sites = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y) || [];
+      for (var j = 0; j < sites.length; j++) {
+        var cs = sites[j]; if (!cs) continue;
+        if (cs.structureType === STRUCTURE_ROAD || cs.structureType === STRUCTURE_CONTAINER) continue;
+        blocked = true; break;
+      }
+    }
+    if (!blocked) hasHarvestTile = true;
+  }
+  if (!openTiles) return { accessible: false, blockedReason: 'no-open-harvest-tiles', checkedAt: Game.time };
+  if (!hasHarvestTile) return { accessible: false, blockedReason: 'harvest-tiles-blocked-by-structures', checkedAt: Game.time };
+  var start = new RoomPosition(25, 25, homeRoom);
+  var ret = PathFinder.search(start, { pos: sourceObj.pos, range: 1 }, { maxOps: 2000, plainCost: 2, swampCost: 10, roomCallback: scoutRoomCostMatrix });
+  if (ret.incomplete || !ret.path || !ret.path.length) return { accessible: false, blockedReason: 'path-to-source-incomplete', checkedAt: Game.time };
+  return { accessible: true, blockedReason: null, checkedAt: Game.time };
+}
+
+function updateScoutHomeIntelForRoom(room) {
+  if (!room || !room.name) return;
+  var root = ensureScoutIntelRoot();
+  var homes = getOwnedHomeRooms();
+  for (var i = 0; i < homes.length; i++) {
+    var homeRoom = homes[i];
+    var linear = Game.map.getRoomLinearDistance(homeRoom, room.name);
+    if (linear > 3) continue;
+    var route = null; try { route = Game.map.findRoute(homeRoom, room.name); } catch (e) { route = ERR_NO_PATH; }
+    var routeDistance = (room.name === homeRoom) ? 0 : ((route === ERR_NO_PATH || !Array.isArray(route)) ? Infinity : route.length);
+    if (!root.homes[homeRoom]) root.homes[homeRoom] = { rooms: {}, updatedAt: Game.time };
+    if (!root.homes[homeRoom].rooms) root.homes[homeRoom].rooms = {};
+    var hostileStructures = room.find(FIND_HOSTILE_STRUCTURES) || [];
+    var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+    var invaderCore = room.find(FIND_STRUCTURES, { filter: function (st) { return st.structureType === STRUCTURE_INVADER_CORE; } }) || [];
+    var sources = room.find(FIND_SOURCES) || [];
+    var srcList = []; var inaccessible = 0;
+    for (var s = 0; s < sources.length; s++) {
+      var src = sources[s];
+      var access = evaluateScoutSourceAccessibility(homeRoom, room, src);
+      if (!access.accessible) inaccessible++;
+      srcList.push({ id: src.id, x: src.pos.x, y: src.pos.y, accessible: access.accessible, blockedReason: access.blockedReason, checkedAt: access.checkedAt });
+    }
+    var remoteEligible = true; var remoteBlockedReason = null;
+    if (hostiles.length > 0) { remoteEligible = false; remoteBlockedReason = 'unsafe-room'; }
+    else if (invaderCore.length > 0) { remoteEligible = false; remoteBlockedReason = 'invader-core'; }
+    else if (sources.length > 0 && inaccessible >= sources.length) { remoteEligible = false; remoteBlockedReason = 'all-sources-inaccessible'; }
+    root.homes[homeRoom].rooms[room.name] = { roomName: room.name, homeRoom: homeRoom, linearDistance: linear, routeDistance: routeDistance, lastSeen: Game.time, sources: srcList, controller: room.controller ? { owner: room.controller.owner && room.controller.owner.username || null, reservation: room.controller.reservation && room.controller.reservation.username || null } : null, hostileCreeps: hostiles.length, hostileStructures: hostileStructures.length, hostileRamparts: hostileStructures.filter(function(h){return h.structureType===STRUCTURE_RAMPART;}).length, invaderCore: invaderCore.length > 0, sourceAccessibility: { total: sources.length, inaccessible: inaccessible }, remoteEligible: remoteEligible, remoteBlockedReason: remoteBlockedReason };
+    root.homes[homeRoom].updatedAt = Game.time;
+    Memory.rooms = Memory.rooms || {}; Memory.rooms[homeRoom] = Memory.rooms[homeRoom] || {};
+    Memory.rooms[homeRoom].lastScoutMap = { tick: Game.time, homeRoom: homeRoom, knownRooms: Object.keys(root.homes[homeRoom].rooms || {}).length };
+  }
+}
 function getScoutMapRoomStatus(roomName) { if (!roomName || !Game.map || typeof Game.map.getRoomStatus !== 'function') return null; try { return Game.map.getRoomStatus(roomName) || null; } catch (e) { return null; } }
 function isScoutRoomClosed(roomName) { var status = getScoutMapRoomStatus(roomName); return !!(status && status.status === 'closed'); }
 function isScoutTargetReachableFrom(creep, targetRoomName) {
