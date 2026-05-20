@@ -170,21 +170,54 @@ function countHomeTruckersOnLocalJobs(homeRoom) {
   return count;
 }
 
+function getMyUsernameForTruckerDispatch() {
+  for (var name in Game.spawns) {
+    if (!Game.spawns.hasOwnProperty(name)) continue;
+    var spawn = Game.spawns[name];
+    if (!spawn || !spawn.owner || !spawn.owner.username) continue;
+    return spawn.owner.username;
+  }
+  return null;
+}
+
+function isRemoteRoomUnsafeForTrucker(remoteRoom) {
+  if (!remoteRoom) return false;
+  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+  if (mem.hostile) return true;
+  if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
+  if (mem._invaderLock && mem._invaderLock.locked) {
+    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+    if (lockTick == null || (Game.time - lockTick) <= 1500) return true;
+  }
+  var myName = getMyUsernameForTruckerDispatch();
+  var intel = mem.intel || {};
+  if (intel.owner && (!myName || intel.owner !== myName)) return true;
+  if (intel.reservation && (!myName || intel.reservation !== myName)) return true;
+  return false;
+}
+
+function getLocalDesiredTruckers(localContainerPressure) {
+  var base = Math.max(0, CFG.LOCAL_TRUCKER_BASE_QUOTA || 0);
+  var desired = base;
+  if (localContainerPressure && (localContainerPressure.localPressure === 'urgent' || localContainerPressure.localPressure === 'critical')) desired += 1;
+  var maxTotal = Math.max(0, CFG.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
+  if (maxTotal > 0) desired = Math.min(desired, maxTotal);
+  return desired;
+}
+
 function chooseJobForTrucker(creep) {
   var d = cleanupDispatchMemory();
   var home = creep.memory.home || creep.room.name;
   var diag = { tick: Game.time, jobsSeen: 0, jobsClaimed: 0, localJobs: 0, remoteJobs: 0, skippedRemoteTTL: 0, skippedReserved: 0, skippedNoVision: 0, skippedUnsafe: 0, assignedByCreep: d.assignedByCreep || {} };
   var localContainerPressure = getLocalContainerPressure(home);
-  var localBaseQuota = Math.max(0, CFG.LOCAL_TRUCKER_BASE_QUOTA || 0);
   var homeTruckers = countHomeTruckers(home);
   var localAssignedTruckers = countHomeTruckersOnLocalJobs(home);
-  var protectLocalBase = localContainerPressure.containersOverPickup > 0 && localAssignedTruckers < localBaseQuota;
-  var forceLocalCollect = localContainerPressure.localPressure === 'urgent' || localContainerPressure.localPressure === 'critical' || protectLocalBase;
-  if (protectLocalBase) localContainerPressure.reason = 'protect_local_base_quota';
+  var localDesiredTruckers = getLocalDesiredTruckers(localContainerPressure);
+  var forceLocalCollect = localAssignedTruckers < localDesiredTruckers;
+  if (forceLocalCollect) localContainerPressure.reason = 'protect_local_desired_quota';
   localContainerPressure.homeTruckers = homeTruckers;
   localContainerPressure.localAssignedTruckers = localAssignedTruckers;
-  localContainerPressure.localBaseQuota = localBaseQuota;
-  localContainerPressure.protectLocalBase = protectLocalBase;
+  localContainerPressure.localDesiredTruckers = localDesiredTruckers;
   localContainerPressure.forceLocalCollect = forceLocalCollect;
   diag.localContainerPressure = localContainerPressure;
 
@@ -209,6 +242,7 @@ function chooseJobForTrucker(creep) {
     if ((r.amount || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) continue;
     if ((Game.time - (r.updated || 0)) > CFG.REQUEST_STALE_TICKS) continue;
     var remoteRoom = r.roomName || r.remoteRoom;
+    if (isRemoteRoomUnsafeForTrucker(remoteRoom)) { diag.skippedUnsafe++; continue; }
     if (!canCreepSafelyTakeRemoteJob(creep, remoteRoom)) { diag.skippedRemoteTTL++; continue; }
     var j = { id: 'remote:' + id, type: 'REMOTE_PICKUP', requestId: id, roomName: remoteRoom, containerId: r.containerId, sourceId: r.sourceId, x: r.x, y: r.y, urgent: !!r.urgent, amount: r.amount || 0 };
     diag.jobsSeen++; diag.remoteJobs++;
