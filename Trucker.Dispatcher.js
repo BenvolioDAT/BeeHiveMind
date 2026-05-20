@@ -156,18 +156,16 @@ function countHomeTruckers(homeRoom) {
 }
 
 function countHomeTruckersOnLocalJobs(homeRoom) {
-  var d = ensureDispatchMemory();
-  var assigned = d.assignedByCreep || {};
   var count = 0;
-  for (var name in assigned) {
-    if (!assigned.hasOwnProperty(name)) continue;
-    var rec = assigned[name];
-    if (!rec || !rec.type) continue;
+  for (var name in Game.creeps) {
+    if (!Game.creeps.hasOwnProperty(name)) continue;
     var c = Game.creeps[name];
     if (!c || !c.memory) continue;
     if (c.memory.role !== 'Trucker') continue;
     if ((c.memory.home || c.room.name) !== homeRoom) continue;
-    if (rec.type === 'LOCAL_COLLECT' || rec.type === 'LOCAL_DELIVER') count++;
+    var job = c.memory.dispatchJob;
+    if (!job || !job.type) continue;
+    if (job.type === 'LOCAL_COLLECT' || job.type === 'LOCAL_DELIVER') count++;
   }
   return count;
 }
