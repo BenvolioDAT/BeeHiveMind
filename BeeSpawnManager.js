@@ -977,6 +977,21 @@ function countRemoteEmergencyRepairAssignments(roomName) {
   return count;
 }
 
+function countLocalRepairCreeps(roomName) {
+  if (!roomName) return 0;
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    if (canonicalRole(creep.memory.role) !== 'Repair') continue;
+    if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
+    if (creep.memory.task === 'remoteContainerEmergencyRepair') continue;
+    count++;
+  }
+  return count;
+}
+
 function isRepairAlreadyAssignedToContainer(roomName, containerId) {
   if (!roomName || !containerId) return false;
   for (var name in Game.creeps) {
@@ -1055,14 +1070,32 @@ function computeRoomQuotas(C, room) {
   var localRepairQuota = computeLocalRepairQuotaForRoom(room);
   var maxRemoteEmergencyPerHome = Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1);
   var activeRemoteEmergencyRepairs = countRemoteEmergencyRepairAssignments(room.name);
+  var selectedEmergencyRequest = null;
   var emergencyRepairQuota = 0;
   if (maxRemoteEmergencyPerHome > 0 && activeRemoteEmergencyRepairs < maxRemoteEmergencyPerHome) {
-    emergencyRepairQuota = findRemoteContainerEmergencyRepairRequest(room.name) ? 1 : 0;
+    selectedEmergencyRequest = findRemoteContainerEmergencyRepairRequest(room.name);
+    emergencyRepairQuota = selectedEmergencyRequest ? 1 : 0;
   }
-  var repairQuota = Math.min(
-    Math.max(localRepairQuota, emergencyRepairQuota),
-    Math.max(1, maxRemoteEmergencyPerHome)
-  );
+  var repairQuota = localRepairQuota + emergencyRepairQuota;
+  var liveLocalRepair = countLocalRepairCreeps(room.name);
+  var liveRemoteEmergencyRepair = activeRemoteEmergencyRepairs;
+  var roomMem = ensureRoomMemory(room.name);
+  roomMem.lastRepairQuota = {
+    tick: Game.time,
+    localRepairQuota: localRepairQuota,
+    emergencyRepairQuota: emergencyRepairQuota,
+    liveLocalRepair: liveLocalRepair,
+    liveRemoteEmergencyRepair: liveRemoteEmergencyRepair,
+    queuedRemoteEmergencyRepair: 0,
+    selectedEmergencyRequest: selectedEmergencyRequest ? {
+      requestId: selectedEmergencyRequest.id || selectedEmergencyRequest.requestId || null,
+      containerId: selectedEmergencyRequest.containerId || null,
+      targetRoom: selectedEmergencyRequest.remoteRoom || selectedEmergencyRequest.roomName || null,
+      reason: 'containerHitsPctBelowStartThreshold'
+    } : null,
+    finalRepairQuota: repairQuota,
+    queueDecision: emergencyRepairQuota > 0 ? 'queueRemoteEmergencyRepair' : 'noRemoteEmergencyRepairQueue'
+  };
 
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
@@ -1140,6 +1173,7 @@ function fillQueueForRoom(C, room) {
   // Iterate quotas in plain English order so future maintainers can eyeball
   // which roles will be enqueued before touching the code.
   var roles = Object.keys(quotas);
+  var repairDiag = ensureRoomMemory(roomName).lastRepairQuota || null;
   var lunaSlotPlan = null;
   for (var i = 0; i < roles.length; i++) {
     var role = roles[i];
@@ -1147,6 +1181,9 @@ function fillQueueForRoom(C, room) {
     var canonical = canonicalRole(role);
     var active = getRoomLocalLiveCount(C, roomName, canonical);
     var queued = queuedCount(roomName, role);
+    if (role === 'Repair' && repairDiag) {
+      active = repairDiag.liveLocalRepair + repairDiag.liveRemoteEmergencyRepair;
+    }
     // Replacement behavior: allow at most one queued replacement for low-TTL
     // workers instead of blindly over-spawning to fill a temporary dip.
     var replacementNeed = 0;
@@ -1162,8 +1199,10 @@ function fillQueueForRoom(C, room) {
     }
     for (var j = 0; j < deficit; j++) {
       if (role === 'Repair') {
-        var emergencyReq = findRemoteContainerEmergencyRepairRequest(roomName);
-        if (emergencyReq) {
+        var emergencyReq = repairDiag && repairDiag.selectedEmergencyRequest
+          ? findRemoteContainerEmergencyRepairRequest(roomName)
+          : null;
+        if (emergencyReq && countRemoteEmergencyRepairAssignments(roomName) < Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1)) {
           enqueue(roomName, role, {
             task: 'remoteContainerEmergencyRepair',
             home: roomName,
@@ -1174,6 +1213,10 @@ function fillQueueForRoom(C, room) {
             x: emergencyReq.x,
             y: emergencyReq.y
           });
+          if (repairDiag) {
+            repairDiag.queuedRemoteEmergencyRepair = (repairDiag.queuedRemoteEmergencyRepair || 0) + 1;
+            repairDiag.queueDecision = 'queuedRemoteEmergencyRepair';
+          }
           continue;
         }
       }
