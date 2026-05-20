@@ -204,7 +204,7 @@ function chooseJobForTrucker(creep) {
     if (!reqs.hasOwnProperty(id)) continue;
     var r = reqs[id];
     if (!r || r.homeRoom !== home) continue;
-    if (r.maintenanceUntil && r.maintenanceUntil > Game.time) continue;
+    if (CFG.shouldBlockRemoteHaulForMaintenance(r)) continue;
     if (isRemoteRequestReservedByOther(r, creep.name)) { diag.skippedReserved++; continue; }
     if ((r.amount || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) continue;
     if ((Game.time - (r.updated || 0)) > CFG.REQUEST_STALE_TICKS) continue;

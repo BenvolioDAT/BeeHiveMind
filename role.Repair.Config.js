@@ -17,7 +17,7 @@ module.exports = Object.freeze({
   OPACITY: 0.45,
   FONT: 0.7,
   remoteContainerEmergencyRepairEnabled: true,
-  remoteContainerEmergencyRepairStartPct: 0.40,
+  remoteContainerEmergencyRepairStartPct: 0.50,
   remoteContainerEmergencyRepairStopPct: 0.85,
   remoteContainerEmergencyRepairMaxPerHome: 1,
   remoteContainerEmergencyRepairHoldTicks: 50,

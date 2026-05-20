@@ -1875,6 +1875,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       clearLunaPathFailure(creep, sid);
 
       if (container && creep.memory.lunaRepairingContainer) {
+        upsertRemoteHaulRequest(creep, src, container);
         markContainerRepairMaintenanceHold(creep, container, src);
         var minEnergy = CFG.remoteContainerRepairMinContainerEnergy || 100;
         var withdrawAmount = CFG.remoteContainerRepairWithdrawAmount || 50;
