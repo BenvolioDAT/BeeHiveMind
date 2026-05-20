@@ -1074,6 +1074,9 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (line.status === 'URGENT') statusColor = '#ff8c42';
       if (line.status === 'STALE' || line.status === 'CRITICAL' || line.status === 'EMERGENCY') statusColor = '#ff5555';
       if (line.status === 'LOW HP' || line.status === 'LUNA FIX') statusColor = '#ffd166';
+      if (line.status === 'NEEDS VISION') statusColor = '#f7c948';
+      if (line.status === 'MISSING') statusColor = '#ff4d6d';
+      if (line.status === 'REPAIRING') statusColor = '#4dd0e1';
       if (line.assigned && line.status !== 'EMERGENCY' && line.status !== 'CRITICAL' && line.status !== 'STALE' && line.status !== 'LUNA FIX' && line.status !== 'LOW HP' && line.status !== 'URGENT' && line.status !== 'READY') statusColor = '#66ccff';
 
       text(v, line.roomName, panelX, y, 0.42, 'left', 1, '#ffffff');

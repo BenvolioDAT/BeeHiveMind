@@ -1024,11 +1024,12 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
     if (!req || req.homeRoom !== roomName) continue;
     if (!req.containerId) continue;
     if (typeof req.containerHitsPct !== 'number') continue;
-    if (req.containerHitsPct > startPct) continue;
-    if ((Game.time - (req.updated || 0)) > staleTicks) {
+    var isStale = (Game.time - (req.updated || 0)) > staleTicks;
+    if (isStale) {
       if (req.containerHitsPct <= lunaPct) ensureRemoteVisionRequestFromStatus(req, roomName);
       continue;
     }
+    if (req.containerHitsPct > startPct) continue;
     if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
     var heldByEmergencyRepair =
       req.maintenanceUntil &&
