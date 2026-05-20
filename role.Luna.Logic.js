@@ -31,6 +31,8 @@ var FLAG_PRUNE_PERIOD = CFG.FLAG_PRUNE_PERIOD;
 var FLAG_RETENTION_TTL = CFG.FLAG_RETENTION_TTL;
 var LUNA_BLOCKED_SOURCE_TTL = CFG.LUNA_BLOCKED_SOURCE_TTL || 10000;
 var LUNA_BLOCKED_ROOM_TTL = CFG.LUNA_BLOCKED_ROOM_TTL || 10000;
+var LUNA_REJECT_INACCESSIBLE_SOURCES = CFG.LUNA_REJECT_INACCESSIBLE_SOURCES !== false;
+var LUNA_INACCESSIBLE_BLOCK_TTL = CFG.LUNA_INACCESSIBLE_BLOCK_TTL || LUNA_BLOCKED_SOURCE_TTL;
 var LUNA_PATH_FAIL_LIMIT = CFG.LUNA_PATH_FAIL_LIMIT || 3;
 var LUNA_STUCK_SOURCE_BLOCK_TICKS = CFG.LUNA_STUCK_SOURCE_BLOCK_TICKS || 8;
 
@@ -989,6 +991,96 @@ function logLunaNoSafeSource(creep, details) {
   console.log('🛑 Luna ' + creep.name + ' no safe assignment: ' + details);
 }
 
+function getRoomEntryAnchor(homeName, remoteName) {
+  var anchor = getAnchorPos(homeName);
+  var route = null;
+  try { route = Game.map.findRoute(homeName, remoteName); } catch (e) { route = ERR_NO_PATH; }
+  if (route === ERR_NO_PATH || !route || !route.length || !route[0] || !route[0].exit) return anchor;
+  var exitDir = route[0].exit;
+  var exits = anchor.findClosestByPath(exitDir);
+  return exits || anchor;
+}
+
+function roomCostMatrixForLuna(roomName) {
+  var room = Game.rooms[roomName]; if (!room) return;
+  var m = new PathFinder.CostMatrix();
+  room.find(FIND_STRUCTURES).forEach(function (s) {
+    if (s.structureType === STRUCTURE_ROAD) m.set(s.pos.x, s.pos.y, 1);
+    else if (s.structureType !== STRUCTURE_CONTAINER && (s.structureType !== STRUCTURE_RAMPART || !s.my)) m.set(s.pos.x, s.pos.y, 0xff);
+  });
+  room.find(FIND_CONSTRUCTION_SITES).forEach(function (cs) {
+    if (cs.structureType !== STRUCTURE_ROAD && cs.structureType !== STRUCTURE_CONTAINER) m.set(cs.pos.x, cs.pos.y, 0xff);
+  });
+  return m;
+}
+
+function recordLunaAccessibility(remoteRoom, sourceId, accessible, reason) {
+  if (!remoteRoom || !sourceId) return;
+  var rm = getRoomMemoryBucket(remoteRoom);
+  rm.lastLunaAccessibility = {
+    sourceId: sourceId,
+    accessible: !!accessible,
+    reason: reason || (accessible ? 'ok' : 'unknown'),
+    checkedAt: Game.time
+  };
+  if (!rm.lastLunaAccessibilityBySource) rm.lastLunaAccessibilityBySource = {};
+  rm.lastLunaAccessibilityBySource[sourceId] = {
+    sourceId: sourceId,
+    accessible: !!accessible,
+    reason: reason || (accessible ? 'ok' : 'unknown'),
+    checkedAt: Game.time
+  };
+}
+
+function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj) {
+  if (!sourceObj || !sourceObj.pos || !remoteRoomName) return { accessible: false, reason: 'source-missing' };
+  var room = Game.rooms[remoteRoomName]; if (!room) return { accessible: true, reason: 'room-not-visible' };
+  if (!LUNA_REJECT_INACCESSIBLE_SOURCES) return { accessible: true, reason: 'check-disabled' };
+  var terrain = room.getTerrain();
+  var openTiles = 0;
+  var hasHarvestTile = false;
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var x = sourceObj.pos.x + dx;
+      var y = sourceObj.pos.y + dy;
+      if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+      if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
+      openTiles++;
+      var look = room.lookForAt(LOOK_STRUCTURES, x, y) || [];
+      var sites = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y) || [];
+      var blocked = false;
+      for (var i = 0; i < look.length; i++) {
+        var st = look[i];
+        if (!st) continue;
+        if (st.structureType === STRUCTURE_ROAD || st.structureType === STRUCTURE_CONTAINER) continue;
+        if (st.structureType === STRUCTURE_RAMPART && st.my) continue;
+        blocked = true; break;
+      }
+      if (!blocked) {
+        for (var s = 0; s < sites.length; s++) {
+          var site = sites[s];
+          if (!site) continue;
+          if (site.structureType === STRUCTURE_ROAD || site.structureType === STRUCTURE_CONTAINER) continue;
+          blocked = true; break;
+        }
+      }
+      if (!blocked) hasHarvestTile = true;
+    }
+  }
+  if (!openTiles) return { accessible: false, reason: 'no-open-harvest-tiles' };
+  if (!hasHarvestTile) return { accessible: false, reason: 'harvest-tiles-blocked-by-structures' };
+  var start = getRoomEntryAnchor(homeName, remoteRoomName);
+  var ret = PathFinder.search(start, { pos: sourceObj.pos, range: 1 }, {
+    maxOps: MAX_PF_OPS,
+    plainCost: PLAIN_COST,
+    swampCost: SWAMP_COST,
+    roomCallback: roomCostMatrixForLuna
+  });
+  if (ret.incomplete || !ret.path || !ret.path.length) return { accessible: false, reason: 'path-to-source-incomplete' };
+  return { accessible: true, reason: 'ok' };
+}
+
 // ============================
   // Invader lock detection
   // ============================
@@ -1028,6 +1120,7 @@ function logLunaNoSafeSource(creep, details) {
 
     var neighborRooms = bfsNeighborRooms(homeName, REMOTE_RADIUS);
     var candidates=[], avoided=[], i, rn;
+    var inaccessibleSources = 0;
 
     // 1) With vision
     for (i=0;i<neighborRooms.length;i++){
@@ -1036,9 +1129,18 @@ function logLunaNoSafeSource(creep, details) {
       var room=Game.rooms[rn]; if (!room) continue;
 
       var sources = room.find(FIND_SOURCES);
+      var roomInaccessible = 0;
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
         if (isLunaSourceBlocked(rn, s.id)) continue;
+        var access = evaluateVisibleSourceAccessibility(homeName, rn, s);
+        recordLunaAccessibility(rn, s.id, access.accessible, access.reason);
+        if (!access.accessible) {
+          inaccessibleSources++;
+          roomInaccessible++;
+          markLunaSourceBlocked(rn, s.id, 'source-inaccessible-blocked-by-structures', LUNA_INACCESSIBLE_BLOCK_TTL);
+          continue;
+        }
         var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
         var lin = Game.map.getRoomLinearDistance(homeName, rn);
 
@@ -1058,7 +1160,11 @@ function logLunaNoSafeSource(creep, details) {
         }
 
         var sticky = (creep.memory.sourceId===s.id) ? 1 : 0;
-        candidates.push({ id:s.id, roomName:rn, cost:cost + stackPenalty + firstOpenBonus + underHarvestBonus, lin:lin, sticky:sticky, assigned: assignedNow });
+        var distancePenalty = lin * 250;
+        candidates.push({ id:s.id, roomName:rn, cost:cost + distancePenalty + stackPenalty + firstOpenBonus + underHarvestBonus, lin:lin, sticky:sticky, assigned: assignedNow });
+      }
+      if (sources.length > 0 && roomInaccessible >= sources.length) {
+        markLunaRoomBlocked(rn, 'all-sources-inaccessible', LUNA_INACCESSIBLE_BLOCK_TTL);
       }
     }
 
@@ -1075,7 +1181,7 @@ function logLunaNoSafeSource(creep, details) {
           if (assigned2 >= cap2) continue;
 
           var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
-          var synth = (lin2*200)+800;
+          var synth = (lin2*350)+800;
           var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
           var stackPenalty2 = assigned2 > 0 ? LUNA_SECONDARY_SOURCE_SCORE_PENALTY : 0;
           var firstOpenBonus2 = assigned2 === 0 ? -1000 : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 200);
@@ -1085,7 +1191,10 @@ function logLunaNoSafeSource(creep, details) {
     }
 
     if (!candidates.length){
-      if (!avoided.length) return null;
+      if (!avoided.length) {
+        logLunaNoSafeSource(creep, 'home=' + homeName + ' inaccessibleSources=' + inaccessibleSources + ' candidates=0');
+        return null;
+      }
       avoided.sort(function(a,b){ return (a.left-b.left)||(a.cost-b.cost)||(a.lin-b.lin)||(a.id<b.id?-1:1); });
       var soonest = avoided[0];
       if (soonest.left <= 5) candidates.push(soonest); else return null;
