@@ -1318,6 +1318,13 @@ function fillQueueForRoom(C, room) {
   var liveTruckers = getRoomLocalLiveCount(C, roomName, "Trucker");
   var queuedTruckers = queuedCount(roomName, "Trucker");
   var assignmentCounts = countHomeTruckersByAssignment(roomName);
+  var effectiveActiveTruckers = Math.min(
+    assignmentCounts.truckersOnLocalJobs,
+    truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota
+  ) + Math.min(
+    assignmentCounts.remoteCapableTruckers,
+    truckerQuotaMeta.remoteDesiredTruckers || 0
+  );
   Memory.rooms[roomName].lastLocalHaulerMode = {
     tick: Game.time,
     mode: 'trucker-primary',
@@ -1333,6 +1340,7 @@ function fillQueueForRoom(C, room) {
     truckersOnLocalJobs: assignmentCounts.truckersOnLocalJobs,
     truckersOnRemoteJobs: assignmentCounts.truckersOnRemoteJobs,
     remoteCapableTruckers: assignmentCounts.remoteCapableTruckers,
+    effectiveActiveTruckers: effectiveActiveTruckers,
     courierRoleRetired: true
   };
   Memory.rooms[roomName].lastTruckerQuota = {
@@ -1350,6 +1358,7 @@ function fillQueueForRoom(C, room) {
     truckersOnLocalJobs: assignmentCounts.truckersOnLocalJobs,
     truckersOnRemoteJobs: assignmentCounts.truckersOnRemoteJobs,
     remoteCapableTruckers: assignmentCounts.remoteCapableTruckers,
+    effectiveActiveTruckers: effectiveActiveTruckers,
     skipped: truckerQuotaMeta.skipped || {},
     reasons: (truckerQuotaMeta.remoteDesiredTruckers || 0) > 0 ? "workload-based remote demand" : "no active remote haul workload"
   };
@@ -1367,6 +1376,9 @@ function fillQueueForRoom(C, room) {
     var canonical = canonicalRole(role);
     var active = getRoomLocalLiveCount(C, roomName, canonical);
     var queued = queuedCount(roomName, role);
+    if (role === 'Trucker') {
+      active = effectiveActiveTruckers;
+    }
     if (role === 'Repair' && repairDiag) {
       active = repairDiag.liveLocalRepair + repairDiag.liveRemoteEmergencyRepair;
     }
