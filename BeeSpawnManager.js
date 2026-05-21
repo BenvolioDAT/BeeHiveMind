@@ -517,32 +517,7 @@ function countApprovedLunaSourcesForRemote(remoteName) {
 
 
 function getLunaRemoteIntelTick(remoteName) {
-  var mem = Memory.rooms && Memory.rooms[remoteName];
-  if (!mem) return null;
-
-  var best = null;
-
-  if (mem.intel) {
-    if (typeof mem.intel.lastScanAt === 'number') best = Math.max(best || 0, mem.intel.lastScanAt);
-    if (typeof mem.intel.lastVisited === 'number') best = Math.max(best || 0, mem.intel.lastVisited);
-    if (typeof mem.intel.t === 'number') best = Math.max(best || 0, mem.intel.t);
-  }
-
-  if (mem.scout && typeof mem.scout.lastVisited === 'number') {
-    best = Math.max(best || 0, mem.scout.lastVisited);
-  }
-
-  if (mem.sources) {
-    for (var sid in mem.sources) {
-      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
-      var srec = mem.sources[sid];
-      if (!srec) continue;
-      if (typeof srec.lastSeen === 'number') best = Math.max(best || 0, srec.lastSeen);
-      if (typeof srec.lastActive === 'number') best = Math.max(best || 0, srec.lastActive);
-    }
-  }
-
-  return best;
+  return BeeToolbox.getBestRemoteIntelTick(remoteName);
 }
 
 function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {

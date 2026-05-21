@@ -227,6 +227,39 @@ function _isRemoteRoomUnsafe(roomName, opts) {
   return false;
 }
 
+// Returns the newest tick where this room had useful scout/source intel.
+// This helper does not decide whether intel is stale; callers compare the
+// returned tick against their own TTL.
+function _getBestRemoteIntelTick(roomName) {
+  if (!roomName) return null;
+  if (!Memory.rooms || !Memory.rooms[roomName]) return null;
+
+  var mem = Memory.rooms[roomName];
+  var best = null;
+
+  if (mem.intel) {
+    if (typeof mem.intel.lastScanAt === 'number') best = Math.max(best || 0, mem.intel.lastScanAt);
+    if (typeof mem.intel.lastVisited === 'number') best = Math.max(best || 0, mem.intel.lastVisited);
+    if (typeof mem.intel.t === 'number') best = Math.max(best || 0, mem.intel.t);
+  }
+
+  if (mem.scout && typeof mem.scout.lastVisited === 'number') {
+    best = Math.max(best || 0, mem.scout.lastVisited);
+  }
+
+  if (mem.sources) {
+    for (var sid in mem.sources) {
+      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
+      var srec = mem.sources[sid];
+      if (!srec) continue;
+      if (typeof srec.lastSeen === 'number') best = Math.max(best || 0, srec.lastSeen);
+      if (typeof srec.lastActive === 'number') best = Math.max(best || 0, srec.lastActive);
+    }
+  }
+
+  return best;
+}
+
 function _canEngageTarget(attacker, target) {
   if (!attacker || !target) return false;
   if (_isFriendlyObject(target)) return false;
@@ -485,6 +518,7 @@ var BeeToolbox = {
   isVisibleRoomSafeForRemoteUse: function (room) { return _isVisibleRoomSafeForRemoteUse(room); },
   refreshVisibleRemoteSafety: function (room) { return _refreshVisibleRemoteSafety(room); },
   isRemoteRoomUnsafe: function (roomName, opts) { return _isRemoteRoomUnsafe(roomName, opts); },
+  getBestRemoteIntelTick: function (roomName) { return _getBestRemoteIntelTick(roomName); },
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL

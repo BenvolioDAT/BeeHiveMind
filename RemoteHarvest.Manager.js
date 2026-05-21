@@ -62,25 +62,7 @@ function getMyUsername() {
 }
 
 function getRemoteIntelTick(remoteName) {
-  var mem = Memory.rooms && Memory.rooms[remoteName];
-  if (!mem) return null;
-  var best = null;
-  if (mem.intel) {
-    if (typeof mem.intel.lastScanAt === 'number') best = Math.max(best || 0, mem.intel.lastScanAt);
-    if (typeof mem.intel.lastVisited === 'number') best = Math.max(best || 0, mem.intel.lastVisited);
-    if (typeof mem.intel.t === 'number') best = Math.max(best || 0, mem.intel.t);
-  }
-  if (mem.scout && typeof mem.scout.lastVisited === 'number') best = Math.max(best || 0, mem.scout.lastVisited);
-  if (mem.sources) {
-    for (var sid in mem.sources) {
-      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
-      var s = mem.sources[sid];
-      if (!s) continue;
-      if (typeof s.lastSeen === 'number') best = Math.max(best || 0, s.lastSeen);
-      if (typeof s.lastActive === 'number') best = Math.max(best || 0, s.lastActive);
-    }
-  }
-  return best;
+  return BeeToolbox.getBestRemoteIntelTick(remoteName);
 }
 
 
