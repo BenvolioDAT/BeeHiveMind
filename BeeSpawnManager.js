@@ -616,9 +616,12 @@ function pruneBlockedLunaQueueItems(roomName) {
     var reason = null;
     if (!it.targetRoom) {
       reason = 'missing-target-room';
-    } else if (isLunaRemoteRoomUnsafe(it.targetRoom)) {
-      reason = 'room-unsafe';
     } else {
+      var localOwnedCheck = (RemoteHarvestManager && typeof RemoteHarvestManager.isLocalOwnedRoomForLuna === 'function') ? RemoteHarvestManager.isLocalOwnedRoomForLuna(roomName, it.targetRoom) : { blocked: false };
+      if (localOwnedCheck && localOwnedCheck.blocked) reason = localOwnedCheck.reason || 'local-owned-room';
+      else if (isLunaRemoteRoomUnsafe(it.targetRoom)) reason = 'room-unsafe';
+    }
+    if (!reason) {
       var sMem = Memory.rooms && Memory.rooms[it.targetRoom] && Memory.rooms[it.targetRoom].sources && Memory.rooms[it.targetRoom].sources[it.sourceId];
       if (sMem && sMem.lunaBlockedUntil && sMem.lunaBlockedUntil > Game.time) {
         reason = 'source-blocked';
@@ -1545,6 +1548,7 @@ function prepareRoomQueues(C) {
       Memory.rooms[room.name].lastRemoteHarvestPlan.rejectedRemoteRooms = remoteDiscovery.rejectedRemoteRooms || [];
     }
     ensureRoomQueue(room.name);
+    pruneBlockedLunaQueueItems(room.name);
     fillQueueForRoom(C, room);
   }
 }
