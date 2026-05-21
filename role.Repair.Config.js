@@ -22,5 +22,6 @@ module.exports = Object.freeze({
   remoteContainerEmergencyRepairMaxPerHome: 1,
   remoteContainerEmergencyRepairHoldTicks: 50,
   remoteContainerEmergencyRepairMinContainerEnergy: 100,
-  remoteContainerEmergencyRepairWithdrawAmount: 100
+  remoteContainerEmergencyRepairWithdrawAmount: 100,
+  remoteRepairMissingTargetRetryTicks: 10
 });

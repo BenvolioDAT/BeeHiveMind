@@ -311,7 +311,12 @@ function releaseRepairTarget(creep){
   var claims = ensureRepairClaimsMemory();
   var id = creep.memory && creep.memory.repairTargetId;
   if (id && claims[id] && claims[id].creepName === creep.name) delete claims[id];
-  if (creep.memory){ delete creep.memory.repairTargetId; delete creep.memory.repairTargetInfo; }
+  if (creep.memory){
+    delete creep.memory.repairTargetId;
+    delete creep.memory.repairTargetInfo;
+    delete creep.memory.remoteRepairMissingTicks;
+    delete creep.memory.remoteRepairMissingTargetId;
+  }
 }
 function getLocalTargets(creep){
   Memory.rooms = Memory.rooms || {}; var rm = Memory.rooms[creep.room.name] || {};
@@ -465,6 +470,27 @@ function run(creep){
       clearStaleRemoteContainerRepairMemory(targetInfo, 'missing-visible-container');
       return;
     }
+
+    var inTargetRoom = Boolean(targetInfo.roomName && creep.room && creep.room.name === targetInfo.roomName);
+    var canCountMissing = Boolean(visible || inTargetRoom);
+    if (creep.memory.remoteRepairMissingTargetId !== targetInfo.id) {
+      creep.memory.remoteRepairMissingTicks = 0;
+      creep.memory.remoteRepairMissingTargetId = targetInfo.id;
+    }
+
+    if (!canCountMissing) {
+      if (targetInfo.roomName && typeof targetInfo.x === 'number' && typeof targetInfo.y === 'number') {
+        go(creep, new RoomPosition(targetInfo.x, targetInfo.y, targetInfo.roomName), 1);
+        return;
+      }
+      if (targetInfo.roomName && creep.room.name !== targetInfo.roomName) {
+        go(creep, new RoomPosition(25, 25, targetInfo.roomName), 20);
+        return;
+      }
+      releaseRepairTarget(creep);
+      return;
+    }
+
     creep.memory.remoteRepairMissingTicks = (creep.memory.remoteRepairMissingTicks || 0) + 1;
     var maxMissing = CFG.remoteRepairMissingTargetRetryTicks || 10;
     if (targetInfo.roomName && typeof targetInfo.x === 'number' && typeof targetInfo.y === 'number' && creep.memory.remoteRepairMissingTicks <= maxMissing) {
@@ -475,6 +501,7 @@ function run(creep){
     return;
   }
   creep.memory.remoteRepairMissingTicks = 0;
+  creep.memory.remoteRepairMissingTargetId = targetInfo.id;
 
   creep.room.visual.text("Repair " + target.structureType + " " + target.hits + "/" + target.hitsMax, target.pos.x, target.pos.y - 1, { align: 'center', color: '#ffffff', opacity: 0.9 });
   debugRing(target, CFG.COLORS.REPAIR, "fix");
