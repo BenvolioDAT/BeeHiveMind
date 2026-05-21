@@ -918,13 +918,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
 
   
 function getMyUsername() {
-  for (var name in Game.spawns) {
-    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
-    var spawn = Game.spawns[name];
-    if (!spawn || !spawn.owner || !spawn.owner.username) continue;
-    return spawn.owner.username;
-  }
-  return null;
+  return BeeToolbox.myUsername();
 }
 
 function markLunaRoomUnsafe(roomName, reason) {
@@ -953,6 +947,9 @@ function isLunaRoomBlockedByMemory(roomName) {
 }
 
 function isVisibleRoomUnsafeForLuna(room) {
+  // Luna keeps this visible unsafe check local because it stamps a Luna-specific
+  // blocked reason into room memory. BeeToolbox handles generic safety checks,
+  // but this function preserves Luna diagnostics.
   if (!room) return false;
   var myName = getMyUsername();
   var controller = room.controller;
@@ -979,30 +976,7 @@ function isVisibleRoomUnsafeForLuna(room) {
 }
 
 function refreshVisibleLunaSafety(room) {
-  if (!room || !room.name) return false;
-  var myName = getMyUsername();
-  var controller = room.controller;
-  var owner = controller && controller.owner && controller.owner.username;
-  var reservation = controller && controller.reservation && controller.reservation.username;
-  var hostileCreeps = room.find(FIND_HOSTILE_CREEPS) || [];
-  var invaderCores = room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; } }) || [];
-  var safe = !hostileCreeps.length &&
-    !invaderCores.length &&
-    !(owner && (!myName || owner !== myName)) &&
-    !(reservation && (!myName || reservation !== myName));
-  if (!safe) return false;
-
-  var rm = getRoomMemoryBucket(room.name);
-  delete rm.lunaBlockedUntil;
-  delete rm.lunaBlockedReason;
-  delete rm.lunaBlockedAt;
-  delete rm.lunaBlocked;
-  delete rm.lunaUnsafe;
-  delete rm.hostile;
-  delete rm.hostileRoom;
-  delete rm.threatLevel;
-  if (rm._invaderLock && rm._invaderLock.locked) delete rm._invaderLock;
-  return true;
+  return BeeToolbox.refreshVisibleRemoteSafety(room);
 }
 
 function isLunaRoomUnsafe(roomName) {

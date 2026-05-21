@@ -49,14 +49,13 @@ function getNextRepairTarget(queue){ while (queue.length){ var head = queue[0]; 
 function findDroppedEnergy(creep){ return creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, { filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount || 0) > 0; } }); }
 function findWithdrawSource(creep){ return creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function(s){ if (!s.store) return false; var t = s.structureType; if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN) return false; return (s.store[RESOURCE_ENERGY] || 0) > 0; } }); }
 function getMyUsernameForRepair(){
-  for (var name in Game.spawns) {
-    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
-    var spawn = Game.spawns[name];
-    if (spawn && spawn.owner && spawn.owner.username) return spawn.owner.username;
-  }
-  return null;
+  return BeeToolbox.myUsername();
 }
 function isRoomUnsafeForRemoteRepair(roomName, homeRoom){
+  // Repair keeps a narrow remote safety gate so it does not inherit broader
+  // Luna/spawn safety rules by accident. Username lookup is shared through
+  // BeeToolbox, but the predicate remains Repair-specific unless behavior
+  // parity is proven.
   if (!roomName || roomName === homeRoom) return false;
   var myName = getMyUsernameForRepair();
   var mem = Memory.rooms && Memory.rooms[roomName];
