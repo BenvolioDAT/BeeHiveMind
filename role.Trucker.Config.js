@@ -30,7 +30,7 @@ function shouldBlockRemoteHaulForMaintenance(req) {
 }
 module.exports = Object.freeze({
   DEBUG_SAY: false,
-  DEBUG_DRAW: false,
+  DEBUG_DRAW: true,
   PATH_REUSE: 25,
   MIN_HAUL_REQUEST_ENERGY: 300,
   URGENT_HAUL_REQUEST_ENERGY: 1600,
