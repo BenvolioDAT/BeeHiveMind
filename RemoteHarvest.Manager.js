@@ -42,8 +42,12 @@ function refreshVisibleRemoteSafety(room) {
 }
 
 function isRemoteUnsafe(remoteName) {
+  // Candidate filtering handles intel owner/reservation gates explicitly.
+  // Keep this wrapper aligned with prior behavior by ignoring intel ownership
+  // inside the shared helper used for generic room-level danger checks.
   return BeeToolbox.isRemoteRoomUnsafe(remoteName, {
-    invaderLockTtl: (LunaConfig && LunaConfig.INVADER_LOCK_MEMO_TTL) || 1500
+    invaderLockTtl: (LunaConfig && LunaConfig.INVADER_LOCK_MEMO_TTL) || 1500,
+    ignoreIntelOwnership: true
   });
 }
 
