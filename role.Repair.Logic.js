@@ -96,6 +96,67 @@ function getRemoteContainerStatusById(id){
   if (!root || !id) return null;
   return root[id] || null;
 }
+
+function clearStaleRemoteContainerRepairMemory(targetInfo, reason){
+  if (!targetInfo) return;
+  var roomName = targetInfo.roomName || targetInfo.remoteRoom || null;
+  var sourceId = targetInfo.sourceId || null;
+  var containerId = targetInfo.containerId || targetInfo.id || null;
+  var root = Memory.__BHM || (Memory.__BHM = {});
+  var status = root.remoteContainerStatus || {};
+  var requests = root.remoteHaulRequests || {};
+  for (var key in status){
+    if (!Object.prototype.hasOwnProperty.call(status, key)) continue;
+    var entry = status[key];
+    if (!entry) continue;
+    var sameContainer = containerId && (entry.containerId === containerId || entry.id === containerId || key === containerId);
+    var sameSourceRoom = sourceId && roomName && entry.sourceId === sourceId && (entry.remoteRoom || entry.roomName) === roomName;
+    if (!sameContainer && !sameSourceRoom) continue;
+    delete status[key];
+  }
+  if (containerId && requests[containerId]) delete requests[containerId];
+  if (targetInfo.id && requests[targetInfo.id]) delete requests[targetInfo.id];
+  if (sourceId && roomName){
+    for (var reqId in requests){
+      if (!Object.prototype.hasOwnProperty.call(requests, reqId)) continue;
+      var req = requests[reqId];
+      if (!req) continue;
+      if (req.sourceId === sourceId && (req.remoteRoom || req.roomName) === roomName) delete requests[reqId];
+    }
+  }
+  if (roomName && sourceId) {
+    var key2 = roomName + ':' + sourceId + ':' + reason;
+    global.__remoteRepairClearLog = global.__remoteRepairClearLog || {};
+    var last = global.__remoteRepairClearLog[key2] || 0;
+    if ((Game.time - last) >= 100) {
+      console.log('RemoteRepair cleared stale container status room=' + roomName + ' source=' + sourceId + ' oldContainer=' + (containerId || 'unknown') + ' reason=' + reason);
+      global.__remoteRepairClearLog[key2] = Game.time;
+    }
+  }
+}
+
+function validateRemoteContainerRepairTarget(creep, targetInfo){
+  if (!targetInfo || targetInfo.type !== STRUCTURE_CONTAINER) return targetInfo;
+  var roomName = targetInfo.roomName;
+  var room = roomName ? Game.rooms[roomName] : null;
+  if (!room) return targetInfo;
+  var containerId = targetInfo.containerId || targetInfo.id;
+  var obj = containerId ? Game.getObjectById(containerId) : null;
+  if (obj && obj.structureType === STRUCTURE_CONTAINER) return targetInfo;
+  if (typeof targetInfo.x === 'number' && typeof targetInfo.y === 'number') {
+    var sites = room.lookForAt(LOOK_CONSTRUCTION_SITES, targetInfo.x, targetInfo.y) || [];
+    for (var i = 0; i < sites.length; i++) {
+      if (sites[i] && sites[i].structureType === STRUCTURE_CONTAINER) {
+        releaseRepairTarget(creep);
+        clearStaleRemoteContainerRepairMemory(targetInfo, 'missing-visible-container');
+        return null;
+      }
+    }
+  }
+  releaseRepairTarget(creep);
+  clearStaleRemoteContainerRepairMemory(targetInfo, 'missing-visible-container');
+  return null;
+}
 function getRepairGoalHits(target, targetInfo){
   if (!target || typeof target.hitsMax !== 'number') return 0;
   var maint = CoreConfig && CoreConfig.settings && CoreConfig.settings.maintenance ? CoreConfig.settings.maintenance : {};
@@ -275,10 +336,14 @@ function getRemoteContainerTargets(creep){
   for (var id in root){
     if (!Object.prototype.hasOwnProperty.call(root,id)) continue;
     var r = root[id]; if (!r || r.homeRoom !== home) continue;
+    if (r.status && r.status !== 'built') continue;
     if (typeof r.containerHitsPct !== 'number' || r.containerHitsPct > 0.75) continue;
     var targetRoom = r.remoteRoom || r.roomName;
     if (isRoomUnsafeForRemoteRepair(targetRoom, home)) continue;
-    out.push({id:id, roomName:targetRoom, x:r.x, y:r.y, type:STRUCTURE_CONTAINER, priority:0, hitsPct:r.containerHitsPct, sourceId:r.sourceId || null});
+    var visibleRoom = targetRoom ? Game.rooms[targetRoom] : null;
+    var containerObj = Game.getObjectById(r.containerId || r.id || id);
+    if (visibleRoom && (!containerObj || containerObj.structureType !== STRUCTURE_CONTAINER)) continue;
+    out.push({id:(r.containerId || r.id || id), containerId:(r.containerId || r.id || id), roomName:targetRoom, x:r.x, y:r.y, type:STRUCTURE_CONTAINER, priority:0, hitsPct:r.containerHitsPct, sourceId:r.sourceId || null});
   }
   return out;
 }
@@ -320,6 +385,9 @@ function run(creep){
       return;
     }
     if (activeTarget && activeTarget.type === STRUCTURE_CONTAINER) {
+      var validatedActiveTarget = validateRemoteContainerRepairTarget(creep, activeTarget);
+      if (!validatedActiveTarget) return;
+      activeTarget = validatedActiveTarget;
       var targetContainer = activeTarget.id ? Game.getObjectById(activeTarget.id) : null;
       if (!targetContainer && activeTarget.roomName && typeof activeTarget.x === 'number' && typeof activeTarget.y === 'number') {
         go(creep, new RoomPosition(activeTarget.x, activeTarget.y, activeTarget.roomName), 1);
@@ -383,15 +451,30 @@ function run(creep){
     claimRepairTarget(creep, targetInfo);
   }
 
+  if (targetInfo.type === STRUCTURE_CONTAINER) {
+    var validatedTarget = validateRemoteContainerRepairTarget(creep, targetInfo);
+    if (!validatedTarget) return;
+    targetInfo = validatedTarget;
+  }
+
   var target = Game.getObjectById(targetInfo.id);
   if (!target) {
-    if (targetInfo.roomName && typeof targetInfo.x === 'number' && typeof targetInfo.y === 'number') {
+    var visible = targetInfo.roomName && Game.rooms[targetInfo.roomName];
+    if (visible && targetInfo.type === STRUCTURE_CONTAINER) {
+      releaseRepairTarget(creep);
+      clearStaleRemoteContainerRepairMemory(targetInfo, 'missing-visible-container');
+      return;
+    }
+    creep.memory.remoteRepairMissingTicks = (creep.memory.remoteRepairMissingTicks || 0) + 1;
+    var maxMissing = CFG.remoteRepairMissingTargetRetryTicks || 10;
+    if (targetInfo.roomName && typeof targetInfo.x === 'number' && typeof targetInfo.y === 'number' && creep.memory.remoteRepairMissingTicks <= maxMissing) {
       go(creep, new RoomPosition(targetInfo.x, targetInfo.y, targetInfo.roomName), 1);
       return;
     }
     releaseRepairTarget(creep);
     return;
   }
+  creep.memory.remoteRepairMissingTicks = 0;
 
   creep.room.visual.text("Repair " + target.structureType + " " + target.hits + "/" + target.hitsMax, target.pos.x, target.pos.y - 1, { align: 'center', color: '#ffffff', opacity: 0.9 });
   debugRing(target, CFG.COLORS.REPAIR, "fix");

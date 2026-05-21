@@ -448,6 +448,16 @@ function _pruneRemoteContainerStatus(now) {
     var age = now - updated;
     entry.lastSeenAgo = age;
     entry.stale = age > staleTicks;
+    var roomName = entry.remoteRoom || entry.roomName;
+    var containerId = entry.containerId || entry.id || id;
+    var room = roomName ? Game.rooms[roomName] : null;
+    if (room) {
+      var live = containerId ? Game.getObjectById(containerId) : null;
+      if (!live || live.structureType !== STRUCTURE_CONTAINER) {
+        delete root.remoteContainerStatus[id];
+        continue;
+      }
+    }
     var hitsPct = typeof entry.containerHitsPct === 'number' ? entry.containerHitsPct : null;
     var isCritical = entry.status === 'missing' || entry.status === 'critical' || entry.status === 'lowHp' || (hitsPct != null && hitsPct <= 0.40);
     var ttl = isCritical ? criticalTtl : defaultTtl;
