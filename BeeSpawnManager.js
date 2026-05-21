@@ -417,22 +417,64 @@ function getMyUsernameForSpawnManager() {
   return null;
 }
 
+function refreshVisibleLunaRemoteSafety(room) {
+  if (!room || !room.name) return false;
+  var myName = getMyUsernameForSpawnManager();
+  var ctl = room.controller;
+  var owner = ctl && ctl.owner && ctl.owner.username;
+  var reservation = ctl && ctl.reservation && ctl.reservation.username;
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+  var invaderCores = room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; } }) || [];
+  var safe = !hostiles.length &&
+    !invaderCores.length &&
+    !(owner && (!myName || owner !== myName)) &&
+    !(reservation && (!myName || reservation !== myName));
+  if (!safe) return false;
+
+  if (!Memory.rooms) Memory.rooms = {};
+  var mem = Memory.rooms[room.name] || (Memory.rooms[room.name] = {});
+  delete mem.lunaBlockedUntil;
+  delete mem.lunaBlockedReason;
+  delete mem.lunaBlockedAt;
+  delete mem.lunaBlocked;
+  delete mem.lunaUnsafe;
+  delete mem.hostile;
+  delete mem.hostileRoom;
+  delete mem.threatLevel;
+  // Room-level invader locks are safe to clear only after visible safety is confirmed.
+  delete mem.lunaInvaderLockUntil;
+  if (mem._invaderLock && mem._invaderLock.locked) delete mem._invaderLock;
+  return true;
+}
+
 function isLunaRemoteRoomUnsafe(remoteName) {
+  var visible = Game.rooms[remoteName];
+  if (visible) {
+    if (RemoteHarvestManager && typeof RemoteHarvestManager.refreshVisibleRemoteSafety === 'function') {
+      RemoteHarvestManager.refreshVisibleRemoteSafety(visible);
+    } else {
+      // Keep this fallback in sync with RemoteHarvest.Manager refreshVisibleRemoteSafety.
+      refreshVisibleLunaRemoteSafety(visible);
+    }
+  }
+
   var mem = (Memory.rooms && Memory.rooms[remoteName]) || {};
-  if (mem.hostile) return true;
-  if (mem.lunaBlockedUntil && Game.time < mem.lunaBlockedUntil) return true;
+  if (mem.lunaBlocked || mem.lunaUnsafe || mem.hostile || mem.hostileRoom) return true;
+  if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
+  if (mem.lunaInvaderLockUntil && mem.lunaInvaderLockUntil > Game.time) return true;
 
   if (mem._invaderLock && mem._invaderLock.locked) {
     var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
     if (lockTick == null || (Game.time - lockTick) <= INVADER_LOCK_TTL) return true;
   }
 
+  if (mem.threatLevel && mem.threatLevel > 0) return true;
+
   var myName = getMyUsernameForSpawnManager();
   var intel = mem.intel || {};
   if (intel.owner && (!myName || intel.owner !== myName)) return true;
   if (intel.reservation && (!myName || intel.reservation !== myName)) return true;
 
-  var visible = Game.rooms[remoteName];
   if (visible && visible.controller) {
     var owner = visible.controller.owner && visible.controller.owner.username;
     if (owner && (!myName || owner !== myName)) return true;
@@ -655,21 +697,45 @@ function collectApprovedLunaSourcesFromRemote(remoteName, out) {
 function pruneBlockedLunaQueueItems(roomName) {
   var q = ensureRoomQueue(roomName);
   var kept = [];
+  var removed = 0;
+  var removedItems = [];
   for (var i = 0; i < q.length; i++) {
     var it = q[i];
     if (!it || it.role !== 'Luna') { kept.push(it); continue; }
-    if (!it.targetRoom || isLunaRemoteRoomUnsafe(it.targetRoom)) {
+
+    var reason = null;
+    if (!it.targetRoom) {
+      reason = 'missing-target-room';
+    } else if (isLunaRemoteRoomUnsafe(it.targetRoom)) {
+      reason = 'room-unsafe';
+    } else {
+      var sMem = Memory.rooms && Memory.rooms[it.targetRoom] && Memory.rooms[it.targetRoom].sources && Memory.rooms[it.targetRoom].sources[it.sourceId];
+      if (sMem && sMem.lunaBlockedUntil && sMem.lunaBlockedUntil > Game.time) {
+        reason = 'source-blocked';
+      }
+    }
+
+    if (reason) {
       if (it.sourceId) RemoteHarvestManager.unreserveSourceForQueue(roomName, it.sourceId);
+      removed++;
+      removedItems.push({
+        sourceId: it.sourceId || null,
+        targetRoom: it.targetRoom || null,
+        reason: reason
+      });
       continue;
     }
-    var sMem = Memory.rooms && Memory.rooms[it.targetRoom] && Memory.rooms[it.targetRoom].sources && Memory.rooms[it.targetRoom].sources[it.sourceId];
-    if (sMem && sMem.lunaBlockedUntil && sMem.lunaBlockedUntil > Game.time) {
-      RemoteHarvestManager.unreserveSourceForQueue(roomName, it.sourceId);
-      continue;
-    }
+
     kept.push(it);
   }
-  Memory.rooms[roomName].spawnQueue = kept;
+  var roomMem = ensureRoomMemory(roomName);
+  roomMem.spawnQueue = kept;
+  roomMem.lastLunaQueuePrune = {
+    tick: Game.time,
+    removed: removed,
+    kept: kept.length,
+    removedItems: removedItems
+  };
 }
 
 function getSourceMaxSlotsForSpawn(sourceId, targetRoom) {
@@ -1451,6 +1517,11 @@ function fillQueueForRoom(C, room) {
       var pick = RemoteHarvestManager.reserveSourceForQueue(roomName);
       if (!pick) {
         dlog('🌙 [QueueGate]', roomName, 'skip Luna enqueue: no free source slots');
+        ensureRoomMemory(roomName).lastLunaQueueGate = {
+          tick: Game.time,
+          reason: 'no-free-source-slots',
+          remoteHarvestPlan: ensureRoomMemory(roomName).lastRemoteHarvestPlan || null
+        };
         break;
       }
       if (!enqueue(roomName, role, { sourceId: pick.sourceId, targetRoom: pick.targetRoom })) {
