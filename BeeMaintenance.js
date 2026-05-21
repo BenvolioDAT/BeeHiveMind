@@ -1,6 +1,7 @@
 
 var CoreConfig = require('core.config');
 var Logger = require('core.logger');
+var BeeToolbox = require('BeeToolbox');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var maintLog = Logger.createLogger('Maintenance', LOG_LEVEL.DEBUG);
 
@@ -433,6 +434,8 @@ function cleanUpMemory() {
 }
 
 function _pruneRemoteContainerStatus(now) {
+  // Maintenance cleanup is TTL/visibility driven: keep status fresh while
+  // visible/live, and prune dead or expired memory snapshots on cadence.
   var interval = CFG.REMOTE_CONTAINER_STATUS_SWEEP_INTERVAL || 500;
   if (interval > 1 && (now % interval) !== 0) return;
   var root = Memory.__BHM;
@@ -449,11 +452,11 @@ function _pruneRemoteContainerStatus(now) {
     entry.lastSeenAgo = age;
     entry.stale = age > staleTicks;
     var roomName = entry.remoteRoom || entry.roomName;
-    var containerId = entry.containerId || entry.id || id;
+    var ident = BeeToolbox.getRemoteContainerIdentity(entry);
+    var containerId = ident.containerId || id;
     var room = roomName ? Game.rooms[roomName] : null;
     if (room) {
-      var live = containerId ? Game.getObjectById(containerId) : null;
-      if (!live || live.structureType !== STRUCTURE_CONTAINER) {
+      if (!BeeToolbox.isLiveContainerId(containerId)) {
         delete root.remoteContainerStatus[id];
         continue;
       }
