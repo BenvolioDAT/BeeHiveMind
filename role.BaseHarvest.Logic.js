@@ -91,11 +91,35 @@ function assignSource(creep) {
   return best.source.id;
 }
 
-function getContainerAtOrAdjacent(pos) { var here = pos.lookFor(LOOK_STRUCTURES); for (var i = 0; i < here.length; i++) { if (here[i].structureType === STRUCTURE_CONTAINER) return here[i]; } var around = pos.findInRange(FIND_STRUCTURES, 1, { filter: function(s) { return s.structureType === STRUCTURE_CONTAINER; } }); return (around && around.length) ? around[0] : null; }
-function countCreepsWithRole(roleName, legacyTask) { var n = 0; for (var name in Game.creeps) { var c = Game.creeps[name]; if (c && matchesRole(c, roleName, legacyTask)) n++; } return n; }
+function getContainerAtOrAdjacent(pos) {
+   var here = pos.lookFor(LOOK_STRUCTURES); for (var i = 0; i < here.length; i++) {
+     if (here[i].structureType === STRUCTURE_CONTAINER) return here[i]; }
+      var around = pos.findInRange(FIND_STRUCTURES, 1, {
+         filter: function(s) {
+           return s.structureType === STRUCTURE_CONTAINER; } }); return (around && around.length) ? around[0] : null; 
+          }
 
-function ensureBaseHarvestIdentity(creep) { if (!creep || !creep.memory) return; if (!creep.memory.role || String(creep.memory.role).toLowerCase() === 'baseharvest') creep.memory.role = 'BaseHarvest'; if (!creep.memory.task) creep.memory.task = 'baseharvest'; }
-function determineBaseHarvestState(creep) { ensureBaseHarvestIdentity(creep); if (!creep) return 'IDLE'; var empty = creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0; var full = creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0; if (empty) { creep.memory.harvesting = true; debugSay(creep, '⤵️MINE'); } else if (full) { creep.memory.harvesting = false; debugSay(creep, '⤴️DROP'); } var nextState = 'IDLE'; if (creep.memory.harvesting) nextState = 'HARVEST'; else if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) nextState = 'OFFLOAD'; creep.memory.state = nextState; return nextState; }
+function countCreepsWithRole(roleName, legacyTask) {
+   var n = 0; for (var name in Game.creeps) { 
+    var c = Game.creeps[name]; if (c && matchesRole(c, roleName, legacyTask)) n++; } return n; 
+  }
+
+function ensureBaseHarvestIdentity(creep) {
+   if (!creep || !creep.memory) return; 
+   if (!creep.memory.role || String(creep.memory.role).toLowerCase() === 'baseharvest') creep.memory.role = 'BaseHarvest'; 
+   if (!creep.memory.task) creep.memory.task = 'baseharvest'; 
+  }
+
+function determineBaseHarvestState(creep) {
+   ensureBaseHarvestIdentity(creep); 
+   if (!creep) return 'IDLE'; 
+   var empty = creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0; var full = creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0; 
+   if (empty) { creep.memory.harvesting = true; debugSay(creep, '⤵️MINE'); } 
+   else if (full) { creep.memory.harvesting = false; debugSay(creep, '⤴️DROP'); }
+    var nextState = 'IDLE'; if (creep.memory.harvesting) nextState = 'HARVEST'; 
+    else if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) nextState = 'OFFLOAD'; creep.memory.state = nextState; 
+    return nextState; 
+  }
 
 function runHarvestPhase(creep) {
   var sid = assignSource(creep); if (!sid) { debugSay(creep, '❓'); return; }
