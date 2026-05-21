@@ -1566,6 +1566,27 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     return pct;
   }
 
+  
+
+  function clearStaleRemoteContainerRepairMemory(sourceId, remoteRoom) {
+    if (!sourceId || !remoteRoom) return;
+    var status = ensureRemoteContainerStatusMemory();
+    var requests = ensureRemoteHaulRequestsMemory();
+    for (var key in status) {
+      if (!Object.prototype.hasOwnProperty.call(status, key)) continue;
+      var entry = status[key];
+      if (!entry || entry.sourceId !== sourceId) continue;
+      var entryRoom = entry.remoteRoom || entry.roomName;
+      if (entryRoom !== remoteRoom) continue;
+      var containerId = entry.containerId || entry.id;
+      var live = containerId ? Game.getObjectById(containerId) : null;
+      if (live && live.structureType === STRUCTURE_CONTAINER) continue;
+      delete status[key];
+      if (containerId && requests[containerId]) delete requests[containerId];
+      if (requests[key]) delete requests[key];
+    }
+  }
+
   function upsertRemoteContainerBuildStatus(creep, source, container, site, plannedPos) {
     if (!creep || !source) return;
     var homeName = getHomeName(creep);
@@ -1591,6 +1612,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     } else if (plannedPos) {
       status = 'planned';
     }
+
+    if (status === 'building' || status === 'planned' || status === 'missing') clearStaleRemoteContainerRepairMemory(source.id, remoteRoom);
 
     var builds = ensureRemoteContainerBuildMemory();
     var prev = builds[source.id] || {};
@@ -1651,6 +1674,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       containerHits: container.hits || 0,
       containerHitsMax: container.hitsMax || 0,
       containerHitsPct: container.hitsMax > 0 ? container.hits / container.hitsMax : 1,
+      status: 'built',
       updated: Game.time,
       maintenanceUntil: prev.maintenanceUntil || 0,
       maintenanceBy: prev.maintenanceBy || null,
