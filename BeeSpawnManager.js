@@ -1290,34 +1290,30 @@ function computeRoomQuotas(C, room) {
   return quotas;
 }
 
-function fillQueueForRoom(C, room) {
-  var quotas = computeRoomQuotas(C, room);
-  queueEmergencyVisionScoutIfNeeded(room.name);
-  var roomName = room.name;
-  pruneBlockedLunaQueueItems(roomName);
-  cleanupRetiredCourierState(roomName);
-
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  var truckerQuotaMeta = computeTruckerQuotaForHome(roomName);
-  Memory.rooms[roomName].lastRoleQuotas = {
+function writeRoleQuotaDiagnostics(roomName, quotas) {
+  var roomMem = ensureRoomMemory(roomName);
+  roomMem.lastRoleQuotas = {
     tick: Game.time,
     quotas: quotas
   };
-  var localTruckerBaseQuota = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
-  var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
-  var remoteTruckerQuota = truckerQuotaMeta.remoteDesiredTruckers || 0;
-  var liveTruckers = getRoomLocalLiveCount(C, roomName, "Trucker");
-  var queuedTruckers = queuedCount(roomName, "Trucker");
-  var assignmentCounts = countHomeTruckersByAssignment(roomName);
-  var effectiveActiveTruckers = Math.min(
+}
+
+function calculateEffectiveTruckerActivity(truckerQuotaMeta, assignmentCounts, localTruckerBaseQuota) {
+  return Math.min(
     assignmentCounts.truckersOnLocalJobs,
     truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota
   ) + Math.min(
     assignmentCounts.remoteCapableTruckers,
     truckerQuotaMeta.remoteDesiredTruckers || 0
   );
-  Memory.rooms[roomName].lastLocalHaulerMode = {
+}
+
+// Trucker quota has local and remote parts; diagnostics are kept verbose
+// so workload decisions can be audited from Memory.
+function writeTruckerQuotaDiagnostics(roomName, quotas, truckerQuotaMeta, liveTruckers, queuedTruckers, assignmentCounts, effectiveActiveTruckers, localTruckerBaseQuota, maxTotalTruckers) {
+  var roomMem = ensureRoomMemory(roomName);
+  var remoteTruckerQuota = truckerQuotaMeta.remoteDesiredTruckers || 0;
+  roomMem.lastLocalHaulerMode = {
     tick: Game.time,
     mode: 'trucker-primary',
     courierQuota: 0,
@@ -1337,14 +1333,14 @@ function fillQueueForRoom(C, room) {
     effectiveActiveTruckers: effectiveActiveTruckers,
     courierRoleRetired: true
   };
-  Memory.rooms[roomName].lastTruckerQuota = {
+  roomMem.lastTruckerQuota = {
     tick: Game.time,
     activeRequests: truckerQuotaMeta.activeRequests,
     urgentRequests: truckerQuotaMeta.urgentRequests,
     remoteEnergyWaiting: truckerQuotaMeta.remoteEnergyWaiting || 0,
     activeRemoteRooms: truckerQuotaMeta.activeRemoteRooms || 0,
     localDesiredTruckers: truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota,
-    remoteDesiredTruckers: truckerQuotaMeta.remoteDesiredTruckers || 0,
+    remoteDesiredTruckers: remoteTruckerQuota,
     finalTruckerQuota: truckerQuotaMeta.finalTruckerQuota || (quotas.Trucker || 0),
     desiredTruckers: truckerQuotaMeta.desiredTruckers,
     liveTruckers: liveTruckers,
@@ -1356,8 +1352,94 @@ function fillQueueForRoom(C, room) {
     remoteCapableTruckers: assignmentCounts.remoteCapableTruckers,
     effectiveActiveTruckers: effectiveActiveTruckers,
     skipped: truckerQuotaMeta.skipped || {},
-    reasons: (truckerQuotaMeta.remoteDesiredTruckers || 0) > 0 ? "workload-based remote demand" : "no active remote haul workload"
+    reasons: remoteTruckerQuota > 0 ? "workload-based remote demand" : "no active remote haul workload"
   };
+}
+
+function calculateRoleDeficitForQueue(role, limit, active, queued, replacementNeed, roomName, truckerQuotaMeta, maxTotalTruckers, liveTruckers, queuedTruckers) {
+  var effectiveLimit = limit + replacementNeed;
+  var deficit = Math.max(0, effectiveLimit - active - queued);
+  if (role === 'Trucker') {
+    var truckerHardCap = truckerQuotaMeta.finalTruckerQuota || limit || 0;
+    if (maxTotalTruckers > 0) truckerHardCap = Math.min(truckerHardCap, maxTotalTruckers);
+    var spareUnderCap = Math.max(0, truckerHardCap - liveTruckers - queuedTruckers);
+    deficit = Math.min(deficit, spareUnderCap);
+  }
+  if (deficit > 0 && tickEvery(DBG_EVERY)) {
+    dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit,
+      'active=', active, 'queued=', queued, 'deficit=', deficit);
+  }
+  return deficit;
+}
+
+// Remote container emergency repair uses a special queue item so the spawned
+// Repair creep knows the exact remote container target.
+function enqueueRepairIfNeeded(roomName, repairDiag, role) {
+  var emergencyReq = repairDiag && repairDiag.selectedEmergencyRequest
+    ? findRemoteContainerEmergencyRepairRequest(roomName)
+    : null;
+  if (emergencyReq && countRemoteEmergencyRepairAssignments(roomName) < Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1)) {
+    enqueue(roomName, role, {
+      task: 'remoteContainerEmergencyRepair',
+      home: roomName,
+      targetRoom: emergencyReq.remoteRoom || emergencyReq.roomName,
+      containerId: emergencyReq.containerId,
+      sourceId: emergencyReq.sourceId,
+      requestId: emergencyReq.id,
+      x: emergencyReq.x,
+      y: emergencyReq.y
+    });
+    if (repairDiag) {
+      repairDiag.queuedRemoteEmergencyRepair = (repairDiag.queuedRemoteEmergencyRepair || 0) + 1;
+      repairDiag.queueDecision = 'queuedRemoteEmergencyRepair';
+    }
+    return true;
+  }
+  return false;
+}
+
+function recordLunaQueueGate(roomName) {
+  ensureRoomMemory(roomName).lastLunaQueueGate = {
+    tick: Game.time,
+    reason: 'no-free-source-slots',
+    remoteHarvestPlan: ensureRoomMemory(roomName).lastRemoteHarvestPlan || null
+  };
+}
+
+// Luna enqueue reserves a specific source before adding the queue item.
+// If enqueue fails, the reservation must be released.
+function enqueueLunaIfNeeded(roomName, role) {
+  var pick = RemoteHarvestManager.reserveSourceForQueue(roomName);
+  if (!pick) {
+    dlog('🌙 [QueueGate]', roomName, 'skip Luna enqueue: no free source slots');
+    recordLunaQueueGate(roomName);
+    return false;
+  }
+  if (!enqueue(roomName, role, { sourceId: pick.sourceId, targetRoom: pick.targetRoom })) {
+    RemoteHarvestManager.unreserveSourceForQueue(roomName, pick.sourceId);
+  }
+  return true;
+}
+
+// Queue filling is intentionally ordered: update diagnostics first, prune
+// invalid queue entries, then enqueue deficits. Changing the order can change
+// spawn behavior.
+function fillQueueForRoom(C, room) {
+  var quotas = computeRoomQuotas(C, room);
+  queueEmergencyVisionScoutIfNeeded(room.name);
+  var roomName = room.name;
+  pruneBlockedLunaQueueItems(roomName);
+  cleanupRetiredCourierState(roomName);
+
+  var truckerQuotaMeta = computeTruckerQuotaForHome(roomName);
+  writeRoleQuotaDiagnostics(roomName, quotas);
+  var localTruckerBaseQuota = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
+  var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
+  var liveTruckers = getRoomLocalLiveCount(C, roomName, "Trucker");
+  var queuedTruckers = queuedCount(roomName, "Trucker");
+  var assignmentCounts = countHomeTruckersByAssignment(roomName);
+  var effectiveActiveTruckers = calculateEffectiveTruckerActivity(truckerQuotaMeta, assignmentCounts, localTruckerBaseQuota);
+  writeTruckerQuotaDiagnostics(roomName, quotas, truckerQuotaMeta, liveTruckers, queuedTruckers, assignmentCounts, effectiveActiveTruckers, localTruckerBaseQuota, maxTotalTruckers);
 
   pruneOverfilledQueue(roomName, quotas, C);
 
@@ -1385,38 +1467,10 @@ function fillQueueForRoom(C, room) {
       replacementNeed = countRoleNeedingReplacement(roomName, canonical, REPLACEMENT_TTL[role]);
       if (replacementNeed > 1) replacementNeed = 1;
     }
-    var effectiveLimit = limit + replacementNeed;
-    var deficit = Math.max(0, effectiveLimit - active - queued);
-    if (role === 'Trucker') {
-      var truckerHardCap = truckerQuotaMeta.finalTruckerQuota || limit || 0;
-      if (maxTotalTruckers > 0) truckerHardCap = Math.min(truckerHardCap, maxTotalTruckers);
-      var spareUnderCap = Math.max(0, truckerHardCap - liveTruckers - queuedTruckers);
-      deficit = Math.min(deficit, spareUnderCap);
-    }
-    if (deficit > 0 && tickEvery(DBG_EVERY)) {
-      dlog('📥 [Queue]', roomName, 'role=', role, 'limit=', limit,
-        'active=', active, 'queued=', queued, 'deficit=', deficit);
-    }
+    var deficit = calculateRoleDeficitForQueue(role, limit, active, queued, replacementNeed, roomName, truckerQuotaMeta, maxTotalTruckers, liveTruckers, queuedTruckers);
     for (var j = 0; j < deficit; j++) {
       if (role === 'Repair') {
-        var emergencyReq = repairDiag && repairDiag.selectedEmergencyRequest
-          ? findRemoteContainerEmergencyRepairRequest(roomName)
-          : null;
-        if (emergencyReq && countRemoteEmergencyRepairAssignments(roomName) < Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1)) {
-          enqueue(roomName, role, {
-            task: 'remoteContainerEmergencyRepair',
-            home: roomName,
-            targetRoom: emergencyReq.remoteRoom || emergencyReq.roomName,
-            containerId: emergencyReq.containerId,
-            sourceId: emergencyReq.sourceId,
-            requestId: emergencyReq.id,
-            x: emergencyReq.x,
-            y: emergencyReq.y
-          });
-          if (repairDiag) {
-            repairDiag.queuedRemoteEmergencyRepair = (repairDiag.queuedRemoteEmergencyRepair || 0) + 1;
-            repairDiag.queueDecision = 'queuedRemoteEmergencyRepair';
-          }
+        if (enqueueRepairIfNeeded(roomName, repairDiag, role)) {
           continue;
         }
       }
@@ -1424,18 +1478,8 @@ function fillQueueForRoom(C, room) {
         enqueue(roomName, role);
         continue;
       }
-      var pick = RemoteHarvestManager.reserveSourceForQueue(roomName);
-      if (!pick) {
-        dlog('🌙 [QueueGate]', roomName, 'skip Luna enqueue: no free source slots');
-        ensureRoomMemory(roomName).lastLunaQueueGate = {
-          tick: Game.time,
-          reason: 'no-free-source-slots',
-          remoteHarvestPlan: ensureRoomMemory(roomName).lastRemoteHarvestPlan || null
-        };
+      if (!enqueueLunaIfNeeded(roomName, role)) {
         break;
-      }
-      if (!enqueue(roomName, role, { sourceId: pick.sourceId, targetRoom: pick.targetRoom })) {
-        RemoteHarvestManager.unreserveSourceForQueue(roomName, pick.sourceId);
       }
     }
   }
