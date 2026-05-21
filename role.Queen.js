@@ -602,7 +602,11 @@ function countAssignedBaseHarvesters(roomName, sourceId) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) continue;
     var c = Game.creeps[creepName];
     if (!c || !c.my || !c.memory) continue;
-    if (c.memory.role !== 'BaseHarvest') continue;
+    var role = c.memory.role;
+    var task = c.memory.task;
+    var isBaseHarvestRole = role && String(role).toLowerCase() === 'baseharvest';
+    var isBaseHarvestTask = task && String(task).toLowerCase() === 'baseharvest';
+    if (!isBaseHarvestRole && !isBaseHarvestTask) continue;
     if (c.memory.assignedSource !== sourceId) continue;
     if (!c.room || c.room.name !== roomName) continue;
     total++;
@@ -622,8 +626,9 @@ function evaluateBackupHarvestSource(creep, source, assignments) {
   if (freeSeats <= 0) return { eligible: false, reason: 'no_free_harvest_seat', freeSeats: 0, totalSeats: seats.length };
 
   var baseHarvestAssigned = countAssignedBaseHarvesters(creep.room.name, source.id);
-  var hasQueenAssignment = !!(assignments && assignments[source.id]);
-  var effectiveTakenSeats = baseHarvestAssigned + (hasQueenAssignment ? 1 : 0);
+  var rec = assignments && assignments[source.id];
+  var hasOtherQueenAssignment = !!(rec && rec.creepName !== creep.name);
+  var effectiveTakenSeats = baseHarvestAssigned + (hasOtherQueenAssignment ? 1 : 0);
 
   // Queen backup harvesting is emergency-only. If BaseHarvest already occupies all
   // reachable source seats, Queen must not path into that blocked source and stall.
