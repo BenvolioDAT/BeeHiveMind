@@ -112,7 +112,7 @@ function clearStaleRemoteContainerRepairMemory(targetInfo, reason){
     var entry = status[key];
     if (!entry) continue;
     var entryIdentity = BeeToolbox.getRemoteContainerIdentity(entry);
-    var sameContainer = containerId && (entryIdentity.containerId === containerId || key === containerId);
+    var sameContainer = containerId && (entryIdentity.containerId === containerId || entry.id === containerId || key === containerId);
     var sameSourceRoom = sourceId && roomName && entryIdentity.sourceId === sourceId && entryIdentity.remoteRoom === roomName;
     if (!sameContainer && !sameSourceRoom) continue;
     delete status[key];
