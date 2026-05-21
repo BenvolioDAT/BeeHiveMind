@@ -1544,19 +1544,21 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
 
   function clearStaleRemoteContainerRepairMemory(sourceId, remoteRoom) {
     if (!sourceId || !remoteRoom) return;
+    // Luna cleanup is source/build-state driven: only clear stale repair state
+    // for this source-room pair when the container no longer exists live.
     var status = ensureRemoteContainerStatusMemory();
     var requests = ensureRemoteHaulRequestsMemory();
+    var targetIdentity = BeeToolbox.getRemoteContainerIdentity({ sourceId: sourceId, remoteRoom: remoteRoom });
     for (var key in status) {
       if (!Object.prototype.hasOwnProperty.call(status, key)) continue;
       var entry = status[key];
-      if (!entry || entry.sourceId !== sourceId) continue;
-      var entryRoom = entry.remoteRoom || entry.roomName;
-      if (entryRoom !== remoteRoom) continue;
-      var containerId = entry.containerId || entry.id;
-      var live = containerId ? Game.getObjectById(containerId) : null;
-      if (live && live.structureType === STRUCTURE_CONTAINER) continue;
+      if (!entry) continue;
+      var entryIdentity = BeeToolbox.getRemoteContainerIdentity(entry);
+      var sameSourceRoom = targetIdentity.sourceId === entryIdentity.sourceId && targetIdentity.remoteRoom === entryIdentity.remoteRoom;
+      if (!sameSourceRoom) continue;
+      if (BeeToolbox.isLiveContainerId(entryIdentity.containerId)) continue;
       delete status[key];
-      if (containerId && requests[containerId]) delete requests[containerId];
+      if (entryIdentity.containerId && requests[entryIdentity.containerId]) delete requests[entryIdentity.containerId];
       if (requests[key]) delete requests[key];
     }
   }

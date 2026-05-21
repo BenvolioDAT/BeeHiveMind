@@ -98,9 +98,12 @@ function getRemoteContainerStatusById(id){
 
 function clearStaleRemoteContainerRepairMemory(targetInfo, reason){
   if (!targetInfo) return;
-  var roomName = targetInfo.roomName || targetInfo.remoteRoom || null;
-  var sourceId = targetInfo.sourceId || null;
-  var containerId = targetInfo.containerId || targetInfo.id || null;
+  // Repair cleanup is target-validation driven: clear stale status/requests
+  // when the currently selected remote repair target fails validation.
+  var targetIdentity = BeeToolbox.getRemoteContainerIdentity(targetInfo);
+  var roomName = targetIdentity.remoteRoom;
+  var sourceId = targetIdentity.sourceId;
+  var containerId = targetIdentity.containerId;
   var root = Memory.__BHM || (Memory.__BHM = {});
   var status = root.remoteContainerStatus || {};
   var requests = root.remoteHaulRequests || {};
@@ -108,8 +111,9 @@ function clearStaleRemoteContainerRepairMemory(targetInfo, reason){
     if (!Object.prototype.hasOwnProperty.call(status, key)) continue;
     var entry = status[key];
     if (!entry) continue;
-    var sameContainer = containerId && (entry.containerId === containerId || entry.id === containerId || key === containerId);
-    var sameSourceRoom = sourceId && roomName && entry.sourceId === sourceId && (entry.remoteRoom || entry.roomName) === roomName;
+    var entryIdentity = BeeToolbox.getRemoteContainerIdentity(entry);
+    var sameContainer = containerId && (entryIdentity.containerId === containerId || key === containerId);
+    var sameSourceRoom = sourceId && roomName && entryIdentity.sourceId === sourceId && entryIdentity.remoteRoom === roomName;
     if (!sameContainer && !sameSourceRoom) continue;
     delete status[key];
   }

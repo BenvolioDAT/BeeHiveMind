@@ -260,6 +260,34 @@ function _getBestRemoteIntelTick(roomName) {
   return best;
 }
 
+// Normalize remote container/source records without mutating input memory.
+function getRemoteContainerIdentity(record) {
+  record = record || {};
+  return {
+    roomName: record.roomName || record.remoteRoom || null,
+    remoteRoom: record.remoteRoom || record.roomName || null,
+    sourceId: record.sourceId || null,
+    containerId: record.containerId || record.id || null,
+    x: typeof record.x === 'number' ? record.x : null,
+    y: typeof record.y === 'number' ? record.y : null
+  };
+}
+
+function isLiveContainerId(containerId) {
+  if (!containerId) return false;
+  var obj = Game.getObjectById(containerId);
+  return !!(obj && obj.structureType === STRUCTURE_CONTAINER);
+}
+
+function isSameRemoteSourceContainerRecord(a, b) {
+  var left = getRemoteContainerIdentity(a);
+  var right = getRemoteContainerIdentity(b);
+  if (!left || !right) return false;
+  if (left.containerId && right.containerId && left.containerId === right.containerId) return true;
+  if (left.sourceId && right.sourceId && left.sourceId === right.sourceId && left.remoteRoom && right.remoteRoom && left.remoteRoom === right.remoteRoom) return true;
+  return false;
+}
+
 function _canEngageTarget(attacker, target) {
   if (!attacker || !target) return false;
   if (_isFriendlyObject(target)) return false;
@@ -519,6 +547,9 @@ var BeeToolbox = {
   refreshVisibleRemoteSafety: function (room) { return _refreshVisibleRemoteSafety(room); },
   isRemoteRoomUnsafe: function (roomName, opts) { return _isRemoteRoomUnsafe(roomName, opts); },
   getBestRemoteIntelTick: function (roomName) { return _getBestRemoteIntelTick(roomName); },
+  getRemoteContainerIdentity: function (record) { return getRemoteContainerIdentity(record); },
+  isLiveContainerId: function (containerId) { return isLiveContainerId(containerId); },
+  isSameRemoteSourceContainerRecord: function (a, b) { return isSameRemoteSourceContainerRecord(a, b); },
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL
