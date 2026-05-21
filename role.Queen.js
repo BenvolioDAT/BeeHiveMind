@@ -568,6 +568,81 @@ function cleanupQueenSourceAssignments(room) {
   return out;
 }
 
+
+function getWalkableHarvestSeats(source) {
+  if (!source || !source.pos) return [];
+  var terrain = new Room.Terrain(source.pos.roomName);
+  var seats = [];
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var x = source.pos.x + dx;
+      var y = source.pos.y + dy;
+      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
+      if (terrain.get(x, y) !== TERRAIN_MASK_WALL) seats.push(new RoomPosition(x, y, source.pos.roomName));
+    }
+  }
+  return seats;
+}
+
+function isSeatOccupiedByOtherCreep(pos, myName) {
+  if (!pos) return false;
+  var creeps = pos.lookFor(LOOK_CREEPS);
+  if (!creeps || !creeps.length) return false;
+  for (var i = 0; i < creeps.length; i++) {
+    if (creeps[i] && creeps[i].name !== myName) return true;
+  }
+  return false;
+}
+
+function countAssignedBaseHarvesters(roomName, sourceId) {
+  if (!roomName || !sourceId) return 0;
+  var total = 0;
+  for (var creepName in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, creepName)) continue;
+    var c = Game.creeps[creepName];
+    if (!c || !c.my || !c.memory) continue;
+    var role = c.memory.role;
+    var task = c.memory.task;
+    var isBaseHarvestRole = role && String(role).toLowerCase() === 'baseharvest';
+    var isBaseHarvestTask = task && String(task).toLowerCase() === 'baseharvest';
+    if (!isBaseHarvestRole && !isBaseHarvestTask) continue;
+    if (c.memory.assignedSource !== sourceId) continue;
+    if (!c.room || c.room.name !== roomName) continue;
+    total++;
+  }
+  return total;
+}
+
+function evaluateBackupHarvestSource(creep, source, assignments) {
+  if (!creep || !source) return { eligible: false, reason: 'invalid_source' };
+  var seats = getWalkableHarvestSeats(source);
+  if (!seats.length) return { eligible: false, reason: 'no_free_harvest_seat', freeSeats: 0, totalSeats: 0 };
+
+  var freeSeats = 0;
+  for (var i = 0; i < seats.length; i++) {
+    if (!isSeatOccupiedByOtherCreep(seats[i], creep.name)) freeSeats++;
+  }
+  if (freeSeats <= 0) return { eligible: false, reason: 'no_free_harvest_seat', freeSeats: 0, totalSeats: seats.length };
+
+  var baseHarvestAssigned = countAssignedBaseHarvesters(creep.room.name, source.id);
+  var rec = assignments && assignments[source.id];
+  var hasOtherQueenAssignment = !!(rec && rec.creepName !== creep.name);
+  var effectiveTakenSeats = baseHarvestAssigned + (hasOtherQueenAssignment ? 1 : 0);
+
+  // Queen backup harvesting is emergency-only. If BaseHarvest already occupies all
+  // reachable source seats, Queen must not path into that blocked source and stall.
+  if (baseHarvestAssigned >= seats.length) {
+    return { eligible: false, reason: 'source_blocked_by_baseharvest', freeSeats: freeSeats, totalSeats: seats.length };
+  }
+
+  if (effectiveTakenSeats >= seats.length) {
+    return { eligible: false, reason: 'no_free_harvest_seat', freeSeats: Math.max(0, seats.length - effectiveTakenSeats), totalSeats: seats.length };
+  }
+
+  return { eligible: true, reason: 'eligible', freeSeats: Math.min(freeSeats, Math.max(0, seats.length - effectiveTakenSeats)), totalSeats: seats.length };
+}
+
 function writeQueenBackupHarvestDiag(creep, diag) {
   if (!creep || !creep.room || !diag) return;
   var mem = ensureRoomQueenAssignmentMemory(creep.room);
@@ -605,22 +680,37 @@ function getBackupHarvestTask(creep) {
 
   var minEnergy = Math.max(0, QueenConfig.BACKUP_HARVEST_MIN_SOURCE_ENERGY || 0);
   var assignedSource = null;
-  var unclaimed = [];
-  var fallback = [];
+  var unclaimedEligible = [];
+  var fallbackEligible = [];
+  var blockedByBaseHarvest = 0;
+  var noFreeSeatCount = 0;
+
   for (var i = 0; i < sources.length; i++) {
     var src = sources[i];
     if (!src || (src.energy || 0) < minEnergy) continue;
+
+    var seatEval = evaluateBackupHarvestSource(creep, src, assignments);
+    if (!seatEval.eligible) {
+      if (seatEval.reason === 'source_blocked_by_baseharvest') blockedByBaseHarvest++;
+      else if (seatEval.reason === 'no_free_harvest_seat') noFreeSeatCount++;
+      continue;
+    }
+
     var rec = assignments[src.id];
     if (rec && rec.creepName === creep.name) assignedSource = src;
-    if (!rec) unclaimed.push(src);
-    fallback.push(src);
+    if (!rec) unclaimedEligible.push(src);
+    fallbackEligible.push(src);
   }
 
   var chosen = assignedSource;
-  if (!chosen && unclaimed.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, unclaimed);
-  if (!chosen && fallback.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, fallback);
+  if (!chosen && unclaimedEligible.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, unclaimedEligible);
+  if (!chosen && fallbackEligible.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, fallbackEligible);
 
-  if (!chosen) { diag.reason = 'no_eligible_source'; writeQueenBackupHarvestDiag(creep, diag); return null; }
+  if (!chosen) {
+    diag.reason = blockedByBaseHarvest > 0 ? 'source_blocked_by_baseharvest' : (noFreeSeatCount > 0 ? 'no_free_harvest_seat' : 'no_eligible_source');
+    writeQueenBackupHarvestDiag(creep, diag);
+    return null;
+  }
 
   assignments[chosen.id] = {
     creepName: creep.name,
@@ -745,10 +835,7 @@ function getBackupHarvestTask(creep) {
     var rc = creep.harvest(source);
     if (rc === ERR_NOT_IN_RANGE) {
       var priority = getQueenTaskPriority(task);
-      var moveResult = MovementManager.request(creep, source, priority, { range: 1, reusePath: 10, intentType: 'harvest' });
-      if (moveResult !== OK && moveResult < 0) {
-        creep.moveTo(source, { reusePath: 10 });
-      }
+      MovementManager.request(creep, source, priority, { range: 1, reusePath: 10, intentType: 'harvest' });
       return;
     }
     if (rc === OK) {
