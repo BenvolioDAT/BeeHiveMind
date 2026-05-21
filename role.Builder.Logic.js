@@ -54,7 +54,52 @@ function tryEmergencySelfHarvest(creep, targetInfo) {
   return true;
 }
 
+function findRemoteContainerBootstrapSource(targetInfo) {
+  if (!isRemoteContainerBuildTarget(targetInfo) || !targetInfo.target || !targetInfo.target.pos) return null;
+  var sitePos = targetInfo.target.pos;
+  if (!sitePos || !sitePos.findInRange) return null;
+  var nearby = sitePos.findInRange(FIND_SOURCES, 1);
+  if (!nearby || !nearby.length) return null;
+  return nearby[0];
+}
+
+function tryRemoteBootstrapSelfHarvest(creep, targetInfo) {
+  if (!isRemoteContainerBuildTarget(targetInfo)) return { acted: false, collected: false, reason: 'not_remote_bootstrap' };
+  if (!hasWorkPart(creep)) return { acted: false, collected: false, reason: 'no_work_parts' };
+  if (isRoomUnsafeForRemoteBuild(creep.pos.roomName, getHomeName(creep))) return { acted: false, collected: false, reason: 'room_unsafe' };
+  var source = findRemoteContainerBootstrapSource(targetInfo);
+  if (!source) return { acted: false, collected: false, reason: 'no_adjacent_source' };
+  clearBuilderHandoffWaitMemory(creep);
+  var carried = creep.store[RESOURCE_ENERGY] || 0;
+  if (carried >= CFG.SELF_HARVEST_DELIVER_AT_ENERGY) {
+    setBuilderState(creep, CFG.BUILDER_STATES.BUILD);
+    setBuilderAssistDiag(creep, {
+      state: 'BUILD',
+      remoteContainerBootstrap: true,
+      selfHarvestUsed: true,
+      selfHarvestSourceId: source.id,
+      carriedEnergy: carried,
+      targetRoom: targetInfo.target.pos.roomName,
+      targetId: targetInfo.target.id,
+      reason: 'remote_bootstrap_self_harvest_deliver_threshold'
+    });
+    return { acted: true, collected: true, reason: 'deliver_threshold_met' };
+  }
+  var hr = creep.harvest(source);
+  if (hr === OK || hr === ERR_TIRED) {
+    setBuilderAssistDiag(creep, { state: 'HARVEST', remoteContainerBootstrap: true, selfHarvestUsed: true, selfHarvestSourceId: source.id, targetRoom: targetInfo.target.pos.roomName, targetId: targetInfo.target.id, reason: 'remote_bootstrap_harvest' });
+    return { acted: true, collected: true, reason: 'harvest_source' };
+  }
+  if (hr === ERR_NOT_IN_RANGE) {
+    creep.moveTo(source, { range: 1, reusePath: 10 });
+    setBuilderAssistDiag(creep, { state: 'HARVEST', remoteContainerBootstrap: true, selfHarvestUsed: true, selfHarvestSourceId: source.id, targetRoom: targetInfo.target.pos.roomName, targetId: targetInfo.target.id, reason: 'move_to_bootstrap_source' });
+    return { acted: true, collected: false, reason: 'move_to_source' };
+  }
+  return { acted: false, collected: false, reason: 'harvest_failed_' + hr };
+}
+
 function collectEnergy(creep) {
+  var result = { acted: false, collected: false, reason: 'no_energy' };
   var homeName = (typeof getHomeName === 'function') ? getHomeName(creep) : null;
   var homeRoom = homeName ? Game.rooms[homeName] : null;
   var homeStorage = homeRoom ? homeRoom.storage : null;
@@ -68,29 +113,29 @@ function collectEnergy(creep) {
   if (homeIsRich && homeName) {
     if (!homeRoom || creep.pos.roomName !== homeName) {
       var anchorPos = (typeof getAnchorPos === 'function') ? getAnchorPos(homeName) : null;
-      if (anchorPos) { debugSay(creep, '🏠'); debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME•ENERGY"); creep.travelTo(anchorPos, { range: 2, reusePath: 25 }); return true; }
+      if (anchorPos) { debugSay(creep, '🏠'); debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME•ENERGY"); creep.travelTo(anchorPos, { range: 2, reusePath: 25 }); return { acted: true, collected: false, reason: 'travel_home' }; }
     } else {
       var withdrawTarget = null;
       if (homeStorage && (homeStorage.store[RESOURCE_ENERGY] || 0) > 0) withdrawTarget = homeStorage;
       else if (homeTerminal && (homeTerminal.store[RESOURCE_ENERGY] || 0) > 0) withdrawTarget = homeTerminal;
-      if (withdrawTarget) { debugSay(creep, '🏦'); debugDrawLine(creep, withdrawTarget, CFG.DRAW.FILL_COLOR, "HOME•WITHDRAW"); var homeWithdraw = creep.withdraw(withdrawTarget, RESOURCE_ENERGY); if (homeWithdraw === ERR_NOT_IN_RANGE) creep.travelTo(withdrawTarget, { range: 1, reusePath: 15 }); return true; }
+      if (withdrawTarget) { debugSay(creep, '🏦'); debugDrawLine(creep, withdrawTarget, CFG.DRAW.FILL_COLOR, "HOME•WITHDRAW"); var homeWithdraw = creep.withdraw(withdrawTarget, RESOURCE_ENERGY); if (homeWithdraw === ERR_NOT_IN_RANGE) creep.travelTo(withdrawTarget, { range: 1, reusePath: 15 }); return { acted: true, collected: homeWithdraw === OK, reason: 'withdraw_home' }; }
     }
   }
 
   var tomb = creep.pos.findClosestByRange(FIND_TOMBSTONES, { filter: function (t) { var energy = t.store[RESOURCE_ENERGY] || 0; return energy > 0; } });
-  if (tomb) { debugSay(creep, '🪦'); debugDrawLine(creep, tomb, CFG.DRAW.GRAVE_COLOR, "TOMB"); var tr = creep.withdraw(tomb, RESOURCE_ENERGY); if (tr === ERR_NOT_IN_RANGE) creep.travelTo(tomb, { range: 1, reusePath: 20 }); return true; }
+  if (tomb) { debugSay(creep, '🪦'); debugDrawLine(creep, tomb, CFG.DRAW.GRAVE_COLOR, "TOMB"); var tr = creep.withdraw(tomb, RESOURCE_ENERGY); if (tr === ERR_NOT_IN_RANGE) creep.travelTo(tomb, { range: 1, reusePath: 20 }); return { acted: true, collected: tr === OK, reason: 'withdraw_tomb' }; }
 
   var ruin = creep.pos.findClosestByRange(FIND_RUINS, { filter: function (r) { var energy = r.store[RESOURCE_ENERGY] || 0; return energy > 0; } });
-  if (ruin) { debugSay(creep, '🏚️'); debugDrawLine(creep, ruin, CFG.DRAW.GRAVE_COLOR, "RUIN"); var rr = creep.withdraw(ruin, RESOURCE_ENERGY); if (rr === ERR_NOT_IN_RANGE) creep.travelTo(ruin, { range: 1, reusePath: 20 }); return true; }
+  if (ruin) { debugSay(creep, '🏚️'); debugDrawLine(creep, ruin, CFG.DRAW.GRAVE_COLOR, "RUIN"); var rr = creep.withdraw(ruin, RESOURCE_ENERGY); if (rr === ERR_NOT_IN_RANGE) creep.travelTo(ruin, { range: 1, reusePath: 20 }); return { acted: true, collected: rr === OK, reason: 'withdraw_ruin' }; }
 
   var dropped = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, { filter: function (r) { var amount = r.amount || 0; return r.resourceType === RESOURCE_ENERGY && amount >= CFG.PICKUP_MIN; } });
-  if (dropped) { debugSay(creep, '🍪'); debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP"); if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) creep.travelTo(dropped, { range: 1, reusePath: 15 }); return true; }
+  if (dropped) { debugSay(creep, '🍪'); debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP"); var pr = creep.pickup(dropped); if (pr === ERR_NOT_IN_RANGE) creep.travelTo(dropped, { range: 1, reusePath: 15 }); return { acted: true, collected: pr === OK, reason: 'pickup_dropped' }; }
 
   var srcCont = creep.pos.findClosestByRange(FIND_STRUCTURES, { filter: function (s) { if (s.structureType !== STRUCTURE_CONTAINER || !s.store) return false; if (s.pos.findInRange(FIND_SOURCES, 1).length === 0) return false; var energy = s.store[RESOURCE_ENERGY] || 0; return energy >= CFG.SRC_CONTAINER_MIN; } });
-  if (srcCont) { debugSay(creep, '📦'); debugDrawLine(creep, srcCont, CFG.DRAW.FILL_COLOR, "SRC•CONT"); var cr = creep.withdraw(srcCont, RESOURCE_ENERGY); if (cr === ERR_NOT_IN_RANGE) creep.travelTo(srcCont, { range: 1, reusePath: 25 }); return true; }
+  if (srcCont) { debugSay(creep, '📦'); debugDrawLine(creep, srcCont, CFG.DRAW.FILL_COLOR, "SRC•CONT"); var cr = creep.withdraw(srcCont, RESOURCE_ENERGY); if (cr === ERR_NOT_IN_RANGE) creep.travelTo(srcCont, { range: 1, reusePath: 25 }); return { acted: true, collected: cr === OK, reason: 'withdraw_source_container' }; }
 
   var storeLike = creep.pos.findClosestByRange(FIND_STRUCTURES, { filter: function (s) { if (!s.store) return false; var t = s.structureType; if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_LINK && t !== STRUCTURE_STORAGE && t !== STRUCTURE_TERMINAL) return false; var energy = s.store[RESOURCE_ENERGY] || 0; return energy > 0; } });
-  if (storeLike) { debugSay(creep, '🏦'); debugDrawLine(creep, storeLike, CFG.DRAW.FILL_COLOR, "WITHDRAW"); var sr = creep.withdraw(storeLike, RESOURCE_ENERGY); if (sr === ERR_NOT_IN_RANGE) creep.travelTo(storeLike, { range: 1, reusePath: 25 }); return true; }
+  if (storeLike) { debugSay(creep, '🏦'); debugDrawLine(creep, storeLike, CFG.DRAW.FILL_COLOR, "WITHDRAW"); var sr = creep.withdraw(storeLike, RESOURCE_ENERGY); if (sr === ERR_NOT_IN_RANGE) creep.travelTo(storeLike, { range: 1, reusePath: 25 }); return { acted: true, collected: sr === OK, reason: 'withdraw_store' }; }
 
   // Builder does not harvest directly. If no stored/dropped energy exists, it waits or returns home.
 
@@ -98,12 +143,12 @@ function collectEnergy(creep) {
     var homeName2 = getHomeName(creep);
     if (homeName2 && creep.pos.roomName !== homeName2) {
       var anchorPos2 = getAnchorPos(homeName2);
-      if (anchorPos2) { debugSay(creep, '🏠'); debugDrawLine(creep, anchorPos2, CFG.DRAW.IDLE_COLOR, "HOME"); creep.travelTo(anchorPos2, { range: 2, reusePath: 25 }); return true; }
+      if (anchorPos2) { debugSay(creep, '🏠'); debugDrawLine(creep, anchorPos2, CFG.DRAW.IDLE_COLOR, "HOME"); creep.travelTo(anchorPos2, { range: 2, reusePath: 25 }); return { acted: true, collected: false, reason: 'travel_home_fallback' }; }
     }
   }
 
   idleNearAnchor(creep);
-  return false;
+  return result;
 }
 
 function idleNearAnchor(creep) { var anchor = creep.room.storage || creep.pos.findClosestByRange(FIND_MY_SPAWNS) || creep.pos; if (anchor && anchor.pos) { debugSay(creep, '🧘'); debugDrawLine(creep, anchor, CFG.DRAW.IDLE_COLOR, "IDLE"); creep.travelTo(anchor, { range: 2, reusePath: 20 }); } }
@@ -448,8 +493,9 @@ function run(creep) {
     var assignedWait = lowTargetInfo && maybePublishBuilderRequest(creep, lowTargetInfo);
     if (assignedWait && !shouldAllowPartialBuild) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo.target.id, handoffPublished: true, handoffAssigned: true, waitedForHandoff: true, selfHarvestUsed: false, reason: 'assigned_handoff_wait' }); debugSay(creep, '⏳'); return; }
     if (!shouldAllowPartialBuild && lowTargetInfo && maybeWaitForUnassignedHandoff(creep, lowTargetInfo)) { debugSay(creep, '⏳'); return; }
-    var gotEnergy = collectEnergy(creep);
-    if (shouldAllowPartialBuild && (!gotEnergy || nearTarget)) {
+    var collectResult = collectEnergy(creep);
+    var gotEnergy = !!(collectResult && collectResult.collected);
+    if (shouldAllowPartialBuild && ((!collectResult || !collectResult.acted) || nearTarget)) {
       clearBuilderHandoffWaitMemory(creep);
       Handoff.clearEnergyHandoffRequest(creep);
       setBuilderState(creep, CFG.BUILDER_STATES.BUILD);
@@ -460,16 +506,20 @@ function run(creep) {
         carriedEnergy: carried,
         freeCapacity: free,
         targetReason: lowTargetInfo ? lowTargetInfo.reason : null,
-        reason: 'partial_energy_remote_container_build'
+        reason: 'partial_energy_remote_container_build',
+        collectEnergyAction: collectResult ? collectResult.reason : null
       });
       return;
     }
-    if (gotEnergy && creep.store.getFreeCapacity() > 0) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'collect_energy', collectTargetFound: true }); return; }
-    if (!gotEnergy && lowTargetInfo && (!CFG.SELF_HARVEST_AFTER_HANDOFF_WAIT || (creep.memory.builderHandoffWaitUntil || 0) < Game.time)) {
-      if (tryEmergencySelfHarvest(creep, lowTargetInfo)) return;
+    if (gotEnergy && creep.store.getFreeCapacity() > 0) { clearBuilderHandoffWaitMemory(creep); setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'collect_energy', collectTargetFound: true, localEnergyFound: true, collectEnergyAction: collectResult ? collectResult.reason : null, goHomeForEnergy: collectResult ? (collectResult.reason === 'travel_home' || collectResult.reason === 'travel_home_fallback') : false }); return; }
+    if (lowTargetInfo && (!CFG.SELF_HARVEST_AFTER_HANDOFF_WAIT || (creep.memory.builderHandoffWaitUntil || 0) < Game.time)) {
+      if (isRemoteContainerBuildTarget(lowTargetInfo)) {
+        var bootstrapHarvest = tryRemoteBootstrapSelfHarvest(creep, lowTargetInfo);
+        if (bootstrapHarvest.acted) return;
+      } else if (!gotEnergy && tryEmergencySelfHarvest(creep, lowTargetInfo)) return;
     }
     if (creep.store.getFreeCapacity() === 0) { clearBuilderHandoffWaitMemory(creep); Handoff.clearEnergyHandoffRequest(creep); setBuilderState(creep, CFG.BUILDER_STATES.IDLE); }
-    setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'idle_no_energy', collectTargetFound: false });
+    setBuilderAssistDiag(creep, { state: 'HARVEST', targetId: lowTargetInfo && lowTargetInfo.target ? lowTargetInfo.target.id : null, handoffPublished: !!lowTargetInfo, handoffAssigned: false, waitedForHandoff: false, selfHarvestUsed: false, reason: 'idle_no_energy', collectTargetFound: false, collectEnergyAction: collectResult ? collectResult.reason : null, goHomeForEnergy: collectResult ? (collectResult.reason === 'travel_home' || collectResult.reason === 'travel_home_fallback') : false, targetRoom: lowTargetInfo && lowTargetInfo.target && lowTargetInfo.target.pos ? lowTargetInfo.target.pos.roomName : null, remoteContainerBootstrap: isRemoteContainerBuildTarget(lowTargetInfo), handoffWaitSkippedReason: isRemoteContainerBuildTarget(lowTargetInfo) ? 'remote_bootstrap_self_harvest_priority' : null, carriedEnergy: creep.store[RESOURCE_ENERGY] || 0 });
     return;
   }
 
