@@ -68,6 +68,38 @@ function getRemoteIntelTick(remoteName) {
 
 
 
+
+function isLocalOwnedRoomForLuna(homeRoom, roomName) {
+  if (!roomName) return false;
+  var homeName = null;
+  if (typeof homeRoom === 'string') homeName = homeRoom;
+  else if (homeRoom && homeRoom.name) homeName = homeRoom.name;
+
+  if (homeName && roomName === homeName) return { blocked: true, reason: 'home-room' };
+
+  var room = Game.rooms[roomName];
+  if (room && room.controller && room.controller.my) return { blocked: true, reason: 'local-owned-room' };
+
+  if (room) {
+    var mySpawnsVisible = room.find(FIND_MY_SPAWNS) || [];
+    if (mySpawnsVisible.length > 0) return { blocked: true, reason: 'owned-spawn-room' };
+  }
+
+  for (var spawnName in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, spawnName)) continue;
+    var spawn = Game.spawns[spawnName];
+    if (!spawn || !spawn.pos) continue;
+    if (spawn.pos.roomName === roomName) return { blocked: true, reason: 'owned-spawn-room' };
+  }
+
+  var myName = getMyUsername();
+  var roomMem = (Memory.rooms && Memory.rooms[roomName]) || {};
+  var intel = roomMem.intel || {};
+  if (intel.owner && myName && intel.owner === myName) return { blocked: true, reason: 'local-owned-room' };
+
+  return { blocked: false, reason: null };
+}
+
 function getRouteDistanceBetweenRooms(homeName, remoteName) {
   if (!homeName || !remoteName) return Infinity;
   if (homeName === remoteName) return 0;
@@ -136,7 +168,8 @@ function gatherCandidateRemoteRoomsForHome(homeRoom) {
     var remoteVisible = Game.rooms[remoteName];
     var intel = remoteMem.intel || {};
 
-    if (remoteName === homeName) reason = 'home-room';
+    var localOwnedCheck = isLocalOwnedRoomForLuna(homeName, remoteName);
+    if (localOwnedCheck.blocked) reason = localOwnedCheck.reason;
     else if (Game.map.getRoomLinearDistance(homeName, remoteName) > radius) reason = 'beyond-radius';
     else if (getRouteDistanceBetweenRooms(homeName, remoteName) === Infinity) reason = 'no-route';
     else if (isRemoteUnsafe(remoteName)) {
@@ -245,6 +278,7 @@ function buildSourcePlanForHome(homeRoom, remoteRooms) {
   for (var i = 0; i < (remoteRooms || []).length; i++) {
     var remoteRoom = remoteRooms[i];
     if (!remoteRoom) continue;
+    if (isLocalOwnedRoomForLuna(homeRoom, remoteRoom).blocked) continue;
     if (isRemoteUnsafe(remoteRoom)) { home.unsafeSources.push(remoteRoom); continue; }
 
     var intelTick = getRemoteIntelTick(remoteRoom);
@@ -471,6 +505,7 @@ function reserveSourceForQueue(homeRoom) {
     var sid = orderedMissing[i];
     var rec = home.sources[sid];
     if (!rec || rec.assignedLuna) continue;
+    if (isLocalOwnedRoomForLuna(homeRoom, rec.remoteRoom).blocked) continue;
     if (isRemoteUnsafe(rec.remoteRoom)) continue;
     var roomSourceMem = (Memory.rooms && Memory.rooms[rec.remoteRoom] && Memory.rooms[rec.remoteRoom].sources && Memory.rooms[rec.remoteRoom].sources[sid]) || {};
     if (roomSourceMem.lunaBlockedUntil && roomSourceMem.lunaBlockedUntil > Game.time) continue;
@@ -492,6 +527,7 @@ function claimSource(creep, sourceId, targetRoom) {
   var home = ensureHomeMemory(homeRoom);
   var rec = home.sources[sourceId];
   if (!rec) return false;
+  if (isLocalOwnedRoomForLuna(homeRoom, targetRoom || rec.remoteRoom).blocked) return false;
   rec.assignedLuna = creep.name;
   rec.remoteRoom = targetRoom || rec.remoteRoom;
   rec.reservedBy = null;
@@ -529,5 +565,6 @@ module.exports = {
   claimSource: claimSource,
   releaseSource: releaseSource,
   isRemoteUnsafe: isRemoteUnsafe,
-  refreshVisibleRemoteSafety: refreshVisibleRemoteSafety
+  refreshVisibleRemoteSafety: refreshVisibleRemoteSafety,
+  isLocalOwnedRoomForLuna: isLocalOwnedRoomForLuna
 };

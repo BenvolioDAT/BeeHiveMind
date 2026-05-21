@@ -892,6 +892,8 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
     for (var i=0;i<rooms.length;i++){
       var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
       var rm = getRoomMemoryBucket(rn);
+      var localOwnedReason = getLunaLocalOwnedRoomBlockReason(homeName, rn);
+      if (localOwnedReason) continue;
       if (rm.hostile) continue;
       if (isRoomLockedByInvaderCore(rn)) continue;
 
@@ -919,6 +921,17 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   
 function getMyUsername() {
   return BeeToolbox.myUsername();
+}
+
+
+function getLunaLocalOwnedRoomBlockReason(homeRoom, roomName) {
+  if (!RemoteHarvestManager || typeof RemoteHarvestManager.isLocalOwnedRoomForLuna !== 'function') return null;
+  var check = RemoteHarvestManager.isLocalOwnedRoomForLuna(homeRoom, roomName);
+  return check && check.blocked ? (check.reason || 'local-owned-room') : null;
+}
+
+function isLunaLocalOwnedRoom(homeRoom, roomName) {
+  return !!getLunaLocalOwnedRoomBlockReason(homeRoom, roomName);
 }
 
 function markLunaRoomUnsafe(roomName, reason) {
@@ -1158,6 +1171,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     // 1) Visible candidates
     for (i=0;i<neighborRooms.length;i++){
       rn=neighborRooms[i];
+      var localOwnedReasonVisible = getLunaLocalOwnedRoomBlockReason(homeName, rn);
+      if (localOwnedReasonVisible) continue;
       if (isLunaRoomUnsafe(rn)) continue;
       var room=Game.rooms[rn]; if (!room) continue;
 
@@ -1209,7 +1224,10 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
 
     // 2) Memory-known candidates (always merged with visible list)
     for (i=0;i<neighborRooms.length;i++){
-      rn=neighborRooms[i]; if (isLunaRoomUnsafe(rn)) continue;
+      rn=neighborRooms[i];
+      var localOwnedReasonMem = getLunaLocalOwnedRoomBlockReason(homeName, rn);
+      if (localOwnedReasonMem) continue;
+      if (isLunaRoomUnsafe(rn)) continue;
       var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
       var roomVisible = Game.rooms[rn];
       var intelTick = null;
@@ -1887,6 +1905,8 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var rm = Memory.rooms[roomName];
         if (!rm || !rm.sources) return false;
         if (!inRadius[roomName]) return false;
+        var localOwnedReason = getLunaLocalOwnedRoomBlockReason(homeName, roomName);
+        if (localOwnedReason) return false;
         if (rm.hostile) return false;
         if (isLunaRoomUnsafe(roomName)) return false;
         if (isRoomLockedByInvaderCore(roomName)) return false;
@@ -1909,6 +1929,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       for (var j=0;j<rooms.length;j++){
         var rn=rooms[j];
         if (!inRadius[rn]) continue;
+        if (isLunaLocalOwnedRoom(homeName, rn)) continue;
         if (isLunaRoomUnsafe(rn)) continue;
         if (isRoomLockedByInvaderCore(rn)) continue;
 
@@ -1971,9 +1992,17 @@ function upsertRemoteContainerStatus(creep, source, container) {
       var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
       var memAssign = ensureAssignmentsMem();
       var blocked = 0, staleIntel = 0, noSources = 0, fullSources = 0, noRoute = 0;
+      var localOwnedRooms = 0, homeRooms = 0, ownedSpawnRooms = 0;
       for (var i = 0; i < ring.length; i++) {
         var rn = ring[i];
         if (rn === Memory.firstSpawnRoom) continue;
+        var localOwnedReason = getLunaLocalOwnedRoomBlockReason(homeName, rn);
+        if (localOwnedReason) {
+          if (localOwnedReason === 'home-room') homeRooms++;
+          else if (localOwnedReason === 'owned-spawn-room') ownedSpawnRooms++;
+          else localOwnedRooms++;
+          continue;
+        }
         if (isLunaRoomUnsafe(rn)) { blocked++; continue; }
         var rm = getRoomMemoryBucket(rn);
         if (!rm || !rm.sources || !Object.keys(rm.sources).length) { noSources++; continue; }
@@ -1997,7 +2026,10 @@ function upsertRemoteContainerStatus(creep, source, container) {
       for (var ri = 0; ri < ring.length; ri++) {
         var roomName = ring[ri];
         var roomMem = getRoomMemoryBucket(roomName);
-        if (isLunaRoomUnsafe(roomName)) {
+        var localOwnedReason2 = getLunaLocalOwnedRoomBlockReason(homeName, roomName);
+        if (localOwnedReason2) {
+          blockedReasonCounts[roomName + ':' + localOwnedReason2] = (blockedReasonCounts[roomName + ':' + localOwnedReason2] || 0) + 1;
+        } else if (isLunaRoomUnsafe(roomName)) {
           var reason = roomMem.lunaBlockedReason || 'memory-blocked';
           blockedReasonCounts[roomName + ':' + reason] = (blockedReasonCounts[roomName + ':' + reason] || 0) + 1;
         }
@@ -2024,6 +2056,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
       var blockedReasonStr = blockedReasonKeys.length ? blockedReasonKeys.slice(0, 5).join(',') : 'none';
       var topRejectedStr = topRejected.slice(0, 3).map(function (x) { return x.key + 'x' + x.count; }).join(',');
       return 'blockedRooms=' + blocked +
+        ' localOwnedRooms=' + localOwnedRooms +
+        ' homeRooms=' + homeRooms +
+        ' ownedSpawnRooms=' + ownedSpawnRooms +
         ' blockedSources=' + blockedSources +
         ' blockedReasonCounts=' + blockedReasonStr +
         ' staleIntel=' + staleIntel +
@@ -2037,6 +2072,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
 
     assignSource: function(creep, roomMemory){
       if (!roomMemory || !roomMemory.sources) return null;
+      if (creep.memory && creep.memory.targetRoom && isLunaLocalOwnedRoom(getHomeName(creep), creep.memory.targetRoom)) return null;
       if (creep.memory && creep.memory.targetRoom && isLunaRoomUnsafe(creep.memory.targetRoom)) return null;
       var sids = Object.keys(roomMemory.sources); if (!sids.length) return null;
 
