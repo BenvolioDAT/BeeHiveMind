@@ -2020,9 +2020,12 @@ function upsertRemoteContainerStatus(creep, source, container) {
         for (var rk in rejectCount) topRejected.push({ key: rk, count: rejectCount[rk] });
         topRejected.sort(function (a, b) { return b.count - a.count; });
       }
+      var blockedReasonKeys = Object.keys(blockedReasonCounts);
+      var blockedReasonStr = blockedReasonKeys.length ? blockedReasonKeys.slice(0, 5).join(',') : 'none';
       var topRejectedStr = topRejected.slice(0, 3).map(function (x) { return x.key + 'x' + x.count; }).join(',');
       return 'blockedRooms=' + blocked +
         ' blockedSources=' + blockedSources +
+        ' blockedReasonCounts=' + blockedReasonStr +
         ' staleIntel=' + staleIntel +
         ' noSources=' + noSources +
         ' fullSources=' + fullSources +

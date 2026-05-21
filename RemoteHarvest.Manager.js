@@ -32,7 +32,41 @@ function ensureHomeMemory(homeRoom) {
   return rec;
 }
 
+function getRoomMemoryBucket(roomName) {
+  Memory.rooms = Memory.rooms || {};
+  return (Memory.rooms[roomName] = (Memory.rooms[roomName] || {}));
+}
+
+function refreshVisibleRemoteSafety(room) {
+  if (!room || !room.name) return false;
+  var myName = getMyUsername();
+  var ctl = room.controller;
+  var owner = ctl && ctl.owner && ctl.owner.username;
+  var reservation = ctl && ctl.reservation && ctl.reservation.username;
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+  var invaderCores = room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; } }) || [];
+  var safe = !hostiles.length &&
+    !invaderCores.length &&
+    !(owner && (!myName || owner !== myName)) &&
+    !(reservation && (!myName || reservation !== myName));
+  if (!safe) return false;
+
+  var mem = getRoomMemoryBucket(room.name);
+  delete mem.lunaBlockedUntil;
+  delete mem.lunaBlockedReason;
+  delete mem.lunaBlockedAt;
+  delete mem.lunaBlocked;
+  delete mem.lunaUnsafe;
+  delete mem.hostile;
+  delete mem.hostileRoom;
+  delete mem.threatLevel;
+  if (mem._invaderLock && mem._invaderLock.locked) delete mem._invaderLock;
+  return true;
+}
+
 function isRemoteUnsafe(remoteName) {
+  var room = Game.rooms[remoteName];
+  if (room) refreshVisibleRemoteSafety(room);
   var mem = (Memory.rooms && Memory.rooms[remoteName]) || {};
   if (mem.lunaBlocked || mem.lunaUnsafe || mem.hostile || mem.hostileRoom) return true;
   if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
@@ -43,7 +77,6 @@ function isRemoteUnsafe(remoteName) {
     if (lockTick == null || (Game.time - lockTick) <= lockTtl) return true;
   }
   if (mem.threatLevel && mem.threatLevel > 0) return true;
-  var room = Game.rooms[remoteName];
   var ctl = room && room.controller;
   var myName = getMyUsername();
   if (ctl && ctl.owner && (!myName || ctl.owner.username !== myName)) return true;
