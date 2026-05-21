@@ -1477,6 +1477,21 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     return true;
   }
 
+  function releaseIfLocalOwnedLunaAssignment(creep) {
+    if (!creep || !creep.memory || !creep.memory.targetRoom) return false;
+    var homeName = getHomeName(creep);
+    var reason = getLunaLocalOwnedRoomBlockReason(homeName, creep.memory.targetRoom);
+    if (!reason) return false;
+    var interval = CFG.NO_SAFE_ASSIGN_LOG_INTERVAL || 25;
+    if (!creep.memory._lastLocalOwnedAssignLog || (Game.time - creep.memory._lastLocalOwnedAssignLog) >= interval) {
+      console.log('🏠 Luna ' + creep.name + ' releasing local-owned assignment room=' + creep.memory.targetRoom + ' reason=' + reason);
+      creep.memory._lastLocalOwnedAssignLog = Game.time;
+    }
+    releaseAssignment(creep);
+    idleAtAnchor(creep, 'LOCAL');
+    return true;
+  }
+
   function ensureActiveAssignment(creep) {
     if (creep.memory.sourceId) return true;
 
@@ -1811,8 +1826,10 @@ function upsertRemoteContainerStatus(creep, source, container) {
       if (shouldReleaseForEndOfLife(creep)) return;
       if (respectCooldown(creep)) return;
       if (handleForcedYield(creep)) return;
+      if (releaseIfLocalOwnedLunaAssignment(creep)) return;
 
       if (!ensureActiveAssignment(creep)) return;
+      if (releaseIfLocalOwnedLunaAssignment(creep)) return;
 
       state = determineLunaState(creep);
       if (state === 'UNASSIGNED') {
