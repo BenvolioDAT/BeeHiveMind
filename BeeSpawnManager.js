@@ -441,6 +441,8 @@ function refreshVisibleLunaRemoteSafety(room) {
   delete mem.hostile;
   delete mem.hostileRoom;
   delete mem.threatLevel;
+  // Room-level invader locks are safe to clear only after visible safety is confirmed.
+  delete mem.lunaInvaderLockUntil;
   if (mem._invaderLock && mem._invaderLock.locked) delete mem._invaderLock;
   return true;
 }
