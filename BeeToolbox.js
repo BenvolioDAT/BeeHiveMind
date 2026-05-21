@@ -140,6 +140,93 @@ function _isForeignPlayerRoom(room) {
   return false;
 }
 
+// -----------------------------------------------------------------------------
+// Shared remote room safety helpers
+// -----------------------------------------------------------------------------
+// Source of truth note:
+// - These helpers define shared room-level safety checks for remote operations.
+// - They are only allowed to clear room-level stale danger flags after a room is
+//   visible and confirmed safe right now.
+// - They must never clear per-source blocks such as:
+//   Memory.rooms[roomName].sources[sourceId].lunaBlockedUntil
+//   because source-level access constraints are managed by assignment logic.
+function _getRoomMemoryBucket(roomName) {
+  if (!roomName) return null;
+  Memory.rooms = Memory.rooms || {};
+  Memory.rooms[roomName] = Memory.rooms[roomName] || {};
+  return Memory.rooms[roomName];
+}
+
+function _isVisibleRoomSafeForRemoteUse(room) {
+  if (!room || !room.name) return false;
+  var myName = _myUsername();
+  var ctl = room.controller;
+  var owner = ctl && ctl.owner && ctl.owner.username;
+  var reservation = ctl && ctl.reservation && ctl.reservation.username;
+  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+  var invaderCores = room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; } }) || [];
+  if (hostiles.length > 0) return false;
+  if (invaderCores.length > 0) return false;
+  if (owner && (!myName || owner !== myName)) return false;
+  if (reservation && (!myName || reservation !== myName)) return false;
+  return true;
+}
+
+function _refreshVisibleRemoteSafety(room) {
+  if (!_isVisibleRoomSafeForRemoteUse(room)) return false;
+  var mem = _getRoomMemoryBucket(room.name);
+  if (!mem) return false;
+  delete mem.lunaBlockedUntil;
+  delete mem.lunaBlockedReason;
+  delete mem.lunaBlockedAt;
+  delete mem.lunaBlocked;
+  delete mem.lunaUnsafe;
+  delete mem.hostile;
+  delete mem.hostileRoom;
+  delete mem.threatLevel;
+  delete mem.lunaInvaderLockUntil;
+  if (mem._invaderLock && mem._invaderLock.locked) delete mem._invaderLock;
+  return true;
+}
+
+function _isRemoteRoomUnsafe(roomName, opts) {
+  opts = opts || {};
+  var invaderLockTtl = typeof opts.invaderLockTtl === 'number' ? opts.invaderLockTtl : 1500;
+  var ignoreIntelOwnership = opts.ignoreIntelOwnership === true;
+  var room = Game.rooms[roomName];
+  if (room) _refreshVisibleRemoteSafety(room);
+
+  var mem = (Memory.rooms && Memory.rooms[roomName]) || {};
+  if (mem.lunaBlocked || mem.lunaUnsafe || mem.hostile || mem.hostileRoom) return true;
+  if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
+  if (mem.lunaInvaderLockUntil && mem.lunaInvaderLockUntil > Game.time) return true;
+  if (mem._invaderLock && mem._invaderLock.locked) {
+    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+    if (lockTick == null || (Game.time - lockTick) <= invaderLockTtl) return true;
+  }
+  if (mem.threatLevel && mem.threatLevel > 0) return true;
+
+  if (!ignoreIntelOwnership) {
+    var myName = _myUsername();
+    var intel = mem.intel || {};
+    if (intel.owner && (!myName || intel.owner !== myName)) return true;
+    if (intel.reservation && (!myName || intel.reservation !== myName)) return true;
+  }
+
+  if (room && room.controller) {
+    var owner = room.controller.owner && room.controller.owner.username;
+    var reservation = room.controller.reservation && room.controller.reservation.username;
+    var myName2 = _myUsername();
+    if (owner && (!myName2 || owner !== myName2)) return true;
+    if (reservation && (!myName2 || reservation !== myName2)) return true;
+  }
+  if (room) {
+    var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
+    if (hostiles.length > 0) return true;
+  }
+  return false;
+}
+
 function _canEngageTarget(attacker, target) {
   if (!attacker || !target) return false;
   if (_isFriendlyObject(target)) return false;
@@ -394,6 +481,10 @@ var BeeToolbox = {
   isForeignPlayerRoom: function (room) { return _isForeignPlayerRoom(room); },
   canEngageTarget: function (attacker, target) { return _canEngageTarget(attacker, target); },
   myUsername: function () { return _myUsername(); },
+  getRoomMemoryBucket: function (roomName) { return _getRoomMemoryBucket(roomName); },
+  isVisibleRoomSafeForRemoteUse: function (room) { return _isVisibleRoomSafeForRemoteUse(room); },
+  refreshVisibleRemoteSafety: function (room) { return _refreshVisibleRemoteSafety(room); },
+  isRemoteRoomUnsafe: function (roomName, opts) { return _isRemoteRoomUnsafe(roomName, opts); },
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL

@@ -2,6 +2,7 @@
 
 var LunaConfig = require('role.Luna.Config');
 var RoadPlanner = require('Planner.Road');
+var BeeToolbox = require('BeeToolbox');
 
 var RESERVE_TTL = 100;
 
@@ -33,61 +34,17 @@ function ensureHomeMemory(homeRoom) {
 }
 
 function getRoomMemoryBucket(roomName) {
-  Memory.rooms = Memory.rooms || {};
-  return (Memory.rooms[roomName] = (Memory.rooms[roomName] || {}));
+  return BeeToolbox.getRoomMemoryBucket(roomName);
 }
 
 function refreshVisibleRemoteSafety(room) {
-  if (!room || !room.name) return false;
-  var myName = getMyUsername();
-  var ctl = room.controller;
-  var owner = ctl && ctl.owner && ctl.owner.username;
-  var reservation = ctl && ctl.reservation && ctl.reservation.username;
-  var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
-  var invaderCores = room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; } }) || [];
-  var safe = !hostiles.length &&
-    !invaderCores.length &&
-    !(owner && (!myName || owner !== myName)) &&
-    !(reservation && (!myName || reservation !== myName));
-  if (!safe) return false;
-
-  var mem = getRoomMemoryBucket(room.name);
-  delete mem.lunaBlockedUntil;
-  delete mem.lunaBlockedReason;
-  delete mem.lunaBlockedAt;
-  delete mem.lunaBlocked;
-  delete mem.lunaUnsafe;
-  delete mem.hostile;
-  delete mem.hostileRoom;
-  delete mem.threatLevel;
-  // Room-level invader locks are safe to clear only after visible safety is confirmed.
-  delete mem.lunaInvaderLockUntil;
-  if (mem._invaderLock && mem._invaderLock.locked) delete mem._invaderLock;
-  return true;
+  return BeeToolbox.refreshVisibleRemoteSafety(room);
 }
 
 function isRemoteUnsafe(remoteName) {
-  var room = Game.rooms[remoteName];
-  if (room) refreshVisibleRemoteSafety(room);
-  var mem = (Memory.rooms && Memory.rooms[remoteName]) || {};
-  if (mem.lunaBlocked || mem.lunaUnsafe || mem.hostile || mem.hostileRoom) return true;
-  if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
-  if (mem.lunaInvaderLockUntil && mem.lunaInvaderLockUntil > Game.time) return true;
-  if (mem._invaderLock && mem._invaderLock.locked) {
-    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
-    var lockTtl = (LunaConfig && LunaConfig.INVADER_LOCK_MEMO_TTL) || 1500;
-    if (lockTick == null || (Game.time - lockTick) <= lockTtl) return true;
-  }
-  if (mem.threatLevel && mem.threatLevel > 0) return true;
-  var ctl = room && room.controller;
-  var myName = getMyUsername();
-  if (ctl && ctl.owner && (!myName || ctl.owner.username !== myName)) return true;
-  if (ctl && ctl.reservation && (!myName || ctl.reservation.username !== myName)) return true;
-  if (room) {
-    var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
-    if (hostiles.length > 0) return true;
-  }
-  return false;
+  return BeeToolbox.isRemoteRoomUnsafe(remoteName, {
+    invaderLockTtl: (LunaConfig && LunaConfig.INVADER_LOCK_MEMO_TTL) || 1500
+  });
 }
 
 function getMyUsername() {
