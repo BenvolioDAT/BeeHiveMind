@@ -21,8 +21,8 @@ var CFG = {
   REMOTE_CONTAINER_STATUS_STALE_TICKS: maintCfg.remoteContainerStatusStaleTicks || 150,
   REMOTE_CONTAINER_STATUS_MEMORY_TTL: maintCfg.remoteContainerStatusMemoryTtl || 20000,
   REMOTE_CONTAINER_STATUS_CRITICAL_MEMORY_TTL: maintCfg.remoteContainerStatusCriticalMemoryTtl || 50000,
-  REPAIR_MAX_RAMPART:      30000,
-  REPAIR_MAX_WALL:         30000,
+  REPAIR_MAX_RAMPART:      10000,
+  REPAIR_MAX_WALL:         10000,
   LOG: Logger.shouldLog(LOG_LEVEL.DEBUG)
 };
 
