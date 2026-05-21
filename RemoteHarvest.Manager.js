@@ -582,5 +582,7 @@ module.exports = {
   reserveSourceForQueue: reserveSourceForQueue,
   unreserveSourceForQueue: unreserveSourceForQueue,
   claimSource: claimSource,
-  releaseSource: releaseSource
+  releaseSource: releaseSource,
+  isRemoteUnsafe: isRemoteUnsafe,
+  refreshVisibleRemoteSafety: refreshVisibleRemoteSafety
 };
