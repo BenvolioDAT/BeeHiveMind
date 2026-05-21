@@ -36,6 +36,7 @@ var LUNA_REJECT_INACCESSIBLE_SOURCES = CFG.LUNA_REJECT_INACCESSIBLE_SOURCES !== 
 var LUNA_INACCESSIBLE_BLOCK_TTL = CFG.LUNA_INACCESSIBLE_BLOCK_TTL || LUNA_BLOCKED_SOURCE_TTL;
 var LUNA_PATH_FAIL_LIMIT = CFG.LUNA_PATH_FAIL_LIMIT || 3;
 var LUNA_STUCK_SOURCE_BLOCK_TICKS = CFG.LUNA_STUCK_SOURCE_BLOCK_TICKS || 8;
+var LUNA_STUCK_SOURCE_BLOCK_TTL = CFG.LUNA_STUCK_SOURCE_BLOCK_TTL || 250;
 var LUNA_REMOTE_INTEL_TTL = CFG.LUNA_REMOTE_INTEL_TTL || 3000;
 
 // =========================
@@ -977,10 +978,38 @@ function isVisibleRoomUnsafeForLuna(room) {
   return false;
 }
 
+function refreshVisibleLunaSafety(room) {
+  if (!room || !room.name) return false;
+  var myName = getMyUsername();
+  var controller = room.controller;
+  var owner = controller && controller.owner && controller.owner.username;
+  var reservation = controller && controller.reservation && controller.reservation.username;
+  var hostileCreeps = room.find(FIND_HOSTILE_CREEPS) || [];
+  var invaderCores = room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; } }) || [];
+  var safe = !hostileCreeps.length &&
+    !invaderCores.length &&
+    !(owner && (!myName || owner !== myName)) &&
+    !(reservation && (!myName || reservation !== myName));
+  if (!safe) return false;
+
+  var rm = getRoomMemoryBucket(room.name);
+  delete rm.lunaBlockedUntil;
+  delete rm.lunaBlockedReason;
+  delete rm.lunaBlockedAt;
+  delete rm.lunaBlocked;
+  delete rm.lunaUnsafe;
+  delete rm.hostile;
+  delete rm.hostileRoom;
+  delete rm.threatLevel;
+  if (rm._invaderLock && rm._invaderLock.locked) delete rm._invaderLock;
+  return true;
+}
+
 function isLunaRoomUnsafe(roomName) {
   if (!roomName) return false;
-  if (isLunaRoomBlockedByMemory(roomName)) return true;
   var room = Game.rooms[roomName];
+  if (room) refreshVisibleLunaSafety(room);
+  if (isLunaRoomBlockedByMemory(roomName)) return true;
   if (room && isVisibleRoomUnsafeForLuna(room)) return true;
   return false;
 }
@@ -1963,7 +1992,47 @@ function upsertRemoteContainerStatus(creep, source, container) {
         if (!freshSeen) staleIntel++;
         if (!hasOpen) fullSources++;
       }
-      return 'blocked=' + blocked + ' staleIntel=' + staleIntel + ' noSources=' + noSources + ' fullSources=' + fullSources + ' noRoute=' + noRoute;
+      var blockedSources = 0;
+      var blockedReasonCounts = {};
+      for (var ri = 0; ri < ring.length; ri++) {
+        var roomName = ring[ri];
+        var roomMem = getRoomMemoryBucket(roomName);
+        if (isLunaRoomUnsafe(roomName)) {
+          var reason = roomMem.lunaBlockedReason || 'memory-blocked';
+          blockedReasonCounts[roomName + ':' + reason] = (blockedReasonCounts[roomName + ':' + reason] || 0) + 1;
+        }
+        if (!roomMem || !roomMem.sources) continue;
+        var sourceIds = Object.keys(roomMem.sources);
+        for (var bi = 0; bi < sourceIds.length; bi++) {
+          if (isLunaSourceBlocked(roomName, sourceIds[bi])) blockedSources++;
+        }
+      }
+      var topRejected = [];
+      var homeMem = Memory.rooms && Memory.rooms[homeName] ? Memory.rooms[homeName] : null;
+      var lastSel = homeMem && homeMem.lastLunaSelection ? homeMem.lastLunaSelection : null;
+      if (lastSel && lastSel.rejectedCloserRooms && lastSel.rejectedCloserRooms.length) {
+        var rejectCount = {};
+        for (var rj = 0; rj < lastSel.rejectedCloserRooms.length; rj++) {
+          var rr = lastSel.rejectedCloserRooms[rj];
+          var key = (rr.roomName || 'unknown') + ':' + (rr.reason || 'unknown');
+          rejectCount[key] = (rejectCount[key] || 0) + 1;
+        }
+        for (var rk in rejectCount) topRejected.push({ key: rk, count: rejectCount[rk] });
+        topRejected.sort(function (a, b) { return b.count - a.count; });
+      }
+      var blockedReasonKeys = Object.keys(blockedReasonCounts);
+      var blockedReasonStr = blockedReasonKeys.length ? blockedReasonKeys.slice(0, 5).join(',') : 'none';
+      var topRejectedStr = topRejected.slice(0, 3).map(function (x) { return x.key + 'x' + x.count; }).join(',');
+      return 'blockedRooms=' + blocked +
+        ' blockedSources=' + blockedSources +
+        ' blockedReasonCounts=' + blockedReasonStr +
+        ' staleIntel=' + staleIntel +
+        ' noSources=' + noSources +
+        ' fullSources=' + fullSources +
+        ' noRoute=' + noRoute +
+        ' approvedSourceFilterUsed=' + (lastSel ? !!lastSel.approvedSourceFilterUsed : false) +
+        ' scoutPlanUsed=' + (lastSel ? !!lastSel.scoutPlanUsed : false) +
+        ' topRejectedRooms=' + (topRejectedStr || 'none');
     },
 
     assignSource: function(creep, roomMemory){
@@ -2042,7 +2111,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
 
       var stuckTicks = typeof creep.memory._stuck === 'number' ? creep.memory._stuck : 0;
       if (stuckTicks >= LUNA_STUCK_SOURCE_BLOCK_TICKS){
-        markLunaSourceBlocked(creep.memory.targetRoom, sid, 'stuck-source-path', LUNA_BLOCKED_SOURCE_TTL);
+        markLunaSourceBlocked(creep.memory.targetRoom, sid, 'stuck-source-path', LUNA_STUCK_SOURCE_BLOCK_TTL);
         releaseAssignment(creep);
         idleAtAnchor(creep, 'STUCK');
         return;
