@@ -934,11 +934,12 @@ function isLunaLocalOwnedRoom(homeRoom, roomName) {
   return !!getLunaLocalOwnedRoomBlockReason(homeRoom, roomName);
 }
 
-function markLunaRoomUnsafe(roomName, reason) {
+function markLunaRoomUnsafe(roomName, reason, ttl) {
   if (!roomName) return;
   Memory.rooms = Memory.rooms || {};
   Memory.rooms[roomName] = Memory.rooms[roomName] || {};
-  Memory.rooms[roomName].lunaBlockedUntil = Game.time + (UNSAFE_ROOM_TTL || 1500);
+  var blockTtl = (typeof ttl === 'number' && ttl > 0) ? ttl : (UNSAFE_ROOM_TTL || 1500);
+  Memory.rooms[roomName].lunaBlockedUntil = Game.time + blockTtl;
   Memory.rooms[roomName].lunaBlockedReason = reason || 'unsafe';
   Memory.rooms[roomName].lunaBlockedAt = Game.time;
 }
@@ -978,13 +979,44 @@ function isVisibleRoomUnsafeForLuna(room) {
   }
   var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
   if (hostiles.length > 0) {
-    markLunaRoomUnsafe(room.name, 'hostileCreeps');
-    return true;
+    var dangerous = [];
+    var scoutOnly = [];
+    for (var i = 0; i < hostiles.length; i++) {
+      if (isDangerousHostileForLuna(hostiles[i])) dangerous.push(hostiles[i]);
+      else scoutOnly.push(hostiles[i]);
+    }
+    if (dangerous.length > 0) {
+      markLunaRoomUnsafe(room.name, 'dangerousHostiles');
+      return true;
+    }
+    if (scoutOnly.length > 0) {
+      Memory.rooms = Memory.rooms || {};
+      Memory.rooms[room.name] = Memory.rooms[room.name] || {};
+      var roomMem = Memory.rooms[room.name];
+      roomMem.lastLunaScoutSeen = Game.time;
+      roomMem.lastLunaScoutCount = scoutOnly.length;
+      roomMem.lastLunaScoutOwner = scoutOnly[0] && scoutOnly[0].owner ? scoutOnly[0].owner.username : null;
+      var scoutLogInterval = CFG.LUNA_SCOUT_LOG_INTERVAL || 100;
+      if (!roomMem.lastLunaScoutLogAt || (Game.time - roomMem.lastLunaScoutLogAt) >= scoutLogInterval) {
+        roomMem.lastLunaScoutLogAt = Game.time;
+        console.log('👀 Luna scout-only hostile in ' + room.name + ' x' + scoutOnly.length + ' owner=' + (roomMem.lastLunaScoutOwner || 'unknown'));
+      }
+    }
   }
   if (isRoomLockedByInvaderCore(room.name)) {
     markLunaRoomUnsafe(room.name, 'invaderLock');
     return true;
   }
+  return false;
+}
+
+function isDangerousHostileForLuna(hostile) {
+  if (!hostile || typeof hostile.getActiveBodyparts !== 'function') return true;
+  if (hostile.getActiveBodyparts(ATTACK) > 0) return true;
+  if (hostile.getActiveBodyparts(RANGED_ATTACK) > 0) return true;
+  if (hostile.getActiveBodyparts(HEAL) > 0) return true;
+  if (hostile.getActiveBodyparts(CLAIM) > 0) return true;
+  if (hostile.getActiveBodyparts(WORK) > 0) return true;
   return false;
 }
 
