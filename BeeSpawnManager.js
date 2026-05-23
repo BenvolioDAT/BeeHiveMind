@@ -424,13 +424,9 @@ function pruneOverfilledQueue(roomName, quotas, C) {
 
 
 function getMyUsernameForSpawnManager() {
-  for (var name in Game.spawns) {
-    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
-    var spawn = Game.spawns[name];
-    if (!spawn || !spawn.owner || !spawn.owner.username) continue;
-    return spawn.owner.username;
-  }
-  return null;
+  // Spawn quota/safety code only needs our account name. BeeToolbox caches it
+  // per tick, which keeps this helper simple without changing queue behavior.
+  return BeeToolbox.myUsername();
 }
 
 function refreshVisibleLunaRemoteSafety(room) {

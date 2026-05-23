@@ -657,6 +657,37 @@ var BeeSelectors = {
     return null;
   },
 
+  findClosestGeneralEnergyContainer: function (room, origin, opts) {
+    // General fallback containers are neither source containers nor spawn hub
+    // buffers. Keeping that classification here lets role files ask for the
+    // target they mean without re-implementing room snapshot checks.
+    opts = opts || {};
+    if (!room || !origin) return null;
+    var pos = origin.pos ? origin.pos : origin;
+    if (!pos || !pos.findClosestByPath) return null;
+    var snap = buildSnapshot(room);
+    if (!snap) return null;
+
+    var minEnergy = (opts.minEnergy != null) ? opts.minEnergy : 1;
+    var includeSourceContainers = opts.includeSourceContainers === true;
+    var includeSpawnHubContainers = opts.includeSpawnHubContainers === true;
+    var hubRange = getHubContainerRange(opts);
+    var candidates = [];
+
+    for (var i = 0; i < snap.allContainers.length; i++) {
+      var container = snap.allContainers[i];
+      if (!container || !container.store) continue;
+      // Store objects expose resource amounts by constant name; for this helper
+      // only RESOURCE_ENERGY matters because Upgraders cannot spend minerals.
+      if ((container.store[RESOURCE_ENERGY] || 0) < minEnergy) continue;
+      if (!includeSourceContainers && isNearAnySource(container.pos, snap.sources, 1)) continue;
+      if (!includeSpawnHubContainers && isNearAnySpawn(container.pos, snap.mySpawns, hubRange)) continue;
+      candidates.push(container);
+    }
+
+    return candidates.length ? pos.findClosestByPath(candidates) : null;
+  },
+
   findSpawnHubContainerConstructionSites: function (room, opts) {
     var snap = buildSnapshot(room);
     return findSpawnHubContainerSitesFromSnapshot(snap, opts);

@@ -2,40 +2,30 @@
 
 // BaseHarvest behavior implementation only. Public role wiring stays in role.BaseHarvest.js.
 var CFG = require('role.BaseHarvest.Config');
+var BeeToolbox = require('BeeToolbox');
 
+// These wrappers preserve BaseHarvest's debug flags and colors, while
+// BeeToolbox handles the shared "object or RoomPosition" visual plumbing.
 function debugSay(creep, msg) {
-  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
-}
-
-function getTargetPosition(target) {
-  if (!target) return null;
-  if (target.pos) return target.pos;
-  if (target.x != null && target.y != null && target.roomName) return target;
-  return null;
+  BeeToolbox.sayIfDebugEnabled(creep, msg, CFG.DEBUG_SAY);
 }
 
 function debugDrawLine(creep, target, color, label) {
-  if (!CFG.DEBUG_DRAW || !creep || !target) return;
-  var room = creep.room; if (!room || !room.visual) return;
-  var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
-  try {
-    room.visual.line(creep.pos, tpos, {
-      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
-    });
-    if (label) {
-      room.visual.text(label, tpos.x, tpos.y - 0.3, {
-        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
-      });
-    }
-  } catch (e) {}
+  BeeToolbox.drawDebugLine(creep, target, color, label, {
+    enabled: CFG.DEBUG_DRAW,
+    width: CFG.DRAW.WIDTH,
+    opacity: CFG.DRAW.OPACITY,
+    font: CFG.DRAW.FONT
+  });
 }
 
 function debugRing(room, pos, color, text) {
-  if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
-  try {
-    room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-    if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-  } catch (e) {}
+  BeeToolbox.drawDebugRing(room, pos, color, text, {
+    enabled: CFG.DEBUG_DRAW,
+    width: CFG.DRAW.WIDTH,
+    opacity: CFG.DRAW.OPACITY,
+    font: CFG.DRAW.FONT
+  });
 }
 
 function isWalkable(pos) { if (!pos || !pos.roomName) return false; if (pos.x <= 0 || pos.x >= 49 || pos.y <= 0 || pos.y >= 49) return false; var t = new Room.Terrain(pos.roomName); return t.get(pos.x, pos.y) !== TERRAIN_MASK_WALL; }

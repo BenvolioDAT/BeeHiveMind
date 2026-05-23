@@ -3,14 +3,17 @@
 // Upgrader behavior implementation only. Public role wiring stays in role.Upgrader.js.
 var CFG = require('role.Upgrader.Config');
 var BeeSelectors = require('BeeSelectors');
+var BeeToolbox = require('BeeToolbox');
 var Handoff = require('role.EnergyHandoff');
 
-function debugSay(creep, msg) { if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true); }
-function getTargetPosition(target) { if (!target) return null; if (target.pos) return target.pos; if (target.x != null && target.y != null && target.roomName) return target; return null; }
-function debugDrawLine(creep, target, color, label) { if (!CFG.DEBUG_DRAW || !creep || !target) return; var room = creep.room; if (!room || !room.visual) return; var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return; try { room.visual.line(creep.pos, tpos, { color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid" }); if (label) room.visual.text(label, tpos.x, tpos.y - 0.3, { color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center" }); } catch (e) {} }
-function debugRing(room, pos, color, text) { if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return; try { room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH }); if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" }); } catch (e) {} }
+// The Upgrader keeps these short wrappers so the role reads naturally, while
+// BeeToolbox owns the repeated RoomVisual guard/position normalization code.
+function debugOptions() { return { enabled: CFG.DEBUG_DRAW, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT }; }
+function debugSay(creep, msg) { BeeToolbox.sayIfDebugEnabled(creep, msg, CFG.DEBUG_SAY); }
+function debugDrawLine(creep, target, color, label) { BeeToolbox.drawDebugLine(creep, target, color, label, debugOptions()); }
+function debugRing(room, pos, color, text) { BeeToolbox.drawDebugRing(room, pos, color, text, debugOptions()); }
 
-function getRoomOfPos(pos) { return pos && Game.rooms[pos.roomName]; }
+function getRoomOfPos(pos) { return BeeToolbox.getRoomForPosition(pos); }
 
 function checkAndUpdateControllerSign(creep, controller) {
   if (!controller) return;
@@ -75,7 +78,24 @@ function tryWithdrawTombstone(creep) { var tomb = creep.pos.findClosestByPath(FI
 function tryWithdrawRuin(creep) { var ruin = creep.pos.findClosestByPath(FIND_RUINS, { filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] || 0) > 0; } }); if (!ruin) return false; debugRing(getRoomOfPos(ruin.pos), ruin.pos, CFG.DRAW.DROP, "RUIN"); debugDrawLine(creep, ruin, CFG.DRAW.DROP, "RUIN"); var rr = creep.withdraw(ruin, RESOURCE_ENERGY); if (rr === ERR_NOT_IN_RANGE) creep.travelTo(ruin, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
 function getHomeWorkerEnergyDraw(kind) { if (kind === 'storage') return { color: CFG.DRAW.STORE, label: "STO" }; if (kind === 'spawn_hub_container') return { color: CFG.DRAW.CONT, label: "HUB" }; if (kind === 'source_container') return { color: CFG.DRAW.CONT, label: "SRC" }; return { color: CFG.DRAW.CONT, label: "CONT" }; }
 function tryWithdrawHomeWorkerEnergy(creep) { var info = BeeSelectors.findBestHomeWorkerEnergySource(creep.room, { includeTerminal: false }); if (!info || !info.target) return false; var draw = getHomeWorkerEnergyDraw(info.kind); debugRing(getRoomOfPos(info.target.pos), info.target.pos, draw.color, draw.label); debugDrawLine(creep, info.target, draw.color, draw.label); var wr = creep.withdraw(info.target, RESOURCE_ENERGY); if (wr === ERR_NOT_IN_RANGE) creep.travelTo(info.target, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
-function tryWithdrawContainer(creep) { var room = creep.room; var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function (s) { if (s.structureType !== STRUCTURE_CONTAINER || !s.store || (s.store[RESOURCE_ENERGY] || 0) <= 0) return false; if (BeeSelectors.isSpawnHubContainer(room, s) || BeeSelectors.isSourceContainer(room, s)) return false; return true; } }); if (!containerWithEnergy) return false; debugRing(getRoomOfPos(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT"); debugDrawLine(creep, containerWithEnergy, CFG.DRAW.CONT, "CONT"); var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY); if (cr === ERR_NOT_IN_RANGE) creep.travelTo(containerWithEnergy, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
+function tryWithdrawContainer(creep) {
+  var room = creep.room;
+  // This is the last refuel fallback. It skips source containers (mining
+  // output) and spawn hub containers (early-room buffer) so Upgraders do not
+  // quietly drain energy reserved for harvest/logistics flow.
+  var containerWithEnergy = BeeSelectors.findClosestGeneralEnergyContainer(room, creep.pos);
+  if (!containerWithEnergy) return false;
+
+  debugRing(getRoomOfPos(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT");
+  debugDrawLine(creep, containerWithEnergy, CFG.DRAW.CONT, "CONT");
+
+  // withdraw is for structures/tombstones/ruins with a Store. Dropped Resource
+  // piles use pickup in pickDroppedEnergy(). ERR_NOT_IN_RANGE means the target
+  // is valid, but the creep must move adjacent before the action can run.
+  var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY);
+  if (cr === ERR_NOT_IN_RANGE) creep.travelTo(containerWithEnergy, { range: 1, reusePath: CFG.PATH_REUSE });
+  return true;
+}
 
 function shouldUpgraderRequestEnergy(creep) {
   if (!CFG.HANDOFF_ENABLED) return false;

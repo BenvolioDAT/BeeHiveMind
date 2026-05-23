@@ -351,11 +351,104 @@ function _canEngageTarget(attacker, target) {
 }
 
 // ---------------------------------------------------------------------------
-// 🚶 Shared Traveler wrapper
+// Debug visual helpers
 // ---------------------------------------------------------------------------
 
 /**
- * BeeTravel — Unified wrapper around Traveler.
+ * Debug visual helpers are intentionally passive.
+ * They normalize common RoomVisual drawing boilerplate but never choose
+ * targets, issue creep actions, path creeps, or write persistent state.
+ */
+function getTargetPosition(target) {
+  // Most Screeps APIs accept either a RoomObject with .pos or a RoomPosition.
+  // Debug drawing wants the position itself, so normalize that shape once here.
+  if (!target) return null;
+  if (target.pos) return target.pos;
+  if (target.x != null && target.y != null && target.roomName) return target;
+  return null;
+}
+
+function getRoomForPosition(pos) {
+  var targetPos = getTargetPosition(pos);
+  if (!targetPos || !targetPos.roomName) return null;
+  return Game.rooms[targetPos.roomName] || null;
+}
+
+function sayIfDebugEnabled(creep, message, enabled) {
+  // Keep debug speech behind each role's own config flag. The shared helper
+  // exists only so role files do not repeat the same creep.say guard.
+  if (!enabled || !creep || !message || typeof creep.say !== 'function') return;
+  creep.say(message, true);
+}
+
+function normalizeDebugVisualOptions(opts) {
+  opts = opts || {};
+  return {
+    enabled: opts.enabled === true,
+    width: opts.width != null ? opts.width : 0.12,
+    opacity: opts.opacity != null ? opts.opacity : 0.45,
+    font: opts.font != null ? opts.font : 0.6,
+    lineStyle: opts.lineStyle || 'solid',
+    radius: opts.radius != null ? opts.radius : 0.5,
+    textYOffset: opts.textYOffset != null ? opts.textYOffset : 0.6
+  };
+}
+
+function drawDebugLine(creep, target, color, label, opts) {
+  // Visuals are observability only. Target selection and movement stay in the
+  // role modules so enabling this helper cannot change creep behavior.
+  var visualOpts = normalizeDebugVisualOptions(opts);
+  if (!visualOpts.enabled || !creep || !target) return;
+  var room = creep.room;
+  if (!room || !room.visual) return;
+  var targetPos = getTargetPosition(target);
+  if (!targetPos || targetPos.roomName !== room.name) return;
+  try {
+    room.visual.line(creep.pos, targetPos, {
+      color: color,
+      width: visualOpts.width,
+      opacity: visualOpts.opacity,
+      lineStyle: visualOpts.lineStyle
+    });
+    if (label) {
+      room.visual.text(label, targetPos.x, targetPos.y - 0.3, {
+        color: color,
+        opacity: visualOpts.opacity,
+        font: visualOpts.font,
+        align: 'center'
+      });
+    }
+  } catch (e) {}
+}
+
+function drawDebugRing(room, pos, color, text, opts) {
+  var visualOpts = normalizeDebugVisualOptions(opts);
+  if (!visualOpts.enabled || !room || !room.visual || !pos) return;
+  try {
+    room.visual.circle(pos, {
+      radius: visualOpts.radius,
+      fill: 'transparent',
+      stroke: color,
+      opacity: visualOpts.opacity,
+      width: visualOpts.width
+    });
+    if (text) {
+      room.visual.text(text, pos.x, pos.y - visualOpts.textYOffset, {
+        color: color,
+        font: visualOpts.font,
+        opacity: visualOpts.opacity,
+        align: 'center'
+      });
+    }
+  } catch (e) {}
+}
+
+// ---------------------------------------------------------------------------
+// Shared Traveler wrapper
+// ---------------------------------------------------------------------------
+
+/**
+ * BeeTravel - Unified wrapper around Traveler.
  * Supports BOTH call styles:
  *   BeeTravel(creep, target, { range: 1, ignoreCreeps: true })
  *   BeeTravel(creep, target, 1, /* reuse= * / 30, { ignoreCreeps:true })
@@ -573,6 +666,11 @@ var BeeToolbox = {
   isForeignPlayerRoom: function (room) { return _isForeignPlayerRoom(room); },
   canEngageTarget: function (attacker, target) { return _canEngageTarget(attacker, target); },
   myUsername: function () { return _myUsername(); },
+  getTargetPosition: getTargetPosition,
+  getRoomForPosition: getRoomForPosition,
+  sayIfDebugEnabled: sayIfDebugEnabled,
+  drawDebugLine: drawDebugLine,
+  drawDebugRing: drawDebugRing,
   getRoomMemoryBucket: function (roomName) { return _getRoomMemoryBucket(roomName); },
   isVisibleRoomSafeForRemoteUse: function (room) { return _isVisibleRoomSafeForRemoteUse(room); },
   refreshVisibleRemoteSafety: function (room) { return _refreshVisibleRemoteSafety(room); },

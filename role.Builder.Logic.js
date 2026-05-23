@@ -3,12 +3,15 @@
 // Builder behavior implementation only. Public role wiring stays in role.Builder.js.
 var CFG = require('role.Builder.Config');
 var BeeSelectors = require('BeeSelectors');
+var BeeToolbox = require('BeeToolbox');
 var Handoff = require('role.EnergyHandoff');
 
-function debugSay(creep, msg) { if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true); }
-function getTargetPosition(target) { if (!target) return null; if (target.pos) return target.pos; if (target.x != null && target.y != null && target.roomName) return target; return null; }
-function debugDrawLine(creep, target, color, label) { if (!CFG.DEBUG_DRAW || !creep || !target) return; var room = creep.room; if (!room || !room.visual) return; var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return; try { room.visual.line(creep.pos, tpos, { color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid" }); if (label) room.visual.text(label, tpos.x, tpos.y - 0.3, { color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center" }); } catch (e) {} }
-function debugRing(room, pos, color, text) { if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return; try { room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH}); if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align:"center" }); } catch (e) {} }
+// Keep the role-local names because they make the Builder code easy to scan,
+// but delegate the repeated RoomVisual details to BeeToolbox.
+function debugOptions() { return { enabled: CFG.DEBUG_DRAW, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT }; }
+function debugSay(creep, msg) { BeeToolbox.sayIfDebugEnabled(creep, msg, CFG.DEBUG_SAY); }
+function debugDrawLine(creep, target, color, label) { BeeToolbox.drawDebugLine(creep, target, color, label, debugOptions()); }
+function debugRing(room, pos, color, text) { BeeToolbox.drawDebugRing(room, pos, color, text, debugOptions()); }
 
 function ensureBuilderIdentity(creep) { if (!creep || !creep.memory) return; creep.memory.role = 'Builder'; if (!creep.memory.task) creep.memory.task = 'builder'; }
 function needsEnergy(creep) { var stored = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0; return stored === 0; }
@@ -109,6 +112,8 @@ function getBuilderEnergyDraw(kind) {
 
 function withdrawBuilderHomeEnergy(creep, info) {
   if (!info || !info.target) return null;
+  // BeeSelectors classifies the source type for us. The Builder still owns the
+  // action result and movement options because role energy priority is behavior.
   var draw = getBuilderEnergyDraw(info.kind);
   debugSay(creep, draw.say);
   debugDrawLine(creep, info.target, CFG.DRAW.FILL_COLOR, draw.label);
@@ -219,12 +224,9 @@ function getBuilderBuildPriority(site) {
 }
 
 function getMyUsernameForBuilder() {
-  for (var name in Game.spawns) {
-    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
-    var spawn = Game.spawns[name];
-    if (spawn && spawn.owner && spawn.owner.username) return spawn.owner.username;
-  }
-  return null;
+  // Shared username lookup avoids each role re-scanning Game.spawns in its own
+  // slightly different way. The remote safety predicate itself stays local.
+  return BeeToolbox.myUsername();
 }
 
 function isRoomUnsafeForRemoteBuild(roomName, homeRoom) {
