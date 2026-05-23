@@ -19,6 +19,7 @@
 //   Luna, Trucker, BeeSpawnManager, and BeeMaintenance all read the same records.
 // -----------------------------------------------------------------------------
 var BeeToolbox = require('BeeToolbox');
+var BeeSelectors = require('BeeSelectors');
 var CFG = require('role.Repair.Config');
 var CoreConfig = require('core.config');
 
@@ -67,6 +68,29 @@ function getRepairQueue(room){ Memory.rooms = Memory.rooms || {}; Memory.rooms[r
 function getNextRepairTarget(queue){ while (queue.length){ var head = queue[0]; if (!head || !head.id){ queue.shift(); continue; } var obj = Game.getObjectById(head.id); if (!obj || !obj.hits || obj.hits >= obj.hitsMax){ queue.shift(); continue; } return obj; } return null; }
 function findDroppedEnergy(creep){ return creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, { filter: function(r){ return r.resourceType === RESOURCE_ENERGY && (r.amount || 0) > 0; } }); }
 function findWithdrawSource(creep){ return creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function(s){ if (!s.store) return false; var t = s.structureType; if (t !== STRUCTURE_CONTAINER && t !== STRUCTURE_EXTENSION && t !== STRUCTURE_SPAWN) return false; return (s.store[RESOURCE_ENERGY] || 0) > 0; } }); }
+function getHomeWorkerEnergyInfo(creep){
+  var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
+  if (!home || creep.room.name !== home) return null;
+  return BeeSelectors.findBestHomeWorkerEnergySource(creep.room, { includeTerminal: true });
+}
+function getHomeWorkerEnergyLabel(kind){
+  if (kind === 'storage') return "STORE";
+  if (kind === 'terminal') return "TERM";
+  if (kind === 'spawn_hub_container') return "HUB";
+  if (kind === 'source_container') return "SRC";
+  return "ENERGY";
+}
+function withdrawHomeWorkerEnergy(creep){
+  var info = getHomeWorkerEnergyInfo(creep);
+  if (!info || !info.target) return false;
+  var label = getHomeWorkerEnergyLabel(info.kind);
+  debugRing(info.target, CFG.COLORS.ENERGY, label);
+  debugLine(creep, info.target, CFG.COLORS.ENERGY, "withdraw");
+  var wr = creep.withdraw(info.target, RESOURCE_ENERGY);
+  if (wr === ERR_NOT_IN_RANGE) go(creep, info.target, 1);
+  else if (wr === OK) debugSay(creep, label);
+  return true;
+}
 function getMyUsernameForRepair(){
   return BeeToolbox.myUsername();
 }
@@ -299,6 +323,7 @@ function runRemoteContainerEmergencyRepair(creep){
   }
 
   if (creep.room.name === home) {
+    if (withdrawHomeWorkerEnergy(creep)) return;
     var localSource = findWithdrawSource(creep);
     if (localSource) {
       var lwr = creep.withdraw(localSource, RESOURCE_ENERGY);
@@ -469,6 +494,7 @@ function run(creep){
     }
     var pile = findDroppedEnergy(creep);
     if (pile){ debugRing(pile, CFG.COLORS.ENERGY, "💧"+(pile.amount || 0)); debugLine(creep, pile, CFG.COLORS.ENERGY, "pickup"); var pr = creep.pickup(pile); if (pr === ERR_NOT_IN_RANGE) go(creep, pile, 1); else if (pr === OK) debugSay(creep, "💼"); return; }
+    if (withdrawHomeWorkerEnergy(creep)) return;
     var source = findWithdrawSource(creep);
     if (source){ debugRing(source, CFG.COLORS.ENERGY, "ENERGY"); debugLine(creep, source, CFG.COLORS.ENERGY, "withdraw"); var wr = creep.withdraw(source, RESOURCE_ENERGY); if (wr === ERR_NOT_IN_RANGE) go(creep, source, 1); else if (wr === OK) debugSay(creep, "⛽"); return; }
     if (CFG.CURRENT_LOG_LEVEL >= CFG.LOG_LEVEL.DEBUG) console.log("No available energy source for "+creep.name);

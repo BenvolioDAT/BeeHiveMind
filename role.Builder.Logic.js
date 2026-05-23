@@ -2,6 +2,7 @@
 
 // Builder behavior implementation only. Public role wiring stays in role.Builder.js.
 var CFG = require('role.Builder.Config');
+var BeeSelectors = require('BeeSelectors');
 var Handoff = require('role.EnergyHandoff');
 
 function debugSay(creep, msg) { if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true); }
@@ -98,6 +99,24 @@ function tryRemoteBootstrapSelfHarvest(creep, targetInfo) {
   return { acted: false, collected: false, reason: 'harvest_failed_' + hr };
 }
 
+function getBuilderEnergyDraw(kind) {
+  if (kind === 'storage') return { label: "HOME.STORE", say: "STORE" };
+  if (kind === 'terminal') return { label: "HOME.TERM", say: "TERM" };
+  if (kind === 'spawn_hub_container') return { label: "HUB.CONT", say: "HUB" };
+  if (kind === 'source_container') return { label: "SRC.CONT", say: "SRC" };
+  return { label: "WITHDRAW", say: "ENERGY" };
+}
+
+function withdrawBuilderHomeEnergy(creep, info) {
+  if (!info || !info.target) return null;
+  var draw = getBuilderEnergyDraw(info.kind);
+  debugSay(creep, draw.say);
+  debugDrawLine(creep, info.target, CFG.DRAW.FILL_COLOR, draw.label);
+  var wr = creep.withdraw(info.target, RESOURCE_ENERGY);
+  if (wr === ERR_NOT_IN_RANGE) creep.travelTo(info.target, { range: 1, reusePath: 25 });
+  return { acted: true, collected: wr === OK, reason: 'withdraw_' + info.kind };
+}
+
 function collectEnergy(creep, opts) {
   opts = opts || {};
   var skipHomeReturn = !!opts.skipHomeReturn;
@@ -116,11 +135,6 @@ function collectEnergy(creep, opts) {
     if (!homeRoom || creep.pos.roomName !== homeName) {
       var anchorPos = (typeof getAnchorPos === 'function') ? getAnchorPos(homeName) : null;
       if (anchorPos) { debugSay(creep, '🏠'); debugDrawLine(creep, anchorPos, CFG.DRAW.IDLE_COLOR, "HOME•ENERGY"); creep.travelTo(anchorPos, { range: 2, reusePath: 25 }); return { acted: true, collected: false, reason: 'travel_home' }; }
-    } else {
-      var withdrawTarget = null;
-      if (homeStorage && (homeStorage.store[RESOURCE_ENERGY] || 0) > 0) withdrawTarget = homeStorage;
-      else if (homeTerminal && (homeTerminal.store[RESOURCE_ENERGY] || 0) > 0) withdrawTarget = homeTerminal;
-      if (withdrawTarget) { debugSay(creep, '🏦'); debugDrawLine(creep, withdrawTarget, CFG.DRAW.FILL_COLOR, "HOME•WITHDRAW"); var homeWithdraw = creep.withdraw(withdrawTarget, RESOURCE_ENERGY); if (homeWithdraw === ERR_NOT_IN_RANGE) creep.travelTo(withdrawTarget, { range: 1, reusePath: 15 }); return { acted: true, collected: homeWithdraw === OK, reason: 'withdraw_home' }; }
     }
   }
 
@@ -132,6 +146,12 @@ function collectEnergy(creep, opts) {
 
   var dropped = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, { filter: function (r) { var amount = r.amount || 0; return r.resourceType === RESOURCE_ENERGY && amount >= CFG.PICKUP_MIN; } });
   if (dropped) { debugSay(creep, '🍪'); debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP"); var pr = creep.pickup(dropped); if (pr === ERR_NOT_IN_RANGE) creep.travelTo(dropped, { range: 1, reusePath: 15 }); return { acted: true, collected: pr === OK, reason: 'pickup_dropped' }; }
+
+  if (homeRoom && creep.pos.roomName === homeName) {
+    var homeWorkerEnergy = BeeSelectors.findBestHomeWorkerEnergySource(homeRoom, { includeTerminal: true });
+    var homeWorkerResult = withdrawBuilderHomeEnergy(creep, homeWorkerEnergy);
+    if (homeWorkerResult) return homeWorkerResult;
+  }
 
   var srcCont = creep.pos.findClosestByRange(FIND_STRUCTURES, { filter: function (s) { if (s.structureType !== STRUCTURE_CONTAINER || !s.store) return false; if (s.pos.findInRange(FIND_SOURCES, 1).length === 0) return false; var energy = s.store[RESOURCE_ENERGY] || 0; return energy >= CFG.SRC_CONTAINER_MIN; } });
   if (srcCont) { debugSay(creep, '📦'); debugDrawLine(creep, srcCont, CFG.DRAW.FILL_COLOR, "SRC•CONT"); var cr = creep.withdraw(srcCont, RESOURCE_ENERGY); if (cr === ERR_NOT_IN_RANGE) creep.travelTo(srcCont, { range: 1, reusePath: 25 }); return { acted: true, collected: cr === OK, reason: 'withdraw_source_container' }; }
@@ -519,6 +539,9 @@ function run(creep) {
       collectResult.reason === 'withdraw_tomb' ||
       collectResult.reason === 'withdraw_ruin' ||
       collectResult.reason === 'pickup_dropped' ||
+      collectResult.reason === 'withdraw_storage' ||
+      collectResult.reason === 'withdraw_terminal' ||
+      collectResult.reason === 'withdraw_spawn_hub_container' ||
       collectResult.reason === 'withdraw_source_container' ||
       collectResult.reason === 'withdraw_store' ||
       collectResult.reason === 'withdraw_home'

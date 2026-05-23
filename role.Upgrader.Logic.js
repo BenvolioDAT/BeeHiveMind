@@ -2,7 +2,7 @@
 
 // Upgrader behavior implementation only. Public role wiring stays in role.Upgrader.js.
 var CFG = require('role.Upgrader.Config');
-const BeeToolbox = require('BeeToolbox');
+var BeeSelectors = require('BeeSelectors');
 var Handoff = require('role.EnergyHandoff');
 
 function debugSay(creep, msg) { if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true); }
@@ -61,11 +61,21 @@ function runUpgradePhase(creep) {
 
 function shouldPauseAtSafeRCL8(controller) { if (!CFG.SKIP_RCL8_IF_SAFE) return false; if (controller.level !== 8) return false; var ticksToDowngrade = controller.ticksToDowngrade || 0; return ticksToDowngrade > CFG.RCL8_SAFE_TTL; }
 
-function runRefuelPhase(creep) { if (maybePublishUpgraderRequest(creep)) { debugSay(creep, '⏳'); return; } if (tryLinkPull(creep)) return; tryToolboxSweep(creep); if (tryWithdrawStorage(creep)) return; if (tryWithdrawContainer(creep)) return; if (pickDroppedEnergy(creep)) return; if (CFG.DEBUG_DRAW) debugSay(creep, "❓"); }
+function runRefuelPhase(creep) {
+  if (maybePublishUpgraderRequest(creep)) { debugSay(creep, "\u23f3"); return; }
+  if (tryLinkPull(creep)) return;
+  if (tryCleanupEnergy(creep)) return;
+  if (tryWithdrawHomeWorkerEnergy(creep)) return;
+  if (tryWithdrawContainer(creep)) return;
+  if (CFG.DEBUG_DRAW) debugSay(creep, "\u2753");
+}
 function tryLinkPull(creep) { var ctrl = creep.room.controller; if (!ctrl) return false; var linkNearController = creep.pos.findClosestByRange(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_LINK && s.store && (s.store[RESOURCE_ENERGY] || 0) > 0 && s.pos.inRangeTo(ctrl, 3); } }); if (!linkNearController) return false; var lr = creep.withdraw(linkNearController, RESOURCE_ENERGY); var linkRoom = getRoomOfPos(linkNearController.pos); debugRing(linkRoom, linkNearController.pos, CFG.DRAW.LINK, "LINK"); debugDrawLine(creep, linkNearController, CFG.DRAW.LINK, "LINK"); if (lr === ERR_NOT_IN_RANGE) creep.travelTo(linkNearController, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
-function tryToolboxSweep(creep) { try { if (BeeToolbox && typeof BeeToolbox.collectEnergy === 'function') BeeToolbox.collectEnergy(creep); } catch (e) {} }
-function tryWithdrawStorage(creep) { var stor = creep.room.storage; if (!stor || !stor.store || (stor.store[RESOURCE_ENERGY] || 0) <= 0) return false; debugRing(getRoomOfPos(stor.pos), stor.pos, CFG.DRAW.STORE, "STO"); debugDrawLine(creep, stor, CFG.DRAW.STORE, "STO"); var sr = creep.withdraw(stor, RESOURCE_ENERGY); if (sr === ERR_NOT_IN_RANGE) creep.travelTo(stor, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
-function tryWithdrawContainer(creep) { var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store && (s.store[RESOURCE_ENERGY] || 0) > 0; } }); if (!containerWithEnergy) return false; debugRing(getRoomOfPos(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT"); debugDrawLine(creep, containerWithEnergy, CFG.DRAW.CONT, "CONT"); var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY); if (cr === ERR_NOT_IN_RANGE) creep.travelTo(containerWithEnergy, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
+function tryCleanupEnergy(creep) { if (tryWithdrawTombstone(creep)) return true; if (tryWithdrawRuin(creep)) return true; if (pickDroppedEnergy(creep)) return true; return false; }
+function tryWithdrawTombstone(creep) { var tomb = creep.pos.findClosestByPath(FIND_TOMBSTONES, { filter: function (t) { return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (!tomb) return false; debugRing(getRoomOfPos(tomb.pos), tomb.pos, CFG.DRAW.DROP, "TOMB"); debugDrawLine(creep, tomb, CFG.DRAW.DROP, "TOMB"); var tr = creep.withdraw(tomb, RESOURCE_ENERGY); if (tr === ERR_NOT_IN_RANGE) creep.travelTo(tomb, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
+function tryWithdrawRuin(creep) { var ruin = creep.pos.findClosestByPath(FIND_RUINS, { filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] || 0) > 0; } }); if (!ruin) return false; debugRing(getRoomOfPos(ruin.pos), ruin.pos, CFG.DRAW.DROP, "RUIN"); debugDrawLine(creep, ruin, CFG.DRAW.DROP, "RUIN"); var rr = creep.withdraw(ruin, RESOURCE_ENERGY); if (rr === ERR_NOT_IN_RANGE) creep.travelTo(ruin, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
+function getHomeWorkerEnergyDraw(kind) { if (kind === 'storage') return { color: CFG.DRAW.STORE, label: "STO" }; if (kind === 'spawn_hub_container') return { color: CFG.DRAW.CONT, label: "HUB" }; if (kind === 'source_container') return { color: CFG.DRAW.CONT, label: "SRC" }; return { color: CFG.DRAW.CONT, label: "CONT" }; }
+function tryWithdrawHomeWorkerEnergy(creep) { var info = BeeSelectors.findBestHomeWorkerEnergySource(creep.room, { includeTerminal: false }); if (!info || !info.target) return false; var draw = getHomeWorkerEnergyDraw(info.kind); debugRing(getRoomOfPos(info.target.pos), info.target.pos, draw.color, draw.label); debugDrawLine(creep, info.target, draw.color, draw.label); var wr = creep.withdraw(info.target, RESOURCE_ENERGY); if (wr === ERR_NOT_IN_RANGE) creep.travelTo(info.target, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
+function tryWithdrawContainer(creep) { var room = creep.room; var containerWithEnergy = creep.pos.findClosestByPath(FIND_STRUCTURES, { filter: function (s) { if (s.structureType !== STRUCTURE_CONTAINER || !s.store || (s.store[RESOURCE_ENERGY] || 0) <= 0) return false; if (BeeSelectors.isSpawnHubContainer(room, s) || BeeSelectors.isSourceContainer(room, s)) return false; return true; } }); if (!containerWithEnergy) return false; debugRing(getRoomOfPos(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT"); debugDrawLine(creep, containerWithEnergy, CFG.DRAW.CONT, "CONT"); var cr = creep.withdraw(containerWithEnergy, RESOURCE_ENERGY); if (cr === ERR_NOT_IN_RANGE) creep.travelTo(containerWithEnergy, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
 
 function shouldUpgraderRequestEnergy(creep) {
   if (!CFG.HANDOFF_ENABLED) return false;

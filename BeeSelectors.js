@@ -610,6 +610,53 @@ var BeeSelectors = {
     return list && list.length ? list[0] : null;
   },
 
+  findBestHomeWorkerEnergySource: function (room, opts) {
+    // Worker refuel order for home-room consumers: storage/terminal first,
+    // then spawn hub containers, then source containers. Hub containers are
+    // never source-adjacent; source containers stay last so mining output is
+    // only used after room stores and hub buffers are unavailable.
+    opts = opts || {};
+    var snap = buildSnapshot(room);
+    if (!snap) return null;
+
+    var minEnergy = (opts.minEnergy != null) ? opts.minEnergy : 1;
+    var storageMin = (opts.storageMinEnergy != null) ? opts.storageMinEnergy : minEnergy;
+    var terminalMin = (opts.terminalMinEnergy != null) ? opts.terminalMinEnergy : minEnergy;
+    var hubMin = (opts.spawnHubMinEnergy != null) ? opts.spawnHubMinEnergy : minEnergy;
+    var sourceMin = (opts.sourceContainerMinEnergy != null) ? opts.sourceContainerMinEnergy : minEnergy;
+    var i;
+
+    if (opts.includeStorage !== false && snap.storage && snap.storage.store && (snap.storage.store[RESOURCE_ENERGY] || 0) >= storageMin) {
+      return { target: snap.storage, kind: 'storage' };
+    }
+
+    if (opts.includeTerminal && snap.terminal && snap.terminal.store && (snap.terminal.store[RESOURCE_ENERGY] || 0) >= terminalMin) {
+      return { target: snap.terminal, kind: 'terminal' };
+    }
+
+    if (opts.includeSpawnHubContainers !== false) {
+      var hubs = findSpawnHubContainersFromSnapshot(snap, opts);
+      for (i = 0; i < hubs.length; i++) {
+        if (!hubs[i] || hubs[i].structureType !== STRUCTURE_CONTAINER || !hubs[i].store) continue;
+        if ((hubs[i].store[RESOURCE_ENERGY] || 0) >= hubMin) {
+          return { target: hubs[i], kind: 'spawn_hub_container' };
+        }
+      }
+    }
+
+    if (opts.includeSourceContainers !== false) {
+      for (i = 0; i < snap.sourceContainers.length; i++) {
+        var c = snap.sourceContainers[i];
+        if (!c || c.structureType !== STRUCTURE_CONTAINER || !c.store) continue;
+        if ((c.store[RESOURCE_ENERGY] || 0) >= sourceMin) {
+          return { target: c, kind: 'source_container' };
+        }
+      }
+    }
+
+    return null;
+  },
+
   findSpawnHubContainerConstructionSites: function (room, opts) {
     var snap = buildSnapshot(room);
     return findSpawnHubContainerSitesFromSnapshot(snap, opts);
