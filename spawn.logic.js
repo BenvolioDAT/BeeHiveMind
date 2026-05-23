@@ -1,8 +1,25 @@
 'use strict';
 
-// Spawn logic lives here so older require('spawn.logic') calls keep working.
-// BeeSpawnManager delegates body selection and squad spawning to this module,
-// so we keep the APIs intact and favor clear, linear helpers for novices.
+// -----------------------------------------------------------------------------
+// spawn.logic.js - body selection and spawn execution helpers
+// Owns:
+// * Canonical role-name normalization for spawn requests.
+// * getBodyForRole(), minEnergyFor(), Generate_Creep_Name(), spawnRole(), and
+//   Spawn_Squad() APIs consumed by BeeSpawnManager and legacy callers.
+// Memory paths read/written:
+// * Writes new creep memory only through spawn.spawnCreep({ memory: mem }).
+// * Reads/writes Memory.squads for squad spawn cooldowns, desiredCounts, and
+//   lastSpawnAt/lastSpawnRole diagnostics.
+// Usually called by:
+// * BeeSpawnManager.dequeueAndSpawn() for ordinary role queue items.
+// * BeeSpawnManager.trySpawnSquad()/remote-defense flow for combat roles.
+// Depends on:
+// * Spawn.BodyConfig.js for role body tables and BeeCombatSquads for threat
+//   based squad spawning.
+// Do not casually change:
+// * Canonical role names, memory copy behavior, squad memory fields, or body
+//   list ordering. Those are part of the spawn queue contract.
+// -----------------------------------------------------------------------------
 
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
@@ -65,6 +82,8 @@ var ROLE_NORMALIZE_MAP = (function () {
 })();
 
 function normalizeRole(role) {
+  // All spawn queue entries eventually pass through this gate. Returning null
+  // rejects unknown roles before body selection or spawn memory is created.
   if (role === undefined || role === null) return null;
   var key = String(role);
   if (!key) return null;
@@ -92,6 +111,8 @@ function cloneBody(body) {
 }
 
 function getBodyForRole(roleName, energyAvailable) {
+  // Body tables are ordered largest-to-smallest. The first affordable body is
+  // what spawnRole will use, so reordering body configs changes spawn behavior.
   if (!roleName) return [];
 
   var energy = typeof energyAvailable === 'number' ? energyAvailable : 0;
@@ -143,6 +164,8 @@ function copyMemory(source) {
 }
 
 function spawnRole(spawn, roleName, availableEnergy, memory) {
+  // Ordinary spawn entry point. It copies queue-item memory, normalizes role,
+  // selects the body, creates a unique name, and calls spawn.spawnCreep.
   if (!spawn) return false;
 
   // Resolve the requested role into our canonical spelling before continuing.
@@ -207,6 +230,8 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
 // Energy accounting
 // -----------------------------------------------------------------------------
 function Calculate_Spawn_Resource(spawnOrRoom) {
+  // Energy accounting shim kept for legacy callers. BeeSpawnManager normally
+  // passes a specific spawn so this returns room.energyAvailable for that room.
   if (spawnOrRoom) {
     // Allow spawns, room objects, or room names.
     var room = spawnOrRoom.room || (typeof spawnOrRoom === 'string'
@@ -246,6 +271,8 @@ function normalizeSquadKey(id) {
 // Novice tip: hide the boilerplate Memory guards so orchestration logic stays
 // focused on decisions, not on `if (!Memory.foo)` noise.
 function ensureSquadMemory(id) {
+  // Squad Memory is keyed as "SquadX" even when callers pass "X". This keeps
+  // old flags and newer remote-defense buckets pointed at the same record.
   if (!id) return {};
   if (!Memory.squads) Memory.squads = {};
   var key = normalizeSquadKey(id);
@@ -458,6 +485,8 @@ function Spawn_Squad(spawn, squadId) {
 var MIN_ENERGY_CACHE = {};
 
 function minEnergyFor(roleName) {
+  // Minimum-cost cache used by BeeSpawnManager's energy gate. It must reflect
+  // the cheapest configured body, not the first/largest body.
   var canonicalRole = normalizeRole(roleName);
   if (!canonicalRole) return 0;
   if (Object.prototype.hasOwnProperty.call(MIN_ENERGY_CACHE, canonicalRole)) {

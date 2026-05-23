@@ -1,4 +1,26 @@
 
+// -----------------------------------------------------------------------------
+// BeeToolbox.js - shared utility and safety helpers used by most roles
+// Owns:
+// * No role behavior directly; this file centralizes reusable predicates,
+//   Traveler wrapping, source/container intel helpers, and energy transfer
+//   helpers so role files do not duplicate them.
+// Memory paths read/written:
+// * Memory.rooms[roomName].sources and sourceContainers via source/container
+//   intel logging.
+// * Room-level remote danger fields such as lunaBlockedUntil, lunaBlockedReason,
+//   lunaBlocked, hostile, hostileRoom, threatLevel, and _invaderLock.
+// * global.__energyTargets as a tick-local cache for energy source lookups.
+// Usually called by:
+// * Luna, Scout, Trucker, Repair, combat roles, BeeMaintenance, and main.js.
+// Systems that depend on it:
+// * RemoteHarvest.Manager, BeeSpawnManager, and Repair rely on its shared remote
+//   safety checks and remote container identity helpers.
+// Do not casually change:
+// * Safety predicates or the fields cleared by refreshVisibleRemoteSafety();
+//   clearing source-level blocks here would bypass Luna assignment safeguards.
+// -----------------------------------------------------------------------------
+
 var Traveler = require('Traveler');
 var Logger = require('core.logger');
 var CoreConfig = require('core.config');
@@ -41,6 +63,8 @@ var _myNameTick = -1;
 var _myNameCache = null;
 
 function _myUsername() {
+  // Resolve our username once per tick from owned spawns/rooms. Safety checks
+  // use this to distinguish our reservations from enemy reservations.
   if (!Game) return null;
   if (_myNameTick === Game.time) return _myNameCache;
   _myNameTick = Game.time;
@@ -173,6 +197,8 @@ function _isVisibleRoomSafeForRemoteUse(room) {
 }
 
 function _refreshVisibleRemoteSafety(room) {
+  // Only room-level danger markers are cleared here, and only after current
+  // vision says the room is safe. Source-level Luna blocks stay owned by Luna.
   if (!_isVisibleRoomSafeForRemoteUse(room)) return false;
   var mem = _getRoomMemoryBucket(room.name);
   if (!mem) return false;
@@ -190,6 +216,9 @@ function _refreshVisibleRemoteSafety(room) {
 }
 
 function _isRemoteRoomUnsafe(roomName, opts) {
+  // Shared remote safety predicate. Callers can ignore intel ownership when
+  // they are doing separate owner/reservation gates, but live hostile/danger
+  // markers still make the room unsafe.
   opts = opts || {};
   var invaderLockTtl = typeof opts.invaderLockTtl === 'number' ? opts.invaderLockTtl : 1500;
   var ignoreIntelOwnership = opts.ignoreIntelOwnership === true;
@@ -332,6 +361,8 @@ function _canEngageTarget(attacker, target) {
  *   BeeTravel(creep, target, 1, /* reuse= * / 30, { ignoreCreeps:true })
  */
 function BeeTravel(creep, target, a3, a4, a5) {
+  // Compatibility wrapper around Traveler.travelTo. Many older role files pass
+  // (range, reuse, opts); newer code passes a single options object.
   if (!creep || !target) return ERR_INVALID_TARGET;
 
   // Normalize destination
@@ -558,6 +589,8 @@ var BeeToolbox = {
   // Logs all sources in a room to Memory.rooms[room].sources (object keyed by source.id).
   // (Comment fixed: we store an OBJECT per source id, not an "array".)
   logSourcesInRoom: function (room) {
+    // Source intel seed. Scouts/Luna/RemoteHarvest all expect
+    // Memory.rooms[room].sources to be an object keyed by source id.
     if (!room) return;
 
     if (!Memory.rooms) Memory.rooms = {};
@@ -588,6 +621,8 @@ var BeeToolbox = {
 
   // Logs containers that are within 1 tile of any source.
   logSourceContainersInRoom: function (room) {
+    // Source-container registry used by legacy container assignment logic.
+    // It is cadence-limited because source-adjacent structure scans are costly.
     if (!room) return;
     if (!Memory.rooms) Memory.rooms = {};
     if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
@@ -739,6 +774,9 @@ var BeeToolbox = {
   _getEnergyTargetsFromCache: getEnergyTargetsFromCache,
 
   collectEnergy: function (creep) {
+    // Generic "find energy" helper used by roles that do not own custom
+    // dispatch logic. The category order is intentional: free leftovers first,
+    // then containers/storage.
     if (!creep) return;
     var room = creep.room;
     if (!room) return;
@@ -772,6 +810,9 @@ var BeeToolbox = {
   },
 
   deliverEnergy: function (creep, structureTypes) {
+    // Generic delivery helper. It filters allowed structures, skips source
+    // containers when delivering to containers, and chooses by priority then
+    // distance.
     if (!creep) return ERR_INVALID_TARGET;
     var carry = creep.store ? creep.store.getUsedCapacity(RESOURCE_ENERGY) : 0;
     if (carry <= 0) return ERR_NOT_ENOUGH_RESOURCES;
@@ -845,6 +886,9 @@ var BeeToolbox = {
 
   // Ensure a CONTAINER exists 0–1 tiles from targetSource; place site if missing
   ensureContainerNearSource: function (creep, targetSource) {
+    // Infrastructure helper for simple miners/builders. Luna has its own remote
+    // container tracking, so avoid merging the two workflows without checking
+    // RemoteHarvest and Trucker expectations.
     if (!creep || !targetSource) return;
 
     var sourcePos = targetSource.pos;

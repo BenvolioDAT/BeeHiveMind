@@ -1,3 +1,20 @@
+// -----------------------------------------------------------------------------
+// main.js - Screeps loop entrypoint
+// Owns:
+// * The order in which housekeeping, AI orchestration, structures, combat flags,
+//   visuals, stale-room cleanup, pixels, and CPU profiling run each tick.
+// Memory paths read/written:
+// * Memory.firstSpawnRoom and GameTickCounter/GameTickRepairCounter.
+// * Memory.rooms[roomName].repairTargets via maintainRepairTargets().
+// Usually called by:
+// * Screeps runtime as module.exports.loop.
+// Systems that depend on it:
+// * BeeHiveMind expects Traveler to be required before role movement.
+// * Repair/towers depend on repairTargets being refreshed before they run.
+// Do not casually change:
+// * The top-level ordering without checking whether a downstream module expects
+//   cleanup/intel to have already run this tick.
+// -----------------------------------------------------------------------------
 
 // Core utilities and shared config
 const CoreConfig = require('core.config');
@@ -30,6 +47,8 @@ Object.defineProperty(global, 'currentLogLevel', {
 const mainLog = Logger.createLogger('Main', LOG_LEVEL.BASIC);
 
 function ensureFirstSpawnMemory() {
+    // Memory.firstSpawnRoom is a legacy anchor used by roles that need a home
+    // fallback before per-room ownership is fully initialized.
     // Track the room of our first spawn so other modules can reference it.
     if (Memory.GameTickCounter === undefined) Memory.GameTickCounter = 0;
     Memory.GameTickCounter++;
@@ -54,6 +73,8 @@ function ensureFirstSpawnMemory() {
 }
 
 function maintainRepairTargets() {
+    // Repair target ownership starts here: BeeMaintenance finds candidates and
+    // this function stores the queue for towers and Repair creeps to consume.
     // Periodically refresh which structures need repairs in each visible room.
     if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
     Memory.GameTickRepairCounter++;
@@ -69,6 +90,8 @@ function maintainRepairTargets() {
 }
 
 function refreshSourceIntel() {
+    // Lightweight source-container refresh used by legacy container assignment
+    // helpers. Luna remote container status has its own dedicated Memory path.
     // Keep an eye on source containers so harvesters stay supplied.
     if (Game.time % 3 !== 0) return;
 
@@ -106,6 +129,8 @@ function maybeGeneratePixel() {
 }
 
 module.exports.loop = function () {
+    // Tick order matters: refresh intel/cleanup first, run roles and structures,
+    // then draw visuals and do less frequent cleanup/pixel work.
     CpuProfiler.start('main.total');
     // --- Intel and housekeeping ---
     CpuProfiler.measure('refreshSourceIntel', refreshSourceIntel);

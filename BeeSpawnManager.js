@@ -1,5 +1,15 @@
 'use strict';
 
+// Documentation map for this file:
+// Owns Memory.rooms[roomName].spawnQueue plus quota diagnostics such as
+// lastRoleQuotas, lastTruckerQuota, lastRepairQuota, lastQueenQuota, and
+// lastRemoteVision. BeeHiveMind calls manageSpawns(C) once per tick, after role
+// logic has had a chance to update haul/status Memory. RemoteHarvest.Manager
+// provides Luna source reservations and audits; spawn.logic chooses bodies and
+// performs spawn.spawnCreep; BeeCombatSquads supplies combat pressure. Avoid
+// changing queue priority, quota math, or the order of Luna reserve/enqueue/
+// unreserve calls without checking the RemoteHarvest.Manager ownership model.
+
 // -----------------------------------------------------------------------------
 // BeeSpawnManager.js – dedicated spawning subsystem extracted from BeeHiveMind
 // Responsibilities:
@@ -247,6 +257,9 @@ function writeRemoteDefenseDiag(roomName, diag) {
 
 // ------------------------------ Spawn Queue ------------------------------
 function ensureRoomQueue(roomName) {
+  // Room queues are the persistent boundary between quota math and actual
+  // spawning. Queue items can outlive the tick that created them, so each item
+  // must carry enough memory for spawn.logic to create the right creep later.
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
   if (!Array.isArray(Memory.rooms[roomName].spawnQueue)) {
@@ -256,6 +269,8 @@ function ensureRoomQueue(roomName) {
 }
 
 function cleanupRetiredCourierState(roomName) {
+  // Historical Memory may still contain Courier queue items/creeps. This keeps
+  // old saves compatible by migrating them to Trucker before quota math runs.
   var q = ensureRoomQueue(roomName);
   var removedQueueItems = 0;
   var kept = [];
@@ -521,6 +536,9 @@ function getLunaRemoteIntelTick(remoteName) {
 }
 
 function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
+  // Approval gate for a remote room before it can contribute Luna sources:
+  // route must exist, range must fit LunaConfig, room must not be unsafe, and
+  // source intel must be fresh enough to avoid spawning into stale Memory.
   if (!homeRoom || !remoteName) {
     if (outMeta) outMeta.reason = 'missing-home-or-remote';
     return false;
@@ -573,6 +591,8 @@ function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
   return true;
 }
 function determineLunaQuota(C, room) {
+  // RemoteHarvest.Manager owns desiredLuna. BeeSpawnManager only reads that
+  // audited plan and turns deficits into spawn queue items.
   if (!room) return 0;
   var home = RemoteHarvestManager.ensureHomeMemory(room.name);
   return home.desiredLuna || 0;
@@ -605,6 +625,9 @@ function collectApprovedLunaSourcesFromRemote(remoteName, out) {
 }
 
 function pruneBlockedLunaQueueItems(roomName) {
+  // Queue cleanup must run before new quota fills. If a remote room/source was
+  // blocked after a Luna was queued, release the RemoteHarvest reservation so a
+  // future safe source can be picked.
   var q = ensureRoomQueue(roomName);
   var kept = [];
   var removed = 0;
@@ -711,6 +734,10 @@ function countOpenHarvestTilesForSpawn(source) {
 }
 
 function buildLunaSourceSlotPlan(room, approvedSources) {
+  // Diagnostic/planning helper: count how many Luna slots each approved source
+  // can support, then subtract live and queued reservations. The queue path now
+  // primarily uses RemoteHarvest.Manager, but this shape is still useful when
+  // inspecting why a home did or did not need another Luna.
   var plan = {
     totalSlots: 0,
     liveUsedSlots: 0,
@@ -954,6 +981,9 @@ function countHomeTruckersByAssignment(roomName) {
 
 
 function computeTruckerQuotaForHome(roomName) {
+  // Trucker quota is workload-based. Luna creates remoteHaulRequests; this
+  // helper counts fresh/safe/large-enough requests, adds local container
+  // pressure, and returns both a final quota and skip diagnostics.
   var requests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
   var active = 0;
   var urgent = 0;
@@ -1144,6 +1174,9 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
 }
 
 function findRemoteContainerEmergencyRepairRequest(roomName) {
+  // Emergency repair can be triggered from either live container status or haul
+  // request records. Both are produced by Luna, so keep the field expectations
+  // aligned with role.Luna.Logic.js and role.Repair.Logic.js.
   if (!RepairConfig.remoteContainerEmergencyRepairEnabled) return null;
   var statusRequests = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : null;
   var haulRequests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : null;
@@ -1155,6 +1188,9 @@ function findRemoteContainerEmergencyRepairRequest(roomName) {
 
 function ensureRemoteVisionRequests() { Memory.__BHM = Memory.__BHM || {}; Memory.__BHM.remoteVisionRequests = Memory.__BHM.remoteVisionRequests || {}; return Memory.__BHM.remoteVisionRequests; }
 function ensureRemoteVisionRequestFromStatus(req, homeRoom) {
+  // Stale low-HP remote container data needs a Scout before Repair can trust it.
+  // This writes a request consumed by role.Scout.Logic.js without spawning the
+  // Scout directly; queueEmergencyVisionScoutIfNeeded decides whether to enqueue.
   if (!req || !homeRoom) return null;
   var map = ensureRemoteVisionRequests();
   var key = (req.containerId || req.sourceId || (req.remoteRoom + ':' + req.x + ':' + req.y));
@@ -1192,6 +1228,9 @@ function isScoutSuitableForRequest(creep, roomName, requestKey, selected) {
   return dist <= 2;
 }
 function queueEmergencyVisionScoutIfNeeded(roomName) {
+  // Bridge from stale remote container status to Scout spawning. The request
+  // itself lives in Memory.__BHM.remoteVisionRequests; this function only queues
+  // a temporary Scout when no suitable live Scout is already handling it.
   var roomMem = ensureRoomMemory(roomName);
   var maxPerHome = ((CoreConfig.settings && CoreConfig.settings.visuals && CoreConfig.settings.visuals.remoteVisionRequestMaxEmergencyScoutsPerHome) || 1);
   var reqs = ensureRemoteVisionRequests();
@@ -1217,6 +1256,8 @@ function queueEmergencyVisionScoutIfNeeded(roomName) {
 
 
 function determineQueenQuota(room) {
+  // Queen quota is recorded in room Memory for debugging because bootstrap
+  // rooms may intentionally keep more Queens than mature storage rooms.
   var roomMem = ensureRoomMemory(room.name);
   var roomHasStorage = !!(room && room.storage);
   var backupEnabled = !!(QueenConfig && QueenConfig.BACKUP_HARVEST_ENABLED);
@@ -1234,6 +1275,8 @@ function determineQueenQuota(room) {
 }
 
 function computeRoomQuotas(C, room) {
+  // Central quota fan-in. Every role-specific signal writes its own diagnostic
+  // before the combined quotas object is returned to fillQueueForRoom().
   var localDefense = computeLocalDefenseQuotas(room);
   var sourceCount = room ? room.find(FIND_SOURCES).length : 0;
   var safeBaseHarvestQuota = Math.max(1, sourceCount || 0);
@@ -1294,6 +1337,11 @@ function computeRoomQuotas(C, room) {
 }
 
 function fillQueueForRoom(C, room) {
+  // The queue fill pass is intentionally ordered:
+  // 1) compute quotas and stale emergency Scout needs,
+  // 2) prune invalid Luna queue items and retired Courier state,
+  // 3) write quota diagnostics,
+  // 4) enqueue deficits, reserving Luna sources before adding queue items.
   var quotas = computeRoomQuotas(C, room);
   queueEmergencyVisionScoutIfNeeded(room.name);
   var roomName = room.name;
@@ -1461,6 +1509,9 @@ function pickLunaSourceForQueue(plan) {
 }
 
 function dequeueAndSpawn(spawner) {
+  // Dequeue is the only place a persistent queue item becomes a creep. It keeps
+  // priority order stable, respects retry cooldowns, checks minimum energy, and
+  // delegates the actual body/memory creation to spawn.logic.spawnRole().
   if (!spawner || spawner.spawning) return false;
   var room = spawner.room;
   var roomName = room.name;
@@ -1535,6 +1586,9 @@ function dequeueAndSpawn(spawner) {
 // Teaching habit: split orchestration into obvious verbs (prepare, run) so
 // extending the manager later is painless.
 function prepareRoomQueues(C) {
+  // Per-room queue preparation runs before any spawn tries to dequeue. Remote
+  // harvest discovery and assignment audits happen here so the spawn queue sees
+  // the same Luna plan that diagnostics report at the end of the function.
   var rooms = C.roomsOwned;
   for (var i = 0; i < rooms.length; i++) {
     var room = rooms[i];
@@ -1643,6 +1697,9 @@ function trySpawnSquad(spawner, squadState) {
 }
 
 function runSpawnPass(C) {
+  // Once all queues are prepared, each idle spawn gets one chance to do combat
+  // defense, manual squad work, or ordinary queued spawning. This prevents one
+  // busy room from consuming unlimited spawn attempts in a single tick.
   var spawns = C.spawns;
   var squadState = { handled: false };
   var remoteDefenseHandled = false;
@@ -1711,6 +1768,8 @@ function runSpawnPass(C) {
 // ------------------------------ Public API ------------------------------
 var BeeSpawnManager = {
   manageSpawns: function manageSpawns(C) {
+    // Public entry used by BeeHiveMind. It expects the tick cache C to already
+    // contain owned rooms/spawns and live role counts from prepareTickCaches().
     if (!C || !Array.isArray(C.spawns) || !Array.isArray(C.roomsOwned)) return;
     if (squadSpawningEnabled() && BeeCombatSquads && typeof BeeCombatSquads.refreshAutoDefensePlans === 'function') {
       // BHM Combat Fix: keep squad plans in sync before evaluating spawn needs.

@@ -1,4 +1,26 @@
 
+// -----------------------------------------------------------------------------
+// BeeMaintenance.js - stale Memory cleanup and repair target discovery
+// Owns:
+// * Periodic cleanup for dead creep memory, stale/empty Memory.rooms buckets,
+//   source/container assignment leftovers, and remote container status TTLs.
+// * Repair target discovery via findStructuresNeedingRepair(), which main.js
+//   writes into Memory.rooms[roomName].repairTargets.
+// Memory paths read/written:
+// * Memory.creeps, Memory.rooms[*], Memory.recentlyCleanedRooms.
+// * Memory.remoteAssignments and Memory.rooms[*].sourceContainers.
+// * Memory.__BHM.remoteContainerStatus, preserving Luna/Repair critical data
+//   longer than ordinary status snapshots.
+// Usually called by:
+// * main.js before BeeHiveMind.run().
+// Systems that depend on it:
+// * role.Repair.Logic.js consumes repairTargets; Luna/RemoteHarvest rely on
+//   source metadata surviving cleanup.
+// Do not casually change:
+// * The distinction between assignment maps and source metadata. Deleting
+//   Memory.rooms[remote].sources metadata can break remote harvest planning.
+// -----------------------------------------------------------------------------
+
 var CoreConfig = require('core.config');
 var Logger = require('core.logger');
 var BeeToolbox = require('BeeToolbox');
@@ -54,6 +76,9 @@ function _lastSeen(mem) {
 // ---- Deep compaction of a single room mem ----
 // Returns true if the room is "now empty" after compaction
 function _compactRoomMem(roomName, mem) {
+  // Compact a single room bucket without assuming one module owns every field.
+  // This function removes known-empty/stale subtrees but preserves source
+  // metadata shapes used by Luna and RemoteHarvest.
   if (!mem) return true;
   var now = _now();
 
@@ -181,6 +206,8 @@ function _compactRemainingRooms() {
 }
 
 function cleanStaleRooms() {
+  // Lightweight visible-room stamp runs every call; expensive pruning only runs
+  // on ROOM_PRUNE_INTERVAL so cleanup stays predictable.
   var now = _now();
   _stampVisibleRooms(now);
 
@@ -238,6 +265,8 @@ function _releaseContainerAssignment(creepName, creepMem) {
 }
 
 function _removeDeadCreepMemory() {
+  // Dead creep cleanup also releases old remote/source/container assignments so
+  // new creeps are not blocked by dead owners.
   if (!Memory.creeps) return;
   for (var name in Memory.creeps) {
     if (!Memory.creeps.hasOwnProperty(name)) continue;
@@ -434,6 +463,9 @@ function cleanUpMemory() {
 }
 
 function _pruneRemoteContainerStatus(now) {
+  // Remote container status is shared by Luna, Trucker, Repair, and
+  // BeeSpawnManager. Keep critical/missing/low-HP records longer so emergency
+  // repair and vision refresh have enough time to react.
   // Maintenance cleanup is TTL/visibility driven: keep status fresh while
   // visible/live, and prune dead or expired memory snapshots on cadence.
   var interval = CFG.REMOTE_CONTAINER_STATUS_SWEEP_INTERVAL || 500;
@@ -573,6 +605,8 @@ function _scanRepairTargets(room, bucket, priorityOrder) {
 }
 
 function findStructuresNeedingRepair(room) {
+  // Public repair target scanner. main.js writes the returned array into
+  // Memory.rooms[room].repairTargets, where towers and Repair creeps consume it.
   if (!room) return [];
   var bucket = _ensureMaintBucket(room.name);
   var priorityOrder = _ensurePriorityTable(bucket);

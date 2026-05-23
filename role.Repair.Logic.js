@@ -1,6 +1,23 @@
 'use strict';
 
-// Repair behavior implementation only. Public role wiring stays in role.Repair.js.
+// -----------------------------------------------------------------------------
+// role.Repair.Logic.js - local repair and emergency remote container repair
+// Owns:
+// * Repair creep memory: repairTargetId/repairTargetInfo plus remote emergency
+//   fields task/targetRoom/containerId/sourceId/requestId/x/y and return state.
+// * Memory.__BHM.repairClaims, a short-lived per-target claim map that prevents
+//   multiple Repair creeps from selecting the same target.
+// Reads/writes:
+// * Memory.rooms[roomName].repairTargets maintained by BeeMaintenance/main.
+// * Memory.__BHM.remoteContainerStatus and remoteHaulRequests produced by Luna;
+//   emergency repair also writes maintenanceUntil/maintenanceBy holds so
+//   Truckers do not drain containers while they are being repaired.
+// Usually called by:
+// * BeeHiveMind.runCreeps() through role.Repair.js.
+// Do not casually change:
+// * Remote container validation/cleanup logic or maintenance hold field names;
+//   Luna, Trucker, BeeSpawnManager, and BeeMaintenance all read the same records.
+// -----------------------------------------------------------------------------
 var BeeToolbox = require('BeeToolbox');
 var CFG = require('role.Repair.Config');
 var CoreConfig = require('core.config');
@@ -33,6 +50,8 @@ function hud(creep, text){
 }
 
 function go(creep, dest, range){
+  // Shared movement wrapper for this role. It prefers BeeToolbox.BeeTravel so
+  // Repair follows the same pathing conventions as other logistics roles.
   var R = (range != null) ? range : 1;
   var dpos = _posOf(dest) || dest;
   if (creep.pos.roomName === dpos.roomName && creep.pos.getRangeTo(dpos) > R) debugLine(creep.pos, dpos, CFG.COLORS.PATH, "→");
@@ -97,6 +116,9 @@ function getRemoteContainerStatusById(id){
 }
 
 function clearStaleRemoteContainerRepairMemory(targetInfo, reason){
+  // Remote repair is allowed to delete stale status/request records only after
+  // the selected target proves invalid. This keeps cleanup tied to visible
+  // evidence instead of blindly pruning Luna's remote container Memory.
   if (!targetInfo) return;
   // Repair cleanup is target-validation driven: clear stale status/requests
   // when the currently selected remote repair target fails validation.
@@ -139,6 +161,8 @@ function clearStaleRemoteContainerRepairMemory(targetInfo, reason){
 }
 
 function validateRemoteContainerRepairTarget(creep, targetInfo){
+  // If a remote container is visible but missing, clear the repair claim and
+  // stale container Memory so BeeSpawnManager/Trucker stop acting on bad data.
   if (!targetInfo || targetInfo.type !== STRUCTURE_CONTAINER) return targetInfo;
   var roomName = targetInfo.roomName;
   var room = roomName ? Game.rooms[roomName] : null;
@@ -173,6 +197,8 @@ function getRepairGoalHits(target, targetInfo){
   return target.hitsMax;
 }
 function clearRemoteTask(creep){
+  // Reset only the emergency remote repair fields. Do not clear generic repair
+  // target Memory here; normal repair claim cleanup is handled separately.
   if (!creep || !creep.memory) return;
   delete creep.memory.task;
   delete creep.memory.targetRoom;
@@ -185,6 +211,9 @@ function clearRemoteTask(creep){
   delete creep.memory.remoteRepairReturningHome;
 }
 function runRemoteContainerEmergencyRepair(creep){
+  // Dedicated emergency flow for low-HP remote source containers. It travels to
+  // the container, marks haul/status records under maintenance, repairs using
+  // container energy or local harvest, then returns home when complete/missing.
   if (!creep || !creep.memory) return;
   var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
   creep.memory.home = home;
@@ -283,6 +312,8 @@ function runRemoteContainerEmergencyRepair(creep){
 
 
 function ensureRepairClaimsMemory(){
+  // Short-lived claim table keyed by target id. This is not the repair queue;
+  // it only prevents multiple live Repair creeps from selecting the same target.
   Memory.__BHM = Memory.__BHM || {};
   Memory.__BHM.repairClaims = Memory.__BHM.repairClaims || {};
   return Memory.__BHM.repairClaims;
@@ -303,6 +334,8 @@ function isRepairTargetClaimedByOther(creep, targetId){
   return c.creepName !== creep.name && Game.creeps[c.creepName];
 }
 function claimRepairTarget(creep, targetInfo){
+  // Claim both global Memory.__BHM.repairClaims and this creep's memory so a
+  // different Repair creep can skip this target until the claim expires.
   if (!creep || !targetInfo || !targetInfo.id) return;
   var claims = ensureRepairClaimsMemory();
   claims[targetInfo.id] = { creepName: creep.name, until: Game.time + 15, roomName: targetInfo.roomName, targetType: targetInfo.type };
@@ -322,6 +355,8 @@ function releaseRepairTarget(creep){
   }
 }
 function getLocalTargets(creep){
+  // Local repair candidates come from Memory.rooms[room].repairTargets, which
+  // main.js refreshes via BeeMaintenance.findStructuresNeedingRepair().
   Memory.rooms = Memory.rooms || {}; var rm = Memory.rooms[creep.room.name] || {};
   var queue = Array.isArray(rm.repairTargets) ? rm.repairTargets : [];
   var out = [];
@@ -338,6 +373,9 @@ function getLocalTargets(creep){
   return out;
 }
 function getRemoteContainerTargets(creep){
+  // Remote repair candidates are derived from Luna's remoteContainerStatus
+  // records. Only built, same-home, visible/safe-enough low-HP containers are
+  // exposed as normal Repair targets.
   var out = []; var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
   var root = Memory.__BHM && Memory.__BHM.remoteContainerStatus;
   if (!root) return out;
@@ -356,6 +394,9 @@ function getRemoteContainerTargets(creep){
   return out;
 }
 function getBestRepairTargetForCreep(creep){
+  // Merge local and remote candidates, skip targets already claimed by another
+  // Repair creep, prefer non-road structures, then sort by configured priority
+  // and lowest hit percentage.
   cleanupRepairClaims();
   var candidates = getLocalTargets(creep).concat(getRemoteContainerTargets(creep));
   var nonRoad = []; var roads = [];
@@ -371,6 +412,9 @@ function getBestRepairTargetForCreep(creep){
 }
 
 function run(creep){
+  // Main Repair pipeline: emergency remote repair has priority; otherwise
+  // collect energy, select/claim a local or remote target, validate it, then
+  // repair until the target reaches its goal.
   if (!creep) return;
   if (creep.memory && !creep.memory.role) creep.memory.role = 'Repair';
   if (creep.memory && creep.memory.task === 'remoteContainerEmergencyRepair') {

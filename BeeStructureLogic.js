@@ -1,5 +1,26 @@
 "use strict";
 
+// -----------------------------------------------------------------------------
+// BeeStructureLogic.js - owned-room tower and link automation
+// Owns:
+// * Tower action selection for defense, healing, and repair.
+// * Link sender/receiver selection and transfer attempts.
+// Memory paths read/written:
+// * Memory.rooms[roomName].repairTargets, written by main/BeeMaintenance and
+//   consumed by tower repair logic.
+// * Memory.rooms[roomName]._towerLocks, a short-lived map that keeps towers
+//   from all repairing the same target every tick.
+// * Memory.rooms[roomName].linkMgr senderId/receiverId/nextScan.
+// Usually called by:
+// * main.js after BeeHiveMind.run().
+// Systems that depend on it:
+// * role.Repair.Logic.js and BeeMaintenance share the repair target queue with
+//   towers, so field names and queue pruning assumptions matter.
+// Do not casually change:
+// * Repair target queue shape or linkMgr keys; they are the persistence layer
+//   for these structure managers.
+// -----------------------------------------------------------------------------
+
 // --------------------------------------------------
 // Tower Logic (merged from tower.logic.js)
 // --------------------------------------------------
@@ -27,6 +48,9 @@ var MIN_SEND = 100;
 
 var BeeStructureLogic = {
   runTowerLogic: function () {
+    // Tower priority is defense -> heal -> repair. Repair reads the shared
+    // Memory.rooms[room].repairTargets queue but uses _towerLocks so towers do
+    // not all pick the same target.
     if (!Memory.rooms) Memory.rooms = {};
 
     for (var roomName in Game.rooms) {
@@ -79,6 +103,8 @@ var BeeStructureLogic = {
   },
 
   runLinkManager: function () {
+    // Link manager periodically scans for a sender near storage/spawn and a
+    // receiver near controller, then transfers energy when both are valid.
     if (!Memory.rooms) Memory.rooms = {};
 
     for (var rn in Game.rooms) {
@@ -153,6 +179,8 @@ function runHealPhase(towers) {
 }
 
 function pruneRepairQueue(RMem) {
+  // Drop completed or missing entries only from the front of the queue. This
+  // preserves BeeMaintenance's sorted repair order for remaining targets.
   while (RMem.repairTargets.length) {
     var head = RMem.repairTargets[0];
     var headObj = head && head.id ? Game.getObjectById(head.id) : null;
@@ -255,6 +283,8 @@ function _label(room, p, text, color) {
 // Link Manager helper functions
 // --------------------------------------------------
 function scanRoomForLinks(room) {
+  // Rescan link topology on a cadence. IDs are persisted so normal ticks avoid
+  // room-wide link selection work.
   var links = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_LINK } });
   if (!links.length) {
     return { sender: null, receiver: null, nextScan: Game.time + RESCAN_INTERVAL };

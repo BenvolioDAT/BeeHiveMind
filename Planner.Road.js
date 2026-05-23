@@ -1,3 +1,19 @@
+// -----------------------------------------------------------------------------
+// Planner.Road.js - staged local and remote road construction planner
+// Owns:
+// * Memory.rooms[homeRoom].roadPlanner.paths, including path arrays, placement
+//   cursor i, done state, nextRoadPlanTick, and lastAnchorSig.
+// * Tick-local global.__RPM caches for construction-site count, cost matrices,
+//   and active remote rooms.
+// Usually called by:
+// * BeeHiveMind.manageRoom() through ensureRemoteRoads(room).
+// Systems that depend on it:
+// * BeeHiveMind.prepareTickCaches() and RemoteHarvest/BeeSpawnManager use
+//   getActiveRemoteRooms() as one source of remote-room activity.
+// Do not casually change:
+// * Path key format. getActiveRemoteRooms() parses keys to identify remotes,
+//   and RemoteHarvest.Manager may treat those rooms as candidate remotes.
+// -----------------------------------------------------------------------------
 
 /** =========================
  *  Config (tweak here)
@@ -114,6 +130,8 @@ function shouldSkipTick(homeRoom) {
 }
 
 function ensureRemoteRoads(homeRoom) {
+  // Public planner entry. It staggers work, refreshes path Memory around the
+  // current anchor, then updates local spokes and visible remote spokes.
   // Teaching note: run heavy road work only on its scheduled slice so we
   // avoid pathfinding every tick. Triggers (anchor change) reset the timer.
   if (!isOwnedRoom(homeRoom)) return;
@@ -349,6 +367,8 @@ function roomCostMatrix(roomName) {
   // ---------- Memory + info ----------
 
 function memoryFor(homeRoom) {
+  // Road planner state is home-owned, even for remote paths. Remote path keys
+  // include the remote room/source so getActiveRemoteRooms() can parse demand.
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[homeRoom.name]) Memory.rooms[homeRoom.name] = {};
 
@@ -359,6 +379,8 @@ function memoryFor(homeRoom) {
 }
  
 function getActiveRemoteRooms(homeRoom) {
+  // Return remote rooms inferred from planned path keys. BeeHiveMind and
+  // RemoteHarvest use this as one hint that a remote is active.
   const mem = memoryFor(homeRoom);
   const rooms = new Set();
   for (const key of Object.keys(mem.paths || {})) {
@@ -381,6 +403,8 @@ function discoverActiveRemoteRoomsFromCreeps() {
 // ---------- Remote spokes ----------
 
 function ensureRemoteSpokes(homeRoom, mem, anchor) {
+  // Remote roads are planned only while the remote room is visible, because
+  // terrain and source positions must be current to avoid bad construction.
   const activeRemotes = activeRemotesOncePerTick();
   for (const remoteName of activeRemotes) {
     if (shouldSkipRemoteByRadius(homeRoom.name, remoteName)) continue;
@@ -439,6 +463,8 @@ function pruneOutOfRadiusPaths(homeRoom, mem) {
 // ---------- Discovery helpers ----------
 
 function chooseHarvestTile(src) {
+  // Pick the road/seat target next to a source. Existing containers win first,
+  // then walkable tiles with road/swamp preferences.
   const room = Game.rooms[src.pos.roomName];
   if (!room) return null;
 

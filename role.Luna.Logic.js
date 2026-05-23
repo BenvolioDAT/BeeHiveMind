@@ -1,6 +1,29 @@
 'use strict';
 
-// Luna behavior implementation only. Public role wiring stays in role.Luna.js; remote mining state should be changed carefully.
+// -----------------------------------------------------------------------------
+// role.Luna.Logic.js - remote miner/forager behavior
+// Owns:
+// * Live Luna creep memory: role/task/home/sourceId/targetRoom/assigned,
+//   assignedContainer/containerId, seat coordinates, repair state, and movement
+//   breadcrumbs such as _stuck/_retargetAt/_forceYield.
+// * Legacy Memory.remoteAssignments same-tick/live ownership records.
+// * Remote container producer records:
+//   Memory.__BHM.remoteContainerStatus,
+//   Memory.__BHM.remoteContainerBuilds,
+//   Memory.__BHM.remoteHaulRequests.
+// Reads:
+// * RemoteHarvest.Manager's Memory.__BHM.remoteHarvest plan for queue/live
+//   source ownership, plus Memory.rooms[remote].sources/intel safety fields.
+// Usually called by:
+// * BeeHiveMind.runCreeps() through role.Luna.js.
+// Systems that depend on it:
+// * BeeSpawnManager uses the source/build state to decide replacement Luna
+//   quotas; Trucker.Dispatcher consumes remoteHaulRequests; Repair consumes
+//   remoteContainerStatus for emergency repair work.
+// Do not casually change:
+// * Assignment/release order, container status keys, haul request keys, or
+//   unsafe-room Memory fields. Those are shared cross-module contracts.
+// -----------------------------------------------------------------------------
 const BeeToolbox = require('BeeToolbox');
 const BeeCombatSquads = require('BeeCombatSquads');
 const MovementManager = require('Movement.Manager');
@@ -507,6 +530,8 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   // ============================
   // Shared reservation table for remote mining seat claims (cleared each tick).
   function getClaimTable(){
+    // Same-tick contention guard. This table resets every tick and prevents two
+    // Luna creeps from selecting the same source in the same decision pass.
     var sc=Memory._sourceClaim;
     if(!sc||sc.t!==Game.time){ Memory._sourceClaim={t:Game.time,m:{}}; }
     return Memory._sourceClaim.m;
@@ -524,6 +549,8 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   function ensureAssignmentsMem(){ if(!Memory.remoteAssignments) Memory.remoteAssignments={}; return Memory.remoteAssignments; }
   // Normalises a mining assignment entry so later logic can rely on keys existing.
   function ensureMiningAssignment(entry, roomName){
+    // Legacy saves used a plain number here. Newer code uses a richer record
+    // with owner/owners/maxSlots so multi-Luna source ownership can be audited.
     if (!entry || typeof entry !== 'object') entry = { count: 0, owner: null, roomName: roomName||null, since: null };
     if (typeof entry.count !== 'number') entry.count = 0;
     if (!('owner' in entry)) entry.owner = null;
@@ -660,6 +687,9 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   // Ownership / duplicate resolver
   // ============================
   function resolveOwnershipForSid(sid){
+    // Authoritative duplicate resolver for live Luna creeps on one source. It
+    // ranks contenders and marks losing creeps with _forceYield instead of
+    // moving them immediately; the main run loop handles the release safely.
     var memAssign = ensureAssignmentsMem();
     var e = ensureMiningAssignment(memAssign[sid], null);
 
@@ -701,6 +731,9 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
 
   // Audits all sids once per tick: recompute counts, scrub dead owners, and prune flags
   function auditRemoteAssignments(){
+    // Once-per-tick cleanup for Memory.remoteAssignments. It recomputes counts
+    // from live creeps, clears dead owners, and prunes old source/controller
+    // flags so stale assignment memory does not block new Luna creeps forever.
     var memAssign = ensureAssignmentsMem();
 
     for (var sid in memAssign){
@@ -935,6 +968,8 @@ function isLunaLocalOwnedRoom(homeRoom, roomName) {
 }
 
 function markLunaRoomUnsafe(roomName, reason, ttl) {
+  // Luna-specific room block. RemoteHarvest/BeeSpawnManager read these fields
+  // through BeeToolbox safety helpers before planning or queueing new Luna work.
   if (!roomName) return;
   Memory.rooms = Memory.rooms || {};
   Memory.rooms[roomName] = Memory.rooms[roomName] || {};
@@ -1025,6 +1060,9 @@ function refreshVisibleLunaSafety(room) {
 }
 
 function isLunaRoomUnsafe(roomName) {
+  // Combined safety check used before assignment, travel, harvesting, and queue
+  // pruning. Visible rooms can clear generic stale danger via BeeToolbox, but
+  // dangerous live conditions are stamped back into Memory for later ticks.
   if (!roomName) return false;
   var room = Game.rooms[roomName];
   if (room) refreshVisibleLunaSafety(room);
@@ -1074,6 +1112,9 @@ function roomCostMatrixForLuna(roomName) {
 }
 
 function recordLunaAccessibility(remoteRoom, sourceId, accessible, reason) {
+  // Source-level diagnostic written when a visible source is checked for
+  // harvest tiles/pathing. Scout and RemoteHarvest reports can explain rejected
+  // sources without needing to redo the full accessibility search.
   if (!remoteRoom || !sourceId) return;
   var rm = getRoomMemoryBucket(remoteRoom);
   rm.lastLunaAccessibility = {
@@ -1404,6 +1445,9 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function releaseAssignment(creep){
+    // Release both RemoteHarvest.Manager's home plan and the legacy
+    // Memory.remoteAssignments model, then put this creep on a retarget
+    // cooldown so it does not immediately reclaim the same bad source.
     RemoteHarvestManager.releaseSource(creep);
     var memAssign = ensureAssignmentsMem();
     var sid = creep.memory.sourceId;
@@ -1424,6 +1468,9 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function validateExclusiveSource(creep){
+    // Final ownership guard before harvesting. If another Luna has a stronger
+    // claim to this source, this creep yields and clears its assignment rather
+    // than competing on the same tile forever.
     if (!creep.memory || !creep.memory.sourceId) return true;
 
     var sid = creep.memory.sourceId;
@@ -1525,6 +1572,9 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function ensureActiveAssignment(creep) {
+    // Primary Luna assignment flow. Prefer the scored remote-source picker,
+    // mirror the claim into RemoteHarvest.Manager, and fall back to legacy room
+    // selection only when the scored picker cannot find a safe source.
     if (creep.memory.sourceId) return true;
 
     var pick = pickRemoteSource(creep);
@@ -1578,12 +1628,16 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
 
 
   function ensureRemoteHaulRequestsMemory() {
+    // Produced by Luna, consumed by Trucker.Dispatcher. Records here represent
+    // remote container energy that is large/fresh/safe enough to haul.
     if (!Memory.__BHM) Memory.__BHM = {};
     if (!Memory.__BHM.remoteHaulRequests) Memory.__BHM.remoteHaulRequests = {};
     return Memory.__BHM.remoteHaulRequests;
   }
 
   function ensureRemoteContainerStatusMemory() {
+    // Produced by Luna, consumed by BeeSpawnManager, Repair, Trucker, and
+    // BeeMaintenance. Treat this schema as shared status Memory.
     if (!Memory.__BHM) Memory.__BHM = {};
     if (!Memory.__BHM.remoteContainerStatus) Memory.__BHM.remoteContainerStatus = {};
     return Memory.__BHM.remoteContainerStatus;
@@ -1592,6 +1646,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   
 
   function ensureRemoteContainerBuildMemory() {
+    // Build progress Memory is keyed by source id so replacement Luna creeps can
+    // continue a planned/building container even if the previous Luna dies.
     if (!Memory.__BHM) Memory.__BHM = {};
     if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
     return Memory.__BHM.remoteContainerBuilds;
@@ -1629,6 +1685,9 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function upsertRemoteContainerBuildStatus(creep, source, container, site, plannedPos) {
+    // Keep both global build Memory and Memory.rooms[remote].sources[source].container
+    // in sync. RemoteHarvest.Manager reads these fields to know unfinished
+    // container work should still count as a Luna need.
     if (!creep || !source) return;
     var homeName = getHomeName(creep);
     var remoteRoom = creep.memory && creep.memory.targetRoom ? creep.memory.targetRoom : (source.pos && source.pos.roomName);
@@ -1693,6 +1752,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     };
   }
 function upsertRemoteContainerStatus(creep, source, container) {
+    // Live container status snapshot. Repair reads hit points, Trucker reads
+    // energy amount/capacity, and BeeMaintenance later prunes stale records.
     if (!creep || !source || !container) return;
     var homeName = getHomeName(creep);
     if (!homeName || container.pos.roomName === homeName) return;
@@ -1724,6 +1785,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
   }
 
   function upsertRemoteHaulRequest(creep, source, container) {
+    // Publish hauling demand when a remote container has enough energy. The id
+    // is usually the container id so Truckers and Repair can refer to the same
+    // physical structure.
     if (!creep || !source || !container) return;
     var homeName = getHomeName(creep);
     if (!homeName || container.pos.roomName === homeName) return;
@@ -1829,6 +1893,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
   }
 
   function ensureSourceContainerOrSite(source) {
+    // Luna owns the "make a container near my source" workflow. It returns
+    // existing container/site/planned position without changing harvest behavior
+    // beyond placing a missing site when the room is visible.
     var container = findSourceContainer(source);
     if (container) return { container: container, site: null, plannedPos: container.pos };
 
@@ -1851,6 +1918,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
   var roleLuna = {
     role: 'Luna',
     run: function(creep){
+      // Main role pipeline:
+      // prepare identity/audits -> ensure/release assignment -> validate safety
+      // and uniqueness -> travel if needed -> harvest/build/repair/offload.
       prepareLuna(creep);
 
       var state = determineLunaState(creep);
@@ -1996,6 +2066,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
     },
 
     initializeAndAssign: function(creep){
+      // Legacy fallback assignment path. The newer RemoteHarvest/BeeSpawnManager
+      // flow normally preassigns sourceId/targetRoom; this path still helps old
+      // or manually spawned Luna creeps find a safe source from room Memory.
       var targetRooms = roleLuna.getNearbyRoomsWithSources(creep);
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
         var least = roleLuna.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
@@ -2120,6 +2193,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
     },
 
     assignSource: function(creep, roomMemory){
+      // Pick a source inside an already-selected target room, preferring totally
+      // free sources, then this creep's sticky source, then partially occupied
+      // sources that still have capacity.
       if (!roomMemory || !roomMemory.sources) return null;
       if (creep.memory && creep.memory.targetRoom && isLunaLocalOwnedRoom(getHomeName(creep), creep.memory.targetRoom)) return null;
       if (creep.memory && creep.memory.targetRoom && isLunaRoomUnsafe(creep.memory.targetRoom)) return null;
@@ -2149,6 +2225,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
 
 
     harvestSource: function(creep){
+      // Harvest loop for the assigned source. It also maintains remote container
+      // build/status/haul Memory, so changing it affects Truckers, Repair,
+      // RemoteHarvest.Manager, and BeeSpawnManager quota decisions.
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
         if (Game.time%25===0) console.log('Forager '+creep.name+' missing targetRoom/sourceId'); return;
       }

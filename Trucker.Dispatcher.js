@@ -1,8 +1,31 @@
 'use strict';
 
+// -----------------------------------------------------------------------------
+// Trucker.Dispatcher.js - job selection and reservation for Trucker creeps
+// Owns:
+// * Memory.__BHM.truckerDispatch.claims and assignedByCreep, the short-lived
+//   claim tables that prevent two Truckers from selecting the same job.
+// * Per-home audit summaries in Memory.rooms[homeRoom].lastRemoteHaulRequestAudit
+//   when chooseJobForTrucker evaluates remote haul requests.
+// Reads:
+// * Memory.__BHM.remoteHaulRequests produced by role.Luna.Logic.js when remote
+//   source containers have enough energy to haul.
+// * Memory.rooms[remoteRoom].intel/hostile/lunaBlocked fields for safety gates.
+// Usually called by:
+// * role.Trucker.Logic.js whenever a Trucker needs a dispatchJob.
+// Systems that depend on it:
+// * BeeSpawnManager reads Trucker job counts and remote haul pressure to size
+//   future Trucker quotas.
+// Do not casually change:
+// * Job id format, reservation TTL semantics, or remote request skip reasons;
+//   they are used in diagnostics and quota calculations.
+// -----------------------------------------------------------------------------
+
 var CFG = require('role.Trucker.Config');
 
 function ensureDispatchMemory() {
+  // Dispatcher-owned claim tables. They are separate from individual Trucker
+  // creep.memory.dispatchJob so dead creeps and expired claims can be cleaned.
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.truckerDispatch) Memory.__BHM.truckerDispatch = {};
   var d = Memory.__BHM.truckerDispatch;
@@ -90,6 +113,8 @@ function releaseJob(creep, jobId) {
 }
 
 function cleanupDispatchMemory() {
+  // Remove expired job claims and claims owned by dead creeps before choosing
+  // new work. This prevents remote haul requests from staying locked forever.
   var d = ensureDispatchMemory();
   var id;
   for (id in d.claims) {
@@ -104,6 +129,9 @@ function cleanupDispatchMemory() {
 }
 
 function getLocalContainerPressure(homeRoom) {
+  // Local pressure protects the home economy. If source containers are near
+  // full, the dispatcher reserves some Truckers for local pickup before remote
+  // haul work can claim everyone.
   var out = {
     containersSeen: 0,
     containersOverPickup: 0,
@@ -181,6 +209,8 @@ function getMyUsernameForTruckerDispatch() {
 }
 
 function isRemoteRoomUnsafeForTrucker(remoteRoom) {
+  // Trucker remote safety gate mirrors Luna enough to avoid hostile/blocked
+  // rooms, but remains local to dispatch so hauling can make its own decisions.
   if (!remoteRoom) return false;
   var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
   if (mem.hostile) return true;
@@ -206,6 +236,9 @@ function getLocalDesiredTruckers(localContainerPressure) {
 }
 
 function chooseJobForTrucker(creep) {
+  // Main dispatcher entry. It prioritizes returning carried energy, preserves
+  // a minimum local-hauling presence, then chooses the best fresh/safe remote
+  // haul request by urgency and amount.
   var d = cleanupDispatchMemory();
   var home = creep.memory.home || creep.room.name;
   var diag = { tick: Game.time, jobsSeen: 0, jobsClaimed: 0, localJobs: 0, remoteJobs: 0, skippedRemoteTTL: 0, skippedReserved: 0, skippedNoVision: 0, skippedUnsafe: 0, skippedLowAmount: 0, skippedStale: 0, skippedMaintenance: 0, assignedByCreep: d.assignedByCreep || {} };

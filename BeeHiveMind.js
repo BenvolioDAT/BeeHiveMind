@@ -15,6 +15,16 @@
 // -----------------------------------------------------------------------------
 'use strict';
 
+// Additional ownership notes:
+// * BeeHiveMind is the tick coordinator, not the owner of role behavior. It
+//   normalizes role memory, builds global.__BHM tick caches, calls room
+//   planners, dispatches role.run(), resolves movement, then delegates spawn
+//   queues to BeeSpawnManager.
+// * Persistent Memory ownership lives in the specialist modules:
+//   BeeMaintenance owns stale cleanup, RemoteHarvest.Manager owns remote Luna
+//   planning, Movement.Manager owns only transient movement intents, and each
+//   role owns its own creep.memory fields.
+
 /**
  * BeeHiveMind – tick orchestrator (with spawn queue + debug breadcrumbs)
  * Readability-first refactor: same strategy, clearer structure & comments.
@@ -137,6 +147,8 @@ function createRoleAliasMap() {
 var ROLE_ALIAS_MAP = createRoleAliasMap();
 
 function canonicalRoleName(name) {
+  // Normalize legacy/alias role strings before dispatch. This protects the
+  // role runner and quota cache from old creep memory such as "remoteharvest".
   // Defensive coding pattern: immediately handle null/undefined to avoid
   // sprinkling guard clauses everywhere else.
   if (!name) return null;
@@ -149,6 +161,8 @@ function canonicalRoleName(name) {
 }
 
 function validateRoleBindings() {
+  // Lightweight wiring check. It logs missing/mismatched role modules but does
+  // not stop the tick; role behavior remains owned by the role modules.
   var roles = Object.keys(creepRoles);
   for (var i = 0; i < roles.length; i++) {
     var name = roles[i];
@@ -176,6 +190,9 @@ function validateRoleBindings() {
 }
 
 function ensureCreepRole(creep) {
+  // Creep memory migration/normalization point. This is intentionally early in
+  // the tick because role counts, spawn quotas, and runCreeps all trust
+  // creep.memory.role after this function returns.
   // Novice tip: always guard against falsy values before dereferencing.
   if (!creep) return 'Idle';
   var mem = creep.memory || (creep.memory = {});
@@ -248,6 +265,9 @@ function objectValues(obj) {
 // Output: populated global.__BHM cache for this tick (rooms, spawns, counts, selectors).
 // Side-effects: mutates global.__BHM; calls BeeSelectors.prepareRoomSnapshot for each owned room.
 function prepareTickCaches() {
+  // Build one tick-local snapshot of rooms, spawns, creeps, role counts,
+  // construction sites, remotes, and selector room snapshots. Most downstream
+  // systems read global.__BHM instead of repeating expensive scans.
   var C = global.__BHM;
   var now = Game.time;
   // Early return: if we've already computed caches this tick, reuse them.

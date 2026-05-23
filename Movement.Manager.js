@@ -16,6 +16,17 @@
 // -----------------------------------------------------------------------------
 'use strict';
 
+// Movement ownership model:
+// * This module owns only tick-local intent data (_intents, _indexByCreep, and
+//   _order). It does not write persistent Memory.
+// * Callers keep ownership of their creep.task/role Memory; they simply request
+//   a move with a priority and destination.
+// * One creep can have only one active movement intent per tick. Same/higher
+//   priority requests replace the destination; lower-priority requests are
+//   ignored so urgent movement cannot be downgraded by later role code.
+// * BeeHiveMind must call startTick() before roles run and resolveAndMove()
+//   after all roles finish, otherwise queued movement may be stale or skipped.
+
 /**
  * What changed & why:
  * - Documented deterministic intent ordering (priority → first-request wins → creepId) and ensured MOVE flushes every tick.

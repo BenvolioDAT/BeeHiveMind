@@ -1,6 +1,25 @@
 'use strict';
 
-// Scout behavior implementation only. Public role wiring stays in role.Scout.js.
+// -----------------------------------------------------------------------------
+// role.Scout.Logic.js - room intel, remote approval inputs, and emergency vision
+// Owns:
+// * Scout creep memory under creep.memory.scout plus targetRoom/state fields.
+// * Memory.rooms[roomName].scout and Memory.rooms[roomName].intel snapshots.
+// * Memory.__BHM.scoutIntel.homes[homeRoom].rooms[remoteRoom], which feeds
+//   RemoteHarvest.Manager's candidate source diagnostics.
+// * Memory.__BHM.remoteVisionRequests assignment/resolution when remote
+//   container data is stale.
+// Usually called by:
+// * BeeHiveMind.runCreeps() through role.Scout.js.
+// Systems that depend on it:
+// * RemoteHarvest.Manager reads scoutIntel for remote room/source approval.
+// * BeeSpawnManager may enqueue emergency Scouts when stale remote container
+//   status needs vision.
+// * BeeCombatSquads/SquadFlagIntel receive threat observations from Scouts.
+// Do not casually change:
+// * Intel field names, target bad-target TTL, or remoteVisionRequests fields;
+//   those are shared with spawn, remote harvest, and repair systems.
+// -----------------------------------------------------------------------------
 const BeeCombatSquads = require('BeeCombatSquads');
 var CFG = require('role.Scout.Config');
 
@@ -15,6 +34,8 @@ function debugLabel(room, pos, text, color) {
 }
 
 function ensureCombatIntelMemory() {
+  // Shared combat intel root. BeeCombatSquads owns the canonical helper when
+  // available; the fallback keeps older Memory layouts working.
   if (BeeCombatSquads && BeeCombatSquads.SquadFlagIntel && typeof BeeCombatSquads.SquadFlagIntel.ensureMemory === 'function') return BeeCombatSquads.SquadFlagIntel.ensureMemory();
   if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
   if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
@@ -56,6 +77,9 @@ function computeThreatBundle(room) {
 }
 
 function recordThreatIntel(room, threatBundle, shouldEscalate, sourceTag, distance) {
+  // Scouts and Luna both feed this threat timeline. Spawning uses the score
+  // later, so this records both "fresh seen" data and deferred threats that are
+  // too far away to spawn defenders for immediately.
   if (!room) return;
   var roomName = room.name || (room.pos ? room.pos.roomName : null);
   if (!roomName) return;
@@ -93,6 +117,9 @@ function recordThreatIntel(room, threatBundle, shouldEscalate, sourceTag, distan
 
 function evaluateRoomThreat(room, sourceTag) { if (!room) return null; var threatBundle = computeThreatBundle(room); var distance = roomDistanceFromOwnedSpawn(room.name); var canEscalate = (distance <= CFG.REMOTE_DEFENSE_MAX_DISTANCE); var allowScore = (!threatBundle || !threatBundle.hasThreat) ? true : canEscalate; recordThreatIntel(room, threatBundle, allowScore, sourceTag, distance); return { threat: threatBundle, distance: distance, canEscalate: canEscalate }; }
 function ensureRemoteDefensePlan(room, threatBundle, distance) {
+  // Convert a live threat observation into Memory.squads[SquadRoomName]. The
+  // spawn manager later sees this as a remoteDefense plan and may spawn combat
+  // creeps if the target is allowed.
   if (!room || !threatBundle || !threatBundle.hasThreat || !(threatBundle.score > 0)) return;
   var flagName = 'Squad' + room.name;
   var bucket = Memory.squads && Memory.squads[flagName] ? Memory.squads[flagName] : null;
@@ -126,6 +153,9 @@ function shouldScoutSkipPlayerRoom(roomName, creep) { var intel = getRoomIntel(r
 function seedSourcesFromVision(room) { if (!room) return; Memory.rooms = Memory.rooms || {}; var rm = Memory.rooms[room.name] = (Memory.rooms[room.name] || {}); rm.sources = rm.sources || {}; var arr = room.find(FIND_SOURCES); for (var i = 0; i < arr.length; i++) { var s = arr[i]; var rec = rm.sources[s.id] = (rm.sources[s.id] || {}); rec.roomName = room.name; rec.x = s.pos.x; rec.y = s.pos.y; rec.lastSeen = Game.time; } }
 
 function logRoomIntel(room) {
+  // Full room intel snapshot. RemoteHarvest.Manager uses sources/owner/
+  // reservation/keeper data; combat uses hostiles; visuals/debugging read the
+  // richer optional fields like portals, minerals, deposits, and power banks.
   if (!room) return;
   Memory.rooms = Memory.rooms || {};
   var rmem = Memory.rooms[room.name] = (Memory.rooms[room.name] || {});
@@ -159,6 +189,8 @@ function logRoomIntel(room) {
 
 function ensureScoutIdentity(creep) { if (!creep || !creep.memory) return; creep.memory.role = 'Scout'; if (!creep.memory.task) creep.memory.task = 'scout'; }
 function ensureScoutMem(creep) {
+  // Scout creep memory is intentionally nested under creep.memory.scout so
+  // role-level fields like targetRoom/state remain compatible with older code.
   ensureScoutIdentity(creep);
   if (!creep.memory.scout) creep.memory.scout = {};
   var m = creep.memory.scout;
@@ -181,6 +213,8 @@ function ensureScoutMem(creep) {
 
 
 function ensureScoutIntelRoot() {
+  // Home-scoped remote intel map. RemoteHarvest.Manager reads this path when it
+  // wants source-level accessibility and route diagnostics gathered by Scouts.
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.scoutIntel) Memory.__BHM.scoutIntel = { homes: {} };
   if (!Memory.__BHM.scoutIntel.homes) Memory.__BHM.scoutIntel.homes = {};
@@ -215,6 +249,9 @@ function scoutRoomCostMatrix(roomName) {
   return m;
 }
 function evaluateScoutSourceAccessibility(homeRoom, room, sourceObj) {
+  // Source-level approval check: a source needs at least one usable harvest
+  // tile and a plausible path from the home-room center before it is marked
+  // remoteEligible for Luna planning.
   if (!room || !sourceObj || !sourceObj.pos) return { accessible: false, blockedReason: 'source-missing', checkedAt: Game.time };
   var terrain = room.getTerrain();
   var openTiles = 0;
@@ -252,6 +289,8 @@ function evaluateScoutSourceAccessibility(homeRoom, room, sourceObj) {
 }
 
 function updateScoutHomeIntelForRoom(room) {
+  // Write one visible room into every nearby home-room scout map. This is the
+  // bridge from roaming Scouts to RemoteHarvest.Manager's approved source list.
   if (!room || !room.name) return;
   var root = ensureScoutIntelRoot();
   var homes = getOwnedHomeRooms();
@@ -316,6 +355,8 @@ function returnHome(creep, mem) { var homeRoom = mem.home || creep.pos.roomName;
 
 function ensureRemoteVisionRoot() { Memory.__BHM = Memory.__BHM || {}; Memory.__BHM.remoteVisionRequests = Memory.__BHM.remoteVisionRequests || {}; return Memory.__BHM.remoteVisionRequests; }
 function canClaimRemoteVisionRequest(creep, req) {
+  // Remote vision requests are short-lived work orders created by BeeSpawnManager
+  // when stale remote container data needs a Scout to confirm status.
   if (!creep || !req) return false;
   if (!req.assignedTo) return true;
   if (req.assignedTo === creep.name) return true;
@@ -349,6 +390,9 @@ function claimRemoteVisionRequest(creep, pick) {
   return true;
 }
 function serviceRemoteVisionRequest(creep, mem) {
+  // If this Scout has or can claim an emergency vision request, it prioritizes
+  // that over normal exploration, refreshes remoteContainerStatus, then clears
+  // the request so the spawn manager stops asking for emergency Scouts.
   var existingId = creep.memory.remoteVisionRequestId;
   var reqs = ensureRemoteVisionRoot();
   var pick = null;
@@ -386,6 +430,9 @@ function serviceRemoteVisionRequest(creep, mem) {
 
 
 function run(creep) {
+  // Main Scout state machine: service emergency remote vision first, otherwise
+  // choose a neighboring room, travel there, write intel, retreat if threatened,
+  // then idle or pick another stale/unknown exit.
   var mem = ensureScoutMem(creep);
   if (serviceRemoteVisionRequest(creep, mem)) return;
   if (!mem.targetRoom) chooseTargetRoom(creep, mem);

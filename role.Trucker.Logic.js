@@ -1,10 +1,35 @@
 'use strict';
 
+// -----------------------------------------------------------------------------
+// role.Trucker.Logic.js - local hauling plus remote container hauling execution
+// Owns:
+// * Trucker creep memory: role/task/home/state, dispatchJob,
+//   requestId/containerId/sourceId/requestRoom/requestX/requestY/targetRoom,
+//   deliveryTargetId/deliveryReservedAmount, and energyHandoffTarget.
+// * Same-tick delivery reservations in Memory._queenRes and Memory._PIB so
+//   Queens and Truckers do not overfill the same structure.
+// * Memory.__BHM.truckerDispatch.lastRun diagnostic fields for the latest
+//   execution pass.
+// Reads/writes:
+// * Memory.__BHM.remoteHaulRequests records produced by Luna remote containers.
+// * role.EnergyHandoff request memory when handing energy to worker creeps.
+// Usually called by:
+// * BeeHiveMind.runCreeps() through role.Trucker.js.
+// Systems that depend on it:
+// * Trucker.Dispatcher assigns remote pickup/local work; BeeSpawnManager reads
+//   dispatch state to decide remote-capable Trucker quotas.
+// Do not casually change:
+// * request claim/release fields or delivery reservation math; duplicate
+//   haulers and over-reserved sinks are easy to create.
+// -----------------------------------------------------------------------------
+
 var CFG = require('role.Trucker.Config');
 var Dispatcher = require('Trucker.Dispatcher');
 var Handoff = require('role.EnergyHandoff');
 
 function ensureIdentity(creep) {
+  // Normalize old or manually spawned haulers into the Trucker contract before
+  // any dispatcher logic reads creep.memory.role/task/home/state.
   creep.memory.role = 'Trucker';
   if (!creep.memory.task) creep.memory.task = 'haulUnified';
   if (!creep.memory.home) creep.memory.home = Memory.firstSpawnRoom || creep.room.name;
@@ -12,6 +37,8 @@ function ensureIdentity(creep) {
 }
 
 function ensureTruckerDiagnostics() {
+  // Last-run diagnostics are shared per tick/home for console debugging. They
+  // are intentionally not used to drive behavior.
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.truckerDispatch) Memory.__BHM.truckerDispatch = {};
   if (!Memory.__BHM.truckerDispatch.lastRun) Memory.__BHM.truckerDispatch.lastRun = {};
@@ -19,6 +46,8 @@ function ensureTruckerDiagnostics() {
 }
 
 function getQueenReservationMap() {
+  // Compatibility reservation map shared with Queen-era logistics. This is
+  // tick-local Memory so multiple haulers do not all choose the same free space.
   if (!Memory._queenRes || Memory._queenRes.tick !== Game.time) {
     Memory._queenRes = { tick: Game.time, map: {} };
   }
@@ -59,6 +88,8 @@ function getEffectiveFreeCapacity(target, resourceType) {
 }
 
 function reservePibFill(creep, target, amount, resourceType) {
+  // PIB fill reservations mirror Queen/Trucker delivery intent in Memory._PIB
+  // so other same-tick logistics code can see capacity that is already claimed.
   resourceType = resourceType || RESOURCE_ENERGY;
   if (!creep || !target || !target.id) return 0;
   if (!Memory._PIB || Memory._PIB.tick !== Game.time) Memory._PIB = { tick: Game.time, rooms: {} };
@@ -86,6 +117,8 @@ function releasePibFill(creep, target, resourceType) {
 }
 
 function reserveFill(creep, target, amount, resourceType) {
+  // Public local-delivery reservation helper for this role. It reserves only
+  // effective free capacity after same-tick Queen and PIB reservations.
   resourceType = resourceType || RESOURCE_ENERGY;
   if (!creep || !target || !target.id) return 0;
   var map = getQueenReservationMap();
@@ -110,6 +143,8 @@ function clearDeliveryReservation(creep, target, resourceType) {
 
 
 function clearTruckerHandoff(creep, room, reason, diag) {
+  // Handoff cleanup must clear both sides of the request: the Trucker's target
+  // and the receiver creep's assigned hauler/courier memory.
   var mem = Handoff.ensureHandoffMemory(room || creep.room);
   var name = creep.memory.energyHandoffTarget;
   if (name && mem && mem.requests && mem.requests[name]) {
@@ -130,6 +165,8 @@ function isCreepEnergyReceiver(target) {
 }
 
 function findClaimableEnergyHandoffRequest(trucker, diag) {
+  // Local worker handoff search. This runs before storage dumping when there is
+  // no urgent structure fill, letting Truckers feed active workers directly.
   if (!CFG.HANDOFF_ENABLED) return null;
   Handoff.cleanupEnergyHandoffRequests(trucker.room);
   var mem = Handoff.ensureHandoffMemory(trucker.room); if (!mem) return null;
@@ -194,6 +231,8 @@ function claimEnergyHandoffRequest(trucker, req, diag) {
 }
 
 function tryTruckerEnergyHandoff(creep, diag) {
+  // Attempt one receiver-to-hauler transfer workflow. Returning true means the
+  // Trucker spent this tick servicing or resolving the handoff request.
   if (!CFG.HANDOFF_ENABLED) return false;
   var carryAmt = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
   if (carryAmt < CFG.HANDOFF_MIN_TRUCKER_ENERGY) { clearTruckerHandoff(creep, creep.room, 'low_energy', diag); if (diag) diag.handoffResult = 'below_min'; return false; }
@@ -229,6 +268,8 @@ function tryTruckerEnergyHandoff(creep, diag) {
 }
 
 function clearRemoteRequestAssignment(creep) {
+  // Release a remoteHaulRequest claim held by this creep and clear all request
+  // location fields from creep memory so the dispatcher can select fresh work.
   var requests = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
   var id = creep.memory.requestId;
   if (id && requests[id] && requests[id].assignedTo === creep.name) {
@@ -240,6 +281,9 @@ function clearRemoteRequestAssignment(creep) {
 }
 
 function isActiveRemoteRequest(req, homeName) { /* unchanged */
+  // Remote requests are valid only while fresh, large enough, same-home, and
+  // not under maintenance. The dispatcher and runner intentionally share this
+  // predicate so claimed jobs can be dropped when Memory changes.
   if (!req || !req.id || !homeName) return false;
   if (req.homeRoom !== homeName) return false;
   if (CFG.shouldBlockRemoteHaulForMaintenance(req)) return false;
@@ -279,6 +323,8 @@ function isNonUrgentStorageLikeTarget(target) {
 }
 
 function claimRemoteRequestForJob(creep, job) { /* unchanged */
+  // Convert a dispatcher job into a live Memory.__BHM.remoteHaulRequests claim
+  // plus creep memory route fields used by runRemote().
   var reqs = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
   var req = reqs[job.requestId];
   if (!req) return null;
@@ -334,6 +380,8 @@ function findLocalDeliverTarget(creep, diag) {
 }
 
 function runLocal(creep, job, diag) {
+  // Local mode alternates between collection and delivery, but urgent spawn/
+  // extension/tower needs can interrupt non-urgent delivery reservations.
   if (creep.room.name !== creep.memory.home) { creep.travelTo(new RoomPosition(25, 25, creep.memory.home), { range: 20, reusePath: CFG.PATH_REUSE }); return; }
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) clearDeliveryReservation(creep);
 
@@ -377,6 +425,8 @@ function runLocal(creep, job, diag) {
 }
 
 function runRemote(creep, job) { /* same with release on completion handled in run */
+  // Remote pickup mode claims a Luna-produced haul request, travels to the
+  // container, withdraws energy, and leaves return/delivery to REMOTE_RETURN.
   var req = claimRemoteRequestForJob(creep, job);
   if (!req) { clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; return; }
   if (!isActiveRemoteRequest(req, creep.memory.home)) {
@@ -399,6 +449,9 @@ function runRemote(creep, job) { /* same with release on completion handled in r
 }
 
 function run(creep) {
+  // Main Trucker state machine: normalize identity, pick/refresh dispatchJob,
+  // prioritize returning carried remote energy, optionally hand off locally,
+  // then execute remote pickup, remote return, or local hauling.
   if (creep.spawning) return;
   ensureIdentity(creep);
   var diag = ensureTruckerDiagnostics();

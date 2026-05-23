@@ -1,5 +1,23 @@
 'use strict';
 
+// -----------------------------------------------------------------------------
+// BeeCombatSquads.js - combat squad Memory, threat intel, and shared CombatAPI
+// Owns:
+// * Memory.squads[flagName] state, members, targetId, rally/target positions,
+//   desired counts, and auto/remote-defense plan metadata.
+// * Memory.squadFlags.rooms/bindings threat and flag-target intel used by
+//   spawn.logic, BeeSpawnManager, Scouts, and Luna.
+// * Tick-local global.__combatApiCache and global.__beeSquadCache.
+// Usually called by:
+// * Combat role logic through CombatAPI, BeeSpawnManager for squad spawning,
+//   role.Scout.Logic.js and role.Luna.Logic.js for remote-defense intel.
+// Systems that depend on it:
+// * spawn.logic.Spawn_Squad() and BeeSpawnManager remote defense ranking.
+// Do not casually change:
+// * Flag naming, Memory.squads member fields, or threat scoring shape; several
+//   modules use those records as a shared combat contract.
+// -----------------------------------------------------------------------------
+
 var CoreLogger = require('core.logger');
 var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 
@@ -30,6 +48,8 @@ var FLAG_CFG = {
 var THREAT_DECAY_TICKS = 150;
 
 function ensureRoomCombatMem(roomName) {
+  // Per-room combat Memory stores the most recent threat snapshot used by
+  // auto-defense and diagnostics. It is separate from Memory.squads formations.
   if (!roomName) return null;
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
@@ -55,6 +75,8 @@ function isSquadFlag(name) {
 }
 
 function ensureSquadFlagMemory() {
+  // Squad flag intel is shared between Scouts, Luna, BeeSpawnManager, and
+  // spawn.logic. Keep rooms/bindings stable for older flag workflows.
   if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
   if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
   if (!Memory.squadFlags.bindings) Memory.squadFlags.bindings = {};
@@ -205,6 +227,8 @@ function isHostileStructure(structure, avoidMap) {
  * ally avoidance map + config gates.
  */
 function gatherHostileCandidates(room, avoidMap) {
+  // Single hostile scan used by scoring, focus fire, and auto-defense. Keeping
+  // owner filtering here ensures every combat caller respects the same config.
   var candidates = { creeps: [], power: [], structures: [] };
   if (!room || typeof room.find !== 'function') return candidates;
   candidates.creeps = room.find(FIND_HOSTILE_CREEPS, {
@@ -470,6 +494,8 @@ function syncPlannedFlags() {
 }
 
 function resolveSquadTarget(identifier) {
+  // Resolve a caller's "Alpha", "SquadAlpha", flag, binding, or Memory-only
+  // remote-defense bucket into a target room and plan object.
   var intel = ensureSquadFlagMemory();
   var bindings = intel.bindings || {};
   var names = [];
@@ -839,6 +865,8 @@ function ensureAutoDefenseForRoom(room) {
  * as local intel changes.
  */
 function refreshAutoDefensePlans() {
+  // Owned-room auto-defense planner. Remote defense plans are created by
+  // Scouts/Luna; this pass is for rooms we control directly.
   for (var roomName in Game.rooms) {
     if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
     var room = Game.rooms[roomName];
@@ -1273,6 +1301,8 @@ function assignRecord(flagName, creepIds) {
 }
 
 function rebuildCache(store) {
+  // Tick cache rebuild. It first records live creeps by squad flag, then keeps
+  // empty Squad flags visible so spawn logic can reform them later.
   // Step 1: add every active squad based on creep memory.
   var creepsByFlag = collectCreepsByFlag();
   for (var flagName in creepsByFlag) {

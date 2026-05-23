@@ -1,5 +1,24 @@
 'use strict';
 
+// -----------------------------------------------------------------------------
+// role.Queen.js - home-room energy logistics and emergency backup harvest
+// Owns:
+// * Queen creep identity and task state in creep.memory.role/task/state/_task.
+// * Per-room terminal stocking state in room.memory.terminalEnergyJob.
+// * Same-tick Queen fill reservations in global.__BHM.queenReservations.
+// * Emergency source assignment diagnostics in
+//   Memory.rooms[roomName].lastQueenBackupHarvest and
+//   Memory.rooms[roomName].queenSourceAssignments.
+// Usually called by:
+// * BeeHiveMind.runCreeps() directly as the Queen role module.
+// Systems that depend on it:
+// * BeeSpawnManager determines Queen quota from role.Queen.Config and room
+//   bootstrap state; Movement.Manager executes Queen idle/harvest moves.
+// Do not casually change:
+// * _task schema, terminalEnergyJob fields, or reservation semantics. Truckers
+//   and Queens both try to avoid overfilling the same structures.
+// -----------------------------------------------------------------------------
+
 const BeeSelectors = require('BeeSelectors');
 const BeeActions = require('BeeActions');
 const MovementManager = require('Movement.Manager');
@@ -102,6 +121,8 @@ function drawLine(creep, target, color, label) {
   // A) Identity + task/state helpers
   // -----------------------------
   function ensureQueenIdentity(creep) {
+    // Queens are logistics creeps. Normalize identity here so old spawned
+    // creeps and queue-spawned creeps follow the same state machine.
     if (!creep || !creep.memory) return;
     creep.memory.role = 'Queen';
     if (!creep.memory.task) creep.memory.task = 'queen';
@@ -137,6 +158,8 @@ function drawLine(creep, target, color, label) {
   // PIB + reservations
   // -----------------------------
   function getReservationBucket() {
+    // Tick-local reservation map for Queen delivery targets. This prevents
+    // multiple Queens from planning the same free capacity.
     if (!global.__BHM) global.__BHM = {};
     if (!global.__BHM.queenReservations || global.__BHM.queenReservations.tick !== Game.time) {
       global.__BHM.queenReservations = { tick: Game.time, map: {} };
@@ -212,6 +235,9 @@ function drawLine(creep, target, color, label) {
   }
 
   function getRoomTerminalEnergyJob(room) {
+    // Persistent room-level state for optional terminal stocking. Multiple
+    // Queens read this same object, but updateTerminalEnergyJob rate-limits
+    // mutation to once per tick.
     if (!room || !room.memory) return null;
     if (!room.memory.terminalEnergyJob) {
       room.memory.terminalEnergyJob = {
@@ -244,6 +270,9 @@ function drawLine(creep, target, color, label) {
   }
 
   function updateTerminalEnergyJob(room) {
+    // Terminal stocking is a background logistics job: start only after storage
+    // surplus is stable, pause for critical fills, and finish when terminal
+    // reaches targetEnergy.
     var job = getRoomTerminalEnergyJob(room);
     if (!job) return null;
     // Multi-Queen safety: only one updater mutates threshold/job state per tick.
@@ -331,6 +360,9 @@ function drawLine(creep, target, color, label) {
   }
 
   function needsNewTask(creep, task) {
+    // Task invalidation is where the Queen decides whether to keep working or
+    // pick fresh work. It checks target existence, resource state, capacity, and
+    // basic stuck detection.
     if (!task) return true;
     var target = task.targetId ? Game.getObjectById(task.targetId) : null;
     if (!task.data) task.data = {};
@@ -372,6 +404,8 @@ function drawLine(creep, target, color, label) {
   // Target selection
   // -----------------------------
   function pickWithdrawTask(creep) {
+    // Withdrawal source picker. BeeSelectors owns the room scan; Queen applies
+    // its preferred source kind order and wraps the chosen target in _task.
     var room = creep.room;
     if (!room) return null;
     var pref = (creep.memory && creep.memory.energyPref && creep.memory.energyPref.length)
@@ -419,6 +453,8 @@ function drawLine(creep, target, color, label) {
   }
 
   function pickDeliverTask(creep) {
+    // Delivery picker. Critical fills beat terminal stocking; storage/link/
+    // terminal fallbacks only happen after spawn/extension/tower needs are safe.
     var room = creep.room;
     if (!room) return null;
 
@@ -651,6 +687,8 @@ function writeQueenBackupHarvestDiag(creep, diag) {
 }
 
 function getBackupHarvestTask(creep) {
+  // Emergency-only source harvesting for Queens. It records detailed refusal
+  // reasons in lastQueenBackupHarvest so bootstrap failures are explainable.
   var room = creep && creep.room;
   var diag = {
     tick: Game.time,
@@ -739,6 +777,8 @@ function getBackupHarvestTask(creep) {
   }
 
   function ensureActiveTask(creep) {
+    // The Queen task slot is sticky until needsNewTask says it is invalid. This
+    // reduces target thrashing and keeps delivery reservations understandable.
     ensureTaskSlot(creep);
     var task = creep.memory._task;
     if (needsNewTask(creep, task)) {
@@ -863,6 +903,8 @@ function getBackupHarvestTask(creep) {
   var roleQueen = {
     role: 'Queen',
     run: function (creep) {
+      // Public Queen role entry. Keep terminal job state fresh, derive state
+      // from _task, then execute exactly one state handler.
       if (!creep || creep.spawning) return;
       // Keep room-level terminal job state fresh every tick, even if this Queen
       // is currently withdrawing or idling. updateTerminalEnergyJob itself is

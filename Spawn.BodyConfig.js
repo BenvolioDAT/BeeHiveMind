@@ -1,9 +1,20 @@
 'use strict';
 
-// This file is the body config registry used by spawn.logic.js.
-// spawn.logic.js imports this one file instead of importing every role file directly.
-// Each role.*.Body.Config.js exports the body choices for one role.
-// Keeping the registry here keeps spawn logic cleaner and body tuning centralized.
+// -----------------------------------------------------------------------------
+// Spawn.BodyConfig.js - registry of role body configuration modules
+// Owns:
+// * The ROLE_CONFIGS object imported by spawn.logic.js.
+// * The mapping from canonical role names to each role.*.Body.Config.js file.
+// Memory paths:
+// * None. This file is pure configuration glue.
+// Usually called by:
+// * spawn.logic.js and RemoteHarvest.Manager diagnostics.
+// Systems that depend on it:
+// * BeeSpawnManager queue energy gates and spawn.logic body selection.
+// Do not casually change:
+// * ROLE_CONFIGS keys. They must match canonical role names used by
+//   BeeHiveMind, BeeSpawnManager, and spawn.logic.
+// -----------------------------------------------------------------------------
 
 var ROLE_CONFIGS = {
   // Keys in ROLE_CONFIGS must match canonical role names used in spawn.logic.js.

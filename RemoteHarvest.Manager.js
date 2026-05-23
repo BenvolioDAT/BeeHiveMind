@@ -1,5 +1,29 @@
 'use strict';
 
+// -----------------------------------------------------------------------------
+// RemoteHarvest.Manager.js - remote mining planning and diagnostics authority
+// Owns:
+// * Memory.__BHM.remoteHarvest.homes[homeRoom], including source records,
+//   desiredLuna, liveLuna, queuedLuna, missing/stale/unsafe source lists, and
+//   queue reservations.
+// * Memory.rooms[homeRoom].lastRemoteHarvestPlan and
+//   Memory.rooms[homeRoom].lastRemoteSourceEconomics for human-readable audits.
+// Reads:
+// * Memory.rooms[remoteRoom].sources/intel/scout data written by Scouts, Luna,
+//   BeeToolbox, and maintenance.
+// * Memory.__BHM.scoutIntel.homes from role.Scout.Logic.js.
+// * Memory.rooms[homeRoom].spawnQueue to count queued Luna reservations.
+// Usually called by:
+// * BeeSpawnManager.prepareRoomQueues(), before it computes Luna quota and
+//   enqueues role jobs.
+// Used by:
+// * role.Luna.Logic.js to claim/release live source ownership.
+// * BeeSpawnManager.js to reserve/unreserve a source for a queued Luna.
+// Do not casually change:
+// * Reservation TTLs, source status names, or the distinction between
+//   diagnostic reports and behavior-changing queue/assignment state.
+// -----------------------------------------------------------------------------
+
 var LunaConfig = require('role.Luna.Config');
 var RoadPlanner = require('Planner.Road');
 var BeeToolbox = require('BeeToolbox');
@@ -17,6 +41,8 @@ var DEFAULT_CONTAINER_REPAIR_ENERGY_PER_TICK = 0.10;
 var ROLE_CONFIGS = BodyConfig && BodyConfig.ROLE_CONFIGS ? BodyConfig.ROLE_CONFIGS : {};
 
 function ensureMemory() {
+  // Root Memory bucket for remote-harvest planning. This is not creep memory;
+  // it is the home-room plan BeeSpawnManager reads before queuing Luna creeps.
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.remoteHarvest) {
     Memory.__BHM.remoteHarvest = { tick: Game.time, homes: {} };
@@ -27,6 +53,8 @@ function ensureMemory() {
 }
 
 function ensureHomeMemory(homeRoom) {
+  // One home owns one remote-harvest plan. Source records here are the source
+  // of truth for desiredLuna, live/queued counts, and queue reservations.
   var root = ensureMemory();
   if (!root.homes[homeRoom]) {
     root.homes[homeRoom] = {
@@ -80,6 +108,9 @@ function getRemoteIntelTick(remoteName) {
 
 
 function isLocalOwnedRoomForLuna(homeRoom, roomName) {
+  // Prevent Luna from treating the home room or another owned spawn room as a
+  // remote. This guard is shared by discovery, queue pruning, and live Luna
+  // assignment release.
   if (!roomName) return false;
   var homeName = null;
   if (typeof homeRoom === 'string') homeName = homeRoom;
@@ -529,6 +560,8 @@ function countQueuedLunaForHome(homeRoom) {
 // Nothing here reserves a source, queues a creep, clears Memory, or changes
 // remote haul/repair behavior.
 function buildRemoteSourceEconomicsReport(homeRoom, remoteDiscovery) {
+  // Human-facing diagnostics only. This report explains profitability and
+  // rejection reasons, but must not enqueue, reserve, release, or block sources.
   if (!homeRoom) return null;
   // Reuse the discovery result from queue prep when available, so the report
   // explains the same candidate set BeeSpawnManager just evaluated.
@@ -680,6 +713,9 @@ function addUniqueRoomName(list, seen, roomName) {
 }
 
 function gatherCandidateRemoteRoomsForHome(homeRoom) {
+  // Remote discovery merges three signals: RoadPlanner active remotes, existing
+  // Memory.rooms source/intel records, and currently visible rooms. The accepted
+  // list is the only set buildSourcePlanForHome should turn into source records.
   var out = { candidateRemoteRooms: [], acceptedRemoteRooms: [], rejectedRemoteRooms: [] };
   if (!homeRoom) return out;
   var homeName = typeof homeRoom === 'string' ? homeRoom : homeRoom.name;
@@ -769,6 +805,9 @@ function gatherCandidateRemoteRoomsForHome(homeRoom) {
 
 
 function getApprovedRemotesFromScout(homeRoom) {
+  // Scout-focused approval path used by Luna fallback selection. It reads
+  // Memory.__BHM.scoutIntel and returns source-level candidates with route
+  // ordering plus explicit rejection reasons for diagnostics.
   var out = { approvedRooms: [], approvedSources: [], rejected: [] };
   var ttl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
   var intel = Memory.__BHM && Memory.__BHM.scoutIntel && Memory.__BHM.scoutIntel.homes && Memory.__BHM.scoutIntel.homes[homeRoom];
@@ -811,12 +850,16 @@ function getApprovedRemotesFromScout(homeRoom) {
 
 
 function ensureRemoteContainerBuildsMemory() {
+  // Shared with role.Luna.Logic.js. Build records tell the planner/spawner that
+  // a source may still need a Luna to create or finish its remote container.
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
   return Memory.__BHM.remoteContainerBuilds;
 }
 
 function isUnfinishedContainerBuild(sourceRec) {
+  // Used to prefer queueing Luna for sources whose container is not built yet.
+  // Unsafe rooms are ignored so the queue does not chase blocked infrastructure.
   if (!sourceRec || !sourceRec.sourceId) return false;
   if (sourceRec.remoteRoom && isRemoteUnsafe(sourceRec.remoteRoom)) return false;
 
@@ -832,6 +875,9 @@ function isUnfinishedContainerBuild(sourceRec) {
   return buildRec.status !== 'built';
 }
 function buildSourcePlanForHome(homeRoom, remoteRooms) {
+  // Rebuild the per-home source plan from approved remote rooms. The function
+  // preserves selected per-source fields from the previous plan, then refreshes
+  // safety/stale/source status for this tick.
   var home = ensureHomeMemory(homeRoom);
   var oldSources = home.sources || {};
   home.sources = {};
@@ -901,6 +947,9 @@ function buildSourcePlanForHome(homeRoom, remoteRooms) {
 }
 
 function auditAssignmentsForHome(homeRoom) {
+  // Reconcile the plan with reality: live Luna creeps, queued Luna spawn items,
+  // expired queue reservations, blocked source Memory, duplicate assignments,
+  // and unfinished container work all converge into lastRemoteHarvestPlan.
   var home = ensureHomeMemory(homeRoom);
   var bySource = {};
   var liveCount = 0;
@@ -1039,6 +1088,9 @@ function auditAssignmentsForHome(homeRoom) {
 }
 
 function unreserveSourceForQueue(homeRoom, sourceId) {
+  // Called when BeeSpawnManager failed to enqueue a Luna after reserving the
+  // source. It deliberately refuses to clear a source already claimed by a live
+  // Luna.
   var home = ensureHomeMemory(homeRoom);
   var rec = home.sources[sourceId];
   if (!rec) return false;
@@ -1053,6 +1105,9 @@ function unreserveSourceForQueue(homeRoom, sourceId) {
 }
 
 function reserveSourceForQueue(homeRoom) {
+  // Spawn-queue reservation point. It chooses one missing/open source, marks it
+  // queued for RESERVE_TTL ticks, and returns only the memory needed for the
+  // queued Luna item.
   var home = ensureHomeMemory(homeRoom);
   var pick = null;
   var unfinishedFirst = [];
@@ -1085,6 +1140,8 @@ function reserveSourceForQueue(homeRoom) {
 }
 
 function claimSource(creep, sourceId, targetRoom) {
+  // Live Luna claim point. Once a creep has a sourceId/targetRoom, this clears
+  // any queue reservation and marks the source assigned to that creep.
   if (!creep || !creep.memory) return false;
   var homeRoom = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
   if (!homeRoom || !sourceId) return false;
@@ -1103,6 +1160,8 @@ function claimSource(creep, sourceId, targetRoom) {
 }
 
 function releaseSource(creep) {
+  // Live Luna release point. Luna calls this on unsafe rooms, stuck paths, end
+  // of life, or duplicate ownership so the source can be queued again later.
   if (!creep || !creep.memory || !creep.memory.sourceId) return false;
   var homeRoom = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
   if (!homeRoom) return false;
