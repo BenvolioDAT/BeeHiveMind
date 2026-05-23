@@ -69,7 +69,7 @@ var CFG = Object.freeze({
 
   //--- Pathing (used by Queen)----
   STUCK_TICKS: 6,
-  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, harvest: 55, idle: 5 },
+  MOVE_PRIORITIES: { withdraw: 60, pickup: 70, deliver: 55, harvest: 55, build: 50, idle: 5 },
 
   // --- Pathing (used by Courier & any others that want it) ---
   PATH_REUSE: 40,
@@ -383,6 +383,24 @@ function drawLine(creep, target, color, label) {
       if (!target) return true;
       if (creep.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) return true;
       if ((target.energy || 0) < Math.max(0, QueenConfig.BACKUP_HARVEST_MIN_SOURCE_ENERGY || 0)) return true;
+    } else if (task.type === 'build') {
+      if (!target) return true;
+      if (!hasWorkPart(creep)) return true;
+      if ((creep.store[RESOURCE_ENERGY] || 0) === 0) return true;
+      if (creep.room && creep.room.storage) return true;
+      if (roomHasCriticalEnergyNeeds(creep.room)) return true;
+      if (target.structureType === STRUCTURE_STORAGE) {
+        if (!task.data || task.data.site !== 'storage') return true;
+      } else if (target.structureType === STRUCTURE_CONTAINER) {
+        if (!task.data || task.data.site !== 'hub_container') return true;
+        if (!BeeSelectors.isSpawnHubContainerSite(creep.room, target, {
+          rangeFromSpawn: QueenConfig.HUB_CONTAINER_RANGE_FROM_SPAWN
+        })) return true;
+      } else {
+        // Queen bootstrap building is deliberately narrow: storage site first,
+        // then the one spawn hub container site. Builder owns all other sites.
+        return true;
+      }
     } else if (task.type === 'idle') {
       // Idle continues until a better option arrives.
     }
@@ -410,7 +428,7 @@ function drawLine(creep, target, color, label) {
     if (!room) return null;
     var pref = (creep.memory && creep.memory.energyPref && creep.memory.energyPref.length)
       ? creep.memory.energyPref
-      : ['tomb','ruin','storage','drop','container','terminal','link'];
+      : ['tomb','ruin','storage','drop','hub_container','container','terminal','link'];
     var list = BeeSelectors.getEnergySourcePriority(room);
     if (!list || !list.length) return null;
 
@@ -445,10 +463,39 @@ function drawLine(creep, target, color, label) {
       if (kind === 'ruin')      return createTask('withdraw', best.id, { source: 'ruin' });
       if (kind === 'storage')   return createTask('withdraw', best.id, { source: 'storage' });
       if (kind === 'terminal')  return createTask('withdraw', best.id, { source: 'terminal' });
+      if (kind === 'hub_container') return createTask('withdraw', best.id, { source: 'hub_container' });
       if (kind === 'container') return createTask('withdraw', best.id, { source: 'container' });
       if (kind === 'link')      return createTask('withdraw', best.id, { source: 'link' });
       return createTask('withdraw', best.id, { source: kind || 'energy' });
     }
+    return null;
+  }
+
+  function pickBootstrapBuildTask(creep) {
+    // Queen has one WORK part in the bootstrap body, so this is helper-only
+    // construction. Builder remains the general construction role; Queen only
+    // spends safe spare energy on storage and the spawn hub container before
+    // storage is built.
+    if (!QueenConfig.QUEEN_BOOTSTRAP_BUILD_ENABLED) return null;
+    if (!creep || !creep.room) return null;
+    if (!hasWorkPart(creep)) return null;
+    if ((creep.store[RESOURCE_ENERGY] || 0) <= 0) return null;
+    var room = creep.room;
+    if (room.storage) return null;
+    if (roomHasCriticalEnergyNeeds(room)) return null;
+
+    if (QueenConfig.QUEEN_BUILD_STORAGE_SITE_ENABLED !== false) {
+      var storageSite = BeeSelectors.findStorageConstructionSite(room);
+      if (storageSite) return createTask('build', storageSite.id, { site: 'storage' });
+    }
+
+    if (QueenConfig.QUEEN_BUILD_HUB_CONTAINER_SITE_ENABLED !== false) {
+      var hubSite = BeeSelectors.findSpawnHubContainerConstructionSite(room, {
+        rangeFromSpawn: QueenConfig.HUB_CONTAINER_RANGE_FROM_SPAWN
+      });
+      if (hubSite) return createTask('build', hubSite.id, { site: 'hub_container' });
+    }
+
     return null;
   }
 
@@ -491,6 +538,9 @@ function drawLine(creep, target, color, label) {
         return createTask('deliver', bestTower.id, { sink: 'tower' });
       }
     }
+
+    var bootstrapBuild = pickBootstrapBuildTask(creep);
+    if (bootstrapBuild) return bootstrapBuild;
 
     if (room.storage) {
       var storagePos = room.storage.pos;
@@ -867,6 +917,24 @@ function getBackupHarvestTask(creep) {
     }
   }
 
+  function runQueenBuildState(creep) {
+    var task = creep.memory._task;
+    var target = getQueenTaskTarget(task);
+    var priority = getQueenTaskPriority(task);
+    if (!task || !target) { clearTask(creep); return; }
+    if (roomHasCriticalEnergyNeeds(creep.room) || creep.room.storage) { clearTask(creep); return; }
+    drawLine(creep, target, CFG.DRAW.SOURCE, 'BLD');
+    debugSay(creep, 'B');
+    var rc = BeeActions.safeBuild(creep, target, { priority: priority, reusePath: 20 });
+    if (rc === OK) {
+      if ((creep.store[RESOURCE_ENERGY] || 0) === 0) clearTask(creep);
+      return;
+    }
+    if (rc === ERR_NOT_ENOUGH_RESOURCES || rc === ERR_INVALID_TARGET || rc === ERR_NO_BODYPART) {
+      clearTask(creep);
+    }
+  }
+
   function runQueenHarvestState(creep) {
     var task = creep.memory._task;
     var source = getQueenTaskTarget(task);
@@ -915,6 +983,7 @@ function getBackupHarvestTask(creep) {
       if (state === 'WITHDRAW') { runQueenWithdrawState(creep); return; }
       if (state === 'PICKUP')   { runQueenPickupState(creep);   return; }
       if (state === 'DELIVER')  { runQueenDeliverState(creep);  return; }
+      if (state === 'BUILD')    { runQueenBuildState(creep);    return; }
       if (state === 'HARVEST')  { runQueenHarvestState(creep);  return; }
       runQueenIdleState(creep);
     }

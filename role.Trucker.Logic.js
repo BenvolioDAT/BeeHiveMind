@@ -26,6 +26,7 @@
 var CFG = require('role.Trucker.Config');
 var Dispatcher = require('Trucker.Dispatcher');
 var Handoff = require('role.EnergyHandoff');
+var BeeSelectors = require('BeeSelectors');
 
 function ensureIdentity(creep) {
   // Normalize old or manually spawned haulers into the Trucker contract before
@@ -139,6 +140,107 @@ function clearDeliveryReservation(creep, target, resourceType) {
   delete creep.memory.deliveryTargetId;
   delete creep.memory.deliveryTargetRoom;
   delete creep.memory.deliveryReservedAmount;
+}
+
+function describeSinkType(target) {
+  if (!target) return null;
+  if (target.structureType) return target.structureType;
+  if (target.name) return 'creep';
+  return 'unknown';
+}
+
+function recordDeliverySelection(creep, diag, target, mode, fallbackReason) {
+  if (!diag) return;
+  diag.deliveryMode = mode || 'legacy_fallback';
+  diag.deliverySinkId = target && target.id ? target.id : null;
+  diag.deliverySinkType = describeSinkType(target);
+  diag.deliveryFallbackReason = fallbackReason || null;
+
+  var home = creep && creep.memory ? (creep.memory.home || (creep.room && creep.room.name)) : null;
+  if (!home) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[home]) Memory.rooms[home] = {};
+  Memory.rooms[home].lastTruckerDelivery = {
+    tick: Game.time,
+    creepName: creep.name,
+    deliveryMode: diag.deliveryMode,
+    selectedSinkId: diag.deliverySinkId,
+    selectedSinkType: diag.deliverySinkType,
+    fallbackReason: diag.deliveryFallbackReason
+  };
+}
+
+function chooseClosestEffectiveFree(creep, candidates, diag) {
+  var best = null;
+  var bestFallback = null;
+  for (var i = 0; i < candidates.length; i++) {
+    var target = candidates[i];
+    if (!target || !target.store) continue;
+    if (diag) diag.deliveryTargetsSeen++;
+    if (getEffectiveFreeCapacity(target, RESOURCE_ENERGY) > 0) {
+      best = best || target;
+    } else {
+      bestFallback = 'full_or_reserved';
+      if (diag) diag.skippedReservedCapacity++;
+    }
+  }
+  if (!best) return { target: null, reason: bestFallback || 'none_available' };
+  var closest = creep.pos.findClosestByPath(candidates, {
+    filter: function (target) {
+      return target && target.store && getEffectiveFreeCapacity(target, RESOURCE_ENERGY) > 0;
+    }
+  });
+  return { target: closest || best, reason: null };
+}
+
+function findPreferredFeederSink(creep, diag) {
+  // Storage/hub feeder mode is the new normal path. Source containers remain
+  // mining output; the hub container is the temporary spawn-area buffer used
+  // only before storage exists.
+  var room = creep && creep.room;
+  if (!room) return { target: null, mode: null, reason: 'missing_room' };
+
+  if (CFG.TRUCKER_STORAGE_FEEDER_ENABLED !== false && room.storage) {
+    if (diag) diag.deliveryTargetsSeen++;
+    if (getEffectiveFreeCapacity(room.storage, RESOURCE_ENERGY) > 0) {
+      return { target: room.storage, mode: 'storage_feeder', reason: null };
+    }
+    if (diag) diag.skippedReservedCapacity++;
+    return { target: null, mode: null, reason: 'storage_full_or_reserved' };
+  }
+  if (room.storage) return { target: null, mode: null, reason: 'storage_feeder_disabled' };
+
+  if (CFG.TRUCKER_HUB_CONTAINER_FEEDER_ENABLED !== false) {
+    var hubs = BeeSelectors.findSpawnHubContainers(room, {
+      rangeFromSpawn: CFG.HUB_CONTAINER_RANGE_FROM_SPAWN
+    });
+    if (hubs && hubs.length) {
+      var picked = chooseClosestEffectiveFree(creep, hubs, diag);
+      if (picked.target) return { target: picked.target, mode: 'hub_container_feeder', reason: null };
+      return { target: null, mode: null, reason: 'hub_container_' + picked.reason };
+    }
+    return { target: null, mode: null, reason: 'no_hub_container' };
+  }
+
+  return { target: null, mode: null, reason: 'hub_container_feeder_disabled' };
+}
+
+function hasActivePreferredFeederSink(creep) {
+  var selection = findPreferredFeederSink(creep, null);
+  return !!(selection && selection.target);
+}
+
+function recordExistingDeliveryTarget(creep, diag, target) {
+  if (!target || !diag || diag.deliveryMode) return;
+  var mode = 'legacy_fallback';
+  if (creep.room && creep.room.storage && target.id === creep.room.storage.id && CFG.TRUCKER_STORAGE_FEEDER_ENABLED !== false) {
+    mode = 'storage_feeder';
+  } else if (creep.room && !creep.room.storage && BeeSelectors.isSpawnHubContainer(creep.room, target, {
+    rangeFromSpawn: CFG.HUB_CONTAINER_RANGE_FROM_SPAWN
+  })) {
+    mode = 'hub_container_feeder';
+  }
+  recordDeliverySelection(creep, diag, target, mode, null);
 }
 
 
@@ -337,13 +439,24 @@ function claimRemoteRequestForJob(creep, job) { /* unchanged */
   return req;
 }
 
-function findLocalCollectTarget(creep) { /* unchanged */
+function findLocalCollectTarget(creep) {
   var room = creep.room;
   var drops = room.find(FIND_DROPPED_RESOURCES, { filter: function(r){ return r.resourceType === RESOURCE_ENERGY && r.amount >= 50; } }); if (drops.length) return creep.pos.findClosestByPath(drops);
   var graves = room.find(FIND_TOMBSTONES, { filter: function(t){ return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (graves.length) return creep.pos.findClosestByPath(graves);
   var ruins = room.find(FIND_RUINS, { filter: function(t){ return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (ruins.length) return creep.pos.findClosestByPath(ruins);
-  var containers = room.find(FIND_STRUCTURES, { filter: function(s){ return s.structureType === STRUCTURE_CONTAINER && s.store && (s.store[RESOURCE_ENERGY] || 0) >= 50; } }); if (containers.length) return creep.pos.findClosestByPath(containers);
-  if (room.storage && (room.storage.store[RESOURCE_ENERGY] || 0) > 0) return room.storage;
+  var hubIds = {};
+  var hubs = BeeSelectors.findSpawnHubContainers(room, { rangeFromSpawn: CFG.HUB_CONTAINER_RANGE_FROM_SPAWN });
+  for (var h = 0; h < hubs.length; h++) {
+    if (hubs[h] && hubs[h].id) hubIds[hubs[h].id] = true;
+  }
+  var containers = room.find(FIND_STRUCTURES, {
+    filter: function(s){
+      if (!s || s.structureType !== STRUCTURE_CONTAINER || !s.store) return false;
+      if (hubIds[s.id]) return false;
+      return (s.store[RESOURCE_ENERGY] || 0) >= 50;
+    }
+  }); if (containers.length) return creep.pos.findClosestByPath(containers);
+  if (room.storage && (room.storage.store[RESOURCE_ENERGY] || 0) > 0 && !hasActivePreferredFeederSink(creep)) return room.storage;
   if (room.terminal && (room.terminal.store[RESOURCE_ENERGY] || 0) > 0) return room.terminal;
   return null;
 }
@@ -364,18 +477,32 @@ function pickClosestWithEffectiveFree(creep, candidates, diag) {
 
 function findLocalDeliverTarget(creep, diag) {
   var room = creep.room;
+  var feeder = findPreferredFeederSink(creep, diag);
+  if (feeder.target) {
+    recordDeliverySelection(creep, diag, feeder.target, feeder.mode, null);
+    return feeder.target;
+  }
+  var feederFallbackReason = feeder.reason || 'no_preferred_feeder';
+
   var spExt = room.find(FIND_STRUCTURES, { filter: function(s){ return (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) && s.store; } });
   var target = pickClosestWithEffectiveFree(creep, spExt, diag);
-  if (target) return target;
+  if (target) {
+    recordDeliverySelection(creep, diag, target, 'legacy_fallback', feederFallbackReason);
+    return target;
+  }
 
   var towers = room.find(FIND_STRUCTURES, { filter: function(s){ if (s.structureType !== STRUCTURE_TOWER || !s.store) return false; var cap = s.store.getCapacity(RESOURCE_ENERGY) || 0; if (cap <= 0) return false; return (s.store[RESOURCE_ENERGY] || 0) < Math.floor(cap * CFG.TOWER_REFILL_AT_OR_BELOW); } });
   target = pickClosestWithEffectiveFree(creep, towers, diag);
-  if (target) return target;
+  if (target) {
+    recordDeliverySelection(creep, diag, target, 'legacy_fallback', feederFallbackReason);
+    return target;
+  }
 
-  if (room.storage && getEffectiveFreeCapacity(room.storage, RESOURCE_ENERGY) > 0) { diag.deliveryTargetsSeen++; return room.storage; }
+  if (room.storage && getEffectiveFreeCapacity(room.storage, RESOURCE_ENERGY) > 0) { diag.deliveryTargetsSeen++; recordDeliverySelection(creep, diag, room.storage, 'legacy_fallback', feederFallbackReason); return room.storage; }
   if (room.storage) { diag.deliveryTargetsSeen++; diag.skippedReservedCapacity++; }
-  if (room.terminal && getEffectiveFreeCapacity(room.terminal, RESOURCE_ENERGY) > 0) { diag.deliveryTargetsSeen++; return room.terminal; }
+  if (room.terminal && getEffectiveFreeCapacity(room.terminal, RESOURCE_ENERGY) > 0) { diag.deliveryTargetsSeen++; recordDeliverySelection(creep, diag, room.terminal, 'legacy_fallback', feederFallbackReason); return room.terminal; }
   if (room.terminal) { diag.deliveryTargetsSeen++; diag.skippedReservedCapacity++; }
+  recordDeliverySelection(creep, diag, null, 'legacy_fallback', feederFallbackReason);
   return null;
 }
 
@@ -385,6 +512,7 @@ function runLocal(creep, job, diag) {
   if (creep.room.name !== creep.memory.home) { creep.travelTo(new RoomPosition(25, 25, creep.memory.home), { range: 20, reusePath: CFG.PATH_REUSE }); return; }
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) clearDeliveryReservation(creep);
 
+  var preferredFeederActive = hasActivePreferredFeederSink(creep);
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && hasUrgentLocalDeliveryTarget(creep)) { creep.memory.dispatchJob = { id: 'localDeliver:' + creep.memory.home, type: 'LOCAL_DELIVER', homeRoom: creep.memory.home }; }
 
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0 || job.type === 'LOCAL_COLLECT') {
@@ -397,13 +525,13 @@ function runLocal(creep, job, diag) {
 
   var urgentTargetExists = hasUrgentLocalDeliveryTarget(creep);
   var dst = creep.memory.deliveryTargetId ? Game.getObjectById(creep.memory.deliveryTargetId) : null;
-  if (urgentTargetExists && dst && isNonUrgentStorageLikeTarget(dst) && !isUrgentDeliveryTarget(dst)) {
+  if (urgentTargetExists && dst && isNonUrgentStorageLikeTarget(dst) && !isUrgentDeliveryTarget(dst) && !preferredFeederActive) {
     clearDeliveryReservation(creep, dst);
     dst = null;
     delete creep.memory.deliveryTargetId;
     diag.urgentRetarget = true;
   }
-  if (!urgentTargetExists) {
+  if (!urgentTargetExists && !preferredFeederActive) {
     diag.handoffBeforeStorage = true;
     if (tryTruckerEnergyHandoff(creep, diag)) return;
   } else {
@@ -411,6 +539,7 @@ function runLocal(creep, job, diag) {
   }
   if (!dst) dst = findLocalDeliverTarget(creep, diag);
   if (!dst) { clearDeliveryReservation(creep); return; }
+  recordExistingDeliveryTarget(creep, diag, dst);
 
   var carried = creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
   var reservedAmount = reserveFill(creep, dst, carried, RESOURCE_ENERGY);
@@ -459,6 +588,7 @@ function run(creep) {
   diag.handoffRequestsSeen = 0; diag.handoffClaimed = false; diag.handoffTarget = null; diag.handoffResult = null; diag.handoffClearedReason = null;
   diag.handoffBeforeStorage = false; diag.lastDeliveryResult = null;
   diag.urgentRetarget = false;
+  diag.deliveryMode = null; diag.deliverySinkId = null; diag.deliverySinkType = null; diag.deliveryFallbackReason = null;
 
   var active = creep.memory.dispatchJob || null;
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && creep.room.name !== creep.memory.home) active = { type: 'REMOTE_RETURN', id: active ? active.id : ('return:' + creep.name) };
@@ -480,6 +610,7 @@ function run(creep) {
       if (tryTruckerEnergyHandoff(creep, diag)) return;
       return;
     }
+    recordExistingDeliveryTarget(creep, diag, sink);
     var reserveAmt = reserveFill(creep, sink, creep.store.getUsedCapacity(RESOURCE_ENERGY), RESOURCE_ENERGY);
     if (reserveAmt <= 0) { clearDeliveryReservation(creep, sink); return; }
     var rc = creep.transfer(sink, RESOURCE_ENERGY);

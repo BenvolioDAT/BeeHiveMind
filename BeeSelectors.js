@@ -55,6 +55,7 @@ function resetReservationsIfNeeded() {
 }
 
 var TOWER_REFILL_AT = 0.8;
+var DEFAULT_HUB_CONTAINER_RANGE_FROM_SPAWN = 3;
 var BUILD_PRIORITY = {
   spawn: 6,
   extension: 5,
@@ -65,6 +66,85 @@ var BUILD_PRIORITY = {
   link: 2,
   road: 1
 };
+
+function getHubContainerRange(opts) {
+  var raw = opts && opts.rangeFromSpawn != null ? opts.rangeFromSpawn : (opts && opts.range);
+  var range = Number(raw);
+  if (!isFinite(range) || range <= 0) range = DEFAULT_HUB_CONTAINER_RANGE_FROM_SPAWN;
+  return Math.max(1, Math.min(5, Math.floor(range)));
+}
+
+function isNearAnySource(pos, sources, range) {
+  if (!pos || !sources) return false;
+  var r = (range != null) ? range : 1;
+  for (var i = 0; i < sources.length; i++) {
+    if (sources[i] && sources[i].pos && pos.inRangeTo(sources[i].pos, r)) return true;
+  }
+  return false;
+}
+
+function isNearAnySpawn(pos, spawns, range) {
+  if (!pos || !spawns) return false;
+  for (var i = 0; i < spawns.length; i++) {
+    if (spawns[i] && spawns[i].pos && pos.inRangeTo(spawns[i].pos, range)) return true;
+  }
+  return false;
+}
+
+function rangeToClosestSpawn(pos, spawns) {
+  if (!pos || !spawns || !spawns.length) return 9999;
+  var best = 9999;
+  for (var i = 0; i < spawns.length; i++) {
+    if (!spawns[i] || !spawns[i].pos) continue;
+    var d = pos.getRangeTo(spawns[i].pos);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function sortByClosestSpawnThenEnergy(a, b, spawns) {
+  var da = rangeToClosestSpawn(a.pos, spawns);
+  var db = rangeToClosestSpawn(b.pos, spawns);
+  if (da !== db) return da - db;
+  var ae = (a.store && a.store[RESOURCE_ENERGY]) || 0;
+  var be = (b.store && b.store[RESOURCE_ENERGY]) || 0;
+  return be - ae;
+}
+
+function findSpawnHubContainersFromSnapshot(snap, opts) {
+  if (!snap || !snap.allContainers || !snap.allContainers.length) return [];
+  var range = getHubContainerRange(opts);
+  var out = [];
+  for (var i = 0; i < snap.allContainers.length; i++) {
+    var c = snap.allContainers[i];
+    if (!c || !c.pos || c.structureType !== STRUCTURE_CONTAINER) continue;
+    // Source container = mining output beside a source. It belongs to harvesters
+    // and Truckers as pickup input, not to Queen as a spawn-area buffer.
+    if (isNearAnySource(c.pos, snap.sources, 1)) continue;
+    // Hub container = temporary pre-storage buffer near a spawn. Truckers feed
+    // it, and Queens withdraw from it to do final-mile spawn/tower fills.
+    if (!isNearAnySpawn(c.pos, snap.mySpawns, range)) continue;
+    out.push(c);
+  }
+  out.sort(function (a, b) { return sortByClosestSpawnThenEnergy(a, b, snap.mySpawns); });
+  return out;
+}
+
+function findSpawnHubContainerSitesFromSnapshot(snap, opts) {
+  if (!snap || !snap.sites || !snap.sites.length) return [];
+  var range = getHubContainerRange(opts);
+  var out = [];
+  for (var i = 0; i < snap.sites.length; i++) {
+    var site = snap.sites[i];
+    if (!site || !site.pos || site.structureType !== STRUCTURE_CONTAINER) continue;
+    if (site.my === false) continue;
+    if (isNearAnySource(site.pos, snap.sources, 1)) continue;
+    if (!isNearAnySpawn(site.pos, snap.mySpawns, range)) continue;
+    out.push(site);
+  }
+  out.sort(function (a, b) { return sortByClosestSpawnThenEnergy(a, b, snap.mySpawns); });
+  return out;
+}
 
 // Function header: computeRepairGoal(structure)
 // Inputs: structure needing repairs
@@ -101,9 +181,11 @@ function buildSnapshot(room) {
   return global.__BHM.getCached(key, 0, function () {
     var snapshot = {
       room: room,
+      allContainers: [],
       energyContainers: [],
       sourceContainers: [],
       otherContainers: [],
+      mySpawns: [],
       spawnLikeNeedy: [],
       towerNeedy: [],
       dropped: [],
@@ -122,18 +204,18 @@ function buildSnapshot(room) {
     // Harvestable sources; remote modules rely on this for fallback.
     var sources = room.find(FIND_SOURCES);
     for (var si = 0; si < sources.length; si++) snapshot.sources.push(sources[si]);
+    var mySpawns = room.find(FIND_MY_SPAWNS);
+    for (var sp = 0; sp < mySpawns.length; sp++) snapshot.mySpawns.push(mySpawns[sp]);
     // FIND_STRUCTURES is the heaviest call here; runs once per tick per room.
     var structures = room.find(FIND_STRUCTURES);
     for (var i = 0; i < structures.length; i++) {
       var s = structures[i];
       if (!s || !s.structureType) continue;
       if (s.structureType === STRUCTURE_CONTAINER && s.store) {
+        snapshot.allContainers.push(s);
         var stored = s.store[RESOURCE_ENERGY] || 0;
         if (stored > 0) {
-          var nearSource = false;
-          for (var sc = 0; sc < sources.length; sc++) {
-            if (s.pos.inRangeTo(sources[sc].pos, 1)) { nearSource = true; break; }
-          }
+          var nearSource = isNearAnySource(s.pos, sources, 1);
           if (nearSource) snapshot.sourceContainers.push(s);
           else snapshot.otherContainers.push(s);
         }
@@ -176,7 +258,7 @@ function buildSnapshot(room) {
     if (room.storage) snapshot.anchor = room.storage;
     else if (room.terminal) snapshot.anchor = room.terminal;
     else {
-      var spawns = room.find(FIND_MY_SPAWNS);
+      var spawns = snapshot.mySpawns;
       if (spawns && spawns.length) snapshot.anchor = spawns[0];
     }
     snapshot.sourceContainers.sort(byEnergyDesc);
@@ -488,6 +570,66 @@ var BeeSelectors = {
     return getSourceContainerOrSiteImpl(source);
   },
 
+  isSourceContainer: function (room, container) {
+    // Source containers sit adjacent to harvest sources and represent mining
+    // output. They should not be treated as the spawn hub buffer.
+    if (!room || !container || !container.pos || container.structureType !== STRUCTURE_CONTAINER) return false;
+    var snap = buildSnapshot(room);
+    return !!(snap && isNearAnySource(container.pos, snap.sources, 1));
+  },
+
+  isSpawnHubContainer: function (room, container, opts) {
+    // Hub containers are pre-storage buffers near spawns. They are explicitly
+    // not source containers, so Truckers can feed them without stealing from
+    // BaseHarvest/Luna mining output.
+    if (!room || !container || !container.pos || container.structureType !== STRUCTURE_CONTAINER) return false;
+    var snap = buildSnapshot(room);
+    if (!snap) return false;
+    if (isNearAnySource(container.pos, snap.sources, 1)) return false;
+    return isNearAnySpawn(container.pos, snap.mySpawns, getHubContainerRange(opts));
+  },
+
+  isSpawnHubContainerSite: function (room, site, opts) {
+    if (!room || !site || !site.pos || site.structureType !== STRUCTURE_CONTAINER) return false;
+    if (site.my === false) return false;
+    var snap = buildSnapshot(room);
+    if (!snap) return false;
+    if (isNearAnySource(site.pos, snap.sources, 1)) return false;
+    return isNearAnySpawn(site.pos, snap.mySpawns, getHubContainerRange(opts));
+  },
+
+  findSpawnHubContainers: function (room, opts) {
+    // Return built hub containers even when empty. Delivery code needs empty
+    // containers as sinks; withdrawal code can add its own energy check.
+    var snap = buildSnapshot(room);
+    return findSpawnHubContainersFromSnapshot(snap, opts);
+  },
+
+  findSpawnHubContainer: function (room, opts) {
+    var list = this.findSpawnHubContainers(room, opts);
+    return list && list.length ? list[0] : null;
+  },
+
+  findSpawnHubContainerConstructionSites: function (room, opts) {
+    var snap = buildSnapshot(room);
+    return findSpawnHubContainerSitesFromSnapshot(snap, opts);
+  },
+
+  findSpawnHubContainerConstructionSite: function (room, opts) {
+    var list = this.findSpawnHubContainerConstructionSites(room, opts);
+    return list && list.length ? list[0] : null;
+  },
+
+  findStorageConstructionSite: function (room) {
+    var snap = buildSnapshot(room);
+    if (!snap || !snap.sites || !snap.sites.length) return null;
+    for (var i = 0; i < snap.sites.length; i++) {
+      var site = snap.sites[i];
+      if (site && site.structureType === STRUCTURE_STORAGE && site.my !== false) return site;
+    }
+    return null;
+  },
+
   // -----------------------------------------------------------------------
   // Remote mining selectors: these coordinate role.Luna (miners) and the
   // hauler roles. They all build on the helper stack above, so their bodies
@@ -593,10 +735,22 @@ var BeeSelectors = {
     for (i = 0; i < snap.tombstones.length; i++) list.push({ kind: 'tomb', target: snap.tombstones[i] });
     for (i = 0; i < snap.ruins.length; i++) list.push({ kind: 'ruin', target: snap.ruins[i] });
     for (i = 0; i < snap.dropped.length; i++) list.push({ kind: 'drop', target: snap.dropped[i] });
+    var hubIds = {};
+    if (!snap.storage) {
+      var hubs = findSpawnHubContainersFromSnapshot(snap, null);
+      for (i = 0; i < hubs.length; i++) {
+        if (!hubs[i] || !hubs[i].store || (hubs[i].store[RESOURCE_ENERGY] || 0) <= 0) continue;
+        hubIds[hubs[i].id] = true;
+        list.push({ kind: 'hub_container', target: hubs[i] });
+      }
+    }
     for (i = 0; i < snap.sourceContainers.length; i++) list.push({ kind: 'container', target: snap.sourceContainers[i] });
     if (snap.storage && (snap.storage.store[RESOURCE_ENERGY] || 0) > 0) list.push({ kind: 'storage', target: snap.storage });
     if (snap.terminal && (snap.terminal.store[RESOURCE_ENERGY] || 0) > 0) list.push({ kind: 'terminal', target: snap.terminal });
-    for (i = 0; i < snap.otherContainers.length; i++) list.push({ kind: 'container', target: snap.otherContainers[i] });
+    for (i = 0; i < snap.otherContainers.length; i++) {
+      if (hubIds[snap.otherContainers[i].id]) continue;
+      list.push({ kind: 'container', target: snap.otherContainers[i] });
+    }
     for (i = 0; i < snap.linksWithEnergy.length; i++) list.push({ kind: 'link', target: snap.linksWithEnergy[i] });
     for (i = 0; i < snap.sources.length; i++) list.push({ kind: 'source', target: snap.sources[i] });
     return list;

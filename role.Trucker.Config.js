@@ -52,6 +52,9 @@ module.exports = Object.freeze({
   HANDOFF_ASSIGN_TTL: Handoff.HANDOFF.HANDOFF_ASSIGN_TTL,
   HANDOFF_WAIT_TTL: Handoff.HANDOFF.HANDOFF_WAIT_TTL,
   DELIVERY_STORAGE_FIRST: true,
+  HUB_CONTAINER_RANGE_FROM_SPAWN: 3,
+  TRUCKER_STORAGE_FEEDER_ENABLED: true,
+  TRUCKER_HUB_CONTAINER_FEEDER_ENABLED: true,
   IDLE_RANGE: 3,
   shouldBlockRemoteHaulForMaintenance: shouldBlockRemoteHaulForMaintenance
 });

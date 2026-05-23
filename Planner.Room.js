@@ -4,6 +4,7 @@ var PlannerVisuals = require('Planner.Visuals');
 var PlannerLayout = require('Planner.Layout');
 var PlannerReservations = require('Planner.Reservations');
 var PlannerRamparts = require('Planner.Ramparts');
+var BeeSelectors = require('BeeSelectors');
 
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
@@ -14,7 +15,8 @@ var CFG = Object.freeze({
   csiteSafetyLimit: 40,
   tickModulo: 2,
   noPlacementCooldownPlaced: 4,
-  noPlacementCooldownNone: 10
+  noPlacementCooldownNone: 10,
+  hubContainerRangeFromSpawn: 3
 });
 
 // Hard caps (upper bounds). Still clamped by CONTROLLER_STRUCTURES per RCL.
@@ -514,6 +516,178 @@ function orderedBaseOffsetsForRcl(rcl) {
   return ordered;
 }
 
+function countAdjacentWalkable(room, terrain, x, y) {
+  var count = 0;
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var ax = x + dx;
+      var ay = y + dy;
+      if (ax < 1 || ax > 48 || ay < 1 || ay > 48) continue;
+      if (terrain.get(ax, ay) === TERRAIN_MASK_WALL) continue;
+      var structs = room.lookForAt(LOOK_STRUCTURES, ax, ay);
+      var blocked = false;
+      for (var i = 0; i < structs.length; i++) {
+        var st = structs[i].structureType;
+        if (st === STRUCTURE_ROAD || st === STRUCTURE_CONTAINER || st === STRUCTURE_RAMPART) continue;
+        blocked = true;
+        break;
+      }
+      if (!blocked) count++;
+    }
+  }
+  return count;
+}
+
+function canPlaceHubContainerSite(room, snapshot, anchor, x, y, reservations, opts, sourceList, mineralList) {
+  if (!room || !snapshot || !anchor) return { ok: false, reason: 'invalid' };
+  if (x < 1 || x > 48 || y < 1 || y > 48) return { ok: false, reason: 'bounds' };
+  if (snapshot.terrain.get(x, y) === TERRAIN_MASK_WALL) return { ok: false, reason: 'wall' };
+
+  var pos = new RoomPosition(x, y, room.name);
+  if (pos.getRangeTo(anchor) <= 1) return { ok: false, reason: 'spawn_access_ring' };
+
+  var sources = sourceList || room.find(FIND_SOURCES);
+  for (var s = 0; s < sources.length; s++) {
+    // Source containers are mining output. The hub container must not occupy
+    // source work tiles or it will steal the role of the source container.
+    if (pos.inRangeTo(sources[s].pos, 1)) return { ok: false, reason: 'source_work_tile' };
+  }
+  var mins = mineralList || room.find(FIND_MINERALS);
+  for (var m = 0; m < mins.length; m++) {
+    if (pos.inRangeTo(mins[m].pos, 1)) return { ok: false, reason: 'mineral_work_tile' };
+  }
+  if (room.controller && pos.inRangeTo(room.controller.pos, 2)) return { ok: false, reason: 'controller_work_tile' };
+
+  if (opts && opts.plannerReservationsEnabled && PlannerReservations.isReserved(reservations, x, y)) {
+    return { ok: false, reason: 'reserved_' + (PlannerReservations.getReservedReason(reservations, x, y) || 'tile') };
+  }
+
+  var structuresAt = room.lookForAt(LOOK_STRUCTURES, x, y);
+  for (var i = 0; i < structuresAt.length; i++) {
+    var st = structuresAt[i].structureType;
+    if (st === STRUCTURE_ROAD) continue;
+    if (st === STRUCTURE_RAMPART && structuresAt[i].my) continue;
+    return { ok: false, reason: 'structure_blocked' };
+  }
+
+  if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length) return { ok: false, reason: 'site_blocked' };
+  var access = countAdjacentWalkable(room, snapshot.terrain, x, y);
+  if (access < 3) return { ok: false, reason: 'low_access' };
+  return { ok: true, access: access };
+}
+
+function pickHubContainerPlacement(room, snapshot, anchor, reservations, opts, sourceList, mineralList) {
+  var maxRange = Math.max(2, Math.min(5, Number(CFG.hubContainerRangeFromSpawn || 3)));
+  var best = null;
+  var skipped = {};
+  for (var range = 2; range <= maxRange; range++) {
+    for (var dx = -range; dx <= range; dx++) {
+      for (var dy = -range; dy <= range; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== range) continue;
+        var x = anchor.x + dx;
+        var y = anchor.y + dy;
+        var can = canPlaceHubContainerSite(room, snapshot, anchor, x, y, reservations, opts, sourceList, mineralList);
+        if (!can.ok) {
+          skipped[can.reason] = (skipped[can.reason] || 0) + 1;
+          continue;
+        }
+        var terrainCost = snapshot.terrain.get(x, y) === TERRAIN_MASK_SWAMP ? 5 : 1;
+        var score = (range * 100) + terrainCost - ((can.access || 0) * 3);
+        if (!best || score < best.score) best = { x: x, y: y, range: range, score: score, access: can.access || 0 };
+      }
+    }
+    if (best) break;
+  }
+  return { pos: best, skipped: skipped };
+}
+
+function rememberHubContainerDiag(room, data) {
+  var mem = plannerMemory(room);
+  mem.lastHubContainerBuild = data;
+  return data;
+}
+
+function ensureHubContainer(room, anchor, snapshot, allowedFn, slotsLeft, globalCapLeft, reservations, opts) {
+  if (!room || !anchor || !snapshot) return { placed: 0 };
+  var diag = {
+    t: Game.time,
+    placed: 0,
+    selected: null,
+    skippedReason: null,
+    skipped: {}
+  };
+
+  if (room.storage) {
+    diag.skippedReason = 'storage_present';
+    rememberHubContainerDiag(room, diag);
+    return { placed: 0 };
+  }
+  if (slotsLeft <= 0 || globalCapLeft <= 0) {
+    diag.skippedReason = 'site_budget_exhausted';
+    rememberHubContainerDiag(room, diag);
+    return { placed: 0 };
+  }
+
+  var builtHub = BeeSelectors.findSpawnHubContainers(room, { rangeFromSpawn: CFG.hubContainerRangeFromSpawn });
+  var siteHub = BeeSelectors.findSpawnHubContainerConstructionSites(room, { rangeFromSpawn: CFG.hubContainerRangeFromSpawn });
+  if ((builtHub && builtHub.length) || (siteHub && siteHub.length)) {
+    diag.skippedReason = 'hub_already_exists_or_building';
+    diag.existingId = builtHub && builtHub.length ? builtHub[0].id : null;
+    diag.siteId = siteHub && siteHub.length ? siteHub[0].id : null;
+    rememberHubContainerDiag(room, diag);
+    return { placed: 0 };
+  }
+
+  var capContainers = allowedFn(STRUCTURE_CONTAINER);
+  var haveContainers = (snapshot.built[STRUCTURE_CONTAINER] || 0) + (snapshot.sites[STRUCTURE_CONTAINER] || 0);
+  if (haveContainers >= capContainers) {
+    diag.skippedReason = 'container_controller_cap';
+    diag.haveContainers = haveContainers;
+    diag.capContainers = capContainers;
+    rememberHubContainerDiag(room, diag);
+    return { placed: 0 };
+  }
+
+  var picked = pickHubContainerPlacement(
+    room,
+    snapshot,
+    anchor,
+    reservations,
+    opts || {},
+    room.find(FIND_SOURCES),
+    room.find(FIND_MINERALS)
+  );
+  diag.skipped = picked.skipped || {};
+  if (!picked.pos) {
+    diag.skippedReason = 'no_conservative_tile';
+    rememberHubContainerDiag(room, diag);
+    return { placed: 0 };
+  }
+
+  var rc = room.createConstructionSite(picked.pos.x, picked.pos.y, STRUCTURE_CONTAINER);
+  diag.resultCode = rc;
+  if (rc !== OK) {
+    diag.skippedReason = 'create_site_' + rc;
+    diag.selected = { x: picked.pos.x, y: picked.pos.y, range: picked.pos.range, access: picked.pos.access };
+    rememberHubContainerDiag(room, diag);
+    return { placed: 0 };
+  }
+
+  var lookup = room.lookForAt(LOOK_CONSTRUCTION_SITES, picked.pos.x, picked.pos.y);
+  diag.placed = 1;
+  diag.selected = {
+    x: picked.pos.x,
+    y: picked.pos.y,
+    range: picked.pos.range,
+    access: picked.pos.access,
+    siteId: (lookup && lookup.length) ? lookup[0].id : null
+  };
+  snapshot.sites[STRUCTURE_CONTAINER] = (snapshot.sites[STRUCTURE_CONTAINER] || 0) + 1;
+  rememberHubContainerDiag(room, diag);
+  return { placed: 1 };
+}
+
 /**
  * High level orchestration:
  *  1. Skip work unless this is our tick slice (smooth CPU).
@@ -601,6 +775,27 @@ function ensureSites(room) {
   );
   placed += containerDelta.placed;
   cCount += containerDelta.placed;
+
+  if (placed >= CFG.maxSitesPerTick || cCount >= CFG.csiteSafetyLimit) {
+    mem.nextPlanTick = Game.time + CFG.noPlacementCooldownPlaced;
+    return;
+  }
+
+  // Phase 1B: before storage exists, place one spawn-area hub container. This
+  // is intentionally separate from source containers: source containers collect
+  // mining output, while the hub is a temporary buffer Truckers feed for Queen.
+  var hubDelta = ensureHubContainer(
+    room,
+    anchor,
+    snapshot,
+    allowedFn,
+    CFG.maxSitesPerTick - placed,
+    CFG.csiteSafetyLimit - cCount,
+    reservations,
+    buildCfg
+  );
+  placed += hubDelta.placed;
+  cCount += hubDelta.placed;
 
   if (placed >= CFG.maxSitesPerTick || cCount >= CFG.csiteSafetyLimit) {
     mem.nextPlanTick = Game.time + CFG.noPlacementCooldownPlaced;
