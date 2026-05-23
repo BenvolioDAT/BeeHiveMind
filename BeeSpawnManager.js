@@ -1539,6 +1539,10 @@ function prepareRoomQueues(C) {
   for (var i = 0; i < rooms.length; i++) {
     var room = rooms[i];
     if (!room.find(FIND_MY_SPAWNS).length) continue;
+    // Remote harvest setup has three separate phases:
+    // 1) discover which rooms are possible remotes,
+    // 2) update the Luna source plan/audit used by existing queue behavior,
+    // 3) after queue prep, write a read-only economics report for humans.
     var remoteDiscovery = RemoteHarvestManager.gatherCandidateRemoteRoomsForHome(room);
     RemoteHarvestManager.buildSourcePlanForHome(room.name, remoteDiscovery.acceptedRemoteRooms || []);
     RemoteHarvestManager.auditAssignmentsForHome(room.name);
@@ -1550,6 +1554,9 @@ function prepareRoomQueues(C) {
     ensureRoomQueue(room.name);
     pruneBlockedLunaQueueItems(room.name);
     fillQueueForRoom(C, room);
+    // This call is intentionally last: it observes the final live/queued Luna
+    // counts for the tick, but it does not enqueue, dequeue, reserve, or assign.
+    RemoteHarvestManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
   }
 }
 

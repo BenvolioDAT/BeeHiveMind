@@ -3,8 +3,18 @@
 var LunaConfig = require('role.Luna.Config');
 var RoadPlanner = require('Planner.Road');
 var BeeToolbox = require('BeeToolbox');
+var BodyConfig = require('Spawn.BodyConfig');
 
 var RESERVE_TTL = 100;
+// Economics diagnostics are intentionally estimates. They explain "why this
+// source looks good/bad" without changing source selection, spawn queues, or
+// remote hauling behavior.
+var REMOTE_SOURCE_ENERGY_REGEN_TICKS = 300;
+var DEFAULT_NEUTRAL_SOURCE_ENERGY_CAPACITY = 1500;
+var DEFAULT_RESERVED_SOURCE_ENERGY_CAPACITY = 3000;
+var DEFAULT_KEEPER_SOURCE_ENERGY_CAPACITY = 4000;
+var DEFAULT_CONTAINER_REPAIR_ENERGY_PER_TICK = 0.10;
+var ROLE_CONFIGS = BodyConfig && BodyConfig.ROLE_CONFIGS ? BodyConfig.ROLE_CONFIGS : {};
 
 function ensureMemory() {
   if (!Memory.__BHM) Memory.__BHM = {};
@@ -107,6 +117,560 @@ function getRouteDistanceBetweenRooms(homeName, remoteName) {
   try { route = Game.map.findRoute(homeName, remoteName); } catch (e) { route = ERR_NO_PATH; }
   if (route === ERR_NO_PATH || !route || !Array.isArray(route)) return Infinity;
   return route.length;
+}
+
+// --- Diagnostics formatting helpers ----------------------------------------
+// Memory reports are easier to read when numbers are rounded and Infinity is
+// written as null. Screeps Memory serializes to JSON, so null is clearer for
+// "unknown/unavailable" than a special JavaScript value.
+function roundNumber(value, places) {
+  if (typeof value !== 'number' || !isFinite(value)) return null;
+  var factor = Math.pow(10, places || 2);
+  return Math.round(value * factor) / factor;
+}
+
+function finiteOrNull(value) {
+  return (typeof value === 'number' && isFinite(value)) ? value : null;
+}
+
+// --- Diagnostics body helpers ------------------------------------------------
+// These helpers read the existing body config and summarize what the room could
+// spawn. They do not ask BeeSpawnManager to enqueue anything.
+function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) total += BODYPART_COST[body[i]] || 0;
+  return total;
+}
+
+function countBodyParts(body, part) {
+  if (!body || !body.length) return 0;
+  var count = 0;
+  for (var i = 0; i < body.length; i++) if (body[i] === part) count++;
+  return count;
+}
+
+function cloneBody(body) {
+  var out = [];
+  if (!body) return out;
+  for (var i = 0; i < body.length; i++) out.push(body[i]);
+  return out;
+}
+
+function chooseDiagnosticBody(roleName, energyCapacity) {
+  var list = ROLE_CONFIGS[roleName];
+  if (!list || !list.length) return [];
+  var energy = typeof energyCapacity === 'number' && energyCapacity > 0 ? energyCapacity : 300;
+  // Body lists are ordered largest-to-smallest elsewhere in the codebase, so
+  // the first affordable body matches the spawn system's normal body choice.
+  for (var i = 0; i < list.length; i++) {
+    if (calculateBodyCost(list[i]) <= energy) return cloneBody(list[i]);
+  }
+  // If the room cannot afford even the smallest body, still report the smallest
+  // configured body so the diagnostic shows the intended role shape.
+  return cloneBody(list[list.length - 1]);
+}
+
+function bodyPartSummary(body) {
+  return {
+    work: countBodyParts(body, WORK),
+    carry: countBodyParts(body, CARRY),
+    move: countBodyParts(body, MOVE),
+    claim: countBodyParts(body, CLAIM),
+    total: body ? body.length : 0,
+    cost: calculateBodyCost(body)
+  };
+}
+
+function getHomeEnergyCapacity(homeRoom) {
+  var room = Game.rooms && Game.rooms[homeRoom];
+  if (!room) return 300;
+  if (typeof room.energyCapacityAvailable === 'number' && room.energyCapacityAvailable > 0) return room.energyCapacityAvailable;
+  if (typeof room.energyAvailable === 'number' && room.energyAvailable > 0) return room.energyAvailable;
+  return 300;
+}
+
+// Pick the same practical "home anchor" used by Luna travel: storage first,
+// then spawn, then controller, then room center as a last-resort estimate.
+function getHomeAnchorPos(homeRoom) {
+  var room = Game.rooms && Game.rooms[homeRoom];
+  if (room) {
+    if (room.storage) return room.storage.pos;
+    var spawns = room.find(FIND_MY_SPAWNS) || [];
+    if (spawns.length) return spawns[0].pos;
+    if (room.controller && room.controller.my) return room.controller.pos;
+  }
+  return new RoomPosition(25, 25, homeRoom);
+}
+
+// Cost matrix used only for the visible-path estimate in this report. It keeps
+// the same broad idea as Luna movement: roads are cheap, blocking structures are
+// impassable, containers are allowed because Luna wants to sit on/near them.
+function buildDiagnosticCostMatrix(roomName) {
+  var room = Game.rooms && Game.rooms[roomName];
+  if (!room) return;
+  var matrix = new PathFinder.CostMatrix();
+  var structures = room.find(FIND_STRUCTURES) || [];
+  for (var i = 0; i < structures.length; i++) {
+    var structure = structures[i];
+    if (structure.structureType === STRUCTURE_ROAD) matrix.set(structure.pos.x, structure.pos.y, 1);
+    else if (structure.structureType !== STRUCTURE_CONTAINER && (structure.structureType !== STRUCTURE_RAMPART || !structure.my)) {
+      matrix.set(structure.pos.x, structure.pos.y, 0xff);
+    }
+  }
+  var sites = room.find(FIND_CONSTRUCTION_SITES) || [];
+  for (var j = 0; j < sites.length; j++) {
+    var site = sites[j];
+    if (site.structureType !== STRUCTURE_ROAD && site.structureType !== STRUCTURE_CONTAINER) matrix.set(site.pos.x, site.pos.y, 0xff);
+  }
+  return matrix;
+}
+
+// Path distance has three quality levels:
+// 1) best: a fresh PathFinder result when the source room is visible;
+// 2) good: cached distance fields from Memory if prior code recorded them;
+// 3) unknown: null, with the economics calculation falling back to route range.
+function estimatePathDistance(homeRoom, remoteRoom, sourceObj, sourceMem, routeDistance) {
+  if (sourceObj && sourceObj.pos && Game.rooms && Game.rooms[homeRoom] && Game.rooms[remoteRoom]) {
+    try {
+      var ret = PathFinder.search(getHomeAnchorPos(homeRoom), { pos: sourceObj.pos, range: 1 }, {
+        maxOps: (LunaConfig && LunaConfig.MAX_PF_OPS) || 3000,
+        plainCost: (LunaConfig && LunaConfig.PLAIN_COST) || 2,
+        swampCost: (LunaConfig && LunaConfig.SWAMP_COST) || 10,
+        roomCallback: buildDiagnosticCostMatrix
+      });
+      if (!ret.incomplete && ret.path && typeof ret.path.length === 'number') {
+        return { distance: ret.path.length, source: 'visible-pathfinder' };
+      }
+    } catch (e) {}
+  }
+
+  // These fields are optional because other parts of the bot may or may not
+  // have seen this remote source recently enough to cache path details.
+  if (sourceMem) {
+    if (typeof sourceMem.pathDistance === 'number') return { distance: sourceMem.pathDistance, source: 'cached-pathDistance' };
+    if (typeof sourceMem.remotePathDistance === 'number') return { distance: sourceMem.remotePathDistance, source: 'cached-remotePathDistance' };
+    if (typeof sourceMem.entrySteps === 'number' && isFinite(routeDistance)) {
+      return { distance: (routeDistance * 50) + sourceMem.entrySteps, source: 'route-plus-entrySteps' };
+    }
+  }
+
+  return { distance: null, source: null };
+}
+
+// Scout intel is separate from room Memory. These accessors keep the report
+// readable and avoid duplicating the long Memory.__BHM path everywhere.
+function getScoutRoomRecord(homeRoom, remoteRoom) {
+  var scout = Memory.__BHM && Memory.__BHM.scoutIntel && Memory.__BHM.scoutIntel.homes &&
+    Memory.__BHM.scoutIntel.homes[homeRoom] && Memory.__BHM.scoutIntel.homes[homeRoom].rooms;
+  return scout && scout[remoteRoom] ? scout[remoteRoom] : null;
+}
+
+function getScoutSourceRecord(homeRoom, remoteRoom, sourceId) {
+  if (!sourceId) return null;
+  var rec = getScoutRoomRecord(homeRoom, remoteRoom);
+  if (!rec || !rec.sources) return null;
+  for (var i = 0; i < rec.sources.length; i++) {
+    if (rec.sources[i] && rec.sources[i].id === sourceId) return rec.sources[i];
+  }
+  return null;
+}
+
+// Controller state matters because a reserved/owned room has larger source
+// capacity than an unreserved neutral room. This helper records both the status
+// and which intel source produced that status.
+function getControllerEstimate(homeRoom, remoteRoom) {
+  var myName = getMyUsername();
+  var room = Game.rooms && Game.rooms[remoteRoom];
+  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+  var intel = mem.intel || {};
+  var scout = getScoutRoomRecord(homeRoom, remoteRoom);
+  var scoutController = scout && scout.controller ? scout.controller : null;
+
+  var owner = null;
+  var reservation = null;
+  var reservationTicks = null;
+  var hasController = false;
+  var source = 'unknown';
+
+  if (room && room.controller) {
+    hasController = true;
+    owner = room.controller.owner && room.controller.owner.username || null;
+    reservation = room.controller.reservation && room.controller.reservation.username || null;
+    reservationTicks = room.controller.reservation && room.controller.reservation.ticksToEnd || null;
+    source = 'visible';
+  } else if (scoutController) {
+    hasController = true;
+    owner = scoutController.owner || null;
+    reservation = scoutController.reservation || null;
+    source = 'scout';
+  } else if (intel.owner || intel.reservation || typeof intel.rcl === 'number') {
+    hasController = true;
+    owner = intel.owner || null;
+    reservation = intel.reservation || null;
+    source = 'room-intel';
+  }
+
+  var ownedByMe = !!(owner && myName && owner === myName);
+  var reservedByMe = !!(reservation && myName && reservation === myName);
+  var ownedByOther = !!(owner && (!myName || owner !== myName));
+  var reservedByOther = !!(reservation && (!myName || reservation !== myName));
+  var status = 'unknown';
+  if (!hasController) status = 'no-controller';
+  else if (ownedByMe) status = 'owned-by-me';
+  else if (ownedByOther) status = 'owned-by-other';
+  else if (reservedByMe) status = 'reserved-by-me';
+  else if (reservedByOther) status = 'reserved-by-other';
+  else status = 'unreserved';
+
+  return {
+    status: status,
+    hasController: hasController,
+    owner: owner,
+    reservation: reservation,
+    reservationTicks: reservationTicks,
+    ownedByMe: ownedByMe,
+    reservedByMe: reservedByMe,
+    ownedByOther: ownedByOther,
+    reservedByOther: reservedByOther,
+    source: source
+  };
+}
+
+// Source energy is energy regenerated per tick. Visible sources give the most
+// accurate number. If the room is not visible, fall back to Screeps defaults:
+// neutral 1500, reserved/owned 3000, keeper 4000 energy per 300 ticks.
+function estimateSourceEnergyPerTick(remoteRoom, sourceObj, sourceMem, controllerEstimate) {
+  if (sourceObj && typeof sourceObj.energyCapacity === 'number' && sourceObj.energyCapacity > 0) {
+    return sourceObj.energyCapacity / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
+  }
+  if (sourceMem && typeof sourceMem.energyCapacity === 'number' && sourceMem.energyCapacity > 0) {
+    return sourceMem.energyCapacity / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
+  }
+
+  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+  var intel = mem.intel || {};
+  if (intel.keeperLairs && intel.keeperLairs > 0) {
+    return DEFAULT_KEEPER_SOURCE_ENERGY_CAPACITY / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
+  }
+  if (controllerEstimate && (controllerEstimate.ownedByMe || controllerEstimate.reservedByMe ||
+      controllerEstimate.ownedByOther || controllerEstimate.reservedByOther)) {
+    return DEFAULT_RESERVED_SOURCE_ENERGY_CAPACITY / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
+  }
+  return DEFAULT_NEUTRAL_SOURCE_ENERGY_CAPACITY / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
+}
+
+// Used to split one reserver's spawn/energy cost across the sources in the room.
+// A two-source room should not charge the full reserver cost to both sources.
+function getRemoteSourceCountEstimate(homeRoom, remoteRoom) {
+  var count = 0;
+  var room = Game.rooms && Game.rooms[remoteRoom];
+  if (room) {
+    var liveSources = room.find(FIND_SOURCES) || [];
+    if (liveSources.length) return liveSources.length;
+  }
+  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+  if (mem.sources) {
+    for (var sid in mem.sources) {
+      if (Object.prototype.hasOwnProperty.call(mem.sources, sid)) count++;
+    }
+    if (count > 0) return count;
+  }
+  var scout = getScoutRoomRecord(homeRoom, remoteRoom);
+  if (scout && scout.sources && scout.sources.length) return scout.sources.length;
+  if (mem.intel && typeof mem.intel.sources === 'number') return Math.max(1, mem.intel.sources);
+  return 1;
+}
+
+// Reserver cost is included only as diagnostics. The bot currently does not
+// spawn remote reservers from this report; this just answers "what would that
+// controller reservation cost per source?"
+function estimateReserverEconomics(homeRoom, remoteRoom, controllerEstimate, sourcesInRoom, energyCapacity) {
+  if (!controllerEstimate || !controllerEstimate.hasController) return { spawnUsage: 0, energyCost: 0 };
+  if (controllerEstimate.ownedByMe || controllerEstimate.ownedByOther || controllerEstimate.reservedByOther) {
+    return { spawnUsage: 0, energyCost: 0 };
+  }
+  var body = chooseDiagnosticBody('Claimer', energyCapacity);
+  if (!body.length) return { spawnUsage: 0, energyCost: 0 };
+  var sourceDivisor = Math.max(1, sourcesInRoom || getRemoteSourceCountEstimate(homeRoom, remoteRoom));
+  var claimLifeTime = (typeof CREEP_CLAIM_LIFE_TIME === 'number') ? CREEP_CLAIM_LIFE_TIME : 600;
+  return {
+    spawnUsage: ((body.length * CREEP_SPAWN_TIME) / claimLifeTime) / sourceDivisor,
+    energyCost: (calculateBodyCost(body) / claimLifeTime) / sourceDivisor
+  };
+}
+
+// Source records can come from live objects, Memory.rooms[remote].sources, or
+// scout intel. Normalize all of those shapes into one {x, y, roomName} style.
+function sourceRecordPosition(rec) {
+  if (!rec) return null;
+  if (rec.pos && typeof rec.pos.x === 'number') return rec.pos;
+  if (typeof rec.x === 'number' && typeof rec.y === 'number') return { x: rec.x, y: rec.y, roomName: rec.roomName || null };
+  return null;
+}
+
+// Build the per-source list for a remote room. The order of preference is live
+// vision, room memory, then scout memory. The seen map prevents duplicate source
+// IDs when the same source appears in more than one intel source.
+function collectDiagnosticSourcesForRemote(homeRoom, remoteRoom) {
+  var out = [];
+  var seen = Object.create(null);
+  var room = Game.rooms && Game.rooms[remoteRoom];
+  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+
+  function add(sourceId, sourceObj, sourceMem, scoutRec, sourceTag) {
+    var key = sourceId || ('unknown:' + out.length);
+    if (sourceId && seen[key]) return;
+    if (sourceId) seen[key] = true;
+    var pos = sourceObj && sourceObj.pos ? sourceObj.pos : sourceRecordPosition(sourceMem) || sourceRecordPosition(scoutRec);
+    out.push({
+      sourceId: sourceId || null,
+      sourceObj: sourceObj || null,
+      sourceMem: sourceMem || null,
+      scoutRec: scoutRec || null,
+      sourceTag: sourceTag || 'unknown',
+      x: pos && typeof pos.x === 'number' ? pos.x : null,
+      y: pos && typeof pos.y === 'number' ? pos.y : null
+    });
+  }
+
+  if (room) {
+    var liveSources = room.find(FIND_SOURCES) || [];
+    for (var i = 0; i < liveSources.length; i++) {
+      var liveSource = liveSources[i];
+      add(liveSource.id, liveSource, mem.sources && mem.sources[liveSource.id], getScoutSourceRecord(homeRoom, remoteRoom, liveSource.id), 'visible');
+    }
+  }
+
+  if (mem.sources) {
+    for (var sid in mem.sources) {
+      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
+      add(sid, null, mem.sources[sid], getScoutSourceRecord(homeRoom, remoteRoom, sid), 'memory');
+    }
+  }
+
+  var scout = getScoutRoomRecord(homeRoom, remoteRoom);
+  if (scout && scout.sources) {
+    for (var s = 0; s < scout.sources.length; s++) {
+      var scoutSource = scout.sources[s];
+      if (!scoutSource) continue;
+      add(scoutSource.id || null, null, mem.sources && scoutSource.id ? mem.sources[scoutSource.id] : null, scoutSource, 'scout');
+    }
+  }
+
+  if (!out.length && mem.intel && typeof mem.intel.sources === 'number' && mem.intel.sources > 0) {
+    for (var n = 0; n < mem.intel.sources; n++) add(null, null, null, null, 'room-intel-count');
+  }
+
+  return out;
+}
+
+// Remote discovery already rejects whole rooms for reasons like unsafe/no-route.
+// Keep those reasons so every source inside that room inherits the same reject.
+function indexRemoteRejectReasons(remoteDiscovery) {
+  var out = Object.create(null);
+  var rejected = remoteDiscovery && remoteDiscovery.rejectedRemoteRooms ? remoteDiscovery.rejectedRemoteRooms : [];
+  for (var i = 0; i < rejected.length; i++) {
+    var rec = rejected[i];
+    if (rec && rec.room) out[rec.room] = rec.reason || 'rejected';
+  }
+  return out;
+}
+
+// This is a diagnostics mirror of the existing safety gates. It labels a source
+// as rejected but never blocks assignment or queueing itself.
+function sourceRejectReason(homeRoom, remoteRoom, sourceRec, roomRejectReason, routeDistance) {
+  if (roomRejectReason) return roomRejectReason;
+  var localOwnedCheck = isLocalOwnedRoomForLuna(homeRoom, remoteRoom);
+  if (localOwnedCheck && localOwnedCheck.blocked) return localOwnedCheck.reason || 'local-owned-room';
+  if (!isFinite(routeDistance)) return 'no-route';
+  if (isRemoteUnsafe(remoteRoom)) return 'unsafe';
+
+  var ttl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
+  var intelTick = getRemoteIntelTick(remoteRoom);
+  if (!Game.rooms[remoteRoom] && (intelTick == null || (Game.time - intelTick) > ttl)) return 'stale-intel';
+
+  var sourceMem = sourceRec && sourceRec.sourceMem;
+  if (sourceMem && sourceMem.lunaBlockedUntil && sourceMem.lunaBlockedUntil > Game.time) {
+    return sourceMem.lunaBlockedReason || 'source-blocked';
+  }
+  var scoutRec = sourceRec && sourceRec.scoutRec;
+  if (scoutRec && scoutRec.accessible === false) return scoutRec.blockedReason || 'source-inaccessible';
+  if (!sourceRec || !sourceRec.sourceId) return 'missing-source-id';
+  return null;
+}
+
+// Recount live and queued Luna directly at report time. This makes the report
+// match the final queue after BeeSpawnManager has finished preparing the room.
+function countLiveLunaForHome(homeRoom) {
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    if (creep.memory.role !== 'Luna' && creep.memory.task !== 'luna' && creep.memory.task !== 'remoteharvest') continue;
+    var creepHome = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
+    if (creepHome === homeRoom) count++;
+  }
+  return count;
+}
+
+function countQueuedLunaForHome(homeRoom) {
+  var queue = (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].spawnQueue) || [];
+  var count = 0;
+  for (var i = 0; i < queue.length; i++) {
+    if (queue[i] && queue[i].role === 'Luna') count++;
+  }
+  return count;
+}
+
+// Main entry point for the economics report. It intentionally writes only to
+// Memory.rooms[homeRoom].lastRemoteSourceEconomics and returns the report.
+// Nothing here reserves a source, queues a creep, clears Memory, or changes
+// remote haul/repair behavior.
+function buildRemoteSourceEconomicsReport(homeRoom, remoteDiscovery) {
+  if (!homeRoom) return null;
+  // Reuse the discovery result from queue prep when available, so the report
+  // explains the same candidate set BeeSpawnManager just evaluated.
+  if (!remoteDiscovery) remoteDiscovery = gatherCandidateRemoteRoomsForHome(homeRoom);
+  var home = ensureHomeMemory(homeRoom);
+  var roomMem = getRoomMemoryBucket(homeRoom);
+  var energyCapacity = getHomeEnergyCapacity(homeRoom);
+  // Miner body is estimated once per home because all candidate sources use the
+  // same room energy capacity and Luna body table.
+  var minerBody = chooseDiagnosticBody('Luna', energyCapacity);
+  var minerSummary = bodyPartSummary(minerBody);
+  var rejectedByRoom = indexRemoteRejectReasons(remoteDiscovery);
+  var remoteRooms = [];
+  var seenRooms = Object.create(null);
+  var candidates = remoteDiscovery && remoteDiscovery.candidateRemoteRooms ? remoteDiscovery.candidateRemoteRooms : [];
+  var accepted = remoteDiscovery && remoteDiscovery.acceptedRemoteRooms ? remoteDiscovery.acceptedRemoteRooms : [];
+  var rejected = remoteDiscovery && remoteDiscovery.rejectedRemoteRooms ? remoteDiscovery.rejectedRemoteRooms : [];
+
+  function addRoom(roomName) {
+    if (!roomName || seenRooms[roomName]) return;
+    seenRooms[roomName] = true;
+    remoteRooms.push(roomName);
+  }
+
+  for (var c = 0; c < candidates.length; c++) addRoom(candidates[c]);
+  for (var a = 0; a < accepted.length; a++) addRoom(accepted[a]);
+  for (var r = 0; r < rejected.length; r++) if (rejected[r]) addRoom(rejected[r].room);
+
+  var sourceReports = [];
+  var profitableSources = 0;
+  var totalEstimatedSpawnUsage = 0;
+  var totalEstimatedNetEnergy = 0;
+
+  for (var i = 0; i < remoteRooms.length; i++) {
+    var remoteRoom = remoteRooms[i];
+    var routeDistance = getRouteDistanceBetweenRooms(homeRoom, remoteRoom);
+    var controllerEstimate = getControllerEstimate(homeRoom, remoteRoom);
+    var sources = collectDiagnosticSourcesForRemote(homeRoom, remoteRoom);
+    var sourcesInRoom = Math.max(1, sources.length || getRemoteSourceCountEstimate(homeRoom, remoteRoom));
+    var reserverEconomics = estimateReserverEconomics(homeRoom, remoteRoom, controllerEstimate, sourcesInRoom, energyCapacity);
+
+    for (var j = 0; j < sources.length; j++) {
+      var sourceRec = sources[j];
+      var pathEstimate = estimatePathDistance(homeRoom, remoteRoom, sourceRec.sourceObj, sourceRec.sourceMem, routeDistance);
+      var pathDistance = pathEstimate.distance;
+      // Haulers need to make a round trip. If exact pathing is unavailable, use
+      // route rooms * 50 tiles as a conservative rough distance.
+      var fallbackOneWayDistance = pathDistance != null ? pathDistance : (isFinite(routeDistance) ? Math.max(50, routeDistance * 50) : null);
+      var roundTripDistance = fallbackOneWayDistance != null ? Math.max(1, fallbackOneWayDistance * 2) : null;
+      var sourceEnergyPerTick = estimateSourceEnergyPerTick(remoteRoom, sourceRec.sourceObj, sourceRec.sourceMem, controllerEstimate);
+      // A source may produce more than this Luna body can harvest. Cap income by
+      // WORK parts so the estimate reflects the chosen miner body.
+      var harvestEnergyPerTick = Math.min(sourceEnergyPerTick, Math.max(0, minerSummary.work * HARVEST_POWER));
+      var haulerCarryPartsNeeded = roundTripDistance != null
+        ? Math.max(0, Math.ceil((harvestEnergyPerTick * roundTripDistance) / CARRY_CAPACITY))
+        : 0;
+      // Spawn usage is "fraction of one spawn kept busy forever". Example:
+      // 0.10 means this source consumes about 10% of a spawn over time.
+      var minerSpawnUsage = minerBody.length ? (minerBody.length * CREEP_SPAWN_TIME) / CREEP_LIFE_TIME : 0;
+      var minerEnergyCost = minerBody.length ? calculateBodyCost(minerBody) / CREEP_LIFE_TIME : 0;
+      var haulerSpawnUsage = (haulerCarryPartsNeeded * 2 * CREEP_SPAWN_TIME) / CREEP_LIFE_TIME;
+      var haulerEnergyCost = (haulerCarryPartsNeeded * (BODYPART_COST[CARRY] + BODYPART_COST[MOVE])) / CREEP_LIFE_TIME;
+      var containerRepairCost = DEFAULT_CONTAINER_REPAIR_ENERGY_PER_TICK;
+      var rejectReason = sourceRejectReason(homeRoom, remoteRoom, sourceRec, rejectedByRoom[remoteRoom] || null, routeDistance);
+      var estimatedTotalSpawnUsage = minerSpawnUsage + haulerSpawnUsage + reserverEconomics.spawnUsage;
+      // Net energy subtracts ongoing creep replacement energy and estimated
+      // container repair energy from harvested energy.
+      var estimatedNetEnergyPerTick = harvestEnergyPerTick - minerEnergyCost - haulerEnergyCost - reserverEconomics.energyCost - containerRepairCost;
+      var profitable = !rejectReason && estimatedNetEnergyPerTick > 0;
+
+      if (profitable) {
+        profitableSources++;
+        totalEstimatedSpawnUsage += estimatedTotalSpawnUsage;
+        totalEstimatedNetEnergy += estimatedNetEnergyPerTick;
+      }
+
+      sourceReports.push({
+        homeRoom: homeRoom,
+        remoteRoom: remoteRoom,
+        sourceId: sourceRec.sourceId,
+        routeDistance: finiteOrNull(routeDistance),
+        pathDistance: pathDistance,
+        pathDistanceSource: pathEstimate.source,
+        sourceEnergyPerTick: roundNumber(sourceEnergyPerTick, 2),
+        reservedOwnedEstimate: controllerEstimate,
+        minerBodyParts: minerSummary,
+        minerSpawnUsage: roundNumber(minerSpawnUsage, 4),
+        haulerCarryPartsNeeded: haulerCarryPartsNeeded,
+        haulerSpawnUsage: roundNumber(haulerSpawnUsage, 4),
+        reserverSpawnUsage: roundNumber(reserverEconomics.spawnUsage, 4),
+        containerRepairCost: roundNumber(containerRepairCost, 3),
+        estimatedNetEnergyPerTick: roundNumber(estimatedNetEnergyPerTick, 2),
+        estimatedTotalSpawnUsage: roundNumber(estimatedTotalSpawnUsage, 4),
+        selectedCandidate: false,
+        rejectReason: rejectReason
+      });
+    }
+  }
+
+  sourceReports.sort(function (a, b) {
+    var ar = a.routeDistance == null ? 999999 : a.routeDistance;
+    var br = b.routeDistance == null ? 999999 : b.routeDistance;
+    if (ar !== br) return ar - br;
+    if (a.remoteRoom !== b.remoteRoom) return a.remoteRoom < b.remoteRoom ? -1 : 1;
+    var asid = a.sourceId || '';
+    var bsid = b.sourceId || '';
+    return asid < bsid ? -1 : (asid > bsid ? 1 : 0);
+  });
+
+  var warning = null;
+  if ((home.desiredLuna || 0) > profitableSources) {
+    warning = 'currentDesiredLuna exceeds profitable source count';
+  }
+  var currentLiveLuna = countLiveLunaForHome(homeRoom);
+  var currentQueuedLuna = countQueuedLunaForHome(homeRoom);
+
+  roomMem.lastRemoteSourceEconomics = {
+    tick: Game.time,
+    homeRoom: homeRoom,
+    candidateSources: sourceReports.length,
+    profitableSources: profitableSources,
+    totalEstimatedSpawnUsage: roundNumber(totalEstimatedSpawnUsage, 4),
+    totalEstimatedNetEnergy: roundNumber(totalEstimatedNetEnergy, 2),
+    currentDesiredLuna: home.desiredLuna || 0,
+    currentLiveLuna: currentLiveLuna,
+    currentQueuedLuna: currentQueuedLuna,
+    warning: warning,
+    sources: sourceReports,
+    // Assumptions are included in Memory so a novice can trace where the math
+    // came from without hunting through constants at the top of the file.
+    assumptions: {
+      creepLifeTime: CREEP_LIFE_TIME,
+      claimCreepLifeTime: (typeof CREEP_CLAIM_LIFE_TIME === 'number') ? CREEP_CLAIM_LIFE_TIME : 600,
+      creepSpawnTime: CREEP_SPAWN_TIME,
+      neutralSourceEnergyCapacity: DEFAULT_NEUTRAL_SOURCE_ENERGY_CAPACITY,
+      reservedSourceEnergyCapacity: DEFAULT_RESERVED_SOURCE_ENERGY_CAPACITY,
+      keeperSourceEnergyCapacity: DEFAULT_KEEPER_SOURCE_ENERGY_CAPACITY,
+      containerRepairCostEnergyPerTick: DEFAULT_CONTAINER_REPAIR_ENERGY_PER_TICK
+    }
+  };
+
+  return roomMem.lastRemoteSourceEconomics;
 }
 
 function addUniqueRoomName(list, seen, roomName) {
@@ -558,6 +1122,7 @@ module.exports = {
   ensureMemory: ensureMemory,
   ensureHomeMemory: ensureHomeMemory,
   gatherCandidateRemoteRoomsForHome: gatherCandidateRemoteRoomsForHome,
+  buildRemoteSourceEconomicsReport: buildRemoteSourceEconomicsReport,
   buildSourcePlanForHome: buildSourcePlanForHome,
   auditAssignmentsForHome: auditAssignmentsForHome,
   reserveSourceForQueue: reserveSourceForQueue,
