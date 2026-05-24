@@ -67,8 +67,11 @@ CoreConfig.settings = Object.freeze({
   maintenance: Object.freeze({
     /** How often to rescan repair targets inside BeeMaintenance. */
     repairScanInterval: 5,
+    /** How often main.js asks BeeToolbox to refresh source-container intel. */
+    sourceContainerRefreshModulo: 3,
     /** How long before the stale room sweep runs. */
     roomSweepInterval: 50,
+    remoteContainerStatusSweepInterval: 500,
     remoteContainerStatusStaleTicks: 150,
     remoteContainerStatusMemoryTtl: 20000,
     remoteContainerStatusCriticalMemoryTtl: 50000,
@@ -83,6 +86,18 @@ CoreConfig.settings = Object.freeze({
     DEBUG_NO_ROUTE: false,
     NO_ROUTE_LOG_INTERVAL: 250,
     NO_ROUTE_CACHE_TTL: 150,
+  }),
+  toolbox: Object.freeze({
+    sourceContainerScanInterval: 50,
+    defaultInvaderLockTtl: 1500,
+    travelFallbackReusePath: 20,
+    travelFallbackMaxOps: 2000,
+    attackPathMaxOps: 1000,
+    remoteTravelTicksPerRoom: 50,
+    remoteRoundTripRoomBuffer: 100,
+    remoteRoundTripFinalBuffer: 100,
+    remoteRequestKnownPosInRoomTicks: 25,
+    remoteRequestUnknownPosInRoomTicks: 50,
   }),
   visuals: Object.freeze({
     enabled: true,

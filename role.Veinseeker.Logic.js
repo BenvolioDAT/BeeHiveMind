@@ -977,10 +977,7 @@ function isVeinseekerRoomBlockedByMemory(roomName) {
   var mem = (Memory.rooms && Memory.rooms[roomName]) || {};
   if (mem.hostile) return true;
   if (mem.sourceWorkerBlockedUntil && mem.sourceWorkerBlockedUntil > Game.time) return true;
-  if (mem._invaderLock && mem._invaderLock.locked) {
-    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
-    if (lockTick == null || (Game.time - lockTick) <= INVADER_LOCK_MEMO_TTL) return true;
-  }
+  if (BeeToolbox.isRoomInvaderLocked(roomName, { ttl: INVADER_LOCK_MEMO_TTL })) return true;
   var myName = getMyUsername();
   var intel = mem.intel || {};
   if (intel.owner && (!myName || intel.owner !== myName)) return true;
@@ -1085,12 +1082,7 @@ function getRoomEntryAnchor(homeName, remoteName) {
 }
 
 function getRouteDistanceBetweenRooms(homeName, remoteName) {
-  if (!homeName || !remoteName) return Infinity;
-  if (homeName === remoteName) return 0;
-  var route = null;
-  try { route = Game.map.findRoute(homeName, remoteName); } catch (e) { route = ERR_NO_PATH; }
-  if (route === ERR_NO_PATH || !route || !route.length) return Infinity;
-  return route.length;
+  return BeeToolbox.getRouteDistanceBetweenRooms(homeName, remoteName);
 }
 
 function roomCostMatrixForVeinseeker(roomName) {
@@ -1180,27 +1172,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   // Invader lock detection
   // ============================
   function isRoomLockedByInvaderCore(roomName){
-    if (!roomName) return false;
-    var rm = getRoomMemoryBucket(roomName);
-    var now = Game.time, room = Game.rooms[roomName];
-
-    if (room){
-      var locked=false;
-      var cores = room.find(FIND_STRUCTURES, { filter:function(s){return s.structureType===STRUCTURE_INVADER_CORE;} });
-      if (cores && cores.length>0) locked=true;
-      if (!locked && room.controller && room.controller.reservation &&
-          room.controller.reservation.username==='Invader'){ locked=true; }
-      if (!locked && BeeToolbox && BeeToolbox.isRoomInvaderLocked){
-        try{ if (BeeToolbox.isRoomInvaderLocked(room)) locked=true; }catch(e){}
-      }
-      rm._invaderLock = { locked: locked, t: now };
-      return locked;
-    }
-
-    if (rm._invaderLock && typeof rm._invaderLock.locked==='boolean' && typeof rm._invaderLock.t==='number'){
-      if ((now - rm._invaderLock.t) <= INVADER_LOCK_MEMO_TTL) return rm._invaderLock.locked;
-    }
-    return false;
+    return BeeToolbox.isRoomInvaderLocked(roomName, { ttl: INVADER_LOCK_MEMO_TTL });
   }
 
   // ============================

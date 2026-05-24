@@ -1,13 +1,13 @@
 'use strict';
 
+var BeeToolbox = require('BeeToolbox');
+
 var ENERGY_PICKUP_MIN = 50;
 var SOURCE_REGEN_TICKS = 300;
 var DEFAULT_SOURCE_ENERGY_PER_TICK = 10;
 
 function ensureRoomMemory(roomName) {
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  return Memory.rooms[roomName];
+  return BeeToolbox.getRoomMemoryBucket(roomName);
 }
 
 function ensureRoomSourceEconomy(room) {
@@ -44,11 +44,7 @@ function getRoomAnchor(room) {
 function estimateInterRoomDistance(fromPos, toPos) {
   if (!fromPos || !toPos) return 25;
   if (fromPos.roomName === toPos.roomName) return Math.max(1, fromPos.getRangeTo(toPos));
-  var routeLength = Infinity;
-  try {
-    var route = Game.map.findRoute(fromPos.roomName, toPos.roomName);
-    if (route && route !== ERR_NO_PATH && typeof route.length === 'number') routeLength = route.length;
-  } catch (err) {}
+  var routeLength = BeeToolbox.getRouteDistanceBetweenRooms(fromPos.roomName, toPos.roomName);
   if (!isFinite(routeLength)) {
     routeLength = Game.map.getRoomLinearDistance(fromPos.roomName, toPos.roomName) || 1;
   }

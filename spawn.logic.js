@@ -27,6 +27,7 @@ var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var CoreConfig = require('core.config');
+var BeeToolbox = require('BeeToolbox');
 // Body definitions now live in Spawn.BodyConfig.js (registry of role body lists).
 var BodyConfig = require('Spawn.BodyConfig');
 
@@ -93,13 +94,7 @@ function normalizeRole(role) {
 }
 
 function calculateBodyCost(body) {
-  if (!body || !body.length) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    var part = body[i];
-    total += BODYPART_COST[part] || 0;
-  }
-  return total;
+  return BeeToolbox.calculateBodyCost(body);
 }
 
 function getBodyCost(body) {
@@ -109,60 +104,19 @@ function getBodyCost(body) {
 }
 
 function cloneBody(body) {
-  var copy = [];
-  if (!body || !body.length) return copy;
-  for (var i = 0; i < body.length; i++) {
-    copy.push(body[i]);
-  }
-  return copy;
+  return BeeToolbox.cloneBody(body);
 }
 
 function getBodySignature(body) {
   // A signature is a stable, cheap string that lets Memory show whether two
   // bodies are the same shape without storing a second full body array.
-  if (!body || !body.length) return '';
-  var parts = [];
-  for (var i = 0; i < body.length; i++) {
-    parts.push(String(body[i]));
-  }
-  return parts.join('|');
+  return BeeToolbox.getBodySignature(body);
 }
 
 function summarizeBody(body) {
   // Keep the summary beginner-readable in Memory: counts by part plus a short
   // text value ordered like Screeps body definitions are usually discussed.
-  var summary = {
-    work: 0,
-    carry: 0,
-    move: 0,
-    attack: 0,
-    ranged_attack: 0,
-    heal: 0,
-    tough: 0,
-    claim: 0,
-    totalParts: 0,
-    text: ''
-  };
-  if (!body || !body.length) return summary;
-  for (var i = 0; i < body.length; i++) {
-    var part = String(body[i]);
-    if (Object.prototype.hasOwnProperty.call(summary, part)) {
-      summary[part]++;
-    }
-    summary.totalParts++;
-  }
-
-  var chunks = [];
-  if (summary.work) chunks.push(summary.work + ' WORK');
-  if (summary.carry) chunks.push(summary.carry + ' CARRY');
-  if (summary.move) chunks.push(summary.move + ' MOVE');
-  if (summary.attack) chunks.push(summary.attack + ' ATTACK');
-  if (summary.ranged_attack) chunks.push(summary.ranged_attack + ' RANGED_ATTACK');
-  if (summary.heal) chunks.push(summary.heal + ' HEAL');
-  if (summary.tough) chunks.push(summary.tough + ' TOUGH');
-  if (summary.claim) chunks.push(summary.claim + ' CLAIM');
-  summary.text = chunks.join(', ');
-  return summary;
+  return BeeToolbox.summarizeBody(body);
 }
 
 function makeBodyPlan(roleName, body, cost, tierIndex, energyUsedForPlan) {

@@ -22,6 +22,7 @@
 // -----------------------------------------------------------------------------
 
 var CFG = require('role.Trucker.Config');
+var BeeToolbox = require('BeeToolbox');
 
 function ensureDispatchMemory() {
   // Dispatcher-owned claim tables. They are separate from individual Trucker
@@ -72,29 +73,11 @@ function refreshContainerRecordFromVision(record, roomObj) {
 }
 
 function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
-  if (!homeRoom || !remoteRoom) return 9999;
-  var rooms = 0;
-  try {
-    var route = Game.map.findRoute(homeRoom, remoteRoom);
-    if (route && route !== ERR_NO_PATH && typeof route.length === 'number') rooms = route.length;
-  } catch (e) {}
-  if (!rooms || rooms < 1) rooms = Game.map.getRoomLinearDistance(homeRoom, remoteRoom) || 1;
-  var estimatedTravelTicks = rooms * 50 + 100;
-  return estimatedTravelTicks * 2 + 100;
+  return BeeToolbox.estimateRemoteRoundTripTicks(homeRoom, remoteRoom);
 }
 
 function estimateRemoteRequestDistance(homeRoom, req) {
-  if (!homeRoom || !req) return 9999;
-  var remoteRoom = req.roomName || req.remoteRoom;
-  if (!remoteRoom) return 9999;
-  var roomDistance = 0;
-  try {
-    var route = Game.map.findRoute(homeRoom, remoteRoom);
-    if (route && route !== ERR_NO_PATH && typeof route.length === 'number') roomDistance = route.length;
-  } catch (err) {}
-  if (!roomDistance || roomDistance < 1) roomDistance = Game.map.getRoomLinearDistance(homeRoom, remoteRoom) || 1;
-  var inRoomDistance = (typeof req.x === 'number' && typeof req.y === 'number') ? 25 : 50;
-  return Math.max(1, roomDistance * 50 + inRoomDistance);
+  return BeeToolbox.estimateRemoteRequestDistance(homeRoom, req);
 }
 
 function scoreRemoteRequestForCreep(creep, req) {
@@ -220,32 +203,10 @@ function countHomeTruckersOnLocalJobs(homeRoom) {
   return count;
 }
 
-function getMyUsernameForTruckerDispatch() {
-  for (var name in Game.spawns) {
-    if (!Game.spawns.hasOwnProperty(name)) continue;
-    var spawn = Game.spawns[name];
-    if (!spawn || !spawn.owner || !spawn.owner.username) continue;
-    return spawn.owner.username;
-  }
-  return null;
-}
-
 function isRemoteRoomUnsafeForTrucker(remoteRoom) {
   // Trucker remote safety gate mirrors Veinseeker enough to avoid hostile/blocked
   // rooms, but remains local to dispatch so hauling can make its own decisions.
-  if (!remoteRoom) return false;
-  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
-  if (mem.hostile) return true;
-  if (mem.sourceWorkerBlockedUntil && mem.sourceWorkerBlockedUntil > Game.time) return true;
-  if (mem._invaderLock && mem._invaderLock.locked) {
-    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
-    if (lockTick == null || (Game.time - lockTick) <= 1500) return true;
-  }
-  var myName = getMyUsernameForTruckerDispatch();
-  var intel = mem.intel || {};
-  if (intel.owner && (!myName || intel.owner !== myName)) return true;
-  if (intel.reservation && (!myName || intel.reservation !== myName)) return true;
-  return false;
+  return BeeToolbox.isRemoteRoomUnsafe(remoteRoom);
 }
 
 function getLocalDesiredTruckers(localContainerPressure) {

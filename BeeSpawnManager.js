@@ -39,7 +39,7 @@ var QUEUE_RETRY_COOLDOWN  = 5;
 var QUEUE_HARD_LIMIT      = 20;
 var DEBUG_SPAWN_QUEUE     = true;
 var DBG_EVERY             = 5;
-var INVADER_LOCK_TTL      = 1500;
+var INVADER_LOCK_TTL = (CoreConfig.settings && CoreConfig.settings.toolbox && CoreConfig.settings.toolbox.defaultInvaderLockTtl) || 1500;
 var REPLACEMENT_TTL = {
   Veinseeker: 80
 };
@@ -175,9 +175,7 @@ function remoteDefenseSpawningEnabled() {
 }
 
 function ensureRoomMemory(roomName) {
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  return Memory.rooms[roomName];
+  return BeeToolbox.getRoomMemoryBucket(roomName);
 }
 
 function getCheapestCombatRoleEnergy() {
@@ -438,8 +436,8 @@ function getCreepBodyCost(creep) {
     ? creep.memory.bornBodyCost
     : 0;
   var parts = getCreepBodyParts(creep);
-  if (parts.length && spawnLogic && typeof spawnLogic.getBodyCost === 'function') {
-    return spawnLogic.getBodyCost(parts);
+  if (parts.length) {
+    return BeeToolbox.calculateBodyCost(parts);
   }
   return memCost;
 }
@@ -447,8 +445,8 @@ function getCreepBodyCost(creep) {
 function getCreepBodySignature(creep) {
   if (!creep) return '';
   var parts = getCreepBodyParts(creep);
-  if (parts.length && spawnLogic && typeof spawnLogic.getBodySignature === 'function') {
-    return spawnLogic.getBodySignature(parts);
+  if (parts.length) {
+    return BeeToolbox.getBodySignature(parts);
   }
   return creep.memory && creep.memory.bornBodySignature ? creep.memory.bornBodySignature : '';
 }
@@ -957,19 +955,7 @@ function getBuilderNeed(C, room) {
 
 
 function getRouteDistanceBetweenRooms(homeName, remoteName) {
-  if (!homeName || !remoteName) return Infinity;
-  if (homeName === remoteName) return 0;
-
-  var route = null;
-  try {
-    route = Game.map.findRoute(homeName, remoteName);
-  } catch (e) {
-    route = ERR_NO_PATH;
-  }
-
-  if (route === ERR_NO_PATH || !route) return Infinity;
-  if (!Array.isArray(route)) return Infinity;
-  return route.length;
+  return BeeToolbox.getRouteDistanceBetweenRooms(homeName, remoteName);
 }
 
 function countApprovedVeinseekerSourcesForRemote(remoteName) {
@@ -1396,15 +1382,7 @@ function getLocalContainerPressure(roomName) {
 }
 
 function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
-  if (!homeRoom || !remoteRoom) return 9999;
-  var rooms = 0;
-  try {
-    var route = Game.map.findRoute(homeRoom, remoteRoom);
-    if (route && route !== ERR_NO_PATH && typeof route.length === 'number') rooms = route.length;
-  } catch (e) {}
-  if (!rooms || rooms < 1) rooms = Game.map.getRoomLinearDistance(homeRoom, remoteRoom) || 1;
-  var estimatedTravelTicks = rooms * 50 + 100;
-  return estimatedTravelTicks * 2 + 100;
+  return BeeToolbox.estimateRemoteRoundTripTicks(homeRoom, remoteRoom);
 }
 
 function countHomeTruckersByAssignment(roomName) {

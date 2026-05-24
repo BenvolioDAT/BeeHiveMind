@@ -93,7 +93,9 @@ function refreshSourceIntel() {
     // Lightweight source-container refresh used by legacy container assignment
     // helpers. Veinseeker remote container status has its own dedicated Memory path.
     // Keep an eye on source containers so harvesters stay supplied.
-    if (Game.time % 3 !== 0) return;
+    const maintenanceCfg = CoreConfig.settings.maintenance || {};
+    const cadence = maintenanceCfg.sourceContainerRefreshModulo || 3;
+    if (cadence > 1 && Game.time % cadence !== 0) return;
 
     for (const room of Object.values(Game.rooms)) {
         BeeToolbox.logSourceContainersInRoom(room);

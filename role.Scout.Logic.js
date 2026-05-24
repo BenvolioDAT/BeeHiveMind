@@ -21,6 +21,7 @@
 //   those are shared with spawn, remote harvest, and repair systems.
 // -----------------------------------------------------------------------------
 const BeeCombatSquads = require('BeeCombatSquads');
+const BeeToolbox = require('BeeToolbox');
 var CFG = require('role.Scout.Config');
 
 function debugLabel(room, pos, text, color) {
@@ -147,7 +148,7 @@ var STATE_IDLE = 'IDLE'; var STATE_TRAVEL = 'TRAVEL'; var STATE_SCOUT = 'SCOUT';
 function stampVisit(roomName) { if (!roomName) return; if (!Memory.rooms) Memory.rooms = {}; if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {}; var rm = Memory.rooms[roomName]; if (!rm.scout) rm.scout = {}; rm.scout.lastVisited = Game.time; }
 function lastVisited(roomName) { if (!Memory.rooms) return -Infinity; var mr = Memory.rooms[roomName]; var scout = mr && mr.scout; return (scout && typeof scout.lastVisited === 'number') ? scout.lastVisited : -Infinity; }
 function shouldLogIntel(room) { var r = (Memory.rooms && Memory.rooms[room.name]) ? Memory.rooms[room.name] : null; var lastScan = (r && r.intel && r.intel.lastScanAt) ? r.intel.lastScanAt : -Infinity; return (Game.time - lastScan) >= CFG.INTEL_INTERVAL; }
-function getMyUsername(creep) { if (creep && creep.owner && creep.owner.username) return creep.owner.username; for (var name in Game.spawns) { var sp = Game.spawns[name]; if (sp && sp.my && sp.owner && sp.owner.username) return sp.owner.username; } for (var r in Game.rooms) { var rm = Game.rooms[r]; if (rm && rm.controller && rm.controller.my && rm.controller.owner && rm.controller.owner.username) return rm.controller.owner.username; } return null; }
+function getMyUsername(creep) { return (creep && creep.owner && creep.owner.username) || BeeToolbox.myUsername(); }
 function getRoomIntel(roomName) { if (!Memory.rooms) return null; var mr = Memory.rooms[roomName]; return (mr && mr.intel) ? mr.intel : null; }
 function shouldScoutSkipPlayerRoom(roomName, creep) { var intel = getRoomIntel(roomName); if (!intel) return false; var myName = getMyUsername(creep); if (intel.owner && intel.owner !== 'Invader' && intel.owner !== myName) return true; if (intel.reservation && intel.reservation !== 'Invader' && intel.reservation !== myName) return true; return false; }
 function countOpenTilesAroundSource(room, source) {

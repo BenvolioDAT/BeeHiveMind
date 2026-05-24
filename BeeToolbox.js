@@ -26,6 +26,7 @@ var Logger = require('core.logger');
 var CoreConfig = require('core.config');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
+var ToolboxConfig = (CoreConfig.settings && CoreConfig.settings.toolbox) || {};
 
 // This utility file gets touched by nearly every role.  The more we can keep the
 // helpers flat and well-named, the easier it is for a new contributor to spot a
@@ -220,7 +221,7 @@ function _isRemoteRoomUnsafe(roomName, opts) {
   // they are doing separate owner/reservation gates, but live hostile/danger
   // markers still make the room unsafe.
   opts = opts || {};
-  var invaderLockTtl = typeof opts.invaderLockTtl === 'number' ? opts.invaderLockTtl : 1500;
+  var invaderLockTtl = typeof opts.invaderLockTtl === 'number' ? opts.invaderLockTtl : (ToolboxConfig.defaultInvaderLockTtl || 1500);
   var ignoreIntelOwnership = opts.ignoreIntelOwnership === true;
   var room = Game.rooms[roomName];
   if (room) _refreshVisibleRemoteSafety(room);
@@ -229,10 +230,7 @@ function _isRemoteRoomUnsafe(roomName, opts) {
   if (mem.sourceWorkerBlocked || mem.sourceWorkerUnsafe || mem.hostile || mem.hostileRoom) return true;
   if (mem.sourceWorkerBlockedUntil && mem.sourceWorkerBlockedUntil > Game.time) return true;
   if (mem.sourceWorkerInvaderLockUntil && mem.sourceWorkerInvaderLockUntil > Game.time) return true;
-  if (mem._invaderLock && mem._invaderLock.locked) {
-    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
-    if (lockTick == null || (Game.time - lockTick) <= invaderLockTtl) return true;
-  }
+  if (isRoomInvaderLocked(roomName, { ttl: invaderLockTtl })) return true;
   if (mem.threatLevel && mem.threatLevel > 0) return true;
 
   if (!ignoreIntelOwnership) {
@@ -315,6 +313,159 @@ function isSameRemoteSourceContainerRecord(a, b) {
   if (left.containerId && right.containerId && left.containerId === right.containerId) return true;
   if (left.sourceId && right.sourceId && left.sourceId === right.sourceId && left.remoteRoom && right.remoteRoom && left.remoteRoom === right.remoteRoom) return true;
   return false;
+}
+
+function getRouteDistanceBetweenRooms(homeName, remoteName) {
+  if (!homeName || !remoteName) return Infinity;
+  if (homeName === remoteName) return 0;
+  var route = null;
+  try {
+    route = Game.map.findRoute(homeName, remoteName);
+  } catch (e) {
+    route = ERR_NO_PATH;
+  }
+  if (route === ERR_NO_PATH || !route || !Array.isArray(route)) return Infinity;
+  return route.length;
+}
+
+function getRouteDistanceWithLinearFallback(homeName, remoteName) {
+  var routeDistance = getRouteDistanceBetweenRooms(homeName, remoteName);
+  if (isFinite(routeDistance) && routeDistance > 0) return routeDistance;
+  var linear = 1;
+  try {
+    linear = Game.map.getRoomLinearDistance(homeName, remoteName) || 1;
+  } catch (e) {}
+  return Math.max(1, linear);
+}
+
+function estimateRemoteTravelTicks(homeRoom, remoteRoom, inRoomTicks) {
+  if (!homeRoom || !remoteRoom) return 9999;
+  var rooms = getRouteDistanceWithLinearFallback(homeRoom, remoteRoom);
+  var perRoom = ToolboxConfig.remoteTravelTicksPerRoom || 50;
+  var roomTicks = (typeof inRoomTicks === 'number') ? inRoomTicks : (ToolboxConfig.remoteRoundTripRoomBuffer || 100);
+  return Math.max(1, rooms * perRoom + roomTicks);
+}
+
+function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
+  if (!homeRoom || !remoteRoom) return 9999;
+  var oneWay = estimateRemoteTravelTicks(homeRoom, remoteRoom, ToolboxConfig.remoteRoundTripRoomBuffer || 100);
+  return oneWay * 2 + (ToolboxConfig.remoteRoundTripFinalBuffer || 100);
+}
+
+function estimateRemoteRequestDistance(homeRoom, req) {
+  if (!homeRoom || !req) return 9999;
+  var remoteRoom = req.roomName || req.remoteRoom;
+  if (!remoteRoom) return 9999;
+  var knownPos = typeof req.x === 'number' && typeof req.y === 'number';
+  var inRoom = knownPos ? (ToolboxConfig.remoteRequestKnownPosInRoomTicks || 25) : (ToolboxConfig.remoteRequestUnknownPosInRoomTicks || 50);
+  return estimateRemoteTravelTicks(homeRoom, remoteRoom, inRoom);
+}
+
+function isRoomInvaderLocked(roomOrName, opts) {
+  opts = opts || {};
+  var roomName = null;
+  var room = null;
+  if (typeof roomOrName === 'string') {
+    roomName = roomOrName;
+    room = Game.rooms[roomName] || null;
+  } else if (roomOrName && roomOrName.name) {
+    room = roomOrName;
+    roomName = room.name;
+  }
+  if (!roomName) return false;
+
+  var ttl = typeof opts.ttl === 'number' ? opts.ttl : (ToolboxConfig.defaultInvaderLockTtl || 1500);
+  var writeMemory = opts.writeMemory !== false;
+  var existingMem = (Memory.rooms && Memory.rooms[roomName]) || null;
+  var mem = (room && writeMemory) ? _getRoomMemoryBucket(roomName) : (existingMem || {});
+
+  if (room) {
+    var locked = false;
+    try {
+      var cores = room.find(FIND_STRUCTURES, {
+        filter: function (s) { return s.structureType === STRUCTURE_INVADER_CORE; }
+      });
+      if (cores && cores.length > 0) locked = true;
+    } catch (e) {}
+    if (!locked && room.controller && room.controller.reservation &&
+        _norm(room.controller.reservation.username) === 'invader') {
+      locked = true;
+    }
+    if (writeMemory && mem) mem._invaderLock = { locked: locked, t: Game.time };
+    return locked;
+  }
+
+  if (mem && mem._invaderLock && mem._invaderLock.locked) {
+    var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
+    if (lockTick == null || (Game.time - lockTick) <= ttl) return true;
+  }
+  return false;
+}
+
+function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
+  var total = 0;
+  for (var i = 0; i < body.length; i++) {
+    total += BODYPART_COST[body[i]] || 0;
+  }
+  return total;
+}
+
+function countBodyParts(body, part) {
+  if (!body || !body.length) return 0;
+  var count = 0;
+  for (var i = 0; i < body.length; i++) {
+    if (body[i] === part) count++;
+  }
+  return count;
+}
+
+function cloneBody(body) {
+  var out = [];
+  if (!body || !body.length) return out;
+  for (var i = 0; i < body.length; i++) out.push(body[i]);
+  return out;
+}
+
+function getBodySignature(body) {
+  if (!body || !body.length) return '';
+  var parts = [];
+  for (var i = 0; i < body.length; i++) parts.push(String(body[i]));
+  return parts.join('|');
+}
+
+function summarizeBody(body) {
+  var summary = {
+    work: 0,
+    carry: 0,
+    move: 0,
+    attack: 0,
+    ranged_attack: 0,
+    heal: 0,
+    tough: 0,
+    claim: 0,
+    totalParts: 0,
+    text: ''
+  };
+  if (!body || !body.length) return summary;
+
+  for (var i = 0; i < body.length; i++) {
+    var part = String(body[i]);
+    if (Object.prototype.hasOwnProperty.call(summary, part)) summary[part]++;
+    summary.totalParts++;
+  }
+
+  var chunks = [];
+  if (summary.work) chunks.push(summary.work + ' WORK');
+  if (summary.carry) chunks.push(summary.carry + ' CARRY');
+  if (summary.move) chunks.push(summary.move + ' MOVE');
+  if (summary.attack) chunks.push(summary.attack + ' ATTACK');
+  if (summary.ranged_attack) chunks.push(summary.ranged_attack + ' RANGED_ATTACK');
+  if (summary.heal) chunks.push(summary.heal + ' HEAL');
+  if (summary.tough) chunks.push(summary.tough + ' TOUGH');
+  if (summary.claim) chunks.push(summary.claim + ' CLAIM');
+  summary.text = chunks.join(', ');
+  return summary;
 }
 
 function _canEngageTarget(attacker, target) {
@@ -492,7 +643,10 @@ function BeeTravel(creep, target, a3, a4, a5) {
     // Fallback to vanilla moveTo if something odd happens
     if (creep.pos && destination) {
       var rp = (destination.x != null) ? destination : new RoomPosition(destination.x, destination.y, destination.roomName);
-      return creep.moveTo(rp, { reusePath: 20, maxOps: 2000 });
+      return creep.moveTo(rp, {
+        reusePath: ToolboxConfig.travelFallbackReusePath || 20,
+        maxOps: ToolboxConfig.travelFallbackMaxOps || 2000
+      });
     }
   }
 }
@@ -500,7 +654,7 @@ function BeeTravel(creep, target, a3, a4, a5) {
 // Interval (in ticks) before we rescan containers adjacent to sources.
 // Kept small enough to react to construction/destruction, but large enough
 // to avoid expensive FIND_STRUCTURES work every few ticks.
-var SOURCE_CONTAINER_SCAN_INTERVAL = 50;
+var SOURCE_CONTAINER_SCAN_INTERVAL = ToolboxConfig.sourceContainerScanInterval || 50;
 
 // ---------------------------------------------------------------------------
 // ⚡ Energy cache builders (shared by couriers, builders, etc.)
@@ -679,6 +833,16 @@ var BeeToolbox = {
   getRemoteContainerIdentity: function (record) { return getRemoteContainerIdentity(record); },
   isLiveContainerId: function (containerId) { return isLiveContainerId(containerId); },
   isSameRemoteSourceContainerRecord: function (a, b) { return isSameRemoteSourceContainerRecord(a, b); },
+  getRouteDistanceBetweenRooms: getRouteDistanceBetweenRooms,
+  estimateRemoteTravelTicks: estimateRemoteTravelTicks,
+  estimateRemoteRoundTripTicks: estimateRemoteRoundTripTicks,
+  estimateRemoteRequestDistance: estimateRemoteRequestDistance,
+  isRoomInvaderLocked: isRoomInvaderLocked,
+  calculateBodyCost: calculateBodyCost,
+  countBodyParts: countBodyParts,
+  cloneBody: cloneBody,
+  getBodySignature: getBodySignature,
+  summarizeBody: summarizeBody,
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL
@@ -1050,7 +1214,10 @@ var BeeToolbox = {
     // helper: first blocking barrier on the path to "toTarget"
     function firstBarrierOnPath(fromCreep, toTarget) {
       if (!fromCreep || !toTarget || !toTarget.pos) return null;
-      var path = fromCreep.room.findPath(fromCreep.pos, toTarget.pos, { ignoreCreeps: true, maxOps: 1000 });
+      var path = fromCreep.room.findPath(fromCreep.pos, toTarget.pos, {
+        ignoreCreeps: true,
+        maxOps: ToolboxConfig.attackPathMaxOps || 1000
+      });
       for (var i = 0; i < path.length; i++) {
         var step = path[i];
         var structs = fromCreep.room.lookForAt(LOOK_STRUCTURES, step.x, step.y);

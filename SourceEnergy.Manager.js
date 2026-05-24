@@ -90,13 +90,7 @@ function isRemoteUnsafe(remoteName) {
 }
 
 function getMyUsername() {
-  for (var name in Game.spawns) {
-    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
-    var spawn = Game.spawns[name];
-    if (!spawn || !spawn.owner || !spawn.owner.username) continue;
-    return spawn.owner.username;
-  }
-  return null;
+  return BeeToolbox.myUsername();
 }
 
 function getRemoteIntelTick(remoteName) {
@@ -142,12 +136,7 @@ function isLocalOwnedRoomForVeinseeker(homeRoom, roomName) {
 }
 
 function getRouteDistanceBetweenRooms(homeName, remoteName) {
-  if (!homeName || !remoteName) return Infinity;
-  if (homeName === remoteName) return 0;
-  var route = null;
-  try { route = Game.map.findRoute(homeName, remoteName); } catch (e) { route = ERR_NO_PATH; }
-  if (route === ERR_NO_PATH || !route || !Array.isArray(route)) return Infinity;
-  return route.length;
+  return BeeToolbox.getRouteDistanceBetweenRooms(homeName, remoteName);
 }
 
 // --- Diagnostics formatting helpers ----------------------------------------
@@ -168,24 +157,15 @@ function finiteOrNull(value) {
 // These helpers read the existing body config and summarize what the room could
 // spawn. They do not ask BeeSpawnManager to enqueue anything.
 function calculateBodyCost(body) {
-  if (!body || !body.length) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) total += BODYPART_COST[body[i]] || 0;
-  return total;
+  return BeeToolbox.calculateBodyCost(body);
 }
 
 function countBodyParts(body, part) {
-  if (!body || !body.length) return 0;
-  var count = 0;
-  for (var i = 0; i < body.length; i++) if (body[i] === part) count++;
-  return count;
+  return BeeToolbox.countBodyParts(body, part);
 }
 
 function cloneBody(body) {
-  var out = [];
-  if (!body) return out;
-  for (var i = 0; i < body.length; i++) out.push(body[i]);
-  return out;
+  return BeeToolbox.cloneBody(body);
 }
 
 function chooseDiagnosticBody(roleName, energyCapacity, context) {

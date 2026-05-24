@@ -236,10 +236,7 @@ function isRoomUnsafeForRemoteBuild(roomName, homeRoom) {
   if (mem) {
     if (mem.hostile) return true;
     if (typeof mem.sourceWorkerBlockedUntil === 'number' && mem.sourceWorkerBlockedUntil > Game.time) return true;
-    if (mem._invaderLock && mem._invaderLock.locked) {
-      var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
-      if (lockTick == null || (Game.time - lockTick) <= 1500) return true;
-    }
+    if (BeeToolbox.isRoomInvaderLocked(roomName)) return true;
     if (mem.intel) {
       if (mem.intel.owner && (!myName || mem.intel.owner !== myName)) return true;
       if (mem.intel.reservation && (!myName || mem.intel.reservation !== myName)) return true;
