@@ -1,6 +1,7 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
+var HarabiCreep = require('role.HarabiCreep');
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -602,4 +603,4 @@ var CFG = Object.freeze({
     }
   };
 
-module.exports = roleClaimer;
+module.exports = HarabiCreep.wrapModule(roleClaimer, { task: 'claimer' });

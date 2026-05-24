@@ -2,8 +2,6 @@
 
 // Keep the public role import stable for BeeHiveMind.js while logic lives in a dedicated module.
 var RepairLogic = require('role.Repair.Logic');
+var HarabiCreep = require('role.HarabiCreep');
 
-module.exports = {
-  role: 'Repair',
-  run: RepairLogic.run
-};
+module.exports = HarabiCreep.wrapRole('Repair', RepairLogic.run, { task: 'repair' });

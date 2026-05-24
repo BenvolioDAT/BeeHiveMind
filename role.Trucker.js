@@ -1,8 +1,6 @@
 'use strict';
 
 var TruckerLogic = require('role.Trucker.Logic');
+var HarabiCreep = require('role.HarabiCreep');
 
-module.exports = {
-  role: 'Trucker',
-  run: TruckerLogic.run
-};
+module.exports = HarabiCreep.wrapRole('Trucker', TruckerLogic.run, { task: 'haulUnified' });

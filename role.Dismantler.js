@@ -10,6 +10,7 @@
 // Buzz motto: “measure twice, dismantle once.” 🐝
 
 var BeeToolbox = require('BeeToolbox');
+var HarabiCreep = require('role.HarabiCreep');
 
 function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
 function _isInvaderCore(s)   { return !!(s && s.structureType === STRUCTURE_INVADER_CORE); }
@@ -246,4 +247,4 @@ var roleDismantler = {
   }
 };
 
-module.exports = roleDismantler;
+module.exports = HarabiCreep.wrapModule(roleDismantler, { task: 'dismantler' });

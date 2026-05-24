@@ -24,6 +24,7 @@ const BeeActions = require('BeeActions');
 const BeeToolbox = require('BeeToolbox');
 const MovementManager = require('Movement.Manager');
 const QueenConfig = require('role.Queen.Config');
+const HarabiCreep = require('role.HarabiCreep');
 
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
@@ -984,4 +985,4 @@ function getBackupHarvestTask(creep) {
     }
   };
 
-module.exports = roleQueen;
+module.exports = HarabiCreep.wrapModule(roleQueen, { task: 'queen' });

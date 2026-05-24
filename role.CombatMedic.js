@@ -2,8 +2,6 @@
 
 // Keep the public role import stable for BeeHiveMind.js while logic lives in a dedicated module.
 var CombatMedicLogic = require('role.CombatMedic.Logic');
+var HarabiCreep = require('role.HarabiCreep');
 
-module.exports = {
-  role: 'CombatMedic',
-  run: CombatMedicLogic.run
-};
+module.exports = HarabiCreep.wrapRole('CombatMedic', CombatMedicLogic.run, { task: 'combat' });

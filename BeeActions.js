@@ -50,7 +50,9 @@ function handleResult(creep, code, target, range, intentKey, opts) {
   moveOpts.intentType = intentKey;
   moveOpts.range = (range != null) ? range : 1;
 
-  var prio = normalizePriority(intentKey, 0);
+  var prio = (opts && typeof opts.priority === 'number')
+    ? opts.priority
+    : normalizePriority(intentKey, 0);
   MovementManager.request(creep, target, prio, moveOpts);
   return code;
 }

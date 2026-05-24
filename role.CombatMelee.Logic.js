@@ -2,29 +2,12 @@
 
 // CombatMelee behavior implementation only. Public role wiring stays in role.CombatMelee.js.
 var CFG = require('role.CombatMelee.Config');
-var Traveler = require('Traveler');
 var CombatStaging = require('Combat.Staging');
-
-function findClosestHostile(creep) {
-  if (!creep || !creep.room) return null;
-  var hostiles = creep.room.find(FIND_HOSTILE_CREEPS);
-  if (!hostiles || !hostiles.length) return null;
-  return creep.pos.findClosestByRange(hostiles);
-}
-
-function setEngagingMemory(creep, target) {
-  if (!creep || !creep.memory) return;
-  creep.memory.combatStatus = 'engaging';
-  creep.memory.combatTargetId = target ? target.id : null;
-  creep.memory.combatTargetRoom = creep.room ? creep.room.name : null;
-  creep.memory.combatLastSeen = Game.time;
-}
+var HarabiCreep = require('role.HarabiCreep');
 
 function setIdleMemory(creep) {
   if (!creep || !creep.memory) return;
-  creep.memory.combatStatus = 'idle';
-  delete creep.memory.combatTargetId;
-  creep.memory.combatTargetRoom = creep.room ? creep.room.name : null;
+  HarabiCreep.recordCombatMemory(creep, 'idle', null);
 }
 
 function getAssignedTargetRoom(creep) {
@@ -38,15 +21,15 @@ function getAssignedTargetRoom(creep) {
 
 function run(creep) {
   if (!creep) return;
-  var target = findClosestHostile(creep);
+  var target = HarabiCreep.pickCombatTarget(creep);
   if (!target) {
     var remoteRoom = getAssignedTargetRoom(creep);
     // Beginner note: if this creep has a remote assignment and has not reached
     // that room yet, keep marching toward the room center so it can scout/engage.
     if (remoteRoom && creep.room && creep.room.name !== remoteRoom) {
-      creep.memory.combatStatus = 'traveling';
-      creep.memory.combatTargetRoom = remoteRoom;
-      creep.travelTo(new RoomPosition(25, 25, remoteRoom), {
+      HarabiCreep.recordCombatMemory(creep, 'traveling', { pos: new RoomPosition(25, 25, remoteRoom) });
+      HarabiCreep.moveCreep(creep, { pos: new RoomPosition(25, 25, remoteRoom), range: 20 }, {
+        intentType: 'combat',
         range: 20,
         ignoreCreeps: CFG.IGNORE_CREEPS
       });
@@ -56,12 +39,15 @@ function run(creep) {
     CombatStaging.moveToStaging(creep);
     return;
   }
-  setEngagingMemory(creep, target);
+  HarabiCreep.recordCombatMemory(creep, 'engaging', target);
   if (creep.pos.inRangeTo(target, CFG.ATTACK_RANGE)) {
     creep.attack(target);
     return;
   }
-  creep.travelTo(target, { range: CFG.TRAVEL_RANGE, ignoreCreeps: CFG.IGNORE_CREEPS });
+  HarabiCreep.moveCreep(creep, { pos: target.pos, range: CFG.TRAVEL_RANGE }, {
+    intentType: 'combat',
+    ignoreCreeps: CFG.IGNORE_CREEPS
+  });
 }
 
 module.exports = { run: run };
