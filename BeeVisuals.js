@@ -15,7 +15,7 @@
 // ----------------------------- Dependencies ------------------------------
 var Builder = require('role.Builder'); // exposes structurePlacements metadata
 var RepairConfig = require('role.Repair.Config');
-var LunaConfig = require('role.Luna.Config');
+var VeinseekerConfig = require('role.Veinseeker.Config');
 var Logger      = require('core.logger');
 var LOG_LEVEL   = Logger.LOG_LEVEL;
 var CoreConfig = require('core.config');
@@ -283,19 +283,17 @@ BeeVisuals.drawEnergyBar = function () {
 
 // Teach-by-example constants live at module scope so they are easy to tweak.
 var WORKER_MAX_TASKS = {
-  BaseHarvest: 2, Builder: 1, Upgrader: 1, Repair: 0,
-  Luna: null, Trucker: null, Scout: 1, Queen: 2,
+  Veinseeker: null, Builder: 1, Upgrader: 1, Repair: 0,
+  Trucker: null, Scout: 1, Queen: 2,
   CombatArcher: 0, CombatMelee: 0, CombatMedic: 0,
   Dismantler: 0, Claimer: 2
 };
 
 var WORKER_ROLE_ALIAS = {
-  baseharvest: 'BaseHarvest',
+  veinseeker: 'Veinseeker',
   builder: 'Builder',
   upgrader: 'Upgrader',
   repair: 'Repair',
-  luna: 'Luna',
-  remoteharvest: 'Luna',
   trucker: 'Trucker',
   haulremote: 'Trucker',
   scout: 'Scout',
@@ -336,8 +334,8 @@ function collectWorkerStats(room) {
     var quotaValue = null;
     if (quotaMap && Object.prototype.hasOwnProperty.call(quotaMap, key)) {
       quotaValue = quotaMap[key];
-    } else if (quotaMap && key === 'BaseHarvest' && Object.prototype.hasOwnProperty.call(quotaMap, 'Baseharvest')) {
-      quotaValue = quotaMap.Baseharvest;
+    } else if (quotaMap && key === 'Veinseeker' && Object.prototype.hasOwnProperty.call(quotaMap, 'Veinseeker')) {
+      quotaValue = quotaMap.Veinseeker;
     } else {
       quotaValue = WORKER_MAX_TASKS[key];
     }
@@ -435,8 +433,8 @@ BeeVisuals.drawWorkerBeeTaskTable = function () {
     var roleQuota = null;
     if (stats.quotas && Object.prototype.hasOwnProperty.call(stats.quotas, k)) {
       roleQuota = stats.quotas[k];
-    } else if (stats.quotas && k === 'BaseHarvest' && Object.prototype.hasOwnProperty.call(stats.quotas, 'Baseharvest')) {
-      roleQuota = stats.quotas.Baseharvest;
+    } else if (stats.quotas && k === 'Veinseeker' && Object.prototype.hasOwnProperty.call(stats.quotas, 'Veinseeker')) {
+      roleQuota = stats.quotas.Veinseeker;
     } else {
       roleQuota = WORKER_MAX_TASKS[k];
     }
@@ -652,9 +650,9 @@ function getRemoteSourcePosition(sourceRecord) {
   return null;
 }
 
-function sourceHasLiveAssignedLuna(sourceRecord) {
-  if (!sourceRecord || !sourceRecord.assignedLuna) return false;
-  return !!Game.creeps[sourceRecord.assignedLuna];
+function sourceHasLiveAssignedVeinseeker(sourceRecord) {
+  if (!sourceRecord || !sourceRecord.assignedVeinseeker) return false;
+  return !!Game.creeps[sourceRecord.assignedVeinseeker];
 }
 
 function drawMapText(mapVisual, label, pos, color, bg) {
@@ -731,7 +729,7 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
 
       var role = creep.memory.role;
       var task = String(creep.memory.task || '').toLowerCase();
-      if (role === 'Luna' || task === 'luna') {
+      if (role === 'Veinseeker' || task === 'veinseeker') {
         drawMapText(mv, '⛏', creep.pos, '#ffe066', '#111111');
         creepsDrawn++;
         continue;
@@ -744,7 +742,7 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
   }
 
   if (vc.remoteMiningMapShowSources !== false) {
-    var homes = Memory && Memory.__BHM && Memory.__BHM.remoteHarvest && Memory.__BHM.remoteHarvest.homes;
+    var homes = Memory && Memory.__BHM && Memory.__BHM.sourceEnergy && Memory.__BHM.sourceEnergy.homes;
     if (homes) {
       var seenRemoteRooms = {};
       for (var homeName in homes) {
@@ -790,7 +788,7 @@ BeeVisuals.drawRemoteMiningMapVisuals = function () {
 
           var label = '⚠';
           var color = '#ff6b6b';
-          if (sourceHasLiveAssignedLuna(rec)) {
+          if (sourceHasLiveAssignedVeinseeker(rec)) {
             label = '✓';
             color = '#6effa1';
           } else if (rec.status === 'queued' || (rec.reservedUntil && rec.reservedUntil > Game.time)) {
@@ -981,7 +979,7 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
 
       var assigned = !!(req.assignedTo && req.assignedUntil > Game.time);
       var emergencyRepairStartPct = RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40;
-      var lunaRepairStartPct = LunaConfig.remoteContainerRepairStartPct || 0.50;
+      var veinseekerRepairStartPct = VeinseekerConfig.remoteContainerRepairStartPct || 0.50;
       var maintenanceUntil = Number(req.maintenanceUntil) || 0;
       var maintenanceReason = req.maintenanceReason || null;
       var hitsPct = Number(req.containerHitsPct);
@@ -990,10 +988,10 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       if (maintenanceReason === 'emergencyRemoteRepair' && maintenanceUntil > Game.time) {
         status = 'REPAIRING';
       } else if (maintenanceReason === 'containerRepair' && maintenanceUntil > Game.time) {
-        status = 'LUNA FIX';
+        status = 'VEINSEEKER FIX';
       } else if (hitsPct != null && hitsPct <= emergencyRepairStartPct) {
         status = 'CRITICAL';
-      } else if (hitsPct != null && hitsPct <= lunaRepairStartPct) {
+      } else if (hitsPct != null && hitsPct <= veinseekerRepairStartPct) {
         status = 'LOW HP';
       }
       if (req.status === 'missing') status = 'MISSING';
@@ -1078,11 +1076,11 @@ BeeVisuals.drawRemoteHaulStatusTable = function () {
       var statusColor = '#00ff66';
       if (line.status === 'URGENT') statusColor = '#ff8c42';
       if (line.status === 'STALE' || line.status === 'CRITICAL' || line.status === 'EMERGENCY') statusColor = '#ff5555';
-      if (line.status === 'LOW HP' || line.status === 'LUNA FIX') statusColor = '#ffd166';
+      if (line.status === 'LOW HP' || line.status === 'VEINSEEKER FIX') statusColor = '#ffd166';
       if (line.status === 'NEEDS VISION') statusColor = '#f7c948';
       if (line.status === 'MISSING') statusColor = '#ff4d6d';
       if (line.status === 'REPAIRING') statusColor = '#4dd0e1';
-      if (line.assigned && line.status !== 'EMERGENCY' && line.status !== 'CRITICAL' && line.status !== 'STALE' && line.status !== 'LUNA FIX' && line.status !== 'LOW HP' && line.status !== 'URGENT' && line.status !== 'READY') statusColor = '#66ccff';
+      if (line.assigned && line.status !== 'EMERGENCY' && line.status !== 'CRITICAL' && line.status !== 'STALE' && line.status !== 'VEINSEEKER FIX' && line.status !== 'LOW HP' && line.status !== 'URGENT' && line.status !== 'READY') statusColor = '#66ccff';
 
       text(v, line.roomName, panelX, y, 0.42, 'left', 1, '#ffffff');
       text(v, String(line.energy), panelX + 3.9, y, 0.42, 'left', 1, '#ffffff');
@@ -1137,8 +1135,8 @@ BeeVisuals.drawRemoteContainerBuildStatusTable = function () {
     else if (status === 'built') statusText = 'DONE';
     else if (status === 'blocked') statusText = 'BLOCK';
 
-    var luna = '-';
-    if (rec.assignedLuna && Game.creeps[rec.assignedLuna]) luna = rec.assignedLuna;
+    var veinseeker = '-';
+    if (rec.assignedVeinseeker && Game.creeps[rec.assignedVeinseeker]) veinseeker = rec.assignedVeinseeker;
 
     var shortSource = sourceId ? String(sourceId).slice(-6) : '------';
     var remoteRoom = rec.remoteRoom || rec.roomName || '?';
@@ -1154,7 +1152,7 @@ BeeVisuals.drawRemoteContainerBuildStatusTable = function () {
       remoteRoom: remoteRoom,
       sourceShort: shortSource,
       statusText: statusText,
-      luna: luna,
+      veinseeker: veinseeker,
       stale: stale,
       pri: pri,
       updated: updated
@@ -1196,7 +1194,7 @@ BeeVisuals.drawRemoteContainerBuildStatusTable = function () {
     for (var i = 0; i < shownRows.length; i++) {
       var line = shownRows[i];
       var lineY = y + rowH * (1 + i);
-      var rowTxt = line.remoteRoom + '  ' + line.sourceShort + '  ' + line.statusText + '  ' + line.luna + (line.stale ? ' !' : '');
+      var rowTxt = line.remoteRoom + '  ' + line.sourceShort + '  ' + line.statusText + '  ' + line.veinseeker + (line.stale ? ' !' : '');
       text(v, rowTxt, leftX + 0.25, lineY, 0.43, 'left', 1, line.stale ? '#ffd166' : '#ffffff');
     }
 
@@ -1249,7 +1247,7 @@ BeeVisuals.drawRemoteContainerBuildVisuals = function () {
       drawBar(v, rec.x + 0.75, rec.y - 0.2, 4.2, 0.25, pct, '#2ad1c9', '#222222');
     }
 
-    var assigned = rec.assignedLuna;
+    var assigned = rec.assignedVeinseeker;
     if (assigned && Game.creeps[assigned]) {
       text(v, assigned, rec.x + 0.75, rec.y + 0.45, 0.38, 'left', 1, '#66ccff');
     }

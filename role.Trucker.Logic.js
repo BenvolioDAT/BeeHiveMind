@@ -11,7 +11,7 @@
 // * Memory.__BHM.truckerDispatch.lastRun diagnostic fields for the latest
 //   execution pass.
 // Reads/writes:
-// * Memory.__BHM.remoteHaulRequests records produced by Luna remote containers.
+// * Memory.__BHM.remoteHaulRequests records produced by Veinseeker remote containers.
 // * role.EnergyHandoff request memory when handing energy to worker creeps.
 // Usually called by:
 // * BeeHiveMind.runCreeps() through role.Trucker.js.
@@ -380,6 +380,7 @@ function clearRemoteRequestAssignment(creep) {
     requests[id].assignedUntil = 0;
   }
   delete creep.memory.requestId; delete creep.memory.containerId; delete creep.memory.sourceId;
+  delete creep.memory.targetType; delete creep.memory.targetId; delete creep.memory.resourceId;
   delete creep.memory.requestRoom; delete creep.memory.requestX; delete creep.memory.requestY; delete creep.memory.targetRoom;
 }
 
@@ -433,7 +434,12 @@ function claimRemoteRequestForJob(creep, job) { /* unchanged */
   if (!req) return null;
   if (isRemoteRequestReservedByOther(req, creep.name)) return null;
   req.assignedTo = creep.name; req.assignedUntil = Game.time + CFG.RESERVATION_TTL;
-  creep.memory.requestId = job.requestId; creep.memory.containerId = req.containerId || job.containerId; creep.memory.sourceId = req.sourceId || job.sourceId;
+  creep.memory.requestId = job.requestId;
+  creep.memory.targetType = req.targetType || job.targetType || 'container';
+  creep.memory.targetId = req.targetId || job.targetId || req.resourceId || job.resourceId || req.containerId || job.containerId || null;
+  creep.memory.resourceId = req.resourceId || job.resourceId || null;
+  creep.memory.containerId = req.containerId || job.containerId;
+  creep.memory.sourceId = req.sourceId || job.sourceId;
   creep.memory.requestRoom = req.roomName || req.remoteRoom || job.roomName || null;
   creep.memory.requestX = (typeof req.x === 'number') ? req.x : job.x; creep.memory.requestY = (typeof req.y === 'number') ? req.y : job.y;
   creep.memory.targetRoom = creep.memory.requestRoom;
@@ -476,6 +482,18 @@ function getLargestEnergyTombstoneNear(pos, range) {
   return best;
 }
 
+function getLargestEnergyRuinNear(pos, range) {
+  if (!pos || !Game.rooms[pos.roomName] || typeof FIND_RUINS === 'undefined') return null;
+  var ruins = pos.findInRange(FIND_RUINS, range || 1, {
+    filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] || 0) > 0; }
+  });
+  var best = null;
+  for (var i = 0; i < ruins.length; i++) {
+    if (!best || (ruins[i].store[RESOURCE_ENERGY] || 0) > (best.store[RESOURCE_ENERGY] || 0)) best = ruins[i];
+  }
+  return best;
+}
+
 function findRemoteLooseEnergy(creep, req, source, container) {
   var anchors = [];
   if (source && source.pos) anchors.push({ pos: source.pos, range: 3 });
@@ -494,6 +512,10 @@ function findRemoteLooseEnergy(creep, req, source, container) {
     var tombstone = getLargestEnergyTombstoneNear(anchor.pos, anchor.range);
     if (tombstone && (!bestTombstone || (tombstone.store[RESOURCE_ENERGY] || 0) > (bestTombstone.store[RESOURCE_ENERGY] || 0))) {
       bestTombstone = tombstone;
+    }
+    var ruin = getLargestEnergyRuinNear(anchor.pos, anchor.range);
+    if (ruin && (!bestTombstone || (ruin.store[RESOURCE_ENERGY] || 0) > (bestTombstone.store[RESOURCE_ENERGY] || 0))) {
+      bestTombstone = ruin;
     }
   }
   return bestDrop || bestTombstone;
@@ -519,7 +541,7 @@ function collectEnergyTarget(creep, target) {
 function findLocalCollectTarget(creep) {
   var room = creep.room;
   BeeSourceEconomy.refreshOwnedRoomSources(room);
-  BeeSourceEconomy.refreshBaseHarvestStats(room);
+  BeeSourceEconomy.refreshVeinseekerStats(room);
   BeeSourceEconomy.refreshTruckerCarryStats(room);
   BeeSourceEconomy.calculatePendingEnergy(room);
   var pick = BeeSourceEconomy.getBestPickupSource(room, creep);
@@ -661,18 +683,28 @@ function runLocal(creep, job, diag) {
   diag.lastDeliveryResult = 'code_' + tr;
 }
 
-function runRemote(creep, job) { /* same with release on completion handled in run */
-  // Remote pickup mode claims a Luna-produced haul request, travels to the
-  // container, withdraws energy, and leaves return/delivery to REMOTE_RETURN.
+function runRemote(creep, job) {
+  // Remote pickup mode claims a Veinseeker-produced haul request, services the
+  // requested target type, and leaves return/delivery to REMOTE_RETURN.
   var req = claimRemoteRequestForJob(creep, job);
   if (!req) { clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; return; }
   if (!isActiveRemoteRequest(req, creep.memory.home)) {
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) { creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home }; return; }
     clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; return;
   }
-  var container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
+  var targetType = creep.memory.targetType || req.targetType || job.targetType || 'container';
+  var targetId = creep.memory.targetId || req.targetId || req.resourceId || creep.memory.containerId || null;
+  var directTarget = targetId ? Game.getObjectById(targetId) : null;
+  var container = targetType === 'container' && creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
   var source = creep.memory.sourceId ? Game.getObjectById(creep.memory.sourceId) : null;
   if (source) drawHaulIntent(creep, source, '#4deeea');
+  if (directTarget) {
+    var directResult = collectEnergyTarget(creep, directTarget);
+    if (directResult === ERR_NOT_ENOUGH_RESOURCES && creep.store.getUsedCapacity(RESOURCE_ENERGY) <= 0) {
+      clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob;
+    }
+    return;
+  }
   if (!container) {
     var loose = findRemoteLooseEnergy(creep, req, source, null);
     if (loose) {

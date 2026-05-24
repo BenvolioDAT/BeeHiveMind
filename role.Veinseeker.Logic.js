@@ -1,9 +1,9 @@
 'use strict';
 
 // -----------------------------------------------------------------------------
-// role.Luna.Logic.js - remote miner/forager behavior
+// role.Veinseeker.Logic.js - remote miner/forager behavior
 // Owns:
-// * Live Luna creep memory: role/task/home/sourceId/targetRoom/assigned,
+// * Live Veinseeker creep memory: role/task/home/sourceId/targetRoom/assigned,
 //   assignedContainer/containerId, seat coordinates, repair state, and movement
 //   breadcrumbs such as _stuck/_retargetAt/_forceYield.
 // * Legacy Memory.remoteAssignments same-tick/live ownership records.
@@ -12,12 +12,12 @@
 //   Memory.__BHM.remoteContainerBuilds,
 //   Memory.__BHM.remoteHaulRequests.
 // Reads:
-// * RemoteHarvest.Manager's Memory.__BHM.remoteHarvest plan for queue/live
+// * SourceEnergy.Manager's Memory.__BHM.sourceEnergy plan for queue/live
 //   source ownership, plus Memory.rooms[remote].sources/intel safety fields.
 // Usually called by:
-// * BeeHiveMind.runCreeps() through role.Luna.js.
+// * BeeHiveMind.runCreeps() through role.Veinseeker.js.
 // Systems that depend on it:
-// * BeeSpawnManager uses the source/build state to decide replacement Luna
+// * BeeSpawnManager uses the source/build state to decide replacement Veinseeker
 //   quotas; Trucker.Dispatcher consumes remoteHaulRequests; Repair consumes
 //   remoteContainerStatus for emergency repair work.
 // Do not casually change:
@@ -27,8 +27,9 @@
 const BeeToolbox = require('BeeToolbox');
 const BeeCombatSquads = require('BeeCombatSquads');
 const MovementManager = require('Movement.Manager');
-var CFG = require('role.Luna.Config');
-var RemoteHarvestManager = require('RemoteHarvest.Manager');
+var CFG = require('role.Veinseeker.Config');
+var SourceEnergyManager = require('SourceEnergy.Manager');
+var VeinseekerManager = require('Veinseeker.Manager');
 
 var REMOTE_DEFENSE_MAX_DISTANCE = CFG.REMOTE_DEFENSE_MAX_DISTANCE;
 var THREAT_DECAY_TICKS_COPY = CFG.THREAT_DECAY_TICKS_COPY;
@@ -36,14 +37,14 @@ var REMOTE_RADIUS = CFG.REMOTE_RADIUS;
 var MAX_PF_OPS = CFG.MAX_PF_OPS;
 var PLAIN_COST = CFG.PLAIN_COST;
 var SWAMP_COST = CFG.SWAMP_COST;
-var MAX_LUNA_PER_SOURCE = CFG.MAX_LUNA_PER_SOURCE;
-var ALLOW_MULTI_LUNA_PER_SOURCE = CFG.ALLOW_MULTI_LUNA_PER_SOURCE !== false;
-var MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA = CFG.MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA || 2;
+var MAX_VEINSEEKER_PER_SOURCE = CFG.MAX_VEINSEEKER_PER_SOURCE;
+var ALLOW_MULTI_VEINSEEKER_PER_SOURCE = CFG.ALLOW_MULTI_VEINSEEKER_PER_SOURCE !== false;
+var MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER = CFG.MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER || 2;
 var PREFER_EMPTY_SOURCES_BEFORE_STACKING = CFG.PREFER_EMPTY_SOURCES_BEFORE_STACKING !== false;
-var LUNA_SECONDARY_SOURCE_SCORE_PENALTY = CFG.LUNA_SECONDARY_SOURCE_SCORE_PENALTY || 150;
-var LUNA_FIRST_OPEN_BONUS = (typeof CFG.LUNA_FIRST_OPEN_BONUS === 'number') ? CFG.LUNA_FIRST_OPEN_BONUS : -120;
-var LUNA_UNDERHARVEST_ENERGY_THRESHOLD = CFG.LUNA_UNDERHARVEST_ENERGY_THRESHOLD || 800;
-var LUNA_RESERVED_SOURCE_SECOND_MIN_WORK = CFG.LUNA_RESERVED_SOURCE_SECOND_MIN_WORK || 4;
+var VEINSEEKER_SECONDARY_SOURCE_SCORE_PENALTY = CFG.VEINSEEKER_SECONDARY_SOURCE_SCORE_PENALTY || 150;
+var VEINSEEKER_FIRST_OPEN_BONUS = (typeof CFG.VEINSEEKER_FIRST_OPEN_BONUS === 'number') ? CFG.VEINSEEKER_FIRST_OPEN_BONUS : -120;
+var VEINSEEKER_UNDERHARVEST_ENERGY_THRESHOLD = CFG.VEINSEEKER_UNDERHARVEST_ENERGY_THRESHOLD || 800;
+var VEINSEEKER_RESERVED_SOURCE_SECOND_MIN_WORK = CFG.VEINSEEKER_RESERVED_SOURCE_SECOND_MIN_WORK || 4;
 var PF_CACHE_TTL = CFG.PF_CACHE_TTL;
 var INVADER_LOCK_MEMO_TTL = CFG.INVADER_LOCK_MEMO_TTL;
 var UNSAFE_ROOM_TTL = CFG.UNSAFE_ROOM_TTL;
@@ -53,19 +54,19 @@ var ASSIGN_STICKY_TTL = CFG.ASSIGN_STICKY_TTL;
 var STUCK_WINDOW = CFG.STUCK_WINDOW;
 var FLAG_PRUNE_PERIOD = CFG.FLAG_PRUNE_PERIOD;
 var FLAG_RETENTION_TTL = CFG.FLAG_RETENTION_TTL;
-var LUNA_BLOCKED_SOURCE_TTL = CFG.LUNA_BLOCKED_SOURCE_TTL || 10000;
-var LUNA_BLOCKED_ROOM_TTL = CFG.LUNA_BLOCKED_ROOM_TTL || 10000;
-var LUNA_REJECT_INACCESSIBLE_SOURCES = CFG.LUNA_REJECT_INACCESSIBLE_SOURCES !== false;
-var LUNA_INACCESSIBLE_BLOCK_TTL = CFG.LUNA_INACCESSIBLE_BLOCK_TTL || LUNA_BLOCKED_SOURCE_TTL;
-var LUNA_PATH_FAIL_LIMIT = CFG.LUNA_PATH_FAIL_LIMIT || 3;
-var LUNA_STUCK_SOURCE_BLOCK_TICKS = CFG.LUNA_STUCK_SOURCE_BLOCK_TICKS || 8;
-var LUNA_STUCK_SOURCE_BLOCK_TTL = CFG.LUNA_STUCK_SOURCE_BLOCK_TTL || 250;
-var LUNA_REMOTE_INTEL_TTL = CFG.LUNA_REMOTE_INTEL_TTL || 3000;
+var VEINSEEKER_BLOCKED_SOURCE_TTL = CFG.VEINSEEKER_BLOCKED_SOURCE_TTL || 10000;
+var VEINSEEKER_BLOCKED_ROOM_TTL = CFG.VEINSEEKER_BLOCKED_ROOM_TTL || 10000;
+var VEINSEEKER_REJECT_INACCESSIBLE_SOURCES = CFG.VEINSEEKER_REJECT_INACCESSIBLE_SOURCES !== false;
+var VEINSEEKER_INACCESSIBLE_BLOCK_TTL = CFG.VEINSEEKER_INACCESSIBLE_BLOCK_TTL || VEINSEEKER_BLOCKED_SOURCE_TTL;
+var VEINSEEKER_PATH_FAIL_LIMIT = CFG.VEINSEEKER_PATH_FAIL_LIMIT || 3;
+var VEINSEEKER_STUCK_SOURCE_BLOCK_TICKS = CFG.VEINSEEKER_STUCK_SOURCE_BLOCK_TICKS || 8;
+var VEINSEEKER_STUCK_SOURCE_BLOCK_TTL = CFG.VEINSEEKER_STUCK_SOURCE_BLOCK_TTL || 250;
+var VEINSEEKER_REMOTE_INTEL_TTL = CFG.VEINSEEKER_REMOTE_INTEL_TTL || 3000;
 
 // =========================
 // Debug helpers
 // =========================
-// BeeToolbox owns the repeated debug say/line plumbing. Luna keeps debugRing
+// BeeToolbox owns the repeated debug say/line plumbing. Veinseeker keeps debugRing
 // role-local because its ring radius/default stroke/RoomVisual width differ
 // from the generic helper and those visuals are useful while tracing remotes.
 function debugOptions() {
@@ -278,7 +279,7 @@ function ensureRemoteDefensePlan(room, threatBundle, distance) {
   bucket.requestedAt = Game.time;
   var intel = ensureCombatIntelMemory();
   if (intel && intel.bindings) {
-    intel.bindings[flagName] = { flagName: flagName, target: serialized, targetId: bucket.targetId, source: 'Luna' };
+    intel.bindings[flagName] = { flagName: flagName, target: serialized, targetId: bucket.targetId, source: 'Veinseeker' };
   }
   Memory.squads[flagName] = bucket;
 }
@@ -316,68 +317,68 @@ function softenRemoteDefensePlan(roomName) {
     rm.sources = rm.sources || {};
     return (rm.sources[sid] = (rm.sources[sid] || {}));
   }
-  function shouldLogLunaBlock(key, interval) {
+  function shouldLogVeinseekerBlock(key, interval) {
     var step = interval || 250;
     if (!Memory.__BHM) Memory.__BHM = {};
-    if (!Memory.__BHM.lunaBlockLog) Memory.__BHM.lunaBlockLog = {};
-    var last = Memory.__BHM.lunaBlockLog[key] || 0;
+    if (!Memory.__BHM.sourceWorkerBlockLog) Memory.__BHM.sourceWorkerBlockLog = {};
+    var last = Memory.__BHM.sourceWorkerBlockLog[key] || 0;
     if ((Game.time - last) < step) return false;
-    Memory.__BHM.lunaBlockLog[key] = Game.time;
+    Memory.__BHM.sourceWorkerBlockLog[key] = Game.time;
     return true;
   }
-  function clearExpiredLunaSourceBlock(roomName, sourceId) {
+  function clearExpiredVeinseekerSourceBlock(roomName, sourceId) {
     if (!roomName || !sourceId) return;
     var srec = getSourceMemory(roomName, sourceId);
-    if (srec && srec.lunaBlockedUntil && srec.lunaBlockedUntil <= Game.time) {
-      delete srec.lunaBlockedUntil; delete srec.lunaBlockedReason;
+    if (srec && srec.sourceWorkerBlockedUntil && srec.sourceWorkerBlockedUntil <= Game.time) {
+      delete srec.sourceWorkerBlockedUntil; delete srec.sourceWorkerBlockedReason;
     }
   }
-  function isLunaSourceBlocked(roomName, sourceId) {
+  function isVeinseekerSourceBlocked(roomName, sourceId) {
     if (!roomName || !sourceId) return false;
-    clearExpiredLunaSourceBlock(roomName, sourceId);
+    clearExpiredVeinseekerSourceBlock(roomName, sourceId);
     var srec = getSourceMemory(roomName, sourceId);
-    return !!(srec && srec.lunaBlockedUntil && srec.lunaBlockedUntil > Game.time);
+    return !!(srec && srec.sourceWorkerBlockedUntil && srec.sourceWorkerBlockedUntil > Game.time);
   }
-  function markLunaSourceBlocked(roomName, sourceId, reason, ttl) {
+  function markVeinseekerSourceBlocked(roomName, sourceId, reason, ttl) {
     if (!roomName || !sourceId) return;
-    var until = Game.time + Math.max(1, ttl || LUNA_BLOCKED_SOURCE_TTL);
+    var until = Game.time + Math.max(1, ttl || VEINSEEKER_BLOCKED_SOURCE_TTL);
     var srec = getSourceMemory(roomName, sourceId);
-    srec.lunaBlockedUntil = until;
-    srec.lunaBlockedReason = reason || 'blocked-source';
+    srec.sourceWorkerBlockedUntil = until;
+    srec.sourceWorkerBlockedReason = reason || 'blocked-source';
     var rm = getRoomMemoryBucket(roomName);
-    rm.lastLunaBlock = { tick: Game.time, type: 'source', sourceId: sourceId, reason: srec.lunaBlockedReason, until: until };
-    if (shouldLogLunaBlock('src:' + roomName + ':' + sourceId, 250)) {
-      console.log('🚫 Luna source blocked ' + roomName + ' ' + sourceId.slice(-6) + ' reason=' + srec.lunaBlockedReason + ' until=' + until);
+    rm.lastSourceWorkerBlock = { tick: Game.time, type: 'source', sourceId: sourceId, reason: srec.sourceWorkerBlockedReason, until: until };
+    if (shouldLogVeinseekerBlock('src:' + roomName + ':' + sourceId, 250)) {
+      console.log('🚫 Veinseeker source blocked ' + roomName + ' ' + sourceId.slice(-6) + ' reason=' + srec.sourceWorkerBlockedReason + ' until=' + until);
     }
   }
-  function markLunaRoomBlocked(roomName, reason, ttl) {
+  function markVeinseekerRoomBlocked(roomName, reason, ttl) {
     if (!roomName) return;
     var rm = getRoomMemoryBucket(roomName);
-    rm.lunaBlockedUntil = Game.time + Math.max(1, ttl || LUNA_BLOCKED_ROOM_TTL);
-    rm.lunaBlockedReason = reason || 'blocked-room';
-    rm.lastLunaBlock = { tick: Game.time, type: 'room', reason: rm.lunaBlockedReason, until: rm.lunaBlockedUntil };
-    if (shouldLogLunaBlock('room:' + roomName, 250)) {
-      console.log('🚫 Luna room blocked ' + roomName + ' reason=' + rm.lunaBlockedReason + ' until=' + rm.lunaBlockedUntil);
+    rm.sourceWorkerBlockedUntil = Game.time + Math.max(1, ttl || VEINSEEKER_BLOCKED_ROOM_TTL);
+    rm.sourceWorkerBlockedReason = reason || 'blocked-room';
+    rm.lastSourceWorkerBlock = { tick: Game.time, type: 'room', reason: rm.sourceWorkerBlockedReason, until: rm.sourceWorkerBlockedUntil };
+    if (shouldLogVeinseekerBlock('room:' + roomName, 250)) {
+      console.log('🚫 Veinseeker room blocked ' + roomName + ' reason=' + rm.sourceWorkerBlockedReason + ' until=' + rm.sourceWorkerBlockedUntil);
     }
   }
-function recordLunaPathFailure(creep, sourceId, reason) {
+function recordVeinseekerPathFailure(creep, sourceId, reason) {
     if (!creep || !creep.memory) return 0;
     var sid = sourceId || creep.memory.sourceId;
     var roomName = creep.memory.targetRoom || creep.pos.roomName;
     if (creep.memory._pathFailSid !== sid) creep.memory._pathFailCount = 0;
     creep.memory._pathFailSid = sid;
     creep.memory._pathFailCount = (creep.memory._pathFailCount || 0) + 1;
-    if (shouldLogLunaBlock('fail:' + creep.name + ':' + sid, 250)) {
-      console.log('⚠️ Luna path fail ' + creep.name + ' sid=' + (sid ? sid.slice(-6) : 'none') + ' count=' + creep.memory._pathFailCount + ' reason=' + reason);
+    if (shouldLogVeinseekerBlock('fail:' + creep.name + ':' + sid, 250)) {
+      console.log('⚠️ Veinseeker path fail ' + creep.name + ' sid=' + (sid ? sid.slice(-6) : 'none') + ' count=' + creep.memory._pathFailCount + ' reason=' + reason);
     }
-    if (creep.memory._pathFailCount >= LUNA_PATH_FAIL_LIMIT && sid && roomName) {
-      markLunaSourceBlocked(roomName, sid, reason || 'path-fail', LUNA_BLOCKED_SOURCE_TTL);
-      if (creep.pos.roomName !== roomName) markLunaRoomBlocked(roomName, 'path-to-room-failed', LUNA_BLOCKED_ROOM_TTL);
+    if (creep.memory._pathFailCount >= VEINSEEKER_PATH_FAIL_LIMIT && sid && roomName) {
+      markVeinseekerSourceBlocked(roomName, sid, reason || 'path-fail', VEINSEEKER_BLOCKED_SOURCE_TTL);
+      if (creep.pos.roomName !== roomName) markVeinseekerRoomBlocked(roomName, 'path-to-room-failed', VEINSEEKER_BLOCKED_ROOM_TTL);
       releaseAssignment(creep);
     }
   return creep.memory._pathFailCount;
 }
-function clearLunaPathFailure(creep, sourceId) {
+function clearVeinseekerPathFailure(creep, sourceId) {
   if (!creep || !creep.memory) return;
   var sid = sourceId || creep.memory.sourceId;
   if (!sid) return;
@@ -385,7 +386,7 @@ function clearLunaPathFailure(creep, sourceId) {
     creep.memory._pathFailCount = 0;
   }
 }
-function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
+function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
   if (!creep || !target) return ERR_INVALID_TARGET;
   var travelOpts = {};
   var k;
@@ -397,11 +398,11 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   travelOpts.returnData = returnData;
   var rc = creep.travelTo(target, travelOpts);
   if (rc === ERR_NO_PATH) {
-    recordLunaPathFailure(creep, sourceId, failReason || 'no-path');
+    recordVeinseekerPathFailure(creep, sourceId, failReason || 'no-path');
     return rc;
   }
   if (returnData.pathfinderReturn && returnData.pathfinderReturn.incomplete && creep.memory && creep.memory._stuck >= STUCK_WINDOW) {
-    recordLunaPathFailure(creep, sourceId, (failReason || 'path') + '-incomplete');
+    recordVeinseekerPathFailure(creep, sourceId, (failReason || 'path') + '-incomplete');
   }
   return rc;
 }
@@ -523,7 +524,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   // Shared reservation table for remote mining seat claims (cleared each tick).
   function getClaimTable(){
     // Same-tick contention guard. This table resets every tick and prevents two
-    // Luna creeps from selecting the same source in the same decision pass.
+    // Veinseeker creeps from selecting the same source in the same decision pass.
     var sc=Memory._sourceClaim;
     if(!sc||sc.t!==Game.time){ Memory._sourceClaim={t:Game.time,m:{}}; }
     return Memory._sourceClaim.m;
@@ -542,7 +543,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   // Normalises a mining assignment entry so later logic can rely on keys existing.
   function ensureMiningAssignment(entry, roomName){
     // Legacy saves used a plain number here. Newer code uses a richer record
-    // with owner/owners/maxSlots so multi-Luna source ownership can be audited.
+    // with owner/owners/maxSlots so multi-Veinseeker source ownership can be audited.
     if (!entry || typeof entry !== 'object') entry = { count: 0, owner: null, roomName: roomName||null, since: null };
     if (typeof entry.count !== 'number') entry.count = 0;
     if (!('owner' in entry)) entry.owner = null;
@@ -552,7 +553,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
       if (entry.owner) entry.owners = [entry.owner];
       else entry.owners = [];
     }
-    if (typeof entry.maxSlots !== 'number') entry.maxSlots = MAX_LUNA_PER_SOURCE;
+    if (typeof entry.maxSlots !== 'number') entry.maxSlots = MAX_VEINSEEKER_PER_SOURCE;
     if (typeof entry.lastAudit !== 'number') entry.lastAudit = 0;
     return entry;
   }
@@ -571,12 +572,12 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
     var e = ensureMiningAssignment(memAssign[sid], null);
     return e.owners || [];
   }
-  function getLiveLunaContendersForSource(sid){
+  function getLiveVeinseekerContendersForSource(sid){
     var contenders = [];
     for (var name in Game.creeps){
       var c = Game.creeps[name];
       if (!c || !c.memory) continue;
-      if (c.memory.task === 'luna' && c.memory.sourceId === sid) contenders.push(c);
+      if (c.memory.task === 'veinseeker' && c.memory.sourceId === sid) contenders.push(c);
     }
     return contenders;
   }
@@ -592,7 +593,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
       var ownerName = owners[j];
       var oc = Game.creeps[ownerName];
       if (!liveMap[ownerName]) return false;
-      if (!oc || !oc.memory || oc.memory.task !== 'luna' || oc.memory.sourceId !== sid) return false;
+      if (!oc || !oc.memory || oc.memory.task !== 'veinseeker' || oc.memory.sourceId !== sid) return false;
     }
     return true;
   }
@@ -632,12 +633,12 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
     return count;
   }
   function getSourceMaxSlots(sid) {
-    if (!ALLOW_MULTI_LUNA_PER_SOURCE) return 1;
-    var maxSlots = Math.max(1, MAX_LUNA_PER_SOURCE);
+    if (!ALLOW_MULTI_VEINSEEKER_PER_SOURCE) return 1;
+    var maxSlots = Math.max(1, MAX_VEINSEEKER_PER_SOURCE);
     var source = Game.getObjectById(sid);
     if (!source || !source.pos || !source.room) return 1;
     var openTiles = countOpenHarvestTiles(source);
-    if (openTiles < MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA) return 1;
+    if (openTiles < MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER) return 1;
     return Math.min(maxSlots, openTiles);
   }
   function rankContenderForSource(a, sourcePos){
@@ -679,13 +680,13 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   // Ownership / duplicate resolver
   // ============================
   function resolveOwnershipForSid(sid){
-    // Authoritative duplicate resolver for live Luna creeps on one source. It
+    // Authoritative duplicate resolver for live Veinseeker creeps on one source. It
     // ranks contenders and marks losing creeps with _forceYield instead of
     // moving them immediately; the main run loop handles the release safely.
     var memAssign = ensureAssignmentsMem();
     var e = ensureMiningAssignment(memAssign[sid], null);
 
-    var contenders = getLiveLunaContendersForSource(sid);
+    var contenders = getLiveVeinseekerContendersForSource(sid);
 
     if (!contenders.length){
       maClearOwner(memAssign, sid);
@@ -725,7 +726,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
   function auditRemoteAssignments(){
     // Once-per-tick cleanup for Memory.remoteAssignments. It recomputes counts
     // from live creeps, clears dead owners, and prunes old source/controller
-    // flags so stale assignment memory does not block new Luna creeps forever.
+    // flags so stale assignment memory does not block new Veinseeker creeps forever.
     var memAssign = ensureAssignmentsMem();
 
     for (var sid in memAssign){
@@ -737,7 +738,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
     for (var name in Game.creeps){
       var c = Game.creeps[name];
       if (!c || !c.memory) continue;
-      if (c.memory.task === 'luna') {
+      if (c.memory.task === 'veinseeker') {
         if (c.memory.sourceId){
           var sid2 = c.memory.sourceId;
           var e2 = ensureMiningAssignment(memAssign[sid2], c.memory.targetRoom||null);
@@ -756,7 +757,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
     for (var sid3 in memAssign){
       var entry = ensureMiningAssignment(memAssign[sid3], null);
       var cap = getSourceMaxSlots(sid3);
-      var contenders = getLiveLunaContendersForSource(sid3);
+      var contenders = getLiveVeinseekerContendersForSource(sid3);
       if (!contenders.length) {
         maClearOwner(memAssign, sid3);
         continue;
@@ -917,7 +918,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
     for (var i=0;i<rooms.length;i++){
       var rn=rooms[i], room=Game.rooms[rn]; if(!room) continue;
       var rm = getRoomMemoryBucket(rn);
-      var localOwnedReason = getLunaLocalOwnedRoomBlockReason(homeName, rn);
+      var localOwnedReason = getVeinseekerLocalOwnedRoomBlockReason(homeName, rn);
       if (localOwnedReason) continue;
       if (rm.hostile) continue;
       if (isRoomLockedByInvaderCore(rn)) continue;
@@ -928,7 +929,7 @@ function lunaTravelToAssigned(creep, target, opts, sourceId, failReason) {
       var sources = room.find(FIND_SOURCES);
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
-        if (isLunaSourceBlocked(rn, s.id)) continue;
+        if (isVeinseekerSourceBlocked(rn, s.id)) continue;
         var e=ensureMiningAssignment(memAssign[s.id], rn);
         // Teaching note: remember which home owns this remote assignment so
         // replacements can be spawned even after a wipe.
@@ -949,33 +950,33 @@ function getMyUsername() {
 }
 
 
-function getLunaLocalOwnedRoomBlockReason(homeRoom, roomName) {
-  if (!RemoteHarvestManager || typeof RemoteHarvestManager.isLocalOwnedRoomForLuna !== 'function') return null;
-  var check = RemoteHarvestManager.isLocalOwnedRoomForLuna(homeRoom, roomName);
+function getVeinseekerLocalOwnedRoomBlockReason(homeRoom, roomName) {
+  if (!SourceEnergyManager || typeof SourceEnergyManager.isLocalOwnedRoomForVeinseeker !== 'function') return null;
+  var check = SourceEnergyManager.isLocalOwnedRoomForVeinseeker(homeRoom, roomName);
   return check && check.blocked ? (check.reason || 'local-owned-room') : null;
 }
 
-function isLunaLocalOwnedRoom(homeRoom, roomName) {
-  return !!getLunaLocalOwnedRoomBlockReason(homeRoom, roomName);
+function isVeinseekerLocalOwnedRoom(homeRoom, roomName) {
+  return !!getVeinseekerLocalOwnedRoomBlockReason(homeRoom, roomName);
 }
 
-function markLunaRoomUnsafe(roomName, reason, ttl) {
-  // Luna-specific room block. RemoteHarvest/BeeSpawnManager read these fields
-  // through BeeToolbox safety helpers before planning or queueing new Luna work.
+function markVeinseekerRoomUnsafe(roomName, reason, ttl) {
+  // Veinseeker-specific room block. SourceEnergy/BeeSpawnManager read these fields
+  // through BeeToolbox safety helpers before planning or queueing new Veinseeker work.
   if (!roomName) return;
   Memory.rooms = Memory.rooms || {};
   Memory.rooms[roomName] = Memory.rooms[roomName] || {};
   var blockTtl = (typeof ttl === 'number' && ttl > 0) ? ttl : (UNSAFE_ROOM_TTL || 1500);
-  Memory.rooms[roomName].lunaBlockedUntil = Game.time + blockTtl;
-  Memory.rooms[roomName].lunaBlockedReason = reason || 'unsafe';
-  Memory.rooms[roomName].lunaBlockedAt = Game.time;
+  Memory.rooms[roomName].sourceWorkerBlockedUntil = Game.time + blockTtl;
+  Memory.rooms[roomName].sourceWorkerBlockedReason = reason || 'unsafe';
+  Memory.rooms[roomName].sourceWorkerBlockedAt = Game.time;
 }
 
-function isLunaRoomBlockedByMemory(roomName) {
+function isVeinseekerRoomBlockedByMemory(roomName) {
   if (!roomName) return false;
   var mem = (Memory.rooms && Memory.rooms[roomName]) || {};
   if (mem.hostile) return true;
-  if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
+  if (mem.sourceWorkerBlockedUntil && mem.sourceWorkerBlockedUntil > Game.time) return true;
   if (mem._invaderLock && mem._invaderLock.locked) {
     var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
     if (lockTick == null || (Game.time - lockTick) <= INVADER_LOCK_MEMO_TTL) return true;
@@ -987,21 +988,21 @@ function isLunaRoomBlockedByMemory(roomName) {
   return false;
 }
 
-function isVisibleRoomUnsafeForLuna(room) {
-  // Luna keeps this visible unsafe check local because it stamps a Luna-specific
+function isVisibleRoomUnsafeForVeinseeker(room) {
+  // Veinseeker keeps this visible unsafe check local because it stamps a Veinseeker-specific
   // blocked reason into room memory. BeeToolbox handles generic safety checks,
-  // but this function preserves Luna diagnostics.
+  // but this function preserves Veinseeker diagnostics.
   if (!room) return false;
   var myName = getMyUsername();
   var controller = room.controller;
   var owner = controller && controller.owner && controller.owner.username;
   if (owner && (!myName || owner !== myName)) {
-    markLunaRoomUnsafe(room.name, 'ownedBy:' + owner);
+    markVeinseekerRoomUnsafe(room.name, 'ownedBy:' + owner);
     return true;
   }
   var reservation = controller && controller.reservation && controller.reservation.username;
   if (reservation && (!myName || reservation !== myName)) {
-    markLunaRoomUnsafe(room.name, 'reservedBy:' + reservation);
+    markVeinseekerRoomUnsafe(room.name, 'reservedBy:' + reservation);
     return true;
   }
   var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
@@ -1009,35 +1010,35 @@ function isVisibleRoomUnsafeForLuna(room) {
     var dangerous = [];
     var scoutOnly = [];
     for (var i = 0; i < hostiles.length; i++) {
-      if (isDangerousHostileForLuna(hostiles[i])) dangerous.push(hostiles[i]);
+      if (isDangerousHostileForVeinseeker(hostiles[i])) dangerous.push(hostiles[i]);
       else scoutOnly.push(hostiles[i]);
     }
     if (dangerous.length > 0) {
-      markLunaRoomUnsafe(room.name, 'dangerousHostiles');
+      markVeinseekerRoomUnsafe(room.name, 'dangerousHostiles');
       return true;
     }
     if (scoutOnly.length > 0) {
       Memory.rooms = Memory.rooms || {};
       Memory.rooms[room.name] = Memory.rooms[room.name] || {};
       var roomMem = Memory.rooms[room.name];
-      roomMem.lastLunaScoutSeen = Game.time;
-      roomMem.lastLunaScoutCount = scoutOnly.length;
-      roomMem.lastLunaScoutOwner = scoutOnly[0] && scoutOnly[0].owner ? scoutOnly[0].owner.username : null;
-      var scoutLogInterval = CFG.LUNA_SCOUT_LOG_INTERVAL || 100;
-      if (!roomMem.lastLunaScoutLogAt || (Game.time - roomMem.lastLunaScoutLogAt) >= scoutLogInterval) {
-        roomMem.lastLunaScoutLogAt = Game.time;
-        console.log('👀 Luna scout-only hostile in ' + room.name + ' x' + scoutOnly.length + ' owner=' + (roomMem.lastLunaScoutOwner || 'unknown'));
+      roomMem.lastVeinseekerScoutSeen = Game.time;
+      roomMem.lastVeinseekerScoutCount = scoutOnly.length;
+      roomMem.lastVeinseekerScoutOwner = scoutOnly[0] && scoutOnly[0].owner ? scoutOnly[0].owner.username : null;
+      var scoutLogInterval = CFG.VEINSEEKER_SCOUT_LOG_INTERVAL || 100;
+      if (!roomMem.lastVeinseekerScoutLogAt || (Game.time - roomMem.lastVeinseekerScoutLogAt) >= scoutLogInterval) {
+        roomMem.lastVeinseekerScoutLogAt = Game.time;
+        console.log('👀 Veinseeker scout-only hostile in ' + room.name + ' x' + scoutOnly.length + ' owner=' + (roomMem.lastVeinseekerScoutOwner || 'unknown'));
       }
     }
   }
   if (isRoomLockedByInvaderCore(room.name)) {
-    markLunaRoomUnsafe(room.name, 'invaderLock');
+    markVeinseekerRoomUnsafe(room.name, 'invaderLock');
     return true;
   }
   return false;
 }
 
-function isDangerousHostileForLuna(hostile) {
+function isDangerousHostileForVeinseeker(hostile) {
   if (!hostile || typeof hostile.getActiveBodyparts !== 'function') return true;
   if (hostile.getActiveBodyparts(ATTACK) > 0) return true;
   if (hostile.getActiveBodyparts(RANGED_ATTACK) > 0) return true;
@@ -1047,30 +1048,30 @@ function isDangerousHostileForLuna(hostile) {
   return false;
 }
 
-function refreshVisibleLunaSafety(room) {
+function refreshVisibleVeinseekerSafety(room) {
   return BeeToolbox.refreshVisibleRemoteSafety(room);
 }
 
-function isLunaRoomUnsafe(roomName) {
+function isVeinseekerRoomUnsafe(roomName) {
   // Combined safety check used before assignment, travel, harvesting, and queue
   // pruning. Visible rooms can clear generic stale danger via BeeToolbox, but
   // dangerous live conditions are stamped back into Memory for later ticks.
   // Do not collapse this into the generic remote helper without behavior tests:
-  // Luna also owns source-level blocks and treats scout-only hostiles specially.
+  // Veinseeker also owns source-level blocks and treats scout-only hostiles specially.
   if (!roomName) return false;
   var room = Game.rooms[roomName];
-  if (room) refreshVisibleLunaSafety(room);
-  if (isLunaRoomBlockedByMemory(roomName)) return true;
-  if (room && isVisibleRoomUnsafeForLuna(room)) return true;
+  if (room) refreshVisibleVeinseekerSafety(room);
+  if (isVeinseekerRoomBlockedByMemory(roomName)) return true;
+  if (room && isVisibleRoomUnsafeForVeinseeker(room)) return true;
   return false;
 }
 
-function logLunaNoSafeSource(creep, details) {
+function logVeinseekerNoSafeSource(creep, details) {
   if (!creep || !details) return;
   var interval = CFG.NO_SAFE_ASSIGN_LOG_INTERVAL || 25;
   if (creep.memory && creep.memory._lastNoSafeAssignLog && (Game.time - creep.memory._lastNoSafeAssignLog) < interval) return;
   if (creep.memory) creep.memory._lastNoSafeAssignLog = Game.time;
-  console.log('🛑 Luna ' + creep.name + ' no safe assignment: ' + details);
+  console.log('🛑 Veinseeker ' + creep.name + ' no safe assignment: ' + details);
 }
 
 function getRoomEntryAnchor(homeName, remoteName) {
@@ -1092,7 +1093,7 @@ function getRouteDistanceBetweenRooms(homeName, remoteName) {
   return route.length;
 }
 
-function roomCostMatrixForLuna(roomName) {
+function roomCostMatrixForVeinseeker(roomName) {
   var room = Game.rooms[roomName]; if (!room) return;
   var m = new PathFinder.CostMatrix();
   room.find(FIND_STRUCTURES).forEach(function (s) {
@@ -1105,20 +1106,20 @@ function roomCostMatrixForLuna(roomName) {
   return m;
 }
 
-function recordLunaAccessibility(remoteRoom, sourceId, accessible, reason) {
+function recordVeinseekerAccessibility(remoteRoom, sourceId, accessible, reason) {
   // Source-level diagnostic written when a visible source is checked for
-  // harvest tiles/pathing. Scout and RemoteHarvest reports can explain rejected
+  // harvest tiles/pathing. Scout and SourceEnergy reports can explain rejected
   // sources without needing to redo the full accessibility search.
   if (!remoteRoom || !sourceId) return;
   var rm = getRoomMemoryBucket(remoteRoom);
-  rm.lastLunaAccessibility = {
+  rm.lastVeinseekerAccessibility = {
     sourceId: sourceId,
     accessible: !!accessible,
     reason: reason || (accessible ? 'ok' : 'unknown'),
     checkedAt: Game.time
   };
-  if (!rm.lastLunaAccessibilityBySource) rm.lastLunaAccessibilityBySource = {};
-  rm.lastLunaAccessibilityBySource[sourceId] = {
+  if (!rm.lastVeinseekerAccessibilityBySource) rm.lastVeinseekerAccessibilityBySource = {};
+  rm.lastVeinseekerAccessibilityBySource[sourceId] = {
     sourceId: sourceId,
     accessible: !!accessible,
     reason: reason || (accessible ? 'ok' : 'unknown'),
@@ -1129,7 +1130,7 @@ function recordLunaAccessibility(remoteRoom, sourceId, accessible, reason) {
 function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj) {
   if (!sourceObj || !sourceObj.pos || !remoteRoomName) return { accessible: false, reason: 'source-missing' };
   var room = Game.rooms[remoteRoomName]; if (!room) return { accessible: true, reason: 'room-not-visible' };
-  if (!LUNA_REJECT_INACCESSIBLE_SOURCES) return { accessible: true, reason: 'check-disabled' };
+  if (!VEINSEEKER_REJECT_INACCESSIBLE_SOURCES) return { accessible: true, reason: 'check-disabled' };
   var terrain = room.getTerrain();
   var openTiles = 0;
   var hasHarvestTile = false;
@@ -1169,7 +1170,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     maxOps: MAX_PF_OPS,
     plainCost: PLAIN_COST,
     swampCost: SWAMP_COST,
-    roomCallback: roomCostMatrixForLuna
+    roomCallback: roomCostMatrixForVeinseeker
   });
   if (ret.incomplete || !ret.path || !ret.path.length) return { accessible: false, reason: 'path-to-source-incomplete' };
   return { accessible: true, reason: 'ok' };
@@ -1212,7 +1213,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     if ((Game.time + creep.name.charCodeAt(0)) % 50 === 0) markValidRemoteSourcesForHome(homeName);
     var anchor = getAnchorPos(homeName);
 
-    var scoutPlan = (RemoteHarvestManager && typeof RemoteHarvestManager.getApprovedRemotesFromScout === 'function') ? RemoteHarvestManager.getApprovedRemotesFromScout(homeName) : null;
+    var scoutPlan = (SourceEnergyManager && typeof SourceEnergyManager.getApprovedRemotesFromScout === 'function') ? SourceEnergyManager.getApprovedRemotesFromScout(homeName) : null;
     var scoutPlanUsed = !!(scoutPlan && scoutPlan.approvedRooms && scoutPlan.approvedRooms.length);
     var approvedSourceFilterUsed = false;
     var approvedSources = Object.create(null);
@@ -1238,9 +1239,9 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     // 1) Visible candidates
     for (i=0;i<neighborRooms.length;i++){
       rn=neighborRooms[i];
-      var localOwnedReasonVisible = getLunaLocalOwnedRoomBlockReason(homeName, rn);
+      var localOwnedReasonVisible = getVeinseekerLocalOwnedRoomBlockReason(homeName, rn);
       if (localOwnedReasonVisible) continue;
-      if (isLunaRoomUnsafe(rn)) continue;
+      if (isVeinseekerRoomUnsafe(rn)) continue;
       var room=Game.rooms[rn]; if (!room) continue;
 
       var sources = room.find(FIND_SOURCES);
@@ -1248,13 +1249,13 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
         if (approvedSourceFilterUsed && !approvedSources[rn + ':' + s.id]) continue;
-        if (isLunaSourceBlocked(rn, s.id)) continue;
+        if (isVeinseekerSourceBlocked(rn, s.id)) continue;
         var access = evaluateVisibleSourceAccessibility(homeName, rn, s);
-        recordLunaAccessibility(rn, s.id, access.accessible, access.reason);
+        recordVeinseekerAccessibility(rn, s.id, access.accessible, access.reason);
         if (!access.accessible) {
           inaccessibleSources++;
           roomInaccessible++;
-          markLunaSourceBlocked(rn, s.id, 'source-inaccessible-blocked-by-structures', LUNA_INACCESSIBLE_BLOCK_TTL);
+          markVeinseekerSourceBlocked(rn, s.id, 'source-inaccessible-blocked-by-structures', VEINSEEKER_INACCESSIBLE_BLOCK_TTL);
           continue;
         }
         var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
@@ -1265,15 +1266,15 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         var assignedNow = maCount(memAssign, s.id);
         var slotCapNow = getSourceMaxSlots(s.id);
         if (assignedNow >= slotCapNow) continue;
-        var firstOpenBonus = assignedNow === 0 ? LUNA_FIRST_OPEN_BONUS : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 50);
-        var stackPenalty = assignedNow > 0 ? LUNA_SECONDARY_SOURCE_SCORE_PENALTY : 0;
+        var firstOpenBonus = assignedNow === 0 ? VEINSEEKER_FIRST_OPEN_BONUS : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 50);
+        var stackPenalty = assignedNow > 0 ? VEINSEEKER_SECONDARY_SOURCE_SCORE_PENALTY : 0;
         var underHarvestBonus = 0;
-        if (s.energy >= LUNA_UNDERHARVEST_ENERGY_THRESHOLD) underHarvestBonus -= 120;
+        if (s.energy >= VEINSEEKER_UNDERHARVEST_ENERGY_THRESHOLD) underHarvestBonus -= 120;
         if (s.energyCapacity >= 3000) {
           var owners = maOwners(memAssign, s.id);
           var primary = owners.length ? Game.creeps[owners[0]] : null;
           var workParts = primary ? primary.getActiveBodyparts(WORK) : 0;
-          if (workParts < LUNA_RESERVED_SOURCE_SECOND_MIN_WORK) underHarvestBonus -= 100;
+          if (workParts < VEINSEEKER_RESERVED_SOURCE_SECOND_MIN_WORK) underHarvestBonus -= 100;
         }
 
         var sticky = (creep.memory.sourceId===s.id) ? 1 : 0;
@@ -1285,16 +1286,16 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         candidateBySid[s.id] = true;
       }
       if (sources.length > 0 && roomInaccessible >= sources.length) {
-        markLunaRoomBlocked(rn, 'all-sources-inaccessible', LUNA_INACCESSIBLE_BLOCK_TTL);
+        markVeinseekerRoomBlocked(rn, 'all-sources-inaccessible', VEINSEEKER_INACCESSIBLE_BLOCK_TTL);
       }
     }
 
     // 2) Memory-known candidates (always merged with visible list)
     for (i=0;i<neighborRooms.length;i++){
       rn=neighborRooms[i];
-      var localOwnedReasonMem = getLunaLocalOwnedRoomBlockReason(homeName, rn);
+      var localOwnedReasonMem = getVeinseekerLocalOwnedRoomBlockReason(homeName, rn);
       if (localOwnedReasonMem) continue;
-      if (isLunaRoomUnsafe(rn)) continue;
+      if (isVeinseekerRoomUnsafe(rn)) continue;
       var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
       var roomVisible = Game.rooms[rn];
       var intelTick = null;
@@ -1304,11 +1305,11 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         if (typeof rm.intel.t === 'number') intelTick = Math.max(intelTick || 0, rm.intel.t);
       }
       if (rm.scout && typeof rm.scout.lastVisited === 'number') intelTick = Math.max(intelTick || 0, rm.scout.lastVisited);
-      if (!roomVisible && (intelTick == null || (Game.time - intelTick) > LUNA_REMOTE_INTEL_TTL)) continue;
+      if (!roomVisible && (intelTick == null || (Game.time - intelTick) > VEINSEEKER_REMOTE_INTEL_TTL)) continue;
       for (var sid in rm.sources){
         if (candidateBySid[sid]) continue;
         if (approvedSourceFilterUsed && !approvedSources[rn + ':' + sid]) continue;
-        if (isLunaSourceBlocked(rn, sid)) continue;
+        if (isVeinseekerSourceBlocked(rn, sid)) continue;
         if (shouldAvoid(creep, sid)){ avoided.push({id:sid,roomName:rn,cost:1e9,lin:99,left:avoidRemaining(creep,sid)}); continue; }
         var cap2 = getSourceMaxSlots(sid);
         var assigned2 = maCount(memAssign, sid);
@@ -1319,8 +1320,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         if (routeDistance2 === Infinity) continue;
         var synth = (lin2*350)+800;
         var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
-        var stackPenalty2 = assigned2 > 0 ? LUNA_SECONDARY_SOURCE_SCORE_PENALTY : 0;
-        var firstOpenBonus2 = assigned2 === 0 ? LUNA_FIRST_OPEN_BONUS : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 50);
+        var stackPenalty2 = assigned2 > 0 ? VEINSEEKER_SECONDARY_SOURCE_SCORE_PENALTY : 0;
+        var firstOpenBonus2 = assigned2 === 0 ? VEINSEEKER_FIRST_OPEN_BONUS : (PREFER_EMPTY_SOURCES_BEFORE_STACKING ? 0 : 50);
         candidates.push({
           id:sid, roomName:rn, routeDistance: routeDistance2, lin:lin2, pathCost: synth,
           firstOpenBonus: firstOpenBonus2, stackPenalty: stackPenalty2, underHarvestBonus: 0,
@@ -1332,12 +1333,12 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     if (!candidates.length){
       if (!avoided.length) {
         if (Memory.rooms && Memory.rooms[homeName]) {
-          Memory.rooms[homeName].lastLunaSelection = {
+          Memory.rooms[homeName].lastVeinseekerSelection = {
             tick: Game.time, creep: creep.name, selectedRoom: null, selectedSourceId: null, selectedDistance: null,
             candidateRoomsSorted: neighborRooms.slice(0), scoutPlanUsed: scoutPlanUsed, approvedSourceFilterUsed: approvedSourceFilterUsed, approvedSourcesCount: scoutPlan && scoutPlan.approvedSources ? scoutPlan.approvedSources.length : 0, rejectedCloserRooms: rejectedCloserRooms, topCandidates: [], fallback: (!scoutPlan || !scoutPlan.approvedRooms || !scoutPlan.approvedRooms.length) ? 'bfs-diagnostics-fallback' : null
           };
         }
-        logLunaNoSafeSource(creep, 'home=' + homeName + ' inaccessibleSources=' + inaccessibleSources + ' candidates=0');
+        logVeinseekerNoSafeSource(creep, 'home=' + homeName + ' inaccessibleSources=' + inaccessibleSources + ' candidates=0');
         return null;
       }
       avoided.sort(function(a,b){ return (a.left-b.left)||(a.cost-b.cost)||(a.lin-b.lin)||(a.id<b.id?-1:1); });
@@ -1421,7 +1422,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         creep.memory._lastLogSid = best.id;
       }
       if (Memory.rooms && Memory.rooms[homeName]) {
-        Memory.rooms[homeName].lastLunaSelection = {
+        Memory.rooms[homeName].lastVeinseekerSelection = {
           tick: Game.time,
           creep: creep.name,
           selectedRoom: best.roomName,
@@ -1439,10 +1440,10 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function releaseAssignment(creep){
-    // Release both RemoteHarvest.Manager's home plan and the legacy
+    // Release both SourceEnergy.Manager's home plan and the legacy
     // Memory.remoteAssignments model, then put this creep on a retarget
     // cooldown so it does not immediately reclaim the same bad source.
-    RemoteHarvestManager.releaseSource(creep);
+    SourceEnergyManager.releaseSource(creep);
     var memAssign = ensureAssignmentsMem();
     var sid = creep.memory.sourceId;
 
@@ -1462,7 +1463,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function validateExclusiveSource(creep){
-    // Final ownership guard before harvesting. If another Luna has a stronger
+    // Final ownership guard before harvesting. If another Veinseeker has a stronger
     // claim to this source, this creep yields and clears its assignment rather
     // than competing on the same tile forever.
     if (!creep.memory || !creep.memory.sourceId) return true;
@@ -1470,7 +1471,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     var sid = creep.memory.sourceId;
     var memAssign = ensureAssignmentsMem();
     var owners = maOwners(memAssign, sid);
-    var winners = getLiveLunaContendersForSource(sid);
+    var winners = getLiveVeinseekerContendersForSource(sid);
     var cap = getSourceMaxSlots(sid);
     if (owners.length && owners.indexOf(creep.name) === -1 && winners.length <= cap){
       resolveOwnershipForSid(sid);
@@ -1499,13 +1500,13 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   // ============================
   // Teaching helpers for the run loop
   // ============================
-  function ensureLunaIdentity(creep) {
+  function ensureVeinseekerIdentity(creep) {
     if (!creep || !creep.memory) return;
-    creep.memory.role = 'Luna';
-    if (creep.memory.task === 'remoteharvest') {
-      creep.memory.task = 'luna';
+    creep.memory.role = 'Veinseeker';
+    if (creep.memory.task === 'veinseeker') {
+      creep.memory.task = 'veinseeker';
     } else if (!creep.memory.task) {
-      creep.memory.task = 'luna';
+      creep.memory.task = 'veinseeker';
     }
   }
 
@@ -1550,14 +1551,14 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     return true;
   }
 
-  function releaseIfLocalOwnedLunaAssignment(creep) {
+  function releaseIfLocalOwnedVeinseekerAssignment(creep) {
     if (!creep || !creep.memory || !creep.memory.targetRoom) return false;
     var homeName = getHomeName(creep);
-    var reason = getLunaLocalOwnedRoomBlockReason(homeName, creep.memory.targetRoom);
+    var reason = getVeinseekerLocalOwnedRoomBlockReason(homeName, creep.memory.targetRoom);
     if (!reason) return false;
     var interval = CFG.NO_SAFE_ASSIGN_LOG_INTERVAL || 25;
     if (!creep.memory._lastLocalOwnedAssignLog || (Game.time - creep.memory._lastLocalOwnedAssignLog) >= interval) {
-      console.log('🏠 Luna ' + creep.name + ' releasing local-owned assignment room=' + creep.memory.targetRoom + ' reason=' + reason);
+      console.log('🏠 Veinseeker ' + creep.name + ' releasing local-owned assignment room=' + creep.memory.targetRoom + ' reason=' + reason);
       creep.memory._lastLocalOwnedAssignLog = Game.time;
     }
     releaseAssignment(creep);
@@ -1566,8 +1567,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function ensureActiveAssignment(creep) {
-    // Primary Luna assignment flow. Prefer the scored remote-source picker,
-    // mirror the claim into RemoteHarvest.Manager, and fall back to legacy room
+    // Primary Veinseeker assignment flow. Prefer the scored remote-source picker,
+    // mirror the claim into SourceEnergy.Manager, and fall back to legacy room
     // selection only when the scored picker cannot find a safe source.
     if (creep.memory.sourceId) return true;
 
@@ -1577,11 +1578,11 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       creep.memory.targetRoom = pick.roomName;
       creep.memory.assigned   = true;
       creep.memory._assignTick = Game.time;
-      RemoteHarvestManager.claimSource(creep, pick.id, pick.roomName);
+      SourceEnergyManager.claimSource(creep, pick.id, pick.roomName);
       return true;
     }
 
-    roleLuna.initializeAndAssign(creep);
+    roleVeinseeker.initializeAndAssign(creep);
     if (!creep.memory.sourceId){
       idleAtAnchor(creep, 'IDLE');
       return false;
@@ -1597,13 +1598,13 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     debugSay(creep, '➡️'+creep.memory.targetRoom);
     debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
 
-    lunaTravelToAssigned(creep, dest, { range: 20, reusePath: 20 }, creep.memory.sourceId, 'path-to-room');
+    veinseekerTravelToAssigned(creep, dest, { range: 20, reusePath: 20 }, creep.memory.sourceId, 'path-to-room');
 
     return true;
   }
 
-  function prepareLuna(creep) {
-    ensureLunaIdentity(creep);
+  function prepareVeinseeker(creep) {
+    ensureVeinseekerIdentity(creep);
     auditOncePerTick();
     if (!creep.memory.home) getHomeName(creep);
     trackMovementBreadcrumb(creep);
@@ -1612,7 +1613,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   // Memory keys:
   // - sourceId: remote source assigned this tick
   // - targetRoom: room name for the assignment
-  function determineLunaState(creep) {
+  function determineVeinseekerState(creep) {
     var state = 'HARVEST';
     if (!creep.memory.targetRoom || !creep.memory.sourceId) state = 'UNASSIGNED';
     else if (creep.pos.roomName !== creep.memory.targetRoom) state = 'TRAVEL';
@@ -1622,7 +1623,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
 
 
   function ensureRemoteHaulRequestsMemory() {
-    // Produced by Luna, consumed by Trucker.Dispatcher. Records here represent
+    // Produced by Veinseeker, consumed by Trucker.Dispatcher. Records here represent
     // remote container energy that is large/fresh/safe enough to haul.
     if (!Memory.__BHM) Memory.__BHM = {};
     if (!Memory.__BHM.remoteHaulRequests) Memory.__BHM.remoteHaulRequests = {};
@@ -1630,7 +1631,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function ensureRemoteContainerStatusMemory() {
-    // Produced by Luna, consumed by BeeSpawnManager, Repair, Trucker, and
+    // Produced by Veinseeker, consumed by BeeSpawnManager, Repair, Trucker, and
     // BeeMaintenance. Treat this schema as shared status Memory.
     if (!Memory.__BHM) Memory.__BHM = {};
     if (!Memory.__BHM.remoteContainerStatus) Memory.__BHM.remoteContainerStatus = {};
@@ -1640,8 +1641,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   
 
   function ensureRemoteContainerBuildMemory() {
-    // Build progress Memory is keyed by source id so replacement Luna creeps can
-    // continue a planned/building container even if the previous Luna dies.
+    // Build progress Memory is keyed by source id so replacement Veinseeker creeps can
+    // continue a planned/building container even if the previous Veinseeker dies.
     if (!Memory.__BHM) Memory.__BHM = {};
     if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
     return Memory.__BHM.remoteContainerBuilds;
@@ -1659,7 +1660,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
 
   function clearStaleRemoteContainerRepairMemory(sourceId, remoteRoom) {
     if (!sourceId || !remoteRoom) return;
-    // Luna cleanup is source/build-state driven: only clear stale repair state
+    // Veinseeker cleanup is source/build-state driven: only clear stale repair state
     // for this source-room pair when the container no longer exists live.
     var status = ensureRemoteContainerStatusMemory();
     var requests = ensureRemoteHaulRequestsMemory();
@@ -1680,8 +1681,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
 
   function upsertRemoteContainerBuildStatus(creep, source, container, site, plannedPos) {
     // Keep both global build Memory and Memory.rooms[remote].sources[source].container
-    // in sync. RemoteHarvest.Manager reads these fields to know unfinished
-    // container work should still count as a Luna need.
+    // in sync. SourceEnergy.Manager reads these fields to know unfinished
+    // container work should still count as a Veinseeker need.
     if (!creep || !source) return;
     var homeName = getHomeName(creep);
     var remoteRoom = creep.memory && creep.memory.targetRoom ? creep.memory.targetRoom : (source.pos && source.pos.roomName);
@@ -1724,7 +1725,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       progress: progress,
       progressTotal: progressTotal,
       progressPct: progressPct,
-      assignedLuna: creep.name || null,
+      assignedVeinseeker: creep.name || null,
       updated: Game.time,
       lastSeen: Game.time
     };
@@ -1790,9 +1791,71 @@ function upsertRemoteContainerStatus(creep, source, container) {
     var amount = container.store ? (container.store[RESOURCE_ENERGY] || 0) : 0;
     var requests = ensureRemoteHaulRequestsMemory();
     var id = container.id || source.id;
-    if (amount < minAmount || isLunaRoomUnsafe(container.pos.roomName)) { delete requests[id]; return; }
+    if (amount < minAmount || isVeinseekerRoomUnsafe(container.pos.roomName)) { delete requests[id]; return; }
     var prev = requests[id] || {};
-    requests[id] = { id: id, homeRoom: homeName, remoteRoom: container.pos.roomName, sourceId: source.id, containerId: container.id, amount: amount, capacity: container.store.getCapacity(RESOURCE_ENERGY) || 2000, fillPct: (container.store.getCapacity(RESOURCE_ENERGY) > 0 ? amount / container.store.getCapacity(RESOURCE_ENERGY) : 0), x: container.pos.x, y: container.pos.y, roomName: container.pos.roomName, urgent: amount >= urgentThreshold || (amount / Math.max(1, container.store.getCapacity(RESOURCE_ENERGY))) >= 0.8, updated: Game.time, containerHits: container.hits || 0, containerHitsMax: container.hitsMax || 0, containerHitsPct: (container.hitsMax > 0 ? (container.hits / container.hitsMax) : 1), assignedTo: prev.assignedTo || null, assignedUntil: prev.assignedUntil || 0, maintenanceUntil: prev.maintenanceUntil || 0, maintenanceBy: prev.maintenanceBy || null, maintenanceReason: prev.maintenanceReason || null };
+    requests[id] = { id: id, homeRoom: homeName, remoteRoom: container.pos.roomName, sourceId: source.id, targetType: 'container', targetId: container.id, containerId: container.id, amount: amount, capacity: container.store.getCapacity(RESOURCE_ENERGY) || 2000, fillPct: (container.store.getCapacity(RESOURCE_ENERGY) > 0 ? amount / container.store.getCapacity(RESOURCE_ENERGY) : 0), x: container.pos.x, y: container.pos.y, roomName: container.pos.roomName, urgent: amount >= urgentThreshold || (amount / Math.max(1, container.store.getCapacity(RESOURCE_ENERGY))) >= 0.8, updated: Game.time, containerHits: container.hits || 0, containerHitsMax: container.hitsMax || 0, containerHitsPct: (container.hitsMax > 0 ? (container.hits / container.hitsMax) : 1), assignedTo: prev.assignedTo || null, assignedUntil: prev.assignedUntil || 0, maintenanceUntil: prev.maintenanceUntil || 0, maintenanceBy: prev.maintenanceBy || null, maintenanceReason: prev.maintenanceReason || null };
+  }
+
+  function upsertRemoteLooseHaulRequest(creep, source, target, targetType) {
+    if (!creep || !source || !target || !target.pos || !targetType) return;
+    var homeName = getHomeName(creep);
+    var roomName = target.pos.roomName;
+    if (!homeName || roomName === homeName || isVeinseekerRoomUnsafe(roomName)) return;
+    var amount = 0;
+    if (targetType === 'dropped') amount = target.amount || 0;
+    else if (target.store) amount = target.store[RESOURCE_ENERGY] || 0;
+    var minAmount = CFG.REMOTE_CONTAINER_REQUEST_MIN || 300;
+    var urgentThreshold = CFG.REMOTE_CONTAINER_REQUEST_URGENT || 1600;
+    var requests = ensureRemoteHaulRequestsMemory();
+    var id = targetType + ':' + target.id;
+    if (amount < minAmount) { delete requests[id]; return; }
+    var prev = requests[id] || {};
+    requests[id] = {
+      id: id,
+      homeRoom: homeName,
+      remoteRoom: roomName,
+      roomName: roomName,
+      sourceId: source.id,
+      targetType: targetType,
+      targetId: target.id,
+      resourceId: targetType === 'dropped' ? target.id : null,
+      containerId: null,
+      amount: amount,
+      capacity: targetType === 'dropped' ? amount : null,
+      fillPct: targetType === 'dropped' ? 1 : null,
+      x: target.pos.x,
+      y: target.pos.y,
+      urgent: amount >= urgentThreshold,
+      updated: Game.time,
+      assignedTo: prev.assignedTo || null,
+      assignedUntil: prev.assignedUntil || 0,
+      maintenanceUntil: prev.maintenanceUntil || 0,
+      maintenanceBy: prev.maintenanceBy || null,
+      maintenanceReason: prev.maintenanceReason || null
+    };
+  }
+
+  function publishRemoteLooseEnergyRequests(creep, source, container) {
+    if (!source || !source.pos || !source.room) return;
+    var anchors = [{ pos: source.pos, range: 3 }];
+    if (container && container.pos) anchors.push({ pos: container.pos, range: 2 });
+    for (var i = 0; i < anchors.length; i++) {
+      var anchor = anchors[i];
+      var drops = anchor.pos.findInRange(FIND_DROPPED_RESOURCES, anchor.range, {
+        filter: function (r) { return r.resourceType === RESOURCE_ENERGY; }
+      }) || [];
+      for (var d = 0; d < drops.length; d++) upsertRemoteLooseHaulRequest(creep, source, drops[d], 'dropped');
+      var tombstones = anchor.pos.findInRange(FIND_TOMBSTONES, anchor.range, {
+        filter: function (t) { return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; }
+      }) || [];
+      for (var t = 0; t < tombstones.length; t++) upsertRemoteLooseHaulRequest(creep, source, tombstones[t], 'tombstone');
+      if (typeof FIND_RUINS !== 'undefined') {
+        var ruins = anchor.pos.findInRange(FIND_RUINS, anchor.range, {
+          filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] || 0) > 0; }
+        }) || [];
+        for (var r = 0; r < ruins.length; r++) upsertRemoteLooseHaulRequest(creep, source, ruins[r], 'ruin');
+      }
+    }
   }
 
   function findAssignedSourceContainer(creep, source) {
@@ -1828,7 +1891,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
   function shouldRepairAssignedContainer(creep, container) {
     if (!CFG.remoteContainerRepairEnabled) return false;
     if (!creep || !container || !container.hitsMax) return false;
-    if (isLunaRoomUnsafe(container.pos.roomName)) return false;
+    if (isVeinseekerRoomUnsafe(container.pos.roomName)) return false;
     return (container.hits / container.hitsMax) <= (CFG.remoteContainerRepairStartPct || 0.5);
   }
 
@@ -1887,7 +1950,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
   }
 
   function ensureSourceContainerOrSite(source) {
-    // Luna owns the "make a container near my source" workflow. It returns
+    // Veinseeker owns the "make a container near my source" workflow. It returns
     // existing container/site/planned position without changing harvest behavior
     // beyond placing a missing site when the room is visible.
     var container = findSourceContainer(source);
@@ -1909,27 +1972,27 @@ function upsertRemoteContainerStatus(creep, source, container) {
   // ============================
   // Main role
   // ============================
-  var roleLuna = {
-    role: 'Luna',
+  var roleVeinseeker = {
+    role: 'Veinseeker',
     run: function(creep){
       // Main role pipeline:
       // prepare identity/audits -> ensure/release assignment -> validate safety
       // and uniqueness -> travel if needed -> harvest/build/repair/offload.
-      prepareLuna(creep);
+      prepareVeinseeker(creep);
 
-      var state = determineLunaState(creep);
+      var state = determineVeinseekerState(creep);
 
       if (shouldReleaseForEndOfLife(creep)) return;
       if (respectCooldown(creep)) return;
       if (handleForcedYield(creep)) return;
-      if (releaseIfLocalOwnedLunaAssignment(creep)) return;
+      if (releaseIfLocalOwnedVeinseekerAssignment(creep)) return;
 
       if (!ensureActiveAssignment(creep)) return;
-      if (releaseIfLocalOwnedLunaAssignment(creep)) return;
+      if (releaseIfLocalOwnedVeinseekerAssignment(creep)) return;
 
-      state = determineLunaState(creep);
+      state = determineVeinseekerState(creep);
       if (state === 'UNASSIGNED') {
-        roleLuna.initializeAndAssign(creep);
+        roleVeinseeker.initializeAndAssign(creep);
         return;
       }
 
@@ -1944,11 +2007,11 @@ function upsertRemoteContainerStatus(creep, source, container) {
 
       if (!validateExclusiveSource(creep)) return;
 
-      if (creep.memory.targetRoom && isLunaRoomUnsafe(creep.memory.targetRoom)) {
+      if (creep.memory.targetRoom && isVeinseekerRoomUnsafe(creep.memory.targetRoom)) {
         debugSay(creep, '🚫SAFE');
         var roomMem = (Memory.rooms && Memory.rooms[creep.memory.targetRoom]) || {};
         if (!creep.memory._lastUnsafeLog || (Game.time - creep.memory._lastUnsafeLog) >= 25) {
-          console.log('🚫 Luna ' + creep.name + ' releasing unsafe room ' + creep.memory.targetRoom + ' reason=' + (roomMem.lunaBlockedReason || 'unsafe'));
+          console.log('🚫 Veinseeker ' + creep.name + ' releasing unsafe room ' + creep.memory.targetRoom + ' reason=' + (roomMem.sourceWorkerBlockedReason || 'unsafe'));
           creep.memory._lastUnsafeLog = Game.time;
         }
         releaseAssignment(creep);
@@ -1958,11 +2021,11 @@ function upsertRemoteContainerStatus(creep, source, container) {
 
       if (state === 'TRAVEL') {
         if (travelToAssignedRoom(creep)) return;
-        state = determineLunaState(creep);
+        state = determineVeinseekerState(creep);
       }
 
       if (state === 'UNASSIGNED') {
-        roleLuna.initializeAndAssign(creep);
+        roleVeinseeker.initializeAndAssign(creep);
         if (!creep.memory.targetRoom || !creep.memory.sourceId){
           if (Game.time % 25 === 0) console.log('🚫 Forager '+creep.name+' could not be assigned a room/source.');
           return;
@@ -1973,10 +2036,10 @@ function upsertRemoteContainerStatus(creep, source, container) {
       if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ try { BeeToolbox.logSourcesInRoom(targetRoomObj); } catch (e) {} }
 
       if (targetRoomObj) {
-        var lunaThreat = evaluateRoomThreat(targetRoomObj, 'Luna');
-        if (lunaThreat && lunaThreat.threat && lunaThreat.threat.hasThreat && lunaThreat.canEscalate) {
-          ensureRemoteDefensePlan(targetRoomObj, lunaThreat.threat, lunaThreat.distance);
-        } else if (targetRoomObj && (!lunaThreat || !lunaThreat.canEscalate || !lunaThreat.threat || !lunaThreat.threat.hasThreat)) {
+        var veinseekerThreat = evaluateRoomThreat(targetRoomObj, 'Veinseeker');
+        if (veinseekerThreat && veinseekerThreat.threat && veinseekerThreat.threat.hasThreat && veinseekerThreat.canEscalate) {
+          ensureRemoteDefensePlan(targetRoomObj, veinseekerThreat.threat, veinseekerThreat.distance);
+        } else if (targetRoomObj && (!veinseekerThreat || !veinseekerThreat.canEscalate || !veinseekerThreat.threat || !veinseekerThreat.threat.hasThreat)) {
           softenRemoteDefensePlan(targetRoomObj.name);
         }
       }
@@ -1993,9 +2056,9 @@ function upsertRemoteContainerStatus(creep, source, container) {
       var ctl = targetRoomObj && targetRoomObj.controller;
       if (ctl) { ensureControllerFlag(ctl); debugRing(targetRoomObj, ctl.pos, CFG.DRAW.TRAVEL_COLOR, "CTRL"); }
 
-      state = determineLunaState(creep);
+      state = determineVeinseekerState(creep);
       if (state === 'HARVEST') {
-        roleLuna.harvestSource(creep);
+        roleVeinseeker.harvestSource(creep);
         return;
       }
       if (state === 'TRAVEL') {
@@ -2018,10 +2081,10 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var rm = Memory.rooms[roomName];
         if (!rm || !rm.sources) return false;
         if (!inRadius[roomName]) return false;
-        var localOwnedReason = getLunaLocalOwnedRoomBlockReason(homeName, roomName);
+        var localOwnedReason = getVeinseekerLocalOwnedRoomBlockReason(homeName, roomName);
         if (localOwnedReason) return false;
         if (rm.hostile) return false;
-        if (isLunaRoomUnsafe(roomName)) return false;
+        if (isVeinseekerRoomUnsafe(roomName)) return false;
         if (isRoomLockedByInvaderCore(roomName)) return false;
         return roomName !== Memory.firstSpawnRoom;
       });
@@ -2042,8 +2105,8 @@ function upsertRemoteContainerStatus(creep, source, container) {
       for (var j=0;j<rooms.length;j++){
         var rn=rooms[j];
         if (!inRadius[rn]) continue;
-        if (isLunaLocalOwnedRoom(homeName, rn)) continue;
-        if (isLunaRoomUnsafe(rn)) continue;
+        if (isVeinseekerLocalOwnedRoom(homeName, rn)) continue;
+        if (isVeinseekerRoomUnsafe(rn)) continue;
         if (isRoomLockedByInvaderCore(rn)) continue;
 
         var rm=getRoomMemoryBucket(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
@@ -2051,7 +2114,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var count=0;
         for (var name in Game.creeps){
           var c=Game.creeps[name];
-          if (c && c.memory && c.memory.task==='luna' && c.memory.targetRoom===rn) count++;
+          if (c && c.memory && c.memory.task==='veinseeker' && c.memory.targetRoom===rn) count++;
         }
         var avg = count / Math.max(1,sources.length);
         if (avg < lowest){ lowest=avg; best=rn; }
@@ -2060,15 +2123,15 @@ function upsertRemoteContainerStatus(creep, source, container) {
     },
 
     initializeAndAssign: function(creep){
-      // Legacy fallback assignment path. The newer RemoteHarvest/BeeSpawnManager
+      // Legacy fallback assignment path. The newer SourceEnergy/BeeSpawnManager
       // flow normally preassigns sourceId/targetRoom; this path still helps old
-      // or manually spawned Luna creeps find a safe source from room Memory.
-      var targetRooms = roleLuna.getNearbyRoomsWithSources(creep);
+      // or manually spawned Veinseeker creeps find a safe source from room Memory.
+      var targetRooms = roleVeinseeker.getNearbyRoomsWithSources(creep);
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
-        var least = roleLuna.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
+        var least = roleVeinseeker.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
         if (!least){
-          var report = roleLuna.buildNoSafeAssignmentReport(creep);
-          logLunaNoSafeSource(creep, report);
+          var report = roleVeinseeker.buildNoSafeAssignmentReport(creep);
+          logVeinseekerNoSafeSource(creep, report);
           delete creep.memory.targetRoom;
           delete creep.memory.sourceId;
           delete creep.memory.assigned;
@@ -2077,7 +2140,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         creep.memory.targetRoom = least;
 
         var roomMemory = getRoomMemoryBucket(creep.memory.targetRoom);
-        var sid = roleLuna.assignSource(creep, roomMemory);
+        var sid = roleVeinseeker.assignSource(creep, roomMemory);
         if (sid){
           creep.memory.sourceId = sid;
           creep.memory.assigned = true;
@@ -2097,7 +2160,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
             creep.memory._lastLogSid = sid;
           }
         }else{
-          logLunaNoSafeSource(creep, 'room=' + creep.memory.targetRoom + ' has no safe/open sources');
+          logVeinseekerNoSafeSource(creep, 'room=' + creep.memory.targetRoom + ' has no safe/open sources');
           creep.memory.targetRoom=null; creep.memory.sourceId=null;
         }
       }
@@ -2112,14 +2175,14 @@ function upsertRemoteContainerStatus(creep, source, container) {
       for (var i = 0; i < ring.length; i++) {
         var rn = ring[i];
         if (rn === Memory.firstSpawnRoom) continue;
-        var localOwnedReason = getLunaLocalOwnedRoomBlockReason(homeName, rn);
+        var localOwnedReason = getVeinseekerLocalOwnedRoomBlockReason(homeName, rn);
         if (localOwnedReason) {
           if (localOwnedReason === 'home-room') homeRooms++;
           else if (localOwnedReason === 'owned-spawn-room') ownedSpawnRooms++;
           else localOwnedRooms++;
           continue;
         }
-        if (isLunaRoomUnsafe(rn)) { blocked++; continue; }
+        if (isVeinseekerRoomUnsafe(rn)) { blocked++; continue; }
         var rm = getRoomMemoryBucket(rn);
         if (!rm || !rm.sources || !Object.keys(rm.sources).length) { noSources++; continue; }
         var roomRoute = null;
@@ -2142,22 +2205,22 @@ function upsertRemoteContainerStatus(creep, source, container) {
       for (var ri = 0; ri < ring.length; ri++) {
         var roomName = ring[ri];
         var roomMem = getRoomMemoryBucket(roomName);
-        var localOwnedReason2 = getLunaLocalOwnedRoomBlockReason(homeName, roomName);
+        var localOwnedReason2 = getVeinseekerLocalOwnedRoomBlockReason(homeName, roomName);
         if (localOwnedReason2) {
           blockedReasonCounts[roomName + ':' + localOwnedReason2] = (blockedReasonCounts[roomName + ':' + localOwnedReason2] || 0) + 1;
-        } else if (isLunaRoomUnsafe(roomName)) {
-          var reason = roomMem.lunaBlockedReason || 'memory-blocked';
+        } else if (isVeinseekerRoomUnsafe(roomName)) {
+          var reason = roomMem.sourceWorkerBlockedReason || 'memory-blocked';
           blockedReasonCounts[roomName + ':' + reason] = (blockedReasonCounts[roomName + ':' + reason] || 0) + 1;
         }
         if (!roomMem || !roomMem.sources) continue;
         var sourceIds = Object.keys(roomMem.sources);
         for (var bi = 0; bi < sourceIds.length; bi++) {
-          if (isLunaSourceBlocked(roomName, sourceIds[bi])) blockedSources++;
+          if (isVeinseekerSourceBlocked(roomName, sourceIds[bi])) blockedSources++;
         }
       }
       var topRejected = [];
       var homeMem = Memory.rooms && Memory.rooms[homeName] ? Memory.rooms[homeName] : null;
-      var lastSel = homeMem && homeMem.lastLunaSelection ? homeMem.lastLunaSelection : null;
+      var lastSel = homeMem && homeMem.lastVeinseekerSelection ? homeMem.lastVeinseekerSelection : null;
       if (lastSel && lastSel.rejectedCloserRooms && lastSel.rejectedCloserRooms.length) {
         var rejectCount = {};
         for (var rj = 0; rj < lastSel.rejectedCloserRooms.length; rj++) {
@@ -2191,15 +2254,15 @@ function upsertRemoteContainerStatus(creep, source, container) {
       // free sources, then this creep's sticky source, then partially occupied
       // sources that still have capacity.
       if (!roomMemory || !roomMemory.sources) return null;
-      if (creep.memory && creep.memory.targetRoom && isLunaLocalOwnedRoom(getHomeName(creep), creep.memory.targetRoom)) return null;
-      if (creep.memory && creep.memory.targetRoom && isLunaRoomUnsafe(creep.memory.targetRoom)) return null;
+      if (creep.memory && creep.memory.targetRoom && isVeinseekerLocalOwnedRoom(getHomeName(creep), creep.memory.targetRoom)) return null;
+      if (creep.memory && creep.memory.targetRoom && isVeinseekerRoomUnsafe(creep.memory.targetRoom)) return null;
       var sids = Object.keys(roomMemory.sources); if (!sids.length) return null;
 
       var memAssign = ensureAssignmentsMem();
       var free=[], sticky=[], rest=[];
       for (var i=0;i<sids.length;i++){
         var sid=sids[i];
-        if (isLunaSourceBlocked(creep.memory.targetRoom, sid)) continue;
+        if (isVeinseekerSourceBlocked(creep.memory.targetRoom, sid)) continue;
         var owners = maOwners(memAssign, sid);
         var cnt   = maCount(memAssign, sid);
         var cap = getSourceMaxSlots(sid);
@@ -2221,16 +2284,16 @@ function upsertRemoteContainerStatus(creep, source, container) {
     harvestSource: function(creep){
       // Harvest loop for the assigned source. It also maintains remote container
       // build/status/haul Memory, so changing it affects Truckers, Repair,
-      // RemoteHarvest.Manager, and BeeSpawnManager quota decisions.
+      // SourceEnergy.Manager, and BeeSpawnManager quota decisions.
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
         if (Game.time%25===0) console.log('Forager '+creep.name+' missing targetRoom/sourceId'); return;
       }
 
-      if (creep.memory.targetRoom && isLunaRoomUnsafe(creep.memory.targetRoom)) {
+      if (creep.memory.targetRoom && isVeinseekerRoomUnsafe(creep.memory.targetRoom)) {
         debugSay(creep, '🚫SAFE');
         var targetMem = (Memory.rooms && Memory.rooms[creep.memory.targetRoom]) || {};
         if (!creep.memory._lastUnsafeLog || (Game.time - creep.memory._lastUnsafeLog) >= 25) {
-          console.log('🚫 Luna ' + creep.name + ' releasing unsafe room ' + creep.memory.targetRoom + ' reason=' + (targetMem.lunaBlockedReason || 'unsafe'));
+          console.log('🚫 Veinseeker ' + creep.name + ' releasing unsafe room ' + creep.memory.targetRoom + ' reason=' + (targetMem.sourceWorkerBlockedReason || 'unsafe'));
           creep.memory._lastUnsafeLog = Game.time;
         }
         releaseAssignment(creep);
@@ -2241,7 +2304,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var dest = new RoomPosition(25,25,creep.memory.targetRoom);
         debugSay(creep, '➡️'+creep.memory.targetRoom);
         debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
-        lunaTravelToAssigned(creep, dest, { range: 20, reusePath: 20 }, creep.memory.sourceId, 'room-travel');
+        veinseekerTravelToAssigned(creep, dest, { range: 20, reusePath: 20 }, creep.memory.sourceId, 'room-travel');
         return;
       }
 
@@ -2268,8 +2331,8 @@ function upsertRemoteContainerStatus(creep, source, container) {
       }
 
       var stuckTicks = typeof creep.memory._stuck === 'number' ? creep.memory._stuck : 0;
-      if (stuckTicks >= LUNA_STUCK_SOURCE_BLOCK_TICKS){
-        markLunaSourceBlocked(creep.memory.targetRoom, sid, 'stuck-source-path', LUNA_STUCK_SOURCE_BLOCK_TTL);
+      if (stuckTicks >= VEINSEEKER_STUCK_SOURCE_BLOCK_TICKS){
+        markVeinseekerSourceBlocked(creep.memory.targetRoom, sid, 'stuck-source-path', VEINSEEKER_STUCK_SOURCE_BLOCK_TTL);
         releaseAssignment(creep);
         idleAtAnchor(creep, 'STUCK');
         return;
@@ -2310,27 +2373,30 @@ function upsertRemoteContainerStatus(creep, source, container) {
       }
 
       var containerHitsPct = (container && container.hitsMax) ? (container.hits / container.hitsMax) : 1;
-      if (creep.memory.lunaRepairingContainer) {
-        if (!container || isLunaRoomUnsafe(container.pos.roomName) || containerHitsPct >= (CFG.remoteContainerRepairStopPct || 0.85)) {
-          creep.memory.lunaRepairingContainer = false;
+      if (creep.memory.sourceWorkerRepairingContainer) {
+        if (!container || isVeinseekerRoomUnsafe(container.pos.roomName) || containerHitsPct >= (CFG.remoteContainerRepairStopPct || 0.85)) {
+          creep.memory.sourceWorkerRepairingContainer = false;
         }
       } else if (shouldRepairAssignedContainer(creep, container)) {
-        creep.memory.lunaRepairingContainer = true;
+        creep.memory.sourceWorkerRepairingContainer = true;
       }
 
-      if (container && !creep.pos.isEqualTo(container.pos)) { debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT'); lunaTravelToAssigned(creep, container, { range: 0, reusePath: 10 }, sid, 'seat-travel'); return; }
-      if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); lunaTravelToAssigned(creep, site, { range: 0, reusePath: 10 }, sid, 'site-travel'); return; }
-      if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); lunaTravelToAssigned(creep, src, { range: 1, reusePath: 10 }, sid, 'source-travel'); return; }
-      clearLunaPathFailure(creep, sid);
+      if (container && creep.memory.sourceWorkerRepairingContainer) creep.memory.state = 'REPAIR_CONTAINER';
+      else if (!container && site) creep.memory.state = 'BUILD_CONTAINER';
 
-      if (container && creep.memory.lunaRepairingContainer) {
+      if (container && !creep.pos.isEqualTo(container.pos)) { debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT'); veinseekerTravelToAssigned(creep, container, { range: 0, reusePath: 10 }, sid, 'seat-travel'); return; }
+      if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); veinseekerTravelToAssigned(creep, site, { range: 0, reusePath: 10 }, sid, 'site-travel'); return; }
+      if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); veinseekerTravelToAssigned(creep, src, { range: 1, reusePath: 10 }, sid, 'source-travel'); return; }
+      clearVeinseekerPathFailure(creep, sid);
+
+      if (container && creep.memory.sourceWorkerRepairingContainer) {
         upsertRemoteHaulRequest(creep, src, container);
         markContainerRepairMaintenanceHold(creep, container, src);
         var minEnergy = CFG.remoteContainerRepairMinContainerEnergy || 100;
         var withdrawAmount = CFG.remoteContainerRepairWithdrawAmount || 50;
         if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
           if (creep.pos.getRangeTo(container) > 3) {
-            lunaTravelToAssigned(creep, container, { range: 3, reusePath: 5 }, sid, 'repair-position');
+            veinseekerTravelToAssigned(creep, container, { range: 3, reusePath: 5 }, sid, 'repair-position');
             return;
           }
           creep.repair(container);
@@ -2351,7 +2417,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       debugSay(creep, '⛏️SRC');
       var rc = creep.harvest(src);
       if (rc === OK) touchSourceActive(creep.room.name, sid);
-      if (rc === OK) clearLunaPathFailure(creep, sid);
+      if (rc === OK) clearVeinseekerPathFailure(creep, sid);
       debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, 'SRC');
 
       if (container && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
@@ -2365,11 +2431,32 @@ function upsertRemoteContainerStatus(creep, source, container) {
         creep.drop(RESOURCE_ENERGY);
       }
       if (container) upsertRemoteHaulRequest(creep, src, container);
+      publishRemoteLooseEnergyRequests(creep, src, container);
     }
   };
 
-roleLuna.MAX_LUNA_PER_SOURCE = MAX_LUNA_PER_SOURCE;
+roleVeinseeker.MAX_VEINSEEKER_PER_SOURCE = MAX_VEINSEEKER_PER_SOURCE;
 
-function run(creep){ return roleLuna.run(creep); }
+function inferMode(creep) {
+  if (!creep || !creep.memory) return 'home';
+  if (creep.memory.mode === 'remote' || creep.memory.mode === 'home') return creep.memory.mode;
+  var home = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
+  if (creep.memory.targetRoom && creep.memory.targetRoom !== home) return 'remote';
+  return 'home';
+}
 
-module.exports = { run: run };
+function run(creep){
+  if (!creep || !creep.memory) return;
+  creep.memory.role = 'Veinseeker';
+  creep.memory.task = 'veinseeker';
+  var mode = inferMode(creep);
+  creep.memory.mode = mode;
+  if (mode === 'remote') return roleVeinseeker.run(creep);
+  return VeinseekerManager.run(creep);
+}
+
+module.exports = {
+  run: run,
+  runHome: VeinseekerManager.run,
+  runRemote: function (creep) { return roleVeinseeker.run(creep); }
+};

@@ -11,7 +11,7 @@ var CFG = Object.freeze({
 
   // --- Visual styles (shared) ---
   DRAW: {
-    // BaseHarvest-style visuals
+    // Veinseeker-style visuals
     TRAVEL:   "#8ab6ff",
     SOURCE:   "#ffd16e",
     SEAT:     "#6effa1",
@@ -179,7 +179,7 @@ var CFG = Object.freeze({
   var RESERVE_CONFIG = {
     desired: 2500,
     rotateAt: 1000,
-    scanRoleNames: ['luna'],
+    scanRoleNames: ['veinseeker'],
     maxTargets: 8
   };
 
@@ -333,8 +333,8 @@ var CFG = Object.freeze({
   }
 
   function ensureReserveRoleScan() {
-    if (RESERVE_CONFIG.scanRoleNames.indexOf('luna') === -1) {
-      RESERVE_CONFIG.scanRoleNames.push('luna');
+    if (RESERVE_CONFIG.scanRoleNames.indexOf('veinseeker') === -1) {
+      RESERVE_CONFIG.scanRoleNames.push('veinseeker');
     }
   }
 

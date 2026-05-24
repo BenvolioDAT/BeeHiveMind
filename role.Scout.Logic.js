@@ -6,13 +6,13 @@
 // * Scout creep memory under creep.memory.scout plus targetRoom/state fields.
 // * Memory.rooms[roomName].scout and Memory.rooms[roomName].intel snapshots.
 // * Memory.__BHM.scoutIntel.homes[homeRoom].rooms[remoteRoom], which feeds
-//   RemoteHarvest.Manager's candidate source diagnostics.
+//   SourceEnergy.Manager's candidate source diagnostics.
 // * Memory.__BHM.remoteVisionRequests assignment/resolution when remote
 //   container data is stale.
 // Usually called by:
 // * BeeHiveMind.runCreeps() through role.Scout.js.
 // Systems that depend on it:
-// * RemoteHarvest.Manager reads scoutIntel for remote room/source approval.
+// * SourceEnergy.Manager reads scoutIntel for remote room/source approval.
 // * BeeSpawnManager may enqueue emergency Scouts when stale remote container
 //   status needs vision.
 // * BeeCombatSquads/SquadFlagIntel receive threat observations from Scouts.
@@ -77,7 +77,7 @@ function computeThreatBundle(room) {
 }
 
 function recordThreatIntel(room, threatBundle, shouldEscalate, sourceTag, distance) {
-  // Scouts and Luna both feed this threat timeline. Spawning uses the score
+  // Scouts and Veinseeker both feed this threat timeline. Spawning uses the score
   // later, so this records both "fresh seen" data and deferred threats that are
   // too far away to spawn defenders for immediately.
   if (!room) return;
@@ -150,10 +150,76 @@ function shouldLogIntel(room) { var r = (Memory.rooms && Memory.rooms[room.name]
 function getMyUsername(creep) { if (creep && creep.owner && creep.owner.username) return creep.owner.username; for (var name in Game.spawns) { var sp = Game.spawns[name]; if (sp && sp.my && sp.owner && sp.owner.username) return sp.owner.username; } for (var r in Game.rooms) { var rm = Game.rooms[r]; if (rm && rm.controller && rm.controller.my && rm.controller.owner && rm.controller.owner.username) return rm.controller.owner.username; } return null; }
 function getRoomIntel(roomName) { if (!Memory.rooms) return null; var mr = Memory.rooms[roomName]; return (mr && mr.intel) ? mr.intel : null; }
 function shouldScoutSkipPlayerRoom(roomName, creep) { var intel = getRoomIntel(roomName); if (!intel) return false; var myName = getMyUsername(creep); if (intel.owner && intel.owner !== 'Invader' && intel.owner !== myName) return true; if (intel.reservation && intel.reservation !== 'Invader' && intel.reservation !== myName) return true; return false; }
-function seedSourcesFromVision(room) { if (!room) return; Memory.rooms = Memory.rooms || {}; var rm = Memory.rooms[room.name] = (Memory.rooms[room.name] || {}); rm.sources = rm.sources || {}; var arr = room.find(FIND_SOURCES); for (var i = 0; i < arr.length; i++) { var s = arr[i]; var rec = rm.sources[s.id] = (rm.sources[s.id] || {}); rec.roomName = room.name; rec.x = s.pos.x; rec.y = s.pos.y; rec.lastSeen = Game.time; } }
+function countOpenTilesAroundSource(room, source) {
+  if (!room || !source || !source.pos) return 0;
+  var terrain = room.getTerrain();
+  var open = 0;
+  for (var dx = -1; dx <= 1; dx++) for (var dy = -1; dy <= 1; dy++) {
+    if (!dx && !dy) continue;
+    var x = source.pos.x + dx, y = source.pos.y + dy;
+    if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+    if (terrain.get(x, y) !== TERRAIN_MASK_WALL) open++;
+  }
+  return open;
+}
+function summarizeBestEnergyObject(list, amountFn) {
+  var best = null; var bestAmount = 0;
+  for (var i = 0; i < list.length; i++) {
+    var obj = list[i];
+    var amount = amountFn(obj);
+    if (amount > bestAmount) { best = obj; bestAmount = amount; }
+  }
+  if (!best || bestAmount <= 0) return null;
+  return { id: best.id, amount: bestAmount, x: best.pos.x, y: best.pos.y, updated: Game.time };
+}
+function buildVisibleSourceIntel(room, source, access) {
+  var containers = source.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; } }) || [];
+  var sites = source.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; } }) || [];
+  var container = containers[0] || null;
+  var site = sites[0] || null;
+  var containerInfo = {
+    status: container ? 'built' : (site ? 'building' : 'missing'),
+    containerId: container ? container.id : null,
+    siteId: site ? site.id : null,
+    x: container ? container.pos.x : (site ? site.pos.x : null),
+    y: container ? container.pos.y : (site ? site.pos.y : null),
+    progress: site ? site.progress || 0 : (container ? 1 : 0),
+    progressTotal: site ? site.progressTotal || 0 : (container ? 1 : 0),
+    progressPct: site && site.progressTotal ? Math.floor((site.progress / site.progressTotal) * 100) : (container ? 100 : 0),
+    updated: Game.time
+  };
+  var drops = source.pos.findInRange(FIND_DROPPED_RESOURCES, 3, { filter: function (r) { return r.resourceType === RESOURCE_ENERGY; } }) || [];
+  var tombstones = source.pos.findInRange(FIND_TOMBSTONES, 3, { filter: function (t) { return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }) || [];
+  var ruins = (typeof FIND_RUINS !== 'undefined') ? (source.pos.findInRange(FIND_RUINS, 3, { filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] || 0) > 0; } }) || []) : [];
+  var openTiles = access && typeof access.openTiles === 'number' ? access.openTiles : countOpenTilesAroundSource(room, source);
+  return {
+    id: source.id,
+    roomName: room.name,
+    x: source.pos.x,
+    y: source.pos.y,
+    lastSeen: Game.time,
+    openTiles: openTiles,
+    accessible: access ? access.accessible : openTiles > 0,
+    blockedReason: access ? access.blockedReason : (openTiles > 0 ? null : 'no-open-harvest-tiles'),
+    container: containerInfo,
+    nearbyDroppedEnergy: summarizeBestEnergyObject(drops, function (r) { return r.amount || 0; }),
+    nearbyTombstoneEnergy: summarizeBestEnergyObject(tombstones, function (t) { return (t.store && t.store[RESOURCE_ENERGY]) || 0; }),
+    nearbyRuinEnergy: summarizeBestEnergyObject(ruins, function (r) { return (r.store && r.store[RESOURCE_ENERGY]) || 0; })
+  };
+}
+function writeVisibleSourceIntel(room, source, access) {
+  Memory.rooms = Memory.rooms || {};
+  var rm = Memory.rooms[room.name] = (Memory.rooms[room.name] || {});
+  rm.sources = rm.sources || {};
+  var data = buildVisibleSourceIntel(room, source, access);
+  var rec = rm.sources[source.id] = (rm.sources[source.id] || {});
+  for (var key in data) if (Object.prototype.hasOwnProperty.call(data, key)) rec[key] = data[key];
+  return data;
+}
+function seedSourcesFromVision(room) { if (!room) return; var arr = room.find(FIND_SOURCES); for (var i = 0; i < arr.length; i++) writeVisibleSourceIntel(room, arr[i], null); }
 
 function logRoomIntel(room) {
-  // Full room intel snapshot. RemoteHarvest.Manager uses sources/owner/
+  // Full room intel snapshot. SourceEnergy.Manager uses sources/owner/
   // reservation/keeper data; combat uses hostiles; visuals/debugging read the
   // richer optional fields like portals, minerals, deposits, and power banks.
   if (!room) return;
@@ -213,7 +279,7 @@ function ensureScoutMem(creep) {
 
 
 function ensureScoutIntelRoot() {
-  // Home-scoped remote intel map. RemoteHarvest.Manager reads this path when it
+  // Home-scoped remote intel map. SourceEnergy.Manager reads this path when it
   // wants source-level accessibility and route diagnostics gathered by Scouts.
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.scoutIntel) Memory.__BHM.scoutIntel = { homes: {} };
@@ -251,8 +317,8 @@ function scoutRoomCostMatrix(roomName) {
 function evaluateScoutSourceAccessibility(homeRoom, room, sourceObj) {
   // Source-level approval check: a source needs at least one usable harvest
   // tile and a plausible path from the home-room center before it is marked
-  // remoteEligible for Luna planning.
-  if (!room || !sourceObj || !sourceObj.pos) return { accessible: false, blockedReason: 'source-missing', checkedAt: Game.time };
+  // remoteEligible for Veinseeker planning.
+  if (!room || !sourceObj || !sourceObj.pos) return { accessible: false, blockedReason: 'source-missing', checkedAt: Game.time, openTiles: 0 };
   var terrain = room.getTerrain();
   var openTiles = 0;
   var hasHarvestTile = false;
@@ -280,17 +346,17 @@ function evaluateScoutSourceAccessibility(homeRoom, room, sourceObj) {
     }
     if (!blocked) hasHarvestTile = true;
   }
-  if (!openTiles) return { accessible: false, blockedReason: 'no-open-harvest-tiles', checkedAt: Game.time };
-  if (!hasHarvestTile) return { accessible: false, blockedReason: 'harvest-tiles-blocked-by-structures', checkedAt: Game.time };
+  if (!openTiles) return { accessible: false, blockedReason: 'no-open-harvest-tiles', checkedAt: Game.time, openTiles: openTiles };
+  if (!hasHarvestTile) return { accessible: false, blockedReason: 'harvest-tiles-blocked-by-structures', checkedAt: Game.time, openTiles: openTiles };
   var start = new RoomPosition(25, 25, homeRoom);
   var ret = PathFinder.search(start, { pos: sourceObj.pos, range: 1 }, { maxOps: 2000, plainCost: 2, swampCost: 10, roomCallback: scoutRoomCostMatrix });
-  if (ret.incomplete || !ret.path || !ret.path.length) return { accessible: false, blockedReason: 'path-to-source-incomplete', checkedAt: Game.time };
-  return { accessible: true, blockedReason: null, checkedAt: Game.time };
+  if (ret.incomplete || !ret.path || !ret.path.length) return { accessible: false, blockedReason: 'path-to-source-incomplete', checkedAt: Game.time, openTiles: openTiles, pathCost: ret.cost || null };
+  return { accessible: true, blockedReason: null, checkedAt: Game.time, openTiles: openTiles, pathCost: ret.cost || null };
 }
 
 function updateScoutHomeIntelForRoom(room) {
   // Write one visible room into every nearby home-room scout map. This is the
-  // bridge from roaming Scouts to RemoteHarvest.Manager's approved source list.
+  // bridge from roaming Scouts to SourceEnergy.Manager's approved source list.
   if (!room || !room.name) return;
   var root = ensureScoutIntelRoot();
   var homes = getOwnedHomeRooms();
@@ -311,7 +377,10 @@ function updateScoutHomeIntelForRoom(room) {
       var src = sources[s];
       var access = evaluateScoutSourceAccessibility(homeRoom, room, src);
       if (!access.accessible) inaccessible++;
-      srcList.push({ id: src.id, x: src.pos.x, y: src.pos.y, accessible: access.accessible, blockedReason: access.blockedReason, checkedAt: access.checkedAt });
+      var sourceIntel = writeVisibleSourceIntel(room, src, access);
+      sourceIntel.routeDistance = routeDistance === Infinity ? null : routeDistance;
+      sourceIntel.pathCost = access.pathCost || null;
+      srcList.push(sourceIntel);
     }
     var remoteEligible = true; var remoteBlockedReason = null;
     if (hostiles.length > 0) { remoteEligible = false; remoteBlockedReason = 'unsafe-room'; }

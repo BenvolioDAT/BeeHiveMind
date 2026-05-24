@@ -34,7 +34,7 @@ var CFG = Object.freeze({
 
   // --- Visual styles (shared) ---
   DRAW: {
-    // BaseHarvest-style visuals
+    // Veinseeker-style visuals
     TRAVEL:   "#8ab6ff",
     SOURCE:   "#ffd16e",
     SEAT:     "#6effa1",
@@ -677,7 +677,7 @@ function isSeatOccupiedByOtherCreep(pos, myName) {
   return false;
 }
 
-function countAssignedBaseHarvesters(roomName, sourceId) {
+function countAssignedVeinseekers(roomName, sourceId) {
   if (!roomName || !sourceId) return 0;
   var total = 0;
   for (var creepName in Game.creeps) {
@@ -686,9 +686,10 @@ function countAssignedBaseHarvesters(roomName, sourceId) {
     if (!c || !c.my || !c.memory) continue;
     var role = c.memory.role;
     var task = c.memory.task;
-    var isBaseHarvestRole = role && String(role).toLowerCase() === 'baseharvest';
-    var isBaseHarvestTask = task && String(task).toLowerCase() === 'baseharvest';
-    if (!isBaseHarvestRole && !isBaseHarvestTask) continue;
+    var isVeinseekerRole = role && String(role).toLowerCase() === 'veinseeker';
+    var isVeinseekerTask = task && String(task).toLowerCase() === 'veinseeker';
+    if (!isVeinseekerRole && !isVeinseekerTask) continue;
+    if (c.memory.mode === 'remote') continue;
     if (c.memory.assignedSource !== sourceId) continue;
     if (!c.room || c.room.name !== roomName) continue;
     total++;
@@ -707,15 +708,15 @@ function evaluateBackupHarvestSource(creep, source, assignments) {
   }
   if (freeSeats <= 0) return { eligible: false, reason: 'no_free_harvest_seat', freeSeats: 0, totalSeats: seats.length };
 
-  var baseHarvestAssigned = countAssignedBaseHarvesters(creep.room.name, source.id);
+  var sourceWorkerAssigned = countAssignedVeinseekers(creep.room.name, source.id);
   var rec = assignments && assignments[source.id];
   var hasOtherQueenAssignment = !!(rec && rec.creepName !== creep.name);
-  var effectiveTakenSeats = baseHarvestAssigned + (hasOtherQueenAssignment ? 1 : 0);
+  var effectiveTakenSeats = sourceWorkerAssigned + (hasOtherQueenAssignment ? 1 : 0);
 
-  // Queen backup harvesting is emergency-only. If BaseHarvest already occupies all
+  // Queen backup harvesting is emergency-only. If Veinseeker already occupies all
   // reachable source seats, Queen must not path into that blocked source and stall.
-  if (baseHarvestAssigned >= seats.length) {
-    return { eligible: false, reason: 'source_blocked_by_baseharvest', freeSeats: freeSeats, totalSeats: seats.length };
+  if (sourceWorkerAssigned >= seats.length) {
+    return { eligible: false, reason: 'source_blocked_by_veinseeker', freeSeats: freeSeats, totalSeats: seats.length };
   }
 
   if (effectiveTakenSeats >= seats.length) {
@@ -766,7 +767,7 @@ function getBackupHarvestTask(creep) {
   var assignedSource = null;
   var unclaimedEligible = [];
   var fallbackEligible = [];
-  var blockedByBaseHarvest = 0;
+  var blockedByVeinseeker = 0;
   var noFreeSeatCount = 0;
 
   for (var i = 0; i < sources.length; i++) {
@@ -775,7 +776,7 @@ function getBackupHarvestTask(creep) {
 
     var seatEval = evaluateBackupHarvestSource(creep, src, assignments);
     if (!seatEval.eligible) {
-      if (seatEval.reason === 'source_blocked_by_baseharvest') blockedByBaseHarvest++;
+      if (seatEval.reason === 'source_blocked_by_veinseeker') blockedByVeinseeker++;
       else if (seatEval.reason === 'no_free_harvest_seat') noFreeSeatCount++;
       continue;
     }
@@ -791,7 +792,7 @@ function getBackupHarvestTask(creep) {
   if (!chosen && fallbackEligible.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, fallbackEligible);
 
   if (!chosen) {
-    diag.reason = blockedByBaseHarvest > 0 ? 'source_blocked_by_baseharvest' : (noFreeSeatCount > 0 ? 'no_free_harvest_seat' : 'no_eligible_source');
+    diag.reason = blockedByVeinseeker > 0 ? 'source_blocked_by_veinseeker' : (noFreeSeatCount > 0 ? 'no_free_harvest_seat' : 'no_eligible_source');
     writeQueenBackupHarvestDiag(creep, diag);
     return null;
   }

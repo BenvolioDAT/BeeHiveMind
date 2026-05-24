@@ -9,14 +9,14 @@
 //   multiple Repair creeps from selecting the same target.
 // Reads/writes:
 // * Memory.rooms[roomName].repairTargets maintained by BeeMaintenance/main.
-// * Memory.__BHM.remoteContainerStatus and remoteHaulRequests produced by Luna;
+// * Memory.__BHM.remoteContainerStatus and remoteHaulRequests produced by Veinseeker;
 //   emergency repair also writes maintenanceUntil/maintenanceBy holds so
 //   Truckers do not drain containers while they are being repaired.
 // Usually called by:
 // * BeeHiveMind.runCreeps() through role.Repair.js.
 // Do not casually change:
 // * Remote container validation/cleanup logic or maintenance hold field names;
-//   Luna, Trucker, BeeSpawnManager, and BeeMaintenance all read the same records.
+//   Veinseeker, Trucker, BeeSpawnManager, and BeeMaintenance all read the same records.
 // -----------------------------------------------------------------------------
 var BeeToolbox = require('BeeToolbox');
 var BeeSelectors = require('BeeSelectors');
@@ -98,7 +98,7 @@ function getMyUsernameForRepair(){
 }
 function isRoomUnsafeForRemoteRepair(roomName, homeRoom){
   // Repair keeps a narrow remote safety gate so it does not inherit broader
-  // Luna/spawn safety rules by accident. Username lookup is shared through
+  // Veinseeker/spawn safety rules by accident. Username lookup is shared through
   // BeeToolbox, but the predicate remains Repair-specific unless behavior
   // parity is proven.
   if (!roomName || roomName === homeRoom) return false;
@@ -106,7 +106,7 @@ function isRoomUnsafeForRemoteRepair(roomName, homeRoom){
   var mem = Memory.rooms && Memory.rooms[roomName];
   if (mem) {
     if (mem.hostile) return true;
-    if (typeof mem.lunaBlockedUntil === 'number' && mem.lunaBlockedUntil > Game.time) return true;
+    if (typeof mem.sourceWorkerBlockedUntil === 'number' && mem.sourceWorkerBlockedUntil > Game.time) return true;
     if (mem._invaderLock && mem._invaderLock.locked) {
       var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
       if (lockTick == null || (Game.time - lockTick) <= 1500) return true;
@@ -144,7 +144,7 @@ function getRemoteContainerStatusById(id){
 function clearStaleRemoteContainerRepairMemory(targetInfo, reason){
   // Remote repair is allowed to delete stale status/request records only after
   // the selected target proves invalid. This keeps cleanup tied to visible
-  // evidence instead of blindly pruning Luna's remote container Memory.
+  // evidence instead of blindly pruning Veinseeker's remote container Memory.
   if (!targetInfo) return;
   // Repair cleanup is target-validation driven: clear stale status/requests
   // when the currently selected remote repair target fails validation.
@@ -400,7 +400,7 @@ function getLocalTargets(creep){
   return out;
 }
 function getRemoteContainerTargets(creep){
-  // Remote repair candidates are derived from Luna's remoteContainerStatus
+  // Remote repair candidates are derived from Veinseeker's remoteContainerStatus
   // records. Only built, same-home, visible/safe-enough low-HP containers are
   // exposed as normal Repair targets.
   var out = []; var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;

@@ -1,10 +1,10 @@
 'use strict';
 
-// BaseHarvest behavior implementation only. Public role wiring stays in role.BaseHarvest.js.
-var CFG = require('role.BaseHarvest.Config');
+// Veinseeker behavior implementation only. Public role wiring stays in role.Veinseeker.js.
+var CFG = require('role.Veinseeker.Config');
 var BeeToolbox = require('BeeToolbox');
 
-// These wrappers preserve BaseHarvest's debug flags and colors, while
+// These wrappers preserve Veinseeker's debug flags and colors, while
 // BeeToolbox handles the shared "object or RoomPosition" visual plumbing.
 function debugSay(creep, msg) {
   BeeToolbox.sayIfDebugEnabled(creep, msg, CFG.DEBUG_SAY);
@@ -37,14 +37,14 @@ function getAdjacentContainerForSource(source) { var arr = source.pos.findInRang
 function getPreferredSeatPos(source) { var cont = getAdjacentContainerForSource(source); if (cont) return cont.pos; var candidates = []; for (var dx = -1; dx <= 1; dx++) { for (var dy = -1; dy <= 1; dy++) { if (dx === 0 && dy === 0) continue; var p = new RoomPosition(source.pos.x + dx, source.pos.y + dy, source.pos.roomName); if (isWalkable(p)) candidates.push(p); } } if (!candidates.length) return null; candidates.sort(function(a, b) { return (a.y - b.y) || (a.x - b.x); }); return candidates[0]; }
 function matchesRole(creep, roleName, legacyTask) { if (!creep || !creep.memory) return false; var role = creep.memory.role; if (role && roleName && String(role).toLowerCase() === String(roleName).toLowerCase()) return true; var task = creep.memory.task; var legacy = legacyTask || roleName; if (task && legacy && String(task).toLowerCase() === String(legacy).toLowerCase()) return true; if (task && roleName && String(task).toLowerCase() === String(roleName).toLowerCase()) return true; return false; }
 function getAssignedSourceId(creep) { if (!creep || !creep.memory) return null; return creep.memory.assignedSource || creep.memory.sourceId || creep.memory.replaceSourceId || creep.memory.replacementTargetSourceId || null; }
-function getIncumbents(roomName, sourceId, excludeName) { var out = []; for (var name in Game.creeps) { var c = Game.creeps[name]; if (!c || !c.my) continue; if (excludeName && name === excludeName) continue; if (c.memory && matchesRole(c, 'BaseHarvest', 'baseharvest') && getAssignedSourceId(c) === sourceId && c.room && c.room.name === roomName) out.push(c); } return out; }
+function getIncumbents(roomName, sourceId, excludeName) { var out = []; for (var name in Game.creeps) { var c = Game.creeps[name]; if (!c || !c.my) continue; if (excludeName && name === excludeName) continue; if (c.memory && matchesRole(c, 'Veinseeker', 'veinseeker') && getAssignedSourceId(c) === sourceId && c.room && c.room.name === roomName) out.push(c); } return out; }
 function countAssignedHarvesters(roomName, sourceId) { return getIncumbents(roomName, sourceId, null).length; }
 
 function writeHandoffDiag(roomName, sourceId, oldName, replacementName, ready, action, reason) {
   if (!roomName) return;
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  Memory.rooms[roomName].lastBaseHarvestHandoff = {
+  Memory.rooms[roomName].lastVeinseekerHandoff = {
     tick: Game.time,
     sourceId: sourceId || null,
     oldCreep: oldName || null,
@@ -57,7 +57,7 @@ function writeHandoffDiag(roomName, sourceId, oldName, replacementName, ready, a
 
 function isReplacementForSource(creep, sourceId) {
   if (!creep || !creep.memory || !sourceId) return false;
-  if (creep.memory.baseHarvestSpawnMode !== 'upgradeReplacement') return false;
+  if (creep.memory.sourceWorkerSpawnMode !== 'upgradeReplacement') return false;
   return (creep.memory.replaceSourceId || creep.memory.assignedSource || creep.memory.sourceId) === sourceId;
 }
 
@@ -77,12 +77,12 @@ function hasActiveWork(creep) {
 function replacementReadyForHandoff(oldCreep, replacement, source) {
   if (!oldCreep || !replacement || !source || !replacement.memory) return false;
   if (replacement.spawning) return false;
-  if (!matchesRole(replacement, 'BaseHarvest', 'baseharvest')) return false;
+  if (!matchesRole(replacement, 'Veinseeker', 'veinseeker')) return false;
   if (replacement.memory.replacementFor !== oldCreep.name) return false;
   if (getAssignedSourceId(replacement) !== source.id) return false;
   if (!hasActiveWork(replacement)) return false;
   if (!replacement.pos || replacement.pos.roomName !== source.pos.roomName) return false;
-  if (replacement.pos.getRangeTo(source) <= (CFG.BASEHARVEST_HANDOFF_RANGE || 1)) return true;
+  if (replacement.pos.getRangeTo(source) <= (CFG.VEINSEEKER_HANDOFF_RANGE || 1)) return true;
   var seatPos = getPreferredSeatPos(source);
   if (seatPos && replacement.pos.isEqualTo(seatPos)) return true;
   var cont = getAdjacentContainerForSource(source);
@@ -125,7 +125,7 @@ function findHandoffQueueSpot(source, seatPos, myName) {
 }
 
 function resolveSourceConflict(creep, source) {
-  var neighbors = source.pos.findInRange(FIND_MY_CREEPS, 1, { filter: function(c) { return c.name !== creep.name && matchesRole(c, 'BaseHarvest', 'baseharvest') && getAssignedSourceId(c) === source.id; } });
+  var neighbors = source.pos.findInRange(FIND_MY_CREEPS, 1, { filter: function(c) { return c.name !== creep.name && matchesRole(c, 'Veinseeker', 'veinseeker') && getAssignedSourceId(c) === source.id; } });
   if (neighbors.length === 0) return false;
   for (var h = 0; h < neighbors.length; h++) { if (isHandoffPair(creep, neighbors[h], source.id)) return false; }
   if (countAssignedHarvesters(creep.room.name, source.id) <= 1) return false;
@@ -145,11 +145,11 @@ function shouldQueueForSource(creep, source, seats, used) { if (used < seats) re
 function findQueueSpotNearSeat(seatPos, myName) { var best = null, bestScore = -Infinity; for (var dx = -1; dx <= 1; dx++) { for (var dy = -1; dy <= 1; dy++) { if (dx === 0 && dy === 0) continue; var p = new RoomPosition(seatPos.x + dx, seatPos.y + dy, seatPos.roomName); if (!isWalkable(p)) continue; var occupied = isTileOccupiedByAlly(p, myName); var score = occupied ? -10 : 0; score += (-p.y * 0.01) + (-p.x * 0.001); if (score > bestScore) { bestScore = score; best = p; } } } return best; }
 
 
-function writeBaseHarvestSlotDiag(roomName, sourceId, seats, used) {
+function writeVeinseekerSlotDiag(roomName, sourceId, seats, used) {
   if (!roomName) return;
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  Memory.rooms[roomName].lastBaseHarvestSourceSlots = {
+  Memory.rooms[roomName].lastVeinseekerSourceSlots = {
     tick: Game.time,
     sourceId: sourceId || null,
     seats: seats || 0,
@@ -175,7 +175,7 @@ function assignSource(creep) {
     var seatPos = getPreferredSeatPos(s); if (!seatPos) continue;
     var seats = getAdjacentContainerForSource(s) ? 1 : countWalkableSeatsAround(s.pos);
     if (CFG.MAX_HARVESTERS_PER_SOURCE > 0) seats = Math.min(seats, CFG.MAX_HARVESTERS_PER_SOURCE);
-    var used = countAssignedHarvesters(creep.room.name, s.id); writeBaseHarvestSlotDiag(creep.room.name, s.id, seats, used); var free = seats - used; var willQueue = false;
+    var used = countAssignedHarvesters(creep.room.name, s.id); writeVeinseekerSlotDiag(creep.room.name, s.id, seats, used); var free = seats - used; var willQueue = false;
     if (free <= 0) { if (!shouldQueueForSource(creep, s, seats, used)) continue; willQueue = true; }
     var range = creep.pos.getRangeTo(seatPos); var score = (free > 0 ? 1000 : 0) - range;
     if (score > bestScore) { bestScore = score; best = { source: s, seatPos: seatPos }; bestWillQueue = willQueue; }
@@ -194,25 +194,49 @@ function getContainerAtOrAdjacent(pos) {
            return s.structureType === STRUCTURE_CONTAINER; } }); return (around && around.length) ? around[0] : null; 
           }
 
+function getSourceLink(source) {
+  if (!source || !source.room || !source.room.controller || !source.room.controller.my) return null;
+  if ((source.room.controller.level || 0) < 6) return null;
+  var links = source.pos.findInRange(FIND_MY_STRUCTURES, 2, {
+    filter: function (s) {
+      return s.structureType === STRUCTURE_LINK && s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+    }
+  });
+  return links && links.length ? links[0] : null;
+}
+
+function transferToSourceLink(creep, source) {
+  if (!creep || !source || creep.store.getUsedCapacity(RESOURCE_ENERGY) <= 0) return false;
+  var link = getSourceLink(source);
+  if (!link) return false;
+  var rc = creep.transfer(link, RESOURCE_ENERGY);
+  if (rc === OK) return true;
+  if (rc === ERR_NOT_IN_RANGE && creep.pos.getRangeTo(link) <= 2) {
+    creep.travelTo(link, { range: 1, reusePath: CFG.TRAVEL_REUSE });
+    return true;
+  }
+  return false;
+}
+
 function countCreepsWithRole(roleName, legacyTask) {
    var n = 0; for (var name in Game.creeps) { 
     var c = Game.creeps[name]; if (c && matchesRole(c, roleName, legacyTask)) n++; } return n; 
   }
 
-function ensureBaseHarvestIdentity(creep) {
+function ensureVeinseekerIdentity(creep) {
    if (!creep || !creep.memory) return; 
-   if (!creep.memory.role || String(creep.memory.role).toLowerCase() === 'baseharvest') creep.memory.role = 'BaseHarvest'; 
-   if (!creep.memory.task) creep.memory.task = 'baseharvest'; 
+   if (!creep.memory.role || String(creep.memory.role).toLowerCase() === 'veinseeker') creep.memory.role = 'Veinseeker'; 
+   if (!creep.memory.task) creep.memory.task = 'veinseeker'; 
   }
 
-function determineBaseHarvestState(creep) {
-   ensureBaseHarvestIdentity(creep); 
+function determineVeinseekerState(creep) {
+   ensureVeinseekerIdentity(creep); 
    if (!creep) return 'IDLE'; 
    var empty = creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0; var full = creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0; 
    if (empty) { creep.memory.harvesting = true; debugSay(creep, '⤵️MINE'); } 
    else if (full) { creep.memory.harvesting = false; debugSay(creep, '⤴️DROP'); }
     var nextState = 'IDLE'; if (creep.memory.harvesting) nextState = 'HARVEST'; 
-    else if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) nextState = 'OFFLOAD'; creep.memory.state = nextState; 
+    else if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) nextState = 'OFFLOAD_HOME'; creep.memory.state = nextState; 
     return nextState; 
   }
 
@@ -240,8 +264,9 @@ function runHarvestPhase(creep) {
   }
   if (seatPos && !creep.pos.isEqualTo(seatPos)) { debugSay(creep, '🪑'); creep.travelTo(seatPos, { range: 0, reusePath: CFG.TRAVEL_REUSE }); return; }
   creep.memory.waitingForSeat = false;
-  var courierCount = countCreepsWithRole('Courier', 'courier'); var queenCount = countCreepsWithRole('Queen', 'queen'); var haveCollectors = (courierCount > 0 || queenCount > 0);
+  var truckerCount = countCreepsWithRole('Trucker', 'haulUnified'); var queenCount = countCreepsWithRole('Queen', 'queen'); var haveCollectors = (truckerCount > 0 || queenCount > 0);
   var contHere = getContainerAtOrAdjacent(creep.pos);
+  if (transferToSourceLink(creep, source)) return;
   if (haveCollectors && contHere && creep.pos.isEqualTo(contHere.pos)) {
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) { var tr = creep.transfer(contHere, RESOURCE_ENERGY); if (tr === ERR_FULL) { debugSay(creep, '⬇️'); creep.drop(RESOURCE_ENERGY); } else if (tr === ERR_NOT_IN_RANGE) { creep.travelTo(contHere.pos, { range: 0, reusePath: CFG.TRAVEL_REUSE }); return; } }
   }
@@ -249,7 +274,7 @@ function runHarvestPhase(creep) {
 }
 
 function runOffloadPhase(creep) {
-  var courierCount2 = countCreepsWithRole('Courier', 'courier'); var queenCount2 = countCreepsWithRole('Queen', 'queen'); var haveCollectors2 = (courierCount2 > 0 || queenCount2 > 0);
+  var truckerCount2 = countCreepsWithRole('Trucker', 'haulUnified'); var queenCount2 = countCreepsWithRole('Queen', 'queen'); var haveCollectors2 = (truckerCount2 > 0 || queenCount2 > 0);
   if (!haveCollectors2) {
     var spawn = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, { filter: function(s) { return s.structureType === STRUCTURE_SPAWN && s.store && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0; } });
     if (spawn) { debugSay(creep, '🏠'); debugDrawLine(creep, spawn, CFG.DRAW.OFFLOAD, "RETURN"); var toSpawn = creep.transfer(spawn, RESOURCE_ENERGY); if (toSpawn === ERR_NOT_IN_RANGE) { creep.travelTo(spawn, { range: 1, reusePath: CFG.TRAVEL_REUSE }); return; } if (toSpawn === OK) return; }
@@ -270,6 +295,6 @@ function runOffloadPhase(creep) {
 }
 
 function idleWhenEmpty(creep) { if (!creep || creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) return; debugSay(creep, '🧘'); debugRing(creep.room, creep.pos, CFG.DRAW.IDLE, "IDLE"); }
-function run(creep) { var state = determineBaseHarvestState(creep); if (state === 'HARVEST') { runHarvestPhase(creep); return; } if (state === 'OFFLOAD') { runOffloadPhase(creep); return; } idleWhenEmpty(creep); }
+function run(creep) { var state = determineVeinseekerState(creep); if (state === 'HARVEST') { runHarvestPhase(creep); return; } if (state === 'OFFLOAD_HOME') { runOffloadPhase(creep); return; } idleWhenEmpty(creep); }
 
 module.exports = { run: run };

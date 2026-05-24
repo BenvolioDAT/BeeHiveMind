@@ -8,17 +8,17 @@
 // Memory paths read/written:
 // * Memory.rooms[roomName].sources and sourceContainers via source/container
 //   intel logging.
-// * Room-level remote danger fields such as lunaBlockedUntil, lunaBlockedReason,
-//   lunaBlocked, hostile, hostileRoom, threatLevel, and _invaderLock.
+// * Room-level remote danger fields such as sourceWorkerBlockedUntil, sourceWorkerBlockedReason,
+//   sourceWorkerBlocked, hostile, hostileRoom, threatLevel, and _invaderLock.
 // * global.__energyTargets as a tick-local cache for energy source lookups.
 // Usually called by:
-// * Luna, Scout, Trucker, Repair, combat roles, BeeMaintenance, and main.js.
+// * Veinseeker, Scout, Trucker, Repair, combat roles, BeeMaintenance, and main.js.
 // Systems that depend on it:
-// * RemoteHarvest.Manager, BeeSpawnManager, and Repair rely on its shared remote
+// * SourceEnergy.Manager, BeeSpawnManager, and Repair rely on its shared remote
 //   safety checks and remote container identity helpers.
 // Do not casually change:
 // * Safety predicates or the fields cleared by refreshVisibleRemoteSafety();
-//   clearing source-level blocks here would bypass Luna assignment safeguards.
+//   clearing source-level blocks here would bypass Veinseeker assignment safeguards.
 // -----------------------------------------------------------------------------
 
 var Traveler = require('Traveler');
@@ -172,7 +172,7 @@ function _isForeignPlayerRoom(room) {
 // - They are only allowed to clear room-level stale danger flags after a room is
 //   visible and confirmed safe right now.
 // - They must never clear per-source blocks such as:
-//   Memory.rooms[roomName].sources[sourceId].lunaBlockedUntil
+//   Memory.rooms[roomName].sources[sourceId].sourceWorkerBlockedUntil
 //   because source-level access constraints are managed by assignment logic.
 function _getRoomMemoryBucket(roomName) {
   if (!roomName) return null;
@@ -198,19 +198,19 @@ function _isVisibleRoomSafeForRemoteUse(room) {
 
 function _refreshVisibleRemoteSafety(room) {
   // Only room-level danger markers are cleared here, and only after current
-  // vision says the room is safe. Source-level Luna blocks stay owned by Luna.
+  // vision says the room is safe. Source-level Veinseeker blocks stay owned by Veinseeker.
   if (!_isVisibleRoomSafeForRemoteUse(room)) return false;
   var mem = _getRoomMemoryBucket(room.name);
   if (!mem) return false;
-  delete mem.lunaBlockedUntil;
-  delete mem.lunaBlockedReason;
-  delete mem.lunaBlockedAt;
-  delete mem.lunaBlocked;
-  delete mem.lunaUnsafe;
+  delete mem.sourceWorkerBlockedUntil;
+  delete mem.sourceWorkerBlockedReason;
+  delete mem.sourceWorkerBlockedAt;
+  delete mem.sourceWorkerBlocked;
+  delete mem.sourceWorkerUnsafe;
   delete mem.hostile;
   delete mem.hostileRoom;
   delete mem.threatLevel;
-  delete mem.lunaInvaderLockUntil;
+  delete mem.sourceWorkerInvaderLockUntil;
   if (mem._invaderLock && mem._invaderLock.locked) delete mem._invaderLock;
   return true;
 }
@@ -226,9 +226,9 @@ function _isRemoteRoomUnsafe(roomName, opts) {
   if (room) _refreshVisibleRemoteSafety(room);
 
   var mem = (Memory.rooms && Memory.rooms[roomName]) || {};
-  if (mem.lunaBlocked || mem.lunaUnsafe || mem.hostile || mem.hostileRoom) return true;
-  if (mem.lunaBlockedUntil && mem.lunaBlockedUntil > Game.time) return true;
-  if (mem.lunaInvaderLockUntil && mem.lunaInvaderLockUntil > Game.time) return true;
+  if (mem.sourceWorkerBlocked || mem.sourceWorkerUnsafe || mem.hostile || mem.hostileRoom) return true;
+  if (mem.sourceWorkerBlockedUntil && mem.sourceWorkerBlockedUntil > Game.time) return true;
+  if (mem.sourceWorkerInvaderLockUntil && mem.sourceWorkerInvaderLockUntil > Game.time) return true;
   if (mem._invaderLock && mem._invaderLock.locked) {
     var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
     if (lockTick == null || (Game.time - lockTick) <= invaderLockTtl) return true;
@@ -687,7 +687,7 @@ var BeeToolbox = {
   // Logs all sources in a room to Memory.rooms[room].sources (object keyed by source.id).
   // (Comment fixed: we store an OBJECT per source id, not an "array".)
   logSourcesInRoom: function (room) {
-    // Source intel seed. Scouts/Luna/RemoteHarvest all expect
+    // Source intel seed. Scouts/Veinseeker/SourceEnergy all expect
     // Memory.rooms[room].sources to be an object keyed by source id.
     if (!room) return;
 
@@ -984,9 +984,9 @@ var BeeToolbox = {
 
   // Ensure a CONTAINER exists 0–1 tiles from targetSource; place site if missing
   ensureContainerNearSource: function (creep, targetSource) {
-    // Infrastructure helper for simple miners/builders. Luna has its own remote
+    // Infrastructure helper for simple miners/builders. Veinseeker has its own remote
     // container tracking, so avoid merging the two workflows without checking
-    // RemoteHarvest and Trucker expectations.
+    // SourceEnergy and Trucker expectations.
     if (!creep || !targetSource) return;
 
     var sourcePos = targetSource.pos;

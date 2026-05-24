@@ -9,12 +9,12 @@
 // Memory paths read/written:
 // * Memory.creeps, Memory.rooms[*], Memory.recentlyCleanedRooms.
 // * Memory.remoteAssignments and Memory.rooms[*].sourceContainers.
-// * Memory.__BHM.remoteContainerStatus, preserving Luna/Repair critical data
+// * Memory.__BHM.remoteContainerStatus, preserving Veinseeker/Repair critical data
 //   longer than ordinary status snapshots.
 // Usually called by:
 // * main.js before BeeHiveMind.run().
 // Systems that depend on it:
-// * role.Repair.Logic.js consumes repairTargets; Luna/RemoteHarvest rely on
+// * role.Repair.Logic.js consumes repairTargets; Veinseeker/SourceEnergy rely on
 //   source metadata surviving cleanup.
 // Do not casually change:
 // * The distinction between assignment maps and source metadata. Deleting
@@ -78,7 +78,7 @@ function _lastSeen(mem) {
 function _compactRoomMem(roomName, mem) {
   // Compact a single room bucket without assuming one module owns every field.
   // This function removes known-empty/stale subtrees but preserves source
-  // metadata shapes used by Luna and RemoteHarvest.
+  // metadata shapes used by Veinseeker and SourceEnergy.
   if (!mem) return true;
   var now = _now();
 
@@ -317,11 +317,11 @@ function isLikelyAssignmentMap(sourceRecord) {
   var assignmentLikeKeys = {
     miner: true,
     harvester: true,
-    baseharvest: true,
-    baseHarvest: true,
-    luna: true,
-    remoteharvest: true,
-    remoteHarvest: true,
+    veinseeker: true,
+    sourceWorker: true,
+    veinseeker: true,
+    veinseeker: true,
+    sourceEnergy: true,
     hauler: true,
     trucker: true,
     courier: true,
@@ -373,7 +373,7 @@ function _pruneSourceAssignments(roomMemory) {
 
     if (_isObject(assignedCreeps)) {
       if (isSourceMetadataRecord(assignedCreeps)) {
-        // Metadata-shaped records are consumed by Luna/RemoteHarvest (including
+        // Metadata-shaped records are consumed by Veinseeker/SourceEnergy (including
         // source container/build progress state). Do not prune top-level keys.
         continue;
       }
@@ -463,7 +463,7 @@ function cleanUpMemory() {
 }
 
 function _pruneRemoteContainerStatus(now) {
-  // Remote container status is shared by Luna, Trucker, Repair, and
+  // Remote container status is shared by Veinseeker, Trucker, Repair, and
   // BeeSpawnManager. Keep critical/missing/low-HP records longer so emergency
   // repair and vision refresh have enough time to react.
   // Maintenance cleanup is TTL/visibility driven: keep status fresh while

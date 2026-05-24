@@ -6,11 +6,11 @@
 // * Memory.squads[flagName] state, members, targetId, rally/target positions,
 //   desired counts, and auto/remote-defense plan metadata.
 // * Memory.squadFlags.rooms/bindings threat and flag-target intel used by
-//   spawn.logic, BeeSpawnManager, Scouts, and Luna.
+//   spawn.logic, BeeSpawnManager, Scouts, and Veinseeker.
 // * Tick-local global.__combatApiCache and global.__beeSquadCache.
 // Usually called by:
 // * Combat role logic through CombatAPI, BeeSpawnManager for squad spawning,
-//   role.Scout.Logic.js and role.Luna.Logic.js for remote-defense intel.
+//   role.Scout.Logic.js and role.Veinseeker.Logic.js for remote-defense intel.
 // Systems that depend on it:
 // * spawn.logic.Spawn_Squad() and BeeSpawnManager remote defense ranking.
 // Do not casually change:
@@ -75,7 +75,7 @@ function isSquadFlag(name) {
 }
 
 function ensureSquadFlagMemory() {
-  // Squad flag intel is shared between Scouts, Luna, BeeSpawnManager, and
+  // Squad flag intel is shared between Scouts, Veinseeker, BeeSpawnManager, and
   // spawn.logic. Keep rooms/bindings stable for older flag workflows.
   if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
   if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
@@ -866,7 +866,7 @@ function ensureAutoDefenseForRoom(room) {
  */
 function refreshAutoDefensePlans() {
   // Owned-room auto-defense planner. Remote defense plans are created by
-  // Scouts/Luna; this pass is for rooms we control directly.
+  // Scouts/Veinseeker; this pass is for rooms we control directly.
   for (var roomName in Game.rooms) {
     if (!Object.prototype.hasOwnProperty.call(Game.rooms, roomName)) continue;
     var room = Game.rooms[roomName];

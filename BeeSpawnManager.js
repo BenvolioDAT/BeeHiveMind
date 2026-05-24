@@ -4,11 +4,11 @@
 // Owns Memory.rooms[roomName].spawnQueue plus quota diagnostics such as
 // lastRoleQuotas, lastTruckerQuota, lastRepairQuota, lastQueenQuota, and
 // lastRemoteVision. BeeHiveMind calls manageSpawns(C) once per tick, after role
-// logic has had a chance to update haul/status Memory. RemoteHarvest.Manager
-// provides Luna source reservations and audits; spawn.logic chooses bodies and
+// logic has had a chance to update haul/status Memory. SourceEnergy.Manager
+// provides Veinseeker source reservations and audits; spawn.logic chooses bodies and
 // performs spawn.spawnCreep; BeeCombatSquads supplies combat pressure. Avoid
-// changing queue priority, quota math, or the order of Luna reserve/enqueue/
-// unreserve calls without checking the RemoteHarvest.Manager ownership model.
+// changing queue priority, quota math, or the order of Veinseeker reserve/enqueue/
+// unreserve calls without checking the SourceEnergy.Manager ownership model.
 
 // -----------------------------------------------------------------------------
 // BeeSpawnManager.js – dedicated spawning subsystem extracted from BeeHiveMind
@@ -25,12 +25,11 @@ var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 var CoreConfig  = require('core.config');
 
 var spawnLogic  = require('spawn.logic');
-var LunaConfig  = require('role.Luna.Config');
+var VeinseekerConfig  = require('role.Veinseeker.Config');
 var TruckerConfig = require('role.Trucker.Config');
 var RepairConfig = require('role.Repair.Config');
 var QueenConfig = require('role.Queen.Config');
-var BaseHarvestConfig = require('role.BaseHarvest.Config');
-var RemoteHarvestManager = require('RemoteHarvest.Manager');
+var SourceEnergyManager = require('SourceEnergy.Manager');
 var BeeToolbox = require('BeeToolbox');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -42,25 +41,24 @@ var DEBUG_SPAWN_QUEUE     = true;
 var DBG_EVERY             = 5;
 var INVADER_LOCK_TTL      = 1500;
 var REPLACEMENT_TTL = {
-  Baseharvest: 80
+  Veinseeker: 80
 };
 
-var BASEHARVEST_ENABLE_BODY_UPGRADES = BaseHarvestConfig.BASEHARVEST_ENABLE_BODY_UPGRADES !== false;
-var BASEHARVEST_WAIT_FOR_BEST_BODY = BaseHarvestConfig.BASEHARVEST_WAIT_FOR_BEST_BODY !== false;
-var BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED = BaseHarvestConfig.BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED !== false;
-var BASEHARVEST_MAX_UPGRADE_WAIT_TICKS = BaseHarvestConfig.BASEHARVEST_MAX_UPGRADE_WAIT_TICKS || 150;
-var BASEHARVEST_REPLACEMENT_SAFE_TTL = BaseHarvestConfig.BASEHARVEST_REPLACEMENT_SAFE_TTL || 120;
-var BASEHARVEST_CRITICAL_TTL = BaseHarvestConfig.BASEHARVEST_CRITICAL_TTL || 60;
+var VEINSEEKER_ENABLE_BODY_UPGRADES = VeinseekerConfig.VEINSEEKER_ENABLE_BODY_UPGRADES !== false;
+var VEINSEEKER_WAIT_FOR_BEST_BODY = VeinseekerConfig.VEINSEEKER_WAIT_FOR_BEST_BODY !== false;
+var VEINSEEKER_UPGRADE_REPLACEMENTS_ENABLED = VeinseekerConfig.VEINSEEKER_UPGRADE_REPLACEMENTS_ENABLED !== false;
+var VEINSEEKER_MAX_UPGRADE_WAIT_TICKS = VeinseekerConfig.VEINSEEKER_MAX_UPGRADE_WAIT_TICKS || 150;
+var VEINSEEKER_REPLACEMENT_SAFE_TTL = VeinseekerConfig.VEINSEEKER_REPLACEMENT_SAFE_TTL || 120;
+var VEINSEEKER_CRITICAL_TTL = VeinseekerConfig.VEINSEEKER_CRITICAL_TTL || 60;
 
 var ROLE_PRIORITY = {
-  Baseharvest: 100,
+  Veinseeker: 70,
   Queen:        90,
   CombatMelee:  88,
   CombatArcher: 87,
   CombatMedic:  86,
   Upgrader:     80,
   Builder:      75,
-  Luna:         70,
   Repair:       60,
   Claimer:      55,
   Scout:        40,
@@ -69,16 +67,15 @@ var ROLE_PRIORITY = {
   
 };
 
-var BASEHARVEST_EMERGENCY_PRIORITY = 110;
-var BASEHARVEST_NORMAL_PRIORITY = ROLE_PRIORITY.Baseharvest || 100;
-var BASEHARVEST_UPGRADE_PRIORITY = 65;
+var VEINSEEKER_EMERGENCY_PRIORITY = 110;
+var VEINSEEKER_NORMAL_PRIORITY = 100;
+var VEINSEEKER_UPGRADE_PRIORITY = 65;
 
 var ROLE_MIN_ENERGY = {
-  Baseharvest: 200,
+  Veinseeker: 200,
   Queen:       200,
   Upgrader:    200,
   Builder:     200,
-  Luna:        250,
   Repair:      200,
   Claimer:     650,
   Scout:       50,
@@ -92,12 +89,11 @@ var ROLE_MIN_ENERGY = {
 var ROLE_ALIAS_MAP = (function () {
   var map = Object.create(null);
   var canon = [
-    'BaseHarvest',
+    'Veinseeker',
     'Builder',
     'Repair',
     'Upgrader',
     'Dismantler',
-    'Luna',
     'Scout',
     'Queen',
     'Trucker',
@@ -111,7 +107,7 @@ var ROLE_ALIAS_MAP = (function () {
     map[name] = name;
     map[name.toLowerCase()] = name;
   }
-  map.remoteharvest = 'Luna';
+  map.veinseeker = 'Veinseeker';
   return map;
 })();
 
@@ -150,9 +146,9 @@ function energyStatus(room) {
   return available + '/' + capacity;
 }
 
-function minEnergyFor(role) {
+function minEnergyFor(role, context) {
   if (spawnLogic && typeof spawnLogic.minEnergyFor === 'function') {
-    var override = spawnLogic.minEnergyFor(role);
+    var override = spawnLogic.minEnergyFor(role, context);
     if (typeof override === 'number') {
       return override;
     }
@@ -196,11 +192,50 @@ function getCheapestCombatRoleEnergy() {
 }
 
 function hasBaseRoleDeficit(C, roomName) {
-  var baseharvest = getRoomLocalLiveCount(C, roomName, 'BaseHarvest');
+  var veinseeker = countLiveHomeVeinseekers(roomName);
   // Trucker replaced Courier as the protected base hauler role.
   var trucker = getRoomLocalLiveCount(C, roomName, 'Trucker');
   var queen = getRoomLocalLiveCount(C, roomName, 'Queen');
-  return baseharvest < 1 || trucker < 1 || queen < 1;
+  return veinseeker < 1 || trucker < 1 || queen < 1;
+}
+
+function countLiveHomeVeinseekers(roomName) {
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory) continue;
+    if (canonicalRole(creep.memory.role) !== 'Veinseeker') continue;
+    if (creep.memory.mode === 'remote') continue;
+    if (getCreepHomeRoomName(creep) !== roomName) continue;
+    if (creep.spawning) continue;
+    count++;
+  }
+  return count;
+}
+
+function countLiveRemoteVeinseekers(roomName) {
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory) continue;
+    if (canonicalRole(creep.memory.role) !== 'Veinseeker') continue;
+    if (creep.memory.mode !== 'remote') continue;
+    if (getCreepHomeRoomName(creep) !== roomName) continue;
+    if (creep.spawning) continue;
+    count++;
+  }
+  return count;
+}
+
+function countQueuedRemoteVeinseekers(roomName) {
+  var q = ensureRoomQueue(roomName);
+  var count = 0;
+  for (var i = 0; i < q.length; i++) {
+    if (q[i] && q[i].role === 'Veinseeker' && q[i].mode === 'remote') count++;
+  }
+  return count;
 }
 
 function isRemoteDefenseTargetAllowed(targetRoom) {
@@ -334,8 +369,8 @@ function queuedCount(roomName, role) {
 function getRoomLocalLiveCount(C, roomName, role) {
   if (!C || !roomName || !role) return 0;
 
-  if (role === 'Luna') {
-    return (C.lunaCountsByHome && C.lunaCountsByHome[roomName]) || 0;
+  if (role === 'Veinseeker') {
+    return (C.veinseekerCountsByHome && C.veinseekerCountsByHome[roomName]) || 0;
   }
 
   var byRoom = C.roleCountsByRoom || {};
@@ -360,20 +395,20 @@ function countRoleNeedingReplacement(roomName, role, threshold) {
   return count;
 }
 
-function isBaseHarvestRole(role) {
-  return canonicalRole(role) === 'BaseHarvest';
+function isVeinseekerRole(role) {
+  return canonicalRole(role) === 'Veinseeker';
 }
 
-function isBaseHarvestQueueItem(item) {
-  return item && isBaseHarvestRole(item.role);
+function isVeinseekerQueueItem(item) {
+  return item && isVeinseekerRole(item.role) && item.mode !== 'remote';
 }
 
-function getBaseHarvestSourceIdFromMemory(mem) {
+function getVeinseekerSourceIdFromMemory(mem) {
   if (!mem) return null;
   return mem.assignedSource || mem.sourceId || mem.replaceSourceId || mem.replacementTargetSourceId || null;
 }
 
-function getBaseHarvestQueueSourceId(item) {
+function getVeinseekerQueueSourceId(item) {
   if (!item) return null;
   return item.sourceId || item.assignedSource || item.replaceSourceId || item.replacementTargetSourceId || null;
 }
@@ -418,12 +453,12 @@ function getCreepBodySignature(creep) {
   return creep.memory && creep.memory.bornBodySignature ? creep.memory.bornBodySignature : '';
 }
 
-function getBaseHarvestDesiredPlan(room) {
+function getVeinseekerDesiredPlan(room) {
   if (!room || !spawnLogic || typeof spawnLogic.getBestBodyPlanForRoomCapacity !== 'function') return null;
-  return spawnLogic.getBestBodyPlanForRoomCapacity('BaseHarvest', room);
+  return spawnLogic.getBestBodyPlanForRoomCapacity('Veinseeker', room, { mode: 'home' });
 }
 
-function makeBaseHarvestPlanDiag(plan) {
+function makeVeinseekerPlanDiag(plan) {
   if (!plan) {
     return {
       cost: 0,
@@ -440,19 +475,20 @@ function makeBaseHarvestPlanDiag(plan) {
   };
 }
 
-function isBaseHarvestSafelyHarvesting(creep, source) {
+function isVeinseekerSafelyHarvesting(creep, source) {
   // "Safe" means the old miner is alive long enough, assigned to this source,
   // and already close enough to keep harvesting while a better body is prepared.
   if (!creep || !source || !creep.memory) return false;
   if (creep.spawning) return false;
-  if (!isBaseHarvestRole(creep.memory.role)) return false;
-  if (getBaseHarvestSourceIdFromMemory(creep.memory) !== source.id) return false;
-  if (typeof creep.ticksToLive === 'number' && creep.ticksToLive < BASEHARVEST_REPLACEMENT_SAFE_TTL) return false;
+  if (!isVeinseekerRole(creep.memory.role)) return false;
+  if (creep.memory.mode === 'remote') return false;
+  if (getVeinseekerSourceIdFromMemory(creep.memory) !== source.id) return false;
+  if (typeof creep.ticksToLive === 'number' && creep.ticksToLive < VEINSEEKER_REPLACEMENT_SAFE_TTL) return false;
   if (!creep.pos || creep.pos.roomName !== source.pos.roomName) return false;
   return creep.pos.getRangeTo(source) <= 1;
 }
 
-function createBaseHarvestSourceRecord() {
+function createVeinseekerSourceRecord() {
   return {
     live: 0,
     queued: 0,
@@ -473,15 +509,15 @@ function createBaseHarvestSourceRecord() {
   };
 }
 
-function buildBaseHarvestCoverageReport(room) {
+function buildVeinseekerCoverageReport(room) {
   var roomName = room && room.name;
-  var desiredPlan = getBaseHarvestDesiredPlan(room);
+  var desiredPlan = getVeinseekerDesiredPlan(room);
   var diag = {
     tick: Game.time,
     roomName: roomName || null,
     energyAvailable: room ? room.energyAvailable : 0,
     energyCapacityAvailable: room ? room.energyCapacityAvailable : 0,
-    desiredPlan: makeBaseHarvestPlanDiag(desiredPlan),
+    desiredPlan: makeVeinseekerPlanDiag(desiredPlan),
     sources: {},
     decisions: []
   };
@@ -491,17 +527,17 @@ function buildBaseHarvestCoverageReport(room) {
 
   var sources = room.find(FIND_SOURCES) || [];
   for (var s = 0; s < sources.length; s++) {
-    diag.sources[sources[s].id] = createBaseHarvestSourceRecord();
+    diag.sources[sources[s].id] = createVeinseekerSourceRecord();
   }
 
   var q = ensureRoomQueue(roomName);
   for (var qi = 0; qi < q.length; qi++) {
     var item = q[qi];
-    if (!isBaseHarvestQueueItem(item)) continue;
-    var qSourceId = getBaseHarvestQueueSourceId(item);
+    if (!isVeinseekerQueueItem(item)) continue;
+    var qSourceId = getVeinseekerQueueSourceId(item);
     if (!qSourceId || !diag.sources[qSourceId]) {
       diag.decisions.push({
-        action: 'ignoreQueuedBaseHarvest',
+        action: 'ignoreQueuedVeinseeker',
         reason: 'missing-or-unknown-source',
         queueIndex: qi
       });
@@ -509,7 +545,7 @@ function buildBaseHarvestCoverageReport(room) {
     }
     var qRec = diag.sources[qSourceId];
     qRec.queued++;
-    if (item.baseHarvestSpawnMode === 'upgradeReplacement' || item.replaceCreepName || item.replacementFor) {
+    if (item.sourceWorkerSpawnMode === 'upgradeReplacement' || item.replaceCreepName || item.replacementFor) {
       qRec.replacementQueued = true;
     }
   }
@@ -518,9 +554,9 @@ function buildBaseHarvestCoverageReport(room) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
     var creep = Game.creeps[name];
     if (!creep || !creep.my || !creep.memory) continue;
-    if (!isBaseHarvestRole(creep.memory.role)) continue;
+    if (!isVeinseekerRole(creep.memory.role) || creep.memory.mode === 'remote') continue;
     if (getCreepHomeRoomName(creep) !== roomName) continue;
-    var sourceId = getBaseHarvestSourceIdFromMemory(creep.memory);
+    var sourceId = getVeinseekerSourceIdFromMemory(creep.memory);
     if (!sourceId || !diag.sources[sourceId]) continue;
 
     var rec = diag.sources[sourceId];
@@ -543,13 +579,13 @@ function buildBaseHarvestCoverageReport(room) {
       rec.lowestTtlName = creep.name;
     }
 
-    if (creep.memory.baseHarvestSpawnMode === 'upgradeReplacement' && creep.memory.replacementFor) {
+    if (creep.memory.sourceWorkerSpawnMode === 'upgradeReplacement' && creep.memory.replacementFor) {
       rec.replacementInProgress = true;
       rec.replacementQueued = true;
     }
 
     var source = Game.getObjectById(sourceId);
-    if (source && isBaseHarvestSafelyHarvesting(creep, source) && bodyCost > rec.bestSafeLiveCost) {
+    if (source && isVeinseekerSafelyHarvesting(creep, source) && bodyCost > rec.bestSafeLiveCost) {
       rec.bestSafeLiveCost = bodyCost;
       rec.bestSafeLiveName = creep.name;
     }
@@ -564,26 +600,26 @@ function buildBaseHarvestCoverageReport(room) {
       srcRec.upgradeNeeded = true;
     }
     if (srcRec.emergencyNeeded) {
-      srcRec.reason = 'no-active-baseharvest-coverage';
+      srcRec.reason = 'no-active-veinseeker-coverage';
     } else if (srcRec.upgradeNeeded) {
       srcRec.reason = 'safe-live-body-below-room-capacity-plan';
     } else if (srcRec.replacementQueued) {
       srcRec.reason = 'replacement-already-queued-or-active';
     } else if (srcRec.queued > 0 && srcRec.activeLive <= 0) {
-      srcRec.reason = 'waiting-for-queued-baseharvest';
+      srcRec.reason = 'waiting-for-queued-veinseeker';
     } else if (srcRec.live > 0 && srcRec.activeLive <= 0) {
-      srcRec.reason = 'baseharvest-spawning';
+      srcRec.reason = 'veinseeker-spawning';
     } else {
       srcRec.reason = 'covered';
     }
   }
 
-  ensureRoomMemory(roomName).lastBaseHarvestBodyPlan = diag;
+  ensureRoomMemory(roomName).lastVeinseekerBodyPlan = diag;
   return { desiredPlan: desiredPlan, diag: diag, sources: sources };
 }
 
-function removeLegacyBaseHarvestQueueItems(roomName) {
-  // Older saves may have source-less Baseharvest items. Source-aware queueing
+function removeLegacyVeinseekerQueueItems(roomName) {
+  // Older saves may have source-less Veinseeker items. Source-aware queueing
   // will replace them immediately with one item per source, so keeping them can
   // create duplicate miners with no assignment target.
   var q = ensureRoomQueue(roomName);
@@ -591,14 +627,14 @@ function removeLegacyBaseHarvestQueueItems(roomName) {
   var removed = 0;
   for (var i = 0; i < q.length; i++) {
     var item = q[i];
-    if (isBaseHarvestQueueItem(item) && !getBaseHarvestQueueSourceId(item)) {
+    if (isVeinseekerQueueItem(item) && !getVeinseekerQueueSourceId(item)) {
       removed++;
       continue;
     }
     kept.push(item);
   }
   if (removed > 0) {
-    ensureRoomMemory(roomName).lastBaseHarvestLegacyQueueCleanup = {
+    ensureRoomMemory(roomName).lastVeinseekerLegacyQueueCleanup = {
       tick: Game.time,
       removed: removed
     };
@@ -606,7 +642,7 @@ function removeLegacyBaseHarvestQueueItems(roomName) {
   Memory.rooms[roomName].spawnQueue = kept;
 }
 
-function addBaseHarvestPlanFields(opts, plan) {
+function addVeinseekerPlanFields(opts, plan) {
   if (!opts || !plan) return opts;
   opts.desiredBodyCost = plan.cost || 0;
   opts.desiredBodySignature = plan.signature || '';
@@ -615,18 +651,18 @@ function addBaseHarvestPlanFields(opts, plan) {
   return opts;
 }
 
-function makeQueueSpaceForEmergencyBaseHarvest(roomName) {
+function makeQueueSpaceForEmergencyVeinseeker(roomName) {
   var q = ensureRoomQueue(roomName);
   if (q.length < QUEUE_HARD_LIMIT) return true;
   for (var i = q.length - 1; i >= 0; i--) {
     var item = q[i];
-    if (isBaseHarvestQueueItem(item) && item.baseHarvestSpawnMode === 'upgradeReplacement') {
+    if (isVeinseekerQueueItem(item) && item.sourceWorkerSpawnMode === 'upgradeReplacement') {
       q.splice(i, 1);
-      ensureRoomMemory(roomName).lastBaseHarvestEmergencyQueueSpace = {
+      ensureRoomMemory(roomName).lastVeinseekerEmergencyQueueSpace = {
         tick: Game.time,
         removedMode: 'upgradeReplacement',
-        removedSourceId: getBaseHarvestQueueSourceId(item),
-        reason: 'emergency-baseharvest-needed-queue-full'
+        removedSourceId: getVeinseekerQueueSourceId(item),
+        reason: 'emergency-veinseeker-needed-queue-full'
       };
       return true;
     }
@@ -634,21 +670,23 @@ function makeQueueSpaceForEmergencyBaseHarvest(roomName) {
   return false;
 }
 
-function enqueueBaseHarvestForSource(roomName, sourceId, mode, desiredPlan, extra) {
-  if (mode === 'emergency' && !makeQueueSpaceForEmergencyBaseHarvest(roomName)) {
+function enqueueVeinseekerForSource(roomName, sourceId, mode, desiredPlan, extra) {
+  if (mode === 'emergency' && !makeQueueSpaceForEmergencyVeinseeker(roomName)) {
     return false;
   }
   var opts = {
+    task: 'veinseeker',
+    mode: 'home',
     home: roomName,
     sourceId: sourceId,
     assignedSource: sourceId,
-    baseHarvestSpawnMode: mode,
+    sourceWorkerSpawnMode: mode,
     created: Game.time,
     priority: mode === 'upgradeReplacement'
-      ? BASEHARVEST_UPGRADE_PRIORITY
-      : (mode === 'emergency' ? BASEHARVEST_EMERGENCY_PRIORITY : BASEHARVEST_NORMAL_PRIORITY)
+      ? VEINSEEKER_UPGRADE_PRIORITY
+      : (mode === 'emergency' ? VEINSEEKER_EMERGENCY_PRIORITY : VEINSEEKER_NORMAL_PRIORITY)
   };
-  addBaseHarvestPlanFields(opts, desiredPlan);
+  addVeinseekerPlanFields(opts, desiredPlan);
   if (extra) {
     for (var key in extra) {
       if (Object.prototype.hasOwnProperty.call(extra, key)) {
@@ -656,10 +694,10 @@ function enqueueBaseHarvestForSource(roomName, sourceId, mode, desiredPlan, extr
       }
     }
   }
-  return enqueue(roomName, 'Baseharvest', opts);
+  return enqueue(roomName, 'Veinseeker', opts);
 }
 
-function queueBaseHarvestSourceNeeds(room, report) {
+function queueVeinseekerSourceNeeds(room, report) {
   if (!room || !report || !report.diag || !report.sources) return;
   var roomName = room.name;
   var sources = report.sources || [];
@@ -670,8 +708,8 @@ function queueBaseHarvestSourceNeeds(room, report) {
     if (!rec) continue;
 
     if (rec.emergencyNeeded) {
-      if (enqueueBaseHarvestForSource(roomName, source.id, 'emergency', desiredPlan, {
-        priority: BASEHARVEST_EMERGENCY_PRIORITY
+      if (enqueueVeinseekerForSource(roomName, source.id, 'emergency', desiredPlan, {
+        priority: VEINSEEKER_EMERGENCY_PRIORITY
       })) {
         rec.queued++;
         rec.reason = 'queued-emergency-no-active-coverage';
@@ -689,9 +727,9 @@ function queueBaseHarvestSourceNeeds(room, report) {
       continue;
     }
 
-    if (rec.lowestTtlName && rec.lowestTtl !== null && rec.lowestTtl <= (REPLACEMENT_TTL.Baseharvest || 80)) {
-      if (enqueueBaseHarvestForSource(roomName, source.id, 'normal', desiredPlan, {
-        priority: BASEHARVEST_NORMAL_PRIORITY,
+    if (rec.lowestTtlName && rec.lowestTtl !== null && rec.lowestTtl <= (REPLACEMENT_TTL.Veinseeker || 80)) {
+      if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
+        priority: VEINSEEKER_NORMAL_PRIORITY,
         replaceCreepName: rec.lowestTtlName,
         replacementFor: rec.lowestTtlName,
         replaceSourceId: source.id
@@ -710,12 +748,12 @@ function queueBaseHarvestSourceNeeds(room, report) {
       continue;
     }
 
-    if (BASEHARVEST_ENABLE_BODY_UPGRADES &&
-        BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED &&
+    if (VEINSEEKER_ENABLE_BODY_UPGRADES &&
+        VEINSEEKER_UPGRADE_REPLACEMENTS_ENABLED &&
         rec.upgradeNeeded &&
         rec.bestSafeLiveName) {
-      if (enqueueBaseHarvestForSource(roomName, source.id, 'upgradeReplacement', desiredPlan, {
-        priority: BASEHARVEST_UPGRADE_PRIORITY,
+      if (enqueueVeinseekerForSource(roomName, source.id, 'upgradeReplacement', desiredPlan, {
+        priority: VEINSEEKER_UPGRADE_PRIORITY,
         replaceCreepName: rec.bestSafeLiveName,
         replacementFor: rec.bestSafeLiveName,
         replaceSourceId: source.id
@@ -733,7 +771,48 @@ function queueBaseHarvestSourceNeeds(room, report) {
       }
     }
   }
-  ensureRoomMemory(roomName).lastBaseHarvestBodyPlan = report.diag;
+  ensureRoomMemory(roomName).lastVeinseekerBodyPlan = report.diag;
+}
+
+function queueRemoteVeinseekerNeeds(roomName) {
+  var desired = determineVeinseekerQuota(null, { name: roomName }) || 0;
+  var live = countLiveRemoteVeinseekers(roomName);
+  var queued = countQueuedRemoteVeinseekers(roomName);
+  var deficit = Math.max(0, desired - live - queued);
+  var diag = {
+    tick: Game.time,
+    desired: desired,
+    live: live,
+    queued: queued,
+    enqueued: 0,
+    skipped: 0,
+    reason: null
+  };
+  for (var i = 0; i < deficit; i++) {
+    var pick = SourceEnergyManager.reserveSourceForQueue(roomName);
+    if (!pick) {
+      diag.skipped++;
+      diag.reason = 'no-free-source-slots';
+      break;
+    }
+    var ok = enqueue(roomName, 'Veinseeker', {
+      task: 'veinseeker',
+      mode: 'remote',
+      home: roomName,
+      sourceId: pick.sourceId,
+      targetRoom: pick.targetRoom,
+      priority: ROLE_PRIORITY.Veinseeker || 70
+    });
+    if (ok) {
+      diag.enqueued++;
+    } else {
+      SourceEnergyManager.unreserveSourceForQueue(roomName, pick.sourceId);
+      diag.skipped++;
+      diag.reason = 'queue-full';
+      break;
+    }
+  }
+  ensureRoomMemory(roomName).lastVeinseekerRemoteQueue = diag;
 }
 
 function enqueue(roomName, role, opts) {
@@ -793,7 +872,7 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   for (var j = 0; j < q.length; j++) {
     var it = q[j];
     if (!it) continue;
-    if (isBaseHarvestQueueItem(it) && getBaseHarvestQueueSourceId(it)) {
+    if (isVeinseekerRole(it.role) && getVeinseekerQueueSourceId(it)) {
       kept.push(it);
       continue;
     }
@@ -821,11 +900,11 @@ function getMyUsernameForSpawnManager() {
   return BeeToolbox.myUsername();
 }
 
-function refreshVisibleLunaRemoteSafety(room) {
+function refreshVisibleVeinseekerRemoteSafety(room) {
   return BeeToolbox.refreshVisibleRemoteSafety(room);
 }
 
-function isLunaRemoteRoomUnsafe(remoteName) {
+function isVeinseekerRemoteRoomUnsafe(remoteName) {
   return BeeToolbox.isRemoteRoomUnsafe(remoteName, { invaderLockTtl: INVADER_LOCK_TTL });
 }
 
@@ -893,7 +972,7 @@ function getRouteDistanceBetweenRooms(homeName, remoteName) {
   return route.length;
 }
 
-function countApprovedLunaSourcesForRemote(remoteName) {
+function countApprovedVeinseekerSourcesForRemote(remoteName) {
   var mem = Memory.rooms && Memory.rooms[remoteName];
   if (!mem) return 0;
 
@@ -919,20 +998,20 @@ function countApprovedLunaSourcesForRemote(remoteName) {
 }
 
 
-function getLunaRemoteIntelTick(remoteName) {
+function getVeinseekerRemoteIntelTick(remoteName) {
   return BeeToolbox.getBestRemoteIntelTick(remoteName);
 }
 
-function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
-  // Approval gate for a remote room before it can contribute Luna sources:
-  // route must exist, range must fit LunaConfig, room must not be unsafe, and
+function isApprovedVeinseekerRemoteForHome(homeRoom, remoteName, outMeta) {
+  // Approval gate for a remote room before it can contribute Veinseeker sources:
+  // route must exist, range must fit VeinseekerConfig, room must not be unsafe, and
   // source intel must be fresh enough to avoid spawning into stale Memory.
   if (!homeRoom || !remoteName) {
     if (outMeta) outMeta.reason = 'missing-home-or-remote';
     return false;
   }
 
-  var maxRange = (LunaConfig && LunaConfig.REMOTE_RADIUS) || 3;
+  var maxRange = (VeinseekerConfig && VeinseekerConfig.REMOTE_RADIUS) || 3;
   var routeDistance = getRouteDistanceBetweenRooms(homeRoom.name, remoteName);
   if (outMeta) outMeta.routeDistance = routeDistance;
 
@@ -946,7 +1025,7 @@ function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
     return false;
   }
 
-  if (isLunaRemoteRoomUnsafe(remoteName)) {
+  if (isVeinseekerRemoteRoomUnsafe(remoteName)) {
     if (outMeta) outMeta.reason = 'unsafe-or-hostile';
     return false;
   }
@@ -963,8 +1042,8 @@ function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
     return false;
   }
 
-  var intelTick = getLunaRemoteIntelTick(remoteName);
-  var intelTtl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
+  var intelTick = getVeinseekerRemoteIntelTick(remoteName);
+  var intelTtl = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 3000;
   if (intelTick == null) {
     if (!Game.rooms[remoteName]) {
       if (outMeta) outMeta.reason = 'stale-source-intel';
@@ -978,15 +1057,15 @@ function isApprovedLunaRemoteForHome(homeRoom, remoteName, outMeta) {
   if (outMeta) outMeta.reason = 'accepted';
   return true;
 }
-function determineLunaQuota(C, room) {
-  // RemoteHarvest.Manager owns desiredLuna. BeeSpawnManager only reads that
+function determineVeinseekerQuota(C, room) {
+  // SourceEnergy.Manager owns desiredVeinseeker. BeeSpawnManager only reads that
   // audited plan and turns deficits into spawn queue items.
   if (!room) return 0;
-  var home = RemoteHarvestManager.ensureHomeMemory(room.name);
-  return home.desiredLuna || 0;
+  var home = SourceEnergyManager.ensureHomeMemory(room.name);
+  return home.desiredVeinseeker || 0;
 }
 
-function collectApprovedLunaSourcesFromRemote(remoteName, out) {
+function collectApprovedVeinseekerSourcesFromRemote(remoteName, out) {
   if (!remoteName || !out) return;
   var mem = Memory.rooms && Memory.rooms[remoteName];
   if (!mem) return;
@@ -996,7 +1075,7 @@ function collectApprovedLunaSourcesFromRemote(remoteName, out) {
     var found = live.find(FIND_SOURCES) || [];
     for (var i = 0; i < found.length; i++) {
       var srcLiveMem = mem.sources && mem.sources[found[i].id] ? mem.sources[found[i].id] : null;
-      if (srcLiveMem && srcLiveMem.lunaBlockedUntil && srcLiveMem.lunaBlockedUntil > Game.time) continue;
+      if (srcLiveMem && srcLiveMem.sourceWorkerBlockedUntil && srcLiveMem.sourceWorkerBlockedUntil > Game.time) continue;
       out.push({ sourceId: found[i].id, targetRoom: remoteName });
     }
     return;
@@ -1006,15 +1085,15 @@ function collectApprovedLunaSourcesFromRemote(remoteName, out) {
     for (var sid in mem.sources) {
       if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
       var srcMem = mem.sources[sid];
-      if (srcMem && srcMem.lunaBlockedUntil && srcMem.lunaBlockedUntil > Game.time) continue;
+      if (srcMem && srcMem.sourceWorkerBlockedUntil && srcMem.sourceWorkerBlockedUntil > Game.time) continue;
       out.push({ sourceId: sid, targetRoom: remoteName });
     }
   }
 }
 
-function pruneBlockedLunaQueueItems(roomName) {
+function pruneBlockedVeinseekerQueueItems(roomName) {
   // Queue cleanup must run before new quota fills. If a remote room/source was
-  // blocked after a Luna was queued, release the RemoteHarvest reservation so a
+  // blocked after a Veinseeker was queued, release the SourceEnergy reservation so a
   // future safe source can be picked.
   var q = ensureRoomQueue(roomName);
   var kept = [];
@@ -1022,25 +1101,25 @@ function pruneBlockedLunaQueueItems(roomName) {
   var removedItems = [];
   for (var i = 0; i < q.length; i++) {
     var it = q[i];
-    if (!it || it.role !== 'Luna') { kept.push(it); continue; }
+    if (!it || it.role !== 'Veinseeker' || it.mode !== 'remote') { kept.push(it); continue; }
 
     var reason = null;
     if (!it.targetRoom) {
       reason = 'missing-target-room';
     } else {
-      var localOwnedCheck = (RemoteHarvestManager && typeof RemoteHarvestManager.isLocalOwnedRoomForLuna === 'function') ? RemoteHarvestManager.isLocalOwnedRoomForLuna(roomName, it.targetRoom) : { blocked: false };
+      var localOwnedCheck = (SourceEnergyManager && typeof SourceEnergyManager.isLocalOwnedRoomForVeinseeker === 'function') ? SourceEnergyManager.isLocalOwnedRoomForVeinseeker(roomName, it.targetRoom) : { blocked: false };
       if (localOwnedCheck && localOwnedCheck.blocked) reason = localOwnedCheck.reason || 'local-owned-room';
-      else if (isLunaRemoteRoomUnsafe(it.targetRoom)) reason = 'room-unsafe';
+      else if (isVeinseekerRemoteRoomUnsafe(it.targetRoom)) reason = 'room-unsafe';
     }
     if (!reason) {
       var sMem = Memory.rooms && Memory.rooms[it.targetRoom] && Memory.rooms[it.targetRoom].sources && Memory.rooms[it.targetRoom].sources[it.sourceId];
-      if (sMem && sMem.lunaBlockedUntil && sMem.lunaBlockedUntil > Game.time) {
+      if (sMem && sMem.sourceWorkerBlockedUntil && sMem.sourceWorkerBlockedUntil > Game.time) {
         reason = 'source-blocked';
       }
     }
 
     if (reason) {
-      if (it.sourceId) RemoteHarvestManager.unreserveSourceForQueue(roomName, it.sourceId);
+      if (it.sourceId) SourceEnergyManager.unreserveSourceForQueue(roomName, it.sourceId);
       removed++;
       removedItems.push({
         sourceId: it.sourceId || null,
@@ -1054,7 +1133,7 @@ function pruneBlockedLunaQueueItems(roomName) {
   }
   var roomMem = ensureRoomMemory(roomName);
   roomMem.spawnQueue = kept;
-  roomMem.lastLunaQueuePrune = {
+  roomMem.lastVeinseekerQueuePrune = {
     tick: Game.time,
     removed: removed,
     kept: kept.length,
@@ -1064,20 +1143,20 @@ function pruneBlockedLunaQueueItems(roomName) {
 
 function getSourceMaxSlotsForSpawn(sourceId, targetRoom) {
   if (!sourceId || !targetRoom) return 0;
-  if (isLunaRemoteRoomUnsafe(targetRoom)) return 0;
+  if (isVeinseekerRemoteRoomUnsafe(targetRoom)) return 0;
   var mem = Memory.rooms && Memory.rooms[targetRoom];
   if (!mem) return 0;
 
-  var intelTick = getLunaRemoteIntelTick(targetRoom);
-  var intelTtl = (LunaConfig && LunaConfig.LUNA_REMOTE_INTEL_TTL) || 3000;
+  var intelTick = getVeinseekerRemoteIntelTick(targetRoom);
+  var intelTtl = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 3000;
   if (!Game.rooms[targetRoom] && (intelTick == null || (Game.time - intelTick) > intelTtl)) {
     return 0;
   }
 
-  var allowMulti = !(LunaConfig && LunaConfig.ALLOW_MULTI_LUNA_PER_SOURCE === false);
+  var allowMulti = !(VeinseekerConfig && VeinseekerConfig.ALLOW_MULTI_VEINSEEKER_PER_SOURCE === false);
   if (!allowMulti) return 1;
-  var maxPerSource = Math.max(1, ((LunaConfig && LunaConfig.MAX_LUNA_PER_SOURCE) || 1));
-  var minOpenForExtra = (LunaConfig && LunaConfig.MIN_OPEN_HARVEST_TILES_PER_EXTRA_LUNA) || 2;
+  var maxPerSource = Math.max(1, ((VeinseekerConfig && VeinseekerConfig.MAX_VEINSEEKER_PER_SOURCE) || 1));
+  var minOpenForExtra = (VeinseekerConfig && VeinseekerConfig.MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER) || 2;
   var source = Game.getObjectById(sourceId);
   if (!source) return 1;
   var openTiles = countOpenHarvestTilesForSpawn(source);
@@ -1121,11 +1200,11 @@ function countOpenHarvestTilesForSpawn(source) {
   return count;
 }
 
-function buildLunaSourceSlotPlan(room, approvedSources) {
-  // Diagnostic/planning helper: count how many Luna slots each approved source
+function buildVeinseekerSourceSlotPlan(room, approvedSources) {
+  // Diagnostic/planning helper: count how many Veinseeker slots each approved source
   // can support, then subtract live and queued reservations. The queue path now
-  // primarily uses RemoteHarvest.Manager, but this shape is still useful when
-  // inspecting why a home did or did not need another Luna.
+  // primarily uses SourceEnergy.Manager, but this shape is still useful when
+  // inspecting why a home did or did not need another Veinseeker.
   var plan = {
     totalSlots: 0,
     liveUsedSlots: 0,
@@ -1155,7 +1234,7 @@ function buildLunaSourceSlotPlan(room, approvedSources) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
     var creep = Game.creeps[name];
     if (!creep || !creep.memory) continue;
-    if (creep.memory.task !== 'luna') continue;
+    if (creep.memory.task !== 'veinseeker' || creep.memory.mode !== 'remote') continue;
     if ((creep.memory.home || (creep.room && creep.room.name)) !== room.name) continue;
     var sid = creep.memory.sourceId;
     if (!sid || !plan.perSource[sid]) continue;
@@ -1166,7 +1245,7 @@ function buildLunaSourceSlotPlan(room, approvedSources) {
   var q = ensureRoomQueue(room.name);
   for (var j = 0; j < q.length; j++) {
     var item = q[j];
-    if (!item || item.role !== 'Luna') continue;
+    if (!item || item.role !== 'Veinseeker' || item.mode !== 'remote') continue;
     if (!item.sourceId || !plan.perSource[item.sourceId]) continue;
     plan.perSource[item.sourceId].queued++;
     plan.queuedReservedSlots++;
@@ -1369,7 +1448,7 @@ function countHomeTruckersByAssignment(roomName) {
 
 
 function computeTruckerQuotaForHome(roomName) {
-  // Trucker quota is workload-based. Luna creates remoteHaulRequests; this
+  // Trucker quota is workload-based. Veinseeker creates remoteHaulRequests; this
   // helper counts fresh/safe/large-enough requests, adds local container
   // pressure, and returns both a final quota and skip diagnostics.
   var requests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
@@ -1389,7 +1468,7 @@ function computeTruckerQuotaForHome(roomName) {
     if (TruckerConfig.shouldBlockRemoteHaulForMaintenance(req)) { maintenanceSkipped++; continue; }
     if ((req.amount || 0) < TruckerConfig.MIN_HAUL_REQUEST_ENERGY) { lowEnergySkipped++; continue; }
     if ((Game.time - (req.updated || 0)) > TruckerConfig.REQUEST_STALE_TICKS) { staleSkipped++; continue; }
-    if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) { unsafeSkipped++; continue; }
+    if (isVeinseekerRemoteRoomUnsafe(req.remoteRoom || req.roomName)) { unsafeSkipped++; continue; }
     active++;
     if (req.urgent) urgent++;
     remoteEnergyWaiting += Math.max(0, req.amount || 0);
@@ -1468,7 +1547,7 @@ function hasRemoteContainerRepairDemand(roomName) {
     if (!st || st.homeRoom !== roomName) continue;
     if (typeof st.containerHitsPct !== 'number') continue;
     if (st.containerHitsPct <= 0.75 && st.containerHitsPct > (RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40)) {
-      if (!isLunaRemoteRoomUnsafe(st.remoteRoom || st.roomName)) return true;
+      if (!isVeinseekerRemoteRoomUnsafe(st.remoteRoom || st.roomName)) return true;
     }
   }
   return false;
@@ -1536,7 +1615,7 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
   if (!requests) return null;
   var staleTicks = (TruckerConfig && TruckerConfig.REQUEST_STALE_TICKS) || 100;
   var startPct = RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40;
-  var lunaPct = (LunaConfig && LunaConfig.remoteContainerRepairStartPct) || 0.50;
+  var veinseekerPct = (VeinseekerConfig && VeinseekerConfig.remoteContainerRepairStartPct) || 0.50;
   for (var id in requests) {
     if (!Object.prototype.hasOwnProperty.call(requests, id)) continue;
     var req = requests[id];
@@ -1545,11 +1624,11 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
     if (typeof req.containerHitsPct !== 'number') continue;
     var isStale = (Game.time - (req.updated || 0)) > staleTicks;
     if (isStale) {
-      if (req.containerHitsPct <= lunaPct) ensureRemoteVisionRequestFromStatus(req, roomName);
+      if (req.containerHitsPct <= veinseekerPct) ensureRemoteVisionRequestFromStatus(req, roomName);
       continue;
     }
     if (req.containerHitsPct > startPct) continue;
-    if (isLunaRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
+    if (isVeinseekerRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
     var heldByEmergencyRepair =
       req.maintenanceUntil &&
       req.maintenanceUntil > Game.time &&
@@ -1563,8 +1642,8 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
 
 function findRemoteContainerEmergencyRepairRequest(roomName) {
   // Emergency repair can be triggered from either live container status or haul
-  // request records. Both are produced by Luna, so keep the field expectations
-  // aligned with role.Luna.Logic.js and role.Repair.Logic.js.
+  // request records. Both are produced by Veinseeker, so keep the field expectations
+  // aligned with role.Veinseeker.Logic.js and role.Repair.Logic.js.
   if (!RepairConfig.remoteContainerEmergencyRepairEnabled) return null;
   var statusRequests = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : null;
   var haulRequests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : null;
@@ -1666,8 +1745,6 @@ function computeRoomQuotas(C, room) {
   // Central quota fan-in. Every role-specific signal writes its own diagnostic
   // before the combined quotas object is returned to fillQueueForRoom().
   var localDefense = computeLocalDefenseQuotas(room);
-  var sourceCount = room ? room.find(FIND_SOURCES).length : 0;
-  var safeBaseHarvestQuota = Math.max(1, sourceCount || 0);
   var localRepairQuota = computeLocalRepairQuotaForRoom(room);
   var maxRemoteEmergencyPerHome = Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1);
   var activeRemoteEmergencyRepairs = countRemoteEmergencyRepairAssignments(room.name);
@@ -1704,13 +1781,10 @@ function computeRoomQuotas(C, room) {
   var truckerQuota = truckerQuotaMeta.finalTruckerQuota || 0;
 
   var quotas = {
-    // One BaseHarvest per owned source keeps mining stable without over-spawning.
-    Baseharvest:  safeBaseHarvestQuota,
     Queen:        determineQueenQuota(room),
     Upgrader:     computeEarlyUpgraderQuota(room),
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
-    Luna:         determineLunaQuota(C, room),
     Repair:       repairQuota,
     Trucker:      truckerQuota,
     Claimer:      0,
@@ -1727,15 +1801,15 @@ function computeRoomQuotas(C, room) {
 function fillQueueForRoom(C, room) {
   // The queue fill pass is intentionally ordered:
   // 1) compute quotas and stale emergency Scout needs,
-  // 2) prune invalid Luna queue items and retired Courier state,
+  // 2) prune invalid Veinseeker queue items and retired Courier state,
   // 3) write quota diagnostics,
-  // 4) enqueue deficits, reserving Luna sources before adding queue items.
+  // 4) enqueue deficits, reserving Veinseeker sources before adding queue items.
   var quotas = computeRoomQuotas(C, room);
   queueEmergencyVisionScoutIfNeeded(room.name);
   var roomName = room.name;
-  pruneBlockedLunaQueueItems(roomName);
+  pruneBlockedVeinseekerQueueItems(roomName);
   cleanupRetiredCourierState(roomName);
-  removeLegacyBaseHarvestQueueItems(roomName);
+  removeLegacyVeinseekerQueueItems(roomName);
 
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
@@ -1800,19 +1874,16 @@ function fillQueueForRoom(C, room) {
   };
 
   pruneOverfilledQueue(roomName, quotas, C);
-  var baseHarvestCoverageReport = buildBaseHarvestCoverageReport(room);
+  var sourceWorkerCoverageReport = buildVeinseekerCoverageReport(room);
+  queueVeinseekerSourceNeeds(room, sourceWorkerCoverageReport);
+  queueRemoteVeinseekerNeeds(roomName);
 
   // Iterate quotas in plain English order so future maintainers can eyeball
   // which roles will be enqueued before touching the code.
   var roles = Object.keys(quotas);
   var repairDiag = ensureRoomMemory(roomName).lastRepairQuota || null;
-  var lunaSlotPlan = null;
   for (var i = 0; i < roles.length; i++) {
     var role = roles[i];
-    if (role === 'Baseharvest') {
-      queueBaseHarvestSourceNeeds(room, baseHarvestCoverageReport);
-      continue;
-    }
     var limit = quotas[role] || 0;
     var canonical = canonicalRole(role);
     var active = getRoomLocalLiveCount(C, roomName, canonical);
@@ -1865,28 +1936,12 @@ function fillQueueForRoom(C, room) {
           continue;
         }
       }
-      if (role !== 'Luna') {
-        enqueue(roomName, role);
-        continue;
-      }
-      var pick = RemoteHarvestManager.reserveSourceForQueue(roomName);
-      if (!pick) {
-        dlog('🌙 [QueueGate]', roomName, 'skip Luna enqueue: no free source slots');
-        ensureRoomMemory(roomName).lastLunaQueueGate = {
-          tick: Game.time,
-          reason: 'no-free-source-slots',
-          remoteHarvestPlan: ensureRoomMemory(roomName).lastRemoteHarvestPlan || null
-        };
-        break;
-      }
-      if (!enqueue(roomName, role, { sourceId: pick.sourceId, targetRoom: pick.targetRoom })) {
-        RemoteHarvestManager.unreserveSourceForQueue(roomName, pick.sourceId);
-      }
+      enqueue(roomName, role);
     }
   }
 }
 
-function pickLunaSourceForQueue(plan) {
+function pickVeinseekerSourceForQueue(plan) {
   if (!plan || !plan.perSource) return null;
   var best = null;
   for (var sid in plan.perSource) {
@@ -1916,26 +1971,26 @@ function countLiveLocalRoleDirect(roomName, roleName) {
   return count;
 }
 
-function sourceHasLiveBaseHarvestCoverage(roomName, sourceId) {
+function sourceHasLiveVeinseekerCoverage(roomName, sourceId) {
   if (!roomName || !sourceId) return false;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
     var creep = Game.creeps[name];
     if (!creep || !creep.my || !creep.memory) continue;
-    if (!isBaseHarvestRole(creep.memory.role)) continue;
+    if (!isVeinseekerRole(creep.memory.role) || creep.memory.mode === 'remote') continue;
     if (getCreepHomeRoomName(creep) !== roomName) continue;
-    if (getBaseHarvestSourceIdFromMemory(creep.memory) !== sourceId) continue;
+    if (getVeinseekerSourceIdFromMemory(creep.memory) !== sourceId) continue;
     if (creep.spawning) continue;
     return true;
   }
   return false;
 }
 
-function roomHasBaseHarvestEmergency(room) {
+function roomHasVeinseekerEmergency(room) {
   if (!room) return false;
   var sources = room.find(FIND_SOURCES) || [];
   for (var i = 0; i < sources.length; i++) {
-    if (!sourceHasLiveBaseHarvestCoverage(room.name, sources[i].id)) {
+    if (!sourceHasLiveVeinseekerCoverage(room.name, sources[i].id)) {
       return true;
     }
   }
@@ -1946,7 +2001,7 @@ function roomInBaseRecoveryDanger(room) {
   if (!room) return true;
   if (countLiveLocalRoleDirect(room.name, 'Queen') < 1) return true;
   if (countLiveLocalRoleDirect(room.name, 'Trucker') < 1) return true;
-  if (roomHasBaseHarvestEmergency(room)) return true;
+  if (roomHasVeinseekerEmergency(room)) return true;
   return false;
 }
 
@@ -1957,17 +2012,17 @@ function queueHasCriticalBaseNeedAfter(q, startIndex, room) {
     if (item.retryAt && Game.time < item.retryAt) continue;
     var role = canonicalRole(item.role);
     if (role === 'Queen' || role === 'Trucker') return true;
-    if (role === 'BaseHarvest') {
-      var mode = item.baseHarvestSpawnMode || 'normal';
-      var sourceId = getBaseHarvestQueueSourceId(item);
+    if (role === 'Veinseeker' && item.mode !== 'remote') {
+      var mode = item.sourceWorkerSpawnMode || 'normal';
+      var sourceId = getVeinseekerQueueSourceId(item);
       if (mode === 'emergency') return true;
-      if (sourceId && room && !sourceHasLiveBaseHarvestCoverage(room.name, sourceId)) return true;
+      if (sourceId && room && !sourceHasLiveVeinseekerCoverage(room.name, sourceId)) return true;
     }
   }
   return false;
 }
 
-function stampBaseHarvestDesiredPlanOnItem(item, desiredPlan) {
+function stampVeinseekerDesiredPlanOnItem(item, desiredPlan) {
   if (!item || !desiredPlan) return;
   item.desiredBodyCost = desiredPlan.cost || 0;
   item.desiredBodySignature = desiredPlan.signature || '';
@@ -1975,12 +2030,12 @@ function stampBaseHarvestDesiredPlanOnItem(item, desiredPlan) {
   item.desiredBodyTierIndex = typeof desiredPlan.tierIndex === 'number' ? desiredPlan.tierIndex : -1;
 }
 
-function writeBaseHarvestSpawnGate(room, item, minEnergy, action, reason) {
+function writeVeinseekerSpawnGate(room, item, minEnergy, action, reason) {
   if (!room) return;
-  ensureRoomMemory(room.name).lastBaseHarvestSpawnGate = {
+  ensureRoomMemory(room.name).lastVeinseekerSpawnGate = {
     tick: Game.time,
     role: item ? item.role : null,
-    mode: item ? (item.baseHarvestSpawnMode || 'normal') : null,
+    mode: item ? (item.sourceWorkerSpawnMode || 'normal') : null,
     sourceId: item ? (item.sourceId || item.replaceSourceId || item.assignedSource || null) : null,
     energyAvailable: room.energyAvailable || 0,
     energyCapacityAvailable: room.energyCapacityAvailable || 0,
@@ -1991,20 +2046,20 @@ function writeBaseHarvestSpawnGate(room, item, minEnergy, action, reason) {
   };
 }
 
-function evaluateBaseHarvestSpawnGate(room, item, q, itemIndex) {
-  var minEnergy = minEnergyFor(item.role);
+function evaluateVeinseekerSpawnGate(room, item, q, itemIndex) {
+  var minEnergy = minEnergyFor(item.role, item);
   var energyAvailable = room.energyAvailable || 0;
-  var desiredPlan = getBaseHarvestDesiredPlan(room);
-  var sourceId = getBaseHarvestQueueSourceId(item);
-  var mode = item.baseHarvestSpawnMode || 'normal';
+  var desiredPlan = getVeinseekerDesiredPlan(room);
+  var sourceId = getVeinseekerQueueSourceId(item);
+  var mode = item.sourceWorkerSpawnMode || 'normal';
   var age = Game.time - (item.created || Game.time);
   var desiredCost = minEnergy;
-  var hasCoverage = sourceHasLiveBaseHarvestCoverage(room.name, sourceId);
+  var hasCoverage = sourceHasLiveVeinseekerCoverage(room.name, sourceId);
   var criticalBehind = queueHasCriticalBaseNeedAfter(q, itemIndex, room);
   var recoveryDanger = roomInBaseRecoveryDanger(room);
 
   if (desiredPlan) {
-    stampBaseHarvestDesiredPlanOnItem(item, desiredPlan);
+    stampVeinseekerDesiredPlanOnItem(item, desiredPlan);
     desiredCost = desiredPlan.cost || minEnergy;
   }
   if (desiredCost > (room.energyCapacityAvailable || 0) && desiredPlan) {
@@ -2013,9 +2068,9 @@ function evaluateBaseHarvestSpawnGate(room, item, q, itemIndex) {
 
   if (!sourceId) {
     if (energyAvailable >= minEnergy) {
-      return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'legacy-baseharvest-no-source' };
+      return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'legacy-veinseeker-no-source' };
     }
-    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-baseharvest' };
+    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' };
   }
 
   if (mode === 'emergency' || !hasCoverage) {
@@ -2025,11 +2080,11 @@ function evaluateBaseHarvestSpawnGate(room, item, q, itemIndex) {
     return { action: 'wait', minEnergy: minEnergy, reason: 'emergency-waiting-for-cheapest-body' };
   }
 
-  if (!BASEHARVEST_ENABLE_BODY_UPGRADES || !BASEHARVEST_WAIT_FOR_BEST_BODY) {
+  if (!VEINSEEKER_ENABLE_BODY_UPGRADES || !VEINSEEKER_WAIT_FOR_BEST_BODY) {
     if (energyAvailable >= minEnergy) {
       return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'body-upgrade-wait-disabled' };
     }
-    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-baseharvest' };
+    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' };
   }
 
   if (mode === 'upgradeReplacement') {
@@ -2038,31 +2093,31 @@ function evaluateBaseHarvestSpawnGate(room, item, q, itemIndex) {
     var checkedOldSource = sourceId ? Game.getObjectById(sourceId) : null;
     if (!checkedOldCreep || !checkedOldCreep.memory) {
       if (!hasCoverage) {
-        item.baseHarvestSpawnMode = 'emergency';
+        item.sourceWorkerSpawnMode = 'emergency';
         return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-missing-source-now-emergency' };
       }
       return { action: 'skip', minEnergy: minEnergy, reason: 'old-creep-missing-upgrade-cancelled' };
     }
-    if (typeof checkedOldCreep.ticksToLive === 'number' && checkedOldCreep.ticksToLive <= BASEHARVEST_CRITICAL_TTL) {
-      item.baseHarvestSpawnMode = 'normal';
+    if (typeof checkedOldCreep.ticksToLive === 'number' && checkedOldCreep.ticksToLive <= VEINSEEKER_CRITICAL_TTL) {
+      item.sourceWorkerSpawnMode = 'normal';
       return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-creep-critical-ttl' };
     }
-    if (!isBaseHarvestSafelyHarvesting(checkedOldCreep, checkedOldSource)) {
-      item.baseHarvestSpawnMode = 'normal';
+    if (!isVeinseekerSafelyHarvesting(checkedOldCreep, checkedOldSource)) {
+      item.sourceWorkerSpawnMode = 'normal';
       return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-creep-not-safe-for-wait' };
     }
     if (energyAvailable >= desiredCost) {
       return { action: 'spawn', energyForSpawn: desiredCost, minEnergy: minEnergy, reason: 'desired-body-affordable' };
     }
     if (energyAvailable < minEnergy) {
-      return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-baseharvest' };
+      return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' };
     }
     if (recoveryDanger || criticalBehind) {
       item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
-      item.baseHarvestDeferredAt = Game.time;
+      item.sourceWorkerDeferredAt = Game.time;
       return { action: 'defer', minEnergy: minEnergy, reason: recoveryDanger ? 'base-recovery-danger' : 'critical-role-behind' };
     }
-    if (age >= BASEHARVEST_MAX_UPGRADE_WAIT_TICKS) {
+    if (age >= VEINSEEKER_MAX_UPGRADE_WAIT_TICKS) {
       return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'max-upgrade-wait-reached' };
     }
     return { action: 'wait', minEnergy: minEnergy, reason: 'waiting-for-room-capacity-body' };
@@ -2073,7 +2128,7 @@ function evaluateBaseHarvestSpawnGate(room, item, q, itemIndex) {
   }
 
   if (energyAvailable < minEnergy) {
-    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-baseharvest' };
+    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' };
   }
 
   if (item.replaceCreepName || item.replacementFor) {
@@ -2086,29 +2141,29 @@ function evaluateBaseHarvestSpawnGate(room, item, q, itemIndex) {
       return { action: 'skip', minEnergy: minEnergy, reason: 'normal-replacement-old-missing-cancelled' };
     }
     if (typeof normalOldCreep.ticksToLive === 'number' &&
-        normalOldCreep.ticksToLive <= BASEHARVEST_REPLACEMENT_SAFE_TTL) {
+        normalOldCreep.ticksToLive <= VEINSEEKER_REPLACEMENT_SAFE_TTL) {
       return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'normal-replacement-old-ttl-low' };
     }
   }
 
   if (criticalBehind) {
     item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
-    item.baseHarvestDeferredAt = Game.time;
+    item.sourceWorkerDeferredAt = Game.time;
     return { action: 'defer', minEnergy: minEnergy, reason: 'critical-role-behind' };
   }
-  if (age >= BASEHARVEST_MAX_UPGRADE_WAIT_TICKS) {
+  if (age >= VEINSEEKER_MAX_UPGRADE_WAIT_TICKS) {
     return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'max-normal-wait-reached' };
   }
   return { action: 'wait', minEnergy: minEnergy, reason: 'normal-covered-source-waiting-for-better-body' };
 }
 
-function isNonBlockingBaseHarvestQueuedWait(item) {
-  if (!isBaseHarvestQueueItem(item)) return false;
-  return item.baseHarvestSpawnMode === 'upgradeReplacement' || item.baseHarvestDeferredAt === Game.time;
+function isNonBlockingVeinseekerQueuedWait(item) {
+  if (!isVeinseekerQueueItem(item)) return false;
+  return item.sourceWorkerSpawnMode === 'upgradeReplacement' || item.sourceWorkerDeferredAt === Game.time;
 }
 
 function dequeueAndSpawn(spawner) {
-  // Safety-first dequeue: BaseHarvest upgrades may wait for a full room body,
+  // Safety-first dequeue: Veinseeker upgrades may wait for a full room body,
   // but only when they are not blocking Queen, Trucker, or emergency miners.
   if (!spawner || spawner.spawning) return false;
   var room = spawner.room;
@@ -2123,17 +2178,17 @@ function dequeueAndSpawn(spawner) {
 
   q.sort(compareQueueItems);
 
-  var skippedNonBlockingBaseHarvest = false;
+  var skippedNonBlockingVeinseeker = false;
   for (var pickIndex = 0; pickIndex < q.length; pickIndex++) {
     var item = q[pickIndex];
     if (!item) continue;
 
     if (item.retryAt && Game.time < item.retryAt) {
-      if (isNonBlockingBaseHarvestQueuedWait(item)) {
-        skippedNonBlockingBaseHarvest = true;
+      if (isNonBlockingVeinseekerQueuedWait(item)) {
+        skippedNonBlockingVeinseeker = true;
         continue;
       }
-      if (!skippedNonBlockingBaseHarvest) {
+      if (!skippedNonBlockingVeinseeker) {
         if (tickEvery(DBG_EVERY)) {
           dlog('[Queue]', roomName, 'head priority cooling down');
         }
@@ -2142,26 +2197,26 @@ function dequeueAndSpawn(spawner) {
       continue;
     }
 
-    var needed = minEnergyFor(item.role);
+    var needed = minEnergyFor(item.role, item);
     var spawnResource = null;
     var gate = null;
 
-    if (isBaseHarvestQueueItem(item)) {
-      gate = evaluateBaseHarvestSpawnGate(room, item, q, pickIndex);
-      writeBaseHarvestSpawnGate(room, item, gate.minEnergy || needed, gate.action, gate.reason);
+    if (isVeinseekerQueueItem(item)) {
+      gate = evaluateVeinseekerSpawnGate(room, item, q, pickIndex);
+      writeVeinseekerSpawnGate(room, item, gate.minEnergy || needed, gate.action, gate.reason);
       if (gate.action === 'skip') {
         q.splice(pickIndex, 1);
         pickIndex--;
-        skippedNonBlockingBaseHarvest = true;
+        skippedNonBlockingVeinseeker = true;
         continue;
       }
       if (gate.action === 'defer') {
-        skippedNonBlockingBaseHarvest = true;
+        skippedNonBlockingVeinseeker = true;
         continue;
       }
       if (gate.action === 'wait') {
         if (tickEvery(DBG_EVERY)) {
-          dlog('[BaseHarvestGate]', roomName, 'mode', item.baseHarvestSpawnMode || 'normal',
+          dlog('[VeinseekerGate]', roomName, 'mode', item.sourceWorkerSpawnMode || 'normal',
             'need', item.desiredBodyCost || needed, 'have', room.energyAvailable, gate.reason);
         }
         return false;
@@ -2179,7 +2234,7 @@ function dequeueAndSpawn(spawner) {
           }
           return false;
         }
-        if (!skippedNonBlockingBaseHarvest) {
+        if (!skippedNonBlockingVeinseeker) {
           if (tickEvery(DBG_EVERY)) {
             dlog('[QueueHold]', roomName, 'prio', item.priority, 'role', item.role,
               'need', needed, 'have', room.energyAvailable);
@@ -2259,7 +2314,7 @@ function dequeueAndSpawnLegacy(spawner) {
   }
 
   var item = q[pickIndex];
-  var needed = minEnergyFor(item.role);
+  var needed = minEnergyFor(item.role, item);
   if ((room.energyAvailable || 0) < needed) {
     if (tickEvery(DBG_EVERY)) {
       dlog('⛽ [QueueHold]', roomName, 'prio', item.priority, 'role', item.role,
@@ -2300,29 +2355,29 @@ function dequeueAndSpawnLegacy(spawner) {
 function prepareRoomQueues(C) {
   // Per-room queue preparation runs before any spawn tries to dequeue. Remote
   // harvest discovery and assignment audits happen here so the spawn queue sees
-  // the same Luna plan that diagnostics report at the end of the function.
+  // the same Veinseeker plan that diagnostics report at the end of the function.
   var rooms = C.roomsOwned;
   for (var i = 0; i < rooms.length; i++) {
     var room = rooms[i];
     if (!room.find(FIND_MY_SPAWNS).length) continue;
     // Remote harvest setup has three separate phases:
     // 1) discover which rooms are possible remotes,
-    // 2) update the Luna source plan/audit used by existing queue behavior,
+    // 2) update the Veinseeker source plan/audit used by existing queue behavior,
     // 3) after queue prep, write a read-only economics report for humans.
-    var remoteDiscovery = RemoteHarvestManager.gatherCandidateRemoteRoomsForHome(room);
-    RemoteHarvestManager.buildSourcePlanForHome(room.name, remoteDiscovery.acceptedRemoteRooms || []);
-    RemoteHarvestManager.auditAssignmentsForHome(room.name);
-    if (Memory.rooms && Memory.rooms[room.name] && Memory.rooms[room.name].lastRemoteHarvestPlan) {
-      Memory.rooms[room.name].lastRemoteHarvestPlan.candidateRemoteRooms = remoteDiscovery.candidateRemoteRooms || [];
-      Memory.rooms[room.name].lastRemoteHarvestPlan.acceptedRemoteRooms = remoteDiscovery.acceptedRemoteRooms || [];
-      Memory.rooms[room.name].lastRemoteHarvestPlan.rejectedRemoteRooms = remoteDiscovery.rejectedRemoteRooms || [];
+    var remoteDiscovery = SourceEnergyManager.gatherCandidateRemoteRoomsForHome(room);
+    SourceEnergyManager.buildSourcePlanForHome(room.name, remoteDiscovery.acceptedRemoteRooms || []);
+    SourceEnergyManager.auditAssignmentsForHome(room.name);
+    if (Memory.rooms && Memory.rooms[room.name] && Memory.rooms[room.name].lastSourceEnergyPlan) {
+      Memory.rooms[room.name].lastSourceEnergyPlan.candidateRemoteRooms = remoteDiscovery.candidateRemoteRooms || [];
+      Memory.rooms[room.name].lastSourceEnergyPlan.acceptedRemoteRooms = remoteDiscovery.acceptedRemoteRooms || [];
+      Memory.rooms[room.name].lastSourceEnergyPlan.rejectedRemoteRooms = remoteDiscovery.rejectedRemoteRooms || [];
     }
     ensureRoomQueue(room.name);
-    pruneBlockedLunaQueueItems(room.name);
+    pruneBlockedVeinseekerQueueItems(room.name);
     fillQueueForRoom(C, room);
-    // This call is intentionally last: it observes the final live/queued Luna
+    // This call is intentionally last: it observes the final live/queued Veinseeker
     // counts for the tick, but it does not enqueue, dequeue, reserve, or assign.
-    RemoteHarvestManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
+    SourceEnergyManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
   }
 }
 

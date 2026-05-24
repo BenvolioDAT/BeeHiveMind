@@ -1,7 +1,7 @@
 'use strict';
 
 var Handoff = require('role.EnergyHandoff');
-var LunaConfig = require('role.Luna.Config');
+var VeinseekerConfig = require('role.Veinseeker.Config');
 
 
 
@@ -12,7 +12,7 @@ function shouldBlockRemoteHaulForMaintenance(req) {
   if (req.maintenanceReason === 'emergencyRemoteRepair') return true;
 
   if (req.maintenanceReason === 'containerRepair') {
-    var criticalPct = (LunaConfig && LunaConfig.remoteContainerRepairCriticalPct) || 0.25;
+    var criticalPct = (VeinseekerConfig && VeinseekerConfig.remoteContainerRepairCriticalPct) || 0.25;
     var hitsPct = (typeof req.containerHitsPct === 'number') ? req.containerHitsPct : 1;
     var amount = req.amount || 0;
     var capacity = req.capacity || 2000;
@@ -21,7 +21,7 @@ function shouldBlockRemoteHaulForMaintenance(req) {
 
     if (hitsPct <= criticalPct) return true;
     // Allow hauling when container is very full and not critically damaged,
-    // so Truckers do not ignore remote income during normal Luna upkeep repairs.
+    // so Truckers do not ignore remote income during normal Veinseeker upkeep repairs.
     if (amount >= urgentEnergy || fillPct >= 0.8) return false;
     return true;
   }

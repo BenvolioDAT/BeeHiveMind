@@ -130,13 +130,13 @@ function refreshOwnedRoomSources(room) {
   return econ;
 }
 
-function refreshBaseHarvestStats(room) {
+function refreshVeinseekerStats(room) {
   var econ = ensureRoomSourceEconomy(room);
   if (!econ || !econ.sources) return;
   var names = Object.keys(Game.creeps);
   for (var i = 0; i < names.length; i++) {
     var c = Game.creeps[names[i]];
-    if (!c || !c.memory || c.memory.role !== 'BaseHarvest') continue;
+    if (!c || !c.memory || c.memory.role !== 'Veinseeker' || c.memory.mode !== 'home') continue;
     var sid = c.memory.assignedSource || c.memory.sourceId;
     if (!sid || !econ.sources[sid]) continue;
     econ.sources[sid].minerCount += 1;
@@ -258,7 +258,7 @@ function getBestPickupSource(room, creep) {
 module.exports = {
   ensureRoomSourceEconomy: ensureRoomSourceEconomy,
   refreshOwnedRoomSources: refreshOwnedRoomSources,
-  refreshBaseHarvestStats: refreshBaseHarvestStats,
+  refreshVeinseekerStats: refreshVeinseekerStats,
   refreshTruckerCarryStats: refreshTruckerCarryStats,
   calculatePendingEnergy: calculatePendingEnergy,
   getBestPickupSource: getBestPickupSource,

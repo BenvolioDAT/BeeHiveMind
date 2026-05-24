@@ -21,7 +21,7 @@
 //   planners, dispatches role.run(), resolves movement, then delegates spawn
 //   queues to BeeSpawnManager.
 // * Persistent Memory ownership lives in the specialist modules:
-//   BeeMaintenance owns stale cleanup, RemoteHarvest.Manager owns remote Luna
+//   BeeMaintenance owns stale cleanup, SourceEnergy.Manager owns remote Veinseeker
 //   planning, Movement.Manager owns only transient movement intents, and each
 //   role owns its own creep.memory fields.
 
@@ -40,11 +40,10 @@ var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
-var BaseHarvest          = require('role.BaseHarvest');
+var Veinseeker           = require('role.Veinseeker');
 var Builder              = require('role.Builder');
 var Queen                = require('role.Queen');
 var Upgrader             = require('role.Upgrader');
-var Luna                 = require('role.Luna');
 var Scout                = require('role.Scout');
 var Trucker              = require('role.Trucker');
 var Claimer              = require('role.Claimer');
@@ -63,12 +62,11 @@ var BeeSourceEconomy    = require('BeeSourceEconomy');
 // Keep references to the role modules so validation can check the intended
 // mapping (e.g. a swapped import would surface as a role name mismatch).
 var roleModules = {
-  BaseHarvest: BaseHarvest,
+  Veinseeker: Veinseeker,
   Builder: Builder,
   Repair: roleRepair,
   Upgrader: Upgrader,
   Dismantler: roleDismantler,
-  Luna: Luna,
   Scout: Scout,
   Queen: Queen,
   Trucker: Trucker,
@@ -82,12 +80,11 @@ var roleModules = {
 // Default role map; specific roles may be registered
 // elsewhere by mutating this object.
 var creepRoles = {
-  BaseHarvest: roleModules.BaseHarvest && roleModules.BaseHarvest.run,
+  Veinseeker: roleModules.Veinseeker && roleModules.Veinseeker.run,
   Builder: roleModules.Builder && roleModules.Builder.run,
   Repair: roleModules.Repair && roleModules.Repair.run,
   Upgrader: roleModules.Upgrader && roleModules.Upgrader.run,
   Dismantler: roleModules.Dismantler && roleModules.Dismantler.run,
-  Luna: roleModules.Luna && roleModules.Luna.run,
   Scout: roleModules.Scout && roleModules.Scout.run,
   Queen: roleModules.Queen && roleModules.Queen.run,
   Trucker: roleModules.Trucker && roleModules.Trucker.run,
@@ -114,12 +111,11 @@ function createRoleAliasMap() {
   // "worker_bee") are mapped to one of these canonical spellings.
   var canonicalRoles = [
     'Idle',
-    'BaseHarvest',
+    'Veinseeker',
     'Builder',
     'Repair',
     'Upgrader',
     'Dismantler',
-    'Luna',
     'Scout',
     'Queen',
     'Trucker',
@@ -141,15 +137,143 @@ function createRoleAliasMap() {
   // Friendly aliases that appear in historical memory dumps.
   map.worker_bee = 'Idle';
   map['Worker_Bee'] = 'Idle';
-  map.remoteharvest = 'Luna';
   return map;
 }
 
 var ROLE_ALIAS_MAP = createRoleAliasMap();
 
+function migrateLegacySourceWorkersToVeinseeker() {
+  if (!Memory.__BHM) Memory.__BHM = {};
+  if (!Memory.__BHM.migrations) Memory.__BHM.migrations = {};
+  if (Memory.__BHM.migrations.veinseekerRoleMigrationDone) return;
+
+  function lower(value) {
+    return value == null ? '' : String(value).toLowerCase();
+  }
+
+  function shouldMigrateMemory(mem) {
+    if (!mem) return false;
+    var role = lower(mem.role);
+    var task = lower(mem.task);
+    return role === 'baseharvest' || role === 'luna' ||
+      task === 'baseharvest' || task === 'luna' || task === 'remoteharvest';
+  }
+
+  function normalizeMemory(mem) {
+    if (!mem || !shouldMigrateMemory(mem)) return false;
+    var role = lower(mem.role);
+    var task = lower(mem.task);
+    var remoteMode = role === 'luna' || task === 'luna' || task === 'remoteharvest';
+    if (!remoteMode && mem.targetRoom && mem.home && mem.targetRoom !== mem.home) remoteMode = true;
+    mem.role = 'Veinseeker';
+    mem.task = 'veinseeker';
+    mem.mode = remoteMode ? 'remote' : 'home';
+    if (mem.baseHarvestSpawnMode && !mem.sourceWorkerSpawnMode) {
+      mem.sourceWorkerSpawnMode = mem.baseHarvestSpawnMode;
+    }
+    if (mem.lunaRepairingContainer && !mem.sourceWorkerRepairingContainer) {
+      mem.sourceWorkerRepairingContainer = mem.lunaRepairingContainer;
+    }
+    delete mem.baseHarvestSpawnMode;
+    delete mem.lunaRepairingContainer;
+    return true;
+  }
+
+  var migratedCreeps = 0;
+  for (var name in Game.creeps) {
+    if (Object.prototype.hasOwnProperty.call(Game.creeps, name) && normalizeMemory(Game.creeps[name].memory)) {
+      migratedCreeps++;
+    }
+  }
+
+  var migratedMemoryCreeps = 0;
+  if (Memory.creeps) {
+    for (var memName in Memory.creeps) {
+      if (Object.prototype.hasOwnProperty.call(Memory.creeps, memName) && normalizeMemory(Memory.creeps[memName])) {
+        migratedMemoryCreeps++;
+      }
+    }
+  }
+
+  var migratedQueueItems = 0;
+  var migratedBlockedRecords = 0;
+  if (Memory.rooms) {
+    for (var roomName in Memory.rooms) {
+      if (!Object.prototype.hasOwnProperty.call(Memory.rooms, roomName)) continue;
+      var roomMem = Memory.rooms[roomName];
+      if (!roomMem) continue;
+      if (roomMem.lunaBlockedUntil != null && roomMem.sourceWorkerBlockedUntil == null) roomMem.sourceWorkerBlockedUntil = roomMem.lunaBlockedUntil;
+      if (roomMem.lunaBlockedReason != null && roomMem.sourceWorkerBlockedReason == null) roomMem.sourceWorkerBlockedReason = roomMem.lunaBlockedReason;
+      if (roomMem.lunaBlockedAt != null && roomMem.sourceWorkerBlockedAt == null) roomMem.sourceWorkerBlockedAt = roomMem.lunaBlockedAt;
+      if (roomMem.lunaBlocked != null && roomMem.sourceWorkerBlocked == null) roomMem.sourceWorkerBlocked = roomMem.lunaBlocked;
+      if (roomMem.lunaUnsafe != null && roomMem.sourceWorkerUnsafe == null) roomMem.sourceWorkerUnsafe = roomMem.lunaUnsafe;
+      if (roomMem.lunaInvaderLockUntil != null && roomMem.sourceWorkerInvaderLockUntil == null) roomMem.sourceWorkerInvaderLockUntil = roomMem.lunaInvaderLockUntil;
+      delete roomMem.lunaBlockedUntil;
+      delete roomMem.lunaBlockedReason;
+      delete roomMem.lunaBlockedAt;
+      delete roomMem.lunaBlocked;
+      delete roomMem.lunaUnsafe;
+      delete roomMem.lunaInvaderLockUntil;
+      var sourceIds = roomMem.sources ? Object.keys(roomMem.sources) : [];
+      for (var s = 0; s < sourceIds.length; s++) {
+        var srcMem = roomMem.sources[sourceIds[s]];
+        if (!srcMem) continue;
+        if (srcMem.lunaBlockedUntil != null && srcMem.sourceWorkerBlockedUntil == null) srcMem.sourceWorkerBlockedUntil = srcMem.lunaBlockedUntil;
+        if (srcMem.lunaBlockedReason != null && srcMem.sourceWorkerBlockedReason == null) srcMem.sourceWorkerBlockedReason = srcMem.lunaBlockedReason;
+        delete srcMem.lunaBlockedUntil;
+        delete srcMem.lunaBlockedReason;
+        migratedBlockedRecords++;
+      }
+      var q = roomMem.spawnQueue;
+      if (!Array.isArray(q)) continue;
+      for (var i = 0; i < q.length; i++) {
+        if (normalizeMemory(q[i])) migratedQueueItems++;
+      }
+    }
+  }
+
+  var migratedRemoteSources = 0;
+  if (Memory.__BHM.remoteHarvest && !Memory.__BHM.sourceEnergy) {
+    Memory.__BHM.sourceEnergy = Memory.__BHM.remoteHarvest;
+  }
+  var remoteRoot = Memory.__BHM.sourceEnergy || Memory.__BHM.remoteHarvest;
+  if (remoteRoot && remoteRoot.homes) {
+    for (var homeRoom in remoteRoot.homes) {
+      if (!Object.prototype.hasOwnProperty.call(remoteRoot.homes, homeRoom)) continue;
+      var home = remoteRoot.homes[homeRoom];
+      if (!home) continue;
+      if (home.desiredLuna != null && home.desiredVeinseeker == null) home.desiredVeinseeker = home.desiredLuna;
+      if (home.liveLuna != null && home.liveVeinseeker == null) home.liveVeinseeker = home.liveLuna;
+      if (home.queuedLuna != null && home.queuedVeinseeker == null) home.queuedVeinseeker = home.queuedLuna;
+      delete home.desiredLuna;
+      delete home.liveLuna;
+      delete home.queuedLuna;
+      var sourceIds = home.sources ? Object.keys(home.sources) : [];
+      for (var s = 0; s < sourceIds.length; s++) {
+        var rec = home.sources[sourceIds[s]];
+        if (!rec) continue;
+        if (rec.assignedLuna != null && rec.assignedVeinseeker == null) rec.assignedVeinseeker = rec.assignedLuna;
+        delete rec.assignedLuna;
+        migratedRemoteSources++;
+      }
+    }
+  }
+  delete Memory.__BHM.remoteHarvest;
+
+  Memory.__BHM.migrations.veinseekerRoleMigrationDone = true;
+  Memory.__BHM.migrations.veinseekerRoleMigration = {
+    tick: Game.time,
+    migratedCreeps: migratedCreeps,
+    migratedMemoryCreeps: migratedMemoryCreeps,
+    migratedQueueItems: migratedQueueItems,
+    migratedRemoteSources: migratedRemoteSources,
+    migratedBlockedRecords: migratedBlockedRecords
+  };
+}
+
 function canonicalRoleName(name) {
   // Normalize legacy/alias role strings before dispatch. This protects the
-  // role runner and quota cache from old creep memory such as "remoteharvest".
+  // role runner and quota cache from old creep memory such as "veinseeker".
   // Defensive coding pattern: immediately handle null/undefined to avoid
   // sprinkling guard clauses everywhere else.
   if (!name) return null;
@@ -224,8 +348,8 @@ function ensureCreepRole(creep) {
   var canonical = canonicalRoleName(mem.role) || canonicalRoleName(mem.task);
   if (!canonical) canonical = 'Idle';
 
-  if (canonical === 'Luna' && mem && mem.task === 'remoteharvest') {
-    mem.task = 'luna';
+  if (canonical === 'Veinseeker' && mem && mem.task === 'veinseeker') {
+    mem.task = 'veinseeker';
   }
 
   mem.role = canonical;
@@ -243,7 +367,7 @@ if (!global.__BHM) global.__BHM = {};
 // Tick cache fields populated each tick:
 // global.__BHM = {
 //   tick, roomsOwned, roomsMap, roomSnapshots,
-//   spawns, creeps, roleCounts, lunaCountsByHome,
+//   spawns, creeps, roleCounts, veinseekerCountsByHome,
 //   roomSiteCounts, totalSites, remotesByHome
 // }.
 
@@ -256,7 +380,7 @@ function refreshSourceEconomyForOwnedRooms() {
   for (var i = 0; i < global.__BHM.roomsOwned.length; i++) {
     var room = global.__BHM.roomsOwned[i];
     BeeSourceEconomy.refreshOwnedRoomSources(room);
-    BeeSourceEconomy.refreshBaseHarvestStats(room);
+    BeeSourceEconomy.refreshVeinseekerStats(room);
     BeeSourceEconomy.refreshTruckerCarryStats(room);
     BeeSourceEconomy.calculatePendingEnergy(room);
   }
@@ -304,7 +428,7 @@ function prepareTickCaches() {
   var creeps = [];
   var roleCounts = Object.create(null);
   var roleCountsByRoom = Object.create(null);
-  var lunaCountsByHome = Object.create(null);
+  var veinseekerCountsByHome = Object.create(null);
   var creepNames = Object.keys(Game.creeps);
   for (var j = 0; j < creepNames.length; j++) {
     var creep = Game.creeps[creepNames[j]];
@@ -328,12 +452,12 @@ function prepareTickCaches() {
       roleCountsByRoom[homeRoom][roleName] = (roleCountsByRoom[homeRoom][roleName] || 0) + 1;
     }
 
-    if (roleName === 'Luna') {
+    if (roleName === 'Veinseeker') {
       var home = (creep.memory && creep.memory.home) || null;
       if (!home && creep.memory && creep.memory._home) home = creep.memory._home;
       if (!home && creep.room) home = creep.room.name;
       if (home) {
-        lunaCountsByHome[home] = (lunaCountsByHome[home] || 0) + 1;
+        veinseekerCountsByHome[home] = (veinseekerCountsByHome[home] || 0) + 1;
       }
     }
   }
@@ -386,7 +510,7 @@ function prepareTickCaches() {
   C.creeps          = creeps;
   C.roleCounts      = roleCounts;
   C.roleCountsByRoom = roleCountsByRoom;
-  C.lunaCountsByHome = lunaCountsByHome;
+  C.veinseekerCountsByHome = veinseekerCountsByHome;
   C.roomSiteCounts  = byRoom;
   C.totalSites      = totalSites;
   C.remotesByHome   = remotesByHome;
@@ -411,6 +535,7 @@ var BeeHiveMind = {
   run: function run() {
     CpuProfiler.start('BeeHiveMind.total');
     CpuProfiler.measure('initializeMemory', BeeHiveMind.initializeMemory);
+    CpuProfiler.measure('migrateLegacySourceWorkersToVeinseeker', migrateLegacySourceWorkersToVeinseeker);
 
     // Expose action/selectors globally for console debugging and legacy modules
     // expecting global symbols.

@@ -235,7 +235,7 @@ function isRoomUnsafeForRemoteBuild(roomName, homeRoom) {
   var mem = Memory.rooms && Memory.rooms[roomName];
   if (mem) {
     if (mem.hostile) return true;
-    if (typeof mem.lunaBlockedUntil === 'number' && mem.lunaBlockedUntil > Game.time) return true;
+    if (typeof mem.sourceWorkerBlockedUntil === 'number' && mem.sourceWorkerBlockedUntil > Game.time) return true;
     if (mem._invaderLock && mem._invaderLock.locked) {
       var lockTick = (typeof mem._invaderLock.t === 'number') ? mem._invaderLock.t : null;
       if (lockTick == null || (Game.time - lockTick) <= 1500) return true;
@@ -325,7 +325,7 @@ function getRemoteContainerBuildTargets(creep) {
       if (!Object.prototype.hasOwnProperty.call(Game.rooms, remoteName)) continue;
       if (remoteName === home) continue;
       if (isRoomUnsafeForRemoteBuild(remoteName, home)) { out.skippedUnsafe++; continue; }
-      var approved = Memory.__BHM && Memory.__BHM.remoteHarvest && Memory.__BHM.remoteHarvest.homes && Memory.__BHM.remoteHarvest.homes[home] && Memory.__BHM.remoteHarvest.homes[home].sources;
+      var approved = Memory.__BHM && Memory.__BHM.sourceEnergy && Memory.__BHM.sourceEnergy.homes && Memory.__BHM.sourceEnergy.homes[home] && Memory.__BHM.sourceEnergy.homes[home].sources;
       if (!approved) continue;
       for (var sid in approved) {
         if (!Object.prototype.hasOwnProperty.call(approved, sid)) continue;
@@ -354,7 +354,7 @@ function getRemoteContainerBuildTargets(creep) {
           progress: nearSite.progress || 0,
           progressTotal: nearSite.progressTotal || 0,
           progressPct: (nearSite.progressTotal > 0 ? Math.floor((nearSite.progress / nearSite.progressTotal) * 100) : 0),
-          assignedLuna: prev.assignedLuna || null,
+          assignedVeinseeker: prev.assignedVeinseeker || null,
           updated: Game.time,
           lastSeen: Game.time
         };

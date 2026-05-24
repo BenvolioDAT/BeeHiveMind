@@ -52,12 +52,11 @@ function combatSpawnLog() {
 var ROLE_CONFIGS = BodyConfig.ROLE_CONFIGS;
 
 var ROLE_CANONICAL = [
-  'BaseHarvest',
+  'Veinseeker',
   'Builder',
   'Repair',
   'Upgrader',
   'Queen',
-  'Luna',
   'Scout',
   'CombatMelee',
   'CombatArcher',
@@ -74,10 +73,10 @@ var ROLE_NORMALIZE_MAP = (function () {
     map[role] = role;
     map[role.toLowerCase()] = role;
   }
-  map.remoteharvest = 'Luna';
+  map.veinseeker = 'Veinseeker';
   map.trucker = 'Trucker';
-  map.worker = 'BaseHarvest';
-  map.harvester = 'BaseHarvest';
+  map.worker = 'Veinseeker';
+  map.harvester = 'Veinseeker';
   return map;
 })();
 
@@ -88,7 +87,7 @@ function normalizeRole(role) {
   var key = String(role);
   if (!key) return null;
 
-  // Try exact match first, then lowercase alias (e.g. "baseharvest" → BaseHarvest).
+  // Try exact match first, then lowercase alias (e.g. "veinseeker" → Veinseeker).
   var canonical = ROLE_NORMALIZE_MAP[key] || ROLE_NORMALIZE_MAP[key.toLowerCase()];
   return canonical || null;
 }
@@ -180,13 +179,24 @@ function makeBodyPlan(roleName, body, cost, tierIndex, energyUsedForPlan) {
   };
 }
 
-function getBestBodyPlanForEnergy(roleName, energy) {
+function getBodyListForRole(canonicalRole, context) {
+  var entry = ROLE_CONFIGS[canonicalRole];
+  if (!entry) return null;
+  if (Array.isArray(entry)) return entry;
+  if (canonicalRole === 'Veinseeker') {
+    var mode = context && context.mode === 'remote' ? 'remote' : 'home';
+    return entry[mode] || entry.home || entry.remote || null;
+  }
+  return entry.default || null;
+}
+
+function getBestBodyPlanForEnergy(roleName, energy, context) {
   // Config arrays are ordered largest-to-smallest. The first affordable entry
   // is the best plan for the supplied energy number.
   var canonicalRole = normalizeRole(roleName);
   if (!canonicalRole) return null;
   var available = typeof energy === 'number' ? energy : 0;
-  var list = ROLE_CONFIGS[canonicalRole];
+  var list = getBodyListForRole(canonicalRole, context);
   if (!list || !list.length) return null;
 
   for (var i = 0; i < list.length; i++) {
@@ -199,7 +209,7 @@ function getBestBodyPlanForEnergy(roleName, energy) {
   return null;
 }
 
-function getBestBodyPlanForRoomCapacity(roleName, room) {
+function getBestBodyPlanForRoomCapacity(roleName, room, context) {
   // Capacity planning answers "what should this room be able to support when
   // full?", which is different from "what can it afford this tick?".
   var targetRoom = room;
@@ -208,17 +218,17 @@ function getBestBodyPlanForRoomCapacity(roleName, room) {
   var capacity = targetRoom && typeof targetRoom.energyCapacityAvailable === 'number'
     ? targetRoom.energyCapacityAvailable
     : 0;
-  return getBestBodyPlanForEnergy(roleName, capacity);
+  return getBestBodyPlanForEnergy(roleName, capacity, context);
 }
 
-function getBodyForRole(roleName, energyAvailable) {
+function getBodyForRole(roleName, energyAvailable, context) {
   // Body tables are ordered largest-to-smallest. The first affordable body is
   // what spawnRole will use, so reordering body configs changes spawn behavior.
   if (!roleName) return [];
 
   var energy = typeof energyAvailable === 'number' ? energyAvailable : 0;
   var canonicalRole = normalizeRole(roleName);
-  var list = canonicalRole ? ROLE_CONFIGS[canonicalRole] : null;
+  var list = canonicalRole ? getBodyListForRole(canonicalRole, context) : null;
   if (!list) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       spawnLog.debug('No config for role', roleName);
@@ -227,7 +237,7 @@ function getBodyForRole(roleName, energyAvailable) {
   }
 
   // Config arrays are ordered largest→smallest; pick the first body we can afford.
-  var plan = getBestBodyPlanForEnergy(canonicalRole, energy);
+  var plan = getBestBodyPlanForEnergy(canonicalRole, energy, context);
   if (plan) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       spawnLog.debug('Picked', canonicalRole, 'body [' + plan.body + ']', 'cost', plan.cost, 'avail', energy);
@@ -277,15 +287,14 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   }
 
   var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
-  var bodyPlan = getBestBodyPlanForEnergy(canonicalRole, energy);
+  var mem = copyMemory(memory);
+  var bodyPlan = getBestBodyPlanForEnergy(canonicalRole, energy, mem);
   if (!bodyPlan || !bodyPlan.body || !bodyPlan.body.length) return false;
   var body = cloneBody(bodyPlan.body);
 
   var creepName = Generate_Creep_Name(canonicalRole);
   if (!creepName) return false;
 
-  // Copy over provided memory so we never mutate the caller's object.
-  var mem = copyMemory(memory);
   // Always persist canonical role spelling so all role modules can trust it.
   var requestedRole = mem.role || roleName;
   mem.role = canonicalRole;
@@ -296,16 +305,15 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     delete mem.skipTaskMemory;
   }
 
-  if (canonicalRole === 'BaseHarvest') {
-    // BaseHarvest queue items may target a specific source. Stamp both the new
-    // source-aware fields and the older assignedSource/sourceId fields so the
-    // runtime can keep working during and after the upgrade handoff.
+  if (canonicalRole === 'Veinseeker') {
+    mem.task = 'veinseeker';
+    mem.mode = mem.mode === 'remote' ? 'remote' : 'home';
     var targetSourceId = mem.assignedSource || mem.sourceId || mem.replaceSourceId || mem.replacementTargetSourceId || null;
     if (targetSourceId) {
       mem.assignedSource = targetSourceId;
       mem.sourceId = targetSourceId;
       if (!mem.replacementTargetSourceId) mem.replacementTargetSourceId = targetSourceId;
-      if (mem.baseHarvestSpawnMode === 'upgradeReplacement' && !mem.replaceSourceId) {
+      if (mem.sourceWorkerSpawnMode === 'upgradeReplacement' && !mem.replaceSourceId) {
         mem.replaceSourceId = targetSourceId;
       }
     }
@@ -343,13 +351,13 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     spawnLog.debug('spawnRole', canonicalRole, 'body [' + body + ']', 'cost', calculateBodyCost(body), 'avail', energy, 'result', result);
   }
   if (result === OK) {
-    if (canonicalRole === 'BaseHarvest' && mem.replacementFor) {
+    if (canonicalRole === 'Veinseeker' && mem.replacementFor) {
       var oldCreep = Game.creeps[mem.replacementFor];
       if (oldCreep && oldCreep.memory) {
         oldCreep.memory.retireAfterReplacementReady = true;
-        oldCreep.memory.retireReason = mem.baseHarvestSpawnMode === 'upgradeReplacement'
-          ? 'baseHarvestBodyUpgrade'
-          : 'baseHarvestTtlReplacement';
+        oldCreep.memory.retireReason = mem.sourceWorkerSpawnMode === 'upgradeReplacement'
+          ? 'sourceWorkerBodyUpgrade'
+          : 'sourceWorkerTtlReplacement';
         oldCreep.memory.replacingCreepName = creepName;
         oldCreep.memory.replacementSourceId = mem.replaceSourceId || mem.assignedSource || mem.sourceId || null;
       }
@@ -620,17 +628,21 @@ function Spawn_Squad(spawn, squadId) {
 // -----------------------------------------------------------------------------
 var MIN_ENERGY_CACHE = {};
 
-function minEnergyFor(roleName) {
+function minEnergyFor(roleName, context) {
   // Minimum-cost cache used by BeeSpawnManager's energy gate. It must reflect
   // the cheapest configured body, not the first/largest body.
   var canonicalRole = normalizeRole(roleName);
   if (!canonicalRole) return 0;
-  if (Object.prototype.hasOwnProperty.call(MIN_ENERGY_CACHE, canonicalRole)) {
-    return MIN_ENERGY_CACHE[canonicalRole];
+  var cacheKey = canonicalRole;
+  if (canonicalRole === 'Veinseeker') {
+    cacheKey += ':' + (context && context.mode === 'remote' ? 'remote' : 'home');
   }
-  var list = ROLE_CONFIGS[canonicalRole];
+  if (Object.prototype.hasOwnProperty.call(MIN_ENERGY_CACHE, cacheKey)) {
+    return MIN_ENERGY_CACHE[cacheKey];
+  }
+  var list = getBodyListForRole(canonicalRole, context);
   if (!list || !list.length) {
-    MIN_ENERGY_CACHE[canonicalRole] = 0;
+    MIN_ENERGY_CACHE[cacheKey] = 0;
     return 0;
   }
   var minCost = null;
@@ -641,7 +653,7 @@ function minEnergyFor(roleName) {
     }
   }
   var finalCost = minCost === null ? 0 : minCost;
-  MIN_ENERGY_CACHE[canonicalRole] = finalCost;
+  MIN_ENERGY_CACHE[cacheKey] = finalCost;
   return finalCost;
 }
 

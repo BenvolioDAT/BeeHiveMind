@@ -6,7 +6,7 @@
 // * Manages repair target reservations via global.__BHM to prevent double work
 //   between creeps and towers.
 // * Exposes selectors for remote mining (seat positions, container state) used
-//   by role.Luna and couriers.
+//   by role.Veinseeker and couriers.
 // Data touched:
 // * global.__BHM.caches – per-key TTL caches (reset at shard reset).
 // * Memory.__BHM.* – remote room metadata (remotesByHome, reservations).
@@ -360,7 +360,7 @@ function chooseBestSeatForSource(pos) {
 // Inputs: Source object
 // Output: {container, site, seatPos, containerEnergy, source}
 // Side-effects: checks immediate surroundings for containers/sites; used by
-//               role.BeeWorker (BaseHarvest/Luna runners) and BeeSelectors API wrappers.
+//               role.BeeWorker (Veinseeker/Veinseeker runners) and BeeSelectors API wrappers.
 function getSourceContainerOrSiteImpl(source) {
   if (!source || !source.pos) return { container: null, site: null, seatPos: null, containerEnergy: 0, source: source };
   var pos = source.pos;
@@ -414,7 +414,7 @@ function collectSourceFlags() {
 // Output: array of remote source entries {sourceId, roomName, container, ...}
 // Side-effects: reads Memory.__BHM.remotesByHome[home], scans visible remote
 //               rooms, merges intel from Memory.rooms when fogged.
-// Consumers: role.Luna (remote miners), role.Trucker.
+// Consumers: role.Veinseeker (remote miners), role.Trucker.
 function buildRemoteSourcesSnapshot(homeRoomName) {
   ensureRemoteMemory();
   var remotes = Memory.__BHM.remotesByHome[homeRoomName] || [];
@@ -581,7 +581,7 @@ var BeeSelectors = {
   isSpawnHubContainer: function (room, container, opts) {
     // Hub containers are pre-storage buffers near spawns. They are explicitly
     // not source containers, so Truckers can feed them without stealing from
-    // BaseHarvest/Luna mining output.
+    // Veinseeker/Veinseeker mining output.
     if (!room || !container || !container.pos || container.structureType !== STRUCTURE_CONTAINER) return false;
     var snap = buildSnapshot(room);
     if (!snap) return false;
@@ -709,12 +709,12 @@ var BeeSelectors = {
   },
 
   // -----------------------------------------------------------------------
-  // Remote mining selectors: these coordinate role.Luna (miners) and the
+  // Remote mining selectors: these coordinate role.Veinseeker (miners) and the
   // hauler roles. They all build on the helper stack above, so their bodies
   // stay short and easy to read.
   // -----------------------------------------------------------------------
   getRemoteSourcesSnapshot: function (homeRoomName) {
-    // Remote mining summary for BeeHiveMind & role.Luna planning.
+    // Remote mining summary for BeeHiveMind & role.Veinseeker planning.
     return buildRemoteSourcesSnapshot(homeRoomName);
   },
 

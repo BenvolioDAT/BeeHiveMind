@@ -8,11 +8,11 @@
 // Usually called by:
 // * BeeHiveMind.manageRoom() through ensureRemoteRoads(room).
 // Systems that depend on it:
-// * BeeHiveMind.prepareTickCaches() and RemoteHarvest/BeeSpawnManager use
+// * BeeHiveMind.prepareTickCaches() and SourceEnergy/BeeSpawnManager use
 //   getActiveRemoteRooms() as one source of remote-room activity.
 // Do not casually change:
 // * Path key format. getActiveRemoteRooms() parses keys to identify remotes,
-//   and RemoteHarvest.Manager may treat those rooms as candidate remotes.
+//   and SourceEnergy.Manager may treat those rooms as candidate remotes.
 // -----------------------------------------------------------------------------
 
 /** =========================
@@ -81,7 +81,7 @@ function activeRemotesOncePerTick() {
   const set = new Set();
   for (const name in Game.creeps) {
     const c = Game.creeps[name];
-    if (c && c.memory && c.memory.task === 'luna' && c.memory.targetRoom) {
+    if (c && c.memory && c.memory.task === 'veinseeker' && c.memory.mode === 'remote' && c.memory.targetRoom) {
       set.add(c.memory.targetRoom);
     }
   }
@@ -380,7 +380,7 @@ function memoryFor(homeRoom) {
  
 function getActiveRemoteRooms(homeRoom) {
   // Return remote rooms inferred from planned path keys. BeeHiveMind and
-  // RemoteHarvest use this as one hint that a remote is active.
+  // SourceEnergy use this as one hint that a remote is active.
   const mem = memoryFor(homeRoom);
   const rooms = new Set();
   for (const key of Object.keys(mem.paths || {})) {

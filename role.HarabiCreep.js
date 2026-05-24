@@ -7,20 +7,18 @@
 // * Provide Harabi-style idler, movement, and combat utility helpers.
 // * Keep role modules small: role files own decisions, this file owns common
 //   lifecycle and low-level creep rules.
-// Reference shape: sy-harabi/screeps-harabi-bot-sample src/creepUtils.js,
-// roomManager.js, and missionDefenseRemote.js.
+// Reference shape: sy-harabi/screeps-harabi-bot-sample role utility modules.
 // -----------------------------------------------------------------------------
 
 var MovementManager = require('Movement.Manager');
 var BeeToolbox = require('BeeToolbox');
 
 var ROLE_TASKS = {
-  BaseHarvest: 'baseharvest',
+  Veinseeker: 'veinseeker',
   Builder: 'builder',
   Repair: 'repair',
   Upgrader: 'upgrader',
   Dismantler: 'dismantler',
-  Luna: 'luna',
   Scout: 'scout',
   Queen: 'queen',
   Trucker: 'haulUnified',

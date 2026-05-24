@@ -8,7 +8,7 @@
 // Memory paths:
 // * None. This file is pure configuration glue.
 // Usually called by:
-// * spawn.logic.js and RemoteHarvest.Manager diagnostics.
+// * spawn.logic.js and SourceEnergy.Manager diagnostics.
 // Systems that depend on it:
 // * BeeSpawnManager queue energy gates and spawn.logic body selection.
 // Do not casually change:
@@ -19,12 +19,11 @@
 var ROLE_CONFIGS = {
   // Keys in ROLE_CONFIGS must match canonical role names used in spawn.logic.js.
   // If you add a new role later, add its matching key + require entry here.
-  BaseHarvest: require('role.BaseHarvest.Body.Config'),
+  Veinseeker: require('role.Veinseeker.Body.Config'),
   Builder: require('role.Builder.Body.Config'),
   Repair: require('role.Repair.Body.Config'),
   Upgrader: require('role.Upgrader.Body.Config'),
   Queen: require('role.Queen.Body.Config'),
-  Luna: require('role.Luna.Body.Config'),
   Scout: require('role.Scout.Body.Config'),
   CombatMelee: require('role.CombatMelee.Body.Config'),
   CombatArcher: require('role.CombatArcher.Body.Config'),
