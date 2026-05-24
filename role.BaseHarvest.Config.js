@@ -28,7 +28,7 @@ module.exports = Object.freeze({
   // you want the older "spawn whatever is currently affordable" behavior.
   BASEHARVEST_ENABLE_BODY_UPGRADES: true,
   BASEHARVEST_WAIT_FOR_BEST_BODY: true,
-  BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED: true,
+  BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED: false,
 
   // Queue safety timers. The manager may wait for a better body only while the
   // old miner can safely keep the source covered. When these limits are hit it
