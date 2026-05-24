@@ -24,6 +24,7 @@
 var Traveler = require('Traveler');
 var Logger = require('core.logger');
 var CoreConfig = require('core.config');
+var MemoryUtils = require('core.memory');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 var ToolboxConfig = (CoreConfig.settings && CoreConfig.settings.toolbox) || {};
@@ -176,10 +177,7 @@ function _isForeignPlayerRoom(room) {
 //   Memory.rooms[roomName].sources[sourceId].sourceWorkerBlockedUntil
 //   because source-level access constraints are managed by assignment logic.
 function _getRoomMemoryBucket(roomName) {
-  if (!roomName) return null;
-  Memory.rooms = Memory.rooms || {};
-  Memory.rooms[roomName] = Memory.rooms[roomName] || {};
-  return Memory.rooms[roomName];
+  return MemoryUtils.ensureRoom(roomName);
 }
 
 function _isVisibleRoomSafeForRemoteUse(room) {
@@ -855,20 +853,19 @@ var BeeToolbox = {
     // Memory.rooms[room].sources to be an object keyed by source id.
     if (!room) return;
 
-    if (!Memory.rooms) Memory.rooms = {};
-    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-    if (!Memory.rooms[room.name].sources) Memory.rooms[room.name].sources = {};
+    var roomMem = _getRoomMemoryBucket(room.name);
+    if (!roomMem.sources) roomMem.sources = {};
 
     // If already populated, skip (CPU hygiene)
     var hasAny = false;
-    for (var k in Memory.rooms[room.name].sources) { if (Memory.rooms[room.name].sources.hasOwnProperty(k)) { hasAny = true; break; } }
+    for (var k in roomMem.sources) { if (roomMem.sources.hasOwnProperty(k)) { hasAny = true; break; } }
     if (hasAny) return;
 
     var sources = room.find(FIND_SOURCES);
     for (var i = 0; i < sources.length; i++) {
       var s = sources[i];
-      if (!Memory.rooms[room.name].sources[s.id]) {
-        Memory.rooms[room.name].sources[s.id] = {}; // room coords optional if you like
+      if (!roomMem.sources[s.id]) {
+        roomMem.sources[s.id] = {}; // room coords optional if you like
         if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
           toolboxLog.info('Logged source', s.id, 'in room', room.name);
         }
@@ -876,7 +873,7 @@ var BeeToolbox = {
     }
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       try {
-        toolboxLog.debug('Final sources in', room.name + ':', JSON.stringify(Memory.rooms[room.name].sources));
+        toolboxLog.debug('Final sources in', room.name + ':', JSON.stringify(roomMem.sources));
       } catch (e) {}
     }
   },
@@ -886,11 +883,8 @@ var BeeToolbox = {
     // Source-container registry used by legacy container assignment logic.
     // It is cadence-limited because source-adjacent structure scans are costly.
     if (!room) return;
-    if (!Memory.rooms) Memory.rooms = {};
-    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-    if (!Memory.rooms[room.name].sourceContainers) Memory.rooms[room.name].sourceContainers = {};
-
-    var roomMem = Memory.rooms[room.name];
+    var roomMem = _getRoomMemoryBucket(room.name);
+    if (!roomMem.sourceContainers) roomMem.sourceContainers = {};
     if (!roomMem._toolbox) roomMem._toolbox = {};
     if (!roomMem._toolbox.sourceContainerScan) roomMem._toolbox.sourceContainerScan = {};
 

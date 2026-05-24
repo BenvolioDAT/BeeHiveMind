@@ -19,6 +19,7 @@
 // Core utilities and shared config
 const CoreConfig = require('core.config');
 const Logger = require('core.logger');
+const MemoryUtils = require('core.memory');
 
 // Core game logic modules
 const BeeMaintenance = require('BeeMaintenance');
@@ -81,11 +82,10 @@ function maintainRepairTargets() {
     if (Memory.GameTickRepairCounter < CoreConfig.settings.maintenance.repairScanInterval) return;
 
     Memory.GameTickRepairCounter = 0;
-    if (!Memory.rooms) Memory.rooms = {};
 
     for (const room of Object.values(Game.rooms)) {
-        if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-        Memory.rooms[room.name].repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
+        const roomMem = MemoryUtils.ensureRoom(room.name);
+        roomMem.repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
     }
 }
 
@@ -130,6 +130,14 @@ function maybeGeneratePixel() {
     }
 }
 
+function measureSafely(sectionName, fn) {
+    try {
+        CpuProfiler.measure(sectionName, fn);
+    } catch (err) {
+        mainLog.warn(sectionName + ' error: ' + err);
+    }
+}
+
 module.exports.loop = function () {
     // Tick order matters: refresh intel/cleanup first, run roles and structures,
     // then draw visuals and do less frequent cleanup/pixel work.
@@ -149,9 +157,9 @@ module.exports.loop = function () {
     }
 
     // --- Visual aids for quick debugging ---
-    try { CpuProfiler.measure('BeeVisuals.drawVisuals', BeeVisuals.drawVisuals); } catch (err) { mainLog.warn('BeeVisuals.drawVisuals error: ' + err); }
-    try { CpuProfiler.measure('BeeVisuals.drawEnergyBar', BeeVisuals.drawEnergyBar); } catch (err2) { mainLog.warn('BeeVisuals.drawEnergyBar error: ' + err2); }
-    try { CpuProfiler.measure('BeeVisuals.drawWorkerBeeTaskTable', BeeVisuals.drawWorkerBeeTaskTable); } catch (err3) { mainLog.warn('BeeVisuals.drawWorkerBeeTaskTable error: ' + err3); }
+    measureSafely('BeeVisuals.drawVisuals', BeeVisuals.drawVisuals);
+    measureSafely('BeeVisuals.drawEnergyBar', BeeVisuals.drawEnergyBar);
+    measureSafely('BeeVisuals.drawWorkerBeeTaskTable', BeeVisuals.drawWorkerBeeTaskTable);
 
     // --- Less frequent maintenance ---
     if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {

@@ -28,6 +28,7 @@ var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 var CoreConfig = require('core.config');
 var BeeToolbox = require('BeeToolbox');
+var Roles = require('core.roles');
 // Body definitions now live in Spawn.BodyConfig.js (registry of role body lists).
 var BodyConfig = require('Spawn.BodyConfig');
 
@@ -52,45 +53,10 @@ function combatSpawnLog() {
 // This keeps spawn behavior the same while making body tuning easier to maintain.
 var ROLE_CONFIGS = BodyConfig.ROLE_CONFIGS;
 
-var ROLE_CANONICAL = [
-  'Veinseeker',
-  'Builder',
-  'Repair',
-  'Upgrader',
-  'Queen',
-  'Scout',
-  'CombatMelee',
-  'CombatArcher',
-  'CombatMedic',
-  'Dismantler',
-  'Claimer',
-  'Trucker'
-];
-
-var ROLE_NORMALIZE_MAP = (function () {
-  var map = Object.create(null);
-  for (var i = 0; i < ROLE_CANONICAL.length; i++) {
-    var role = ROLE_CANONICAL[i];
-    map[role] = role;
-    map[role.toLowerCase()] = role;
-  }
-  map.veinseeker = 'Veinseeker';
-  map.trucker = 'Trucker';
-  map.worker = 'Veinseeker';
-  map.harvester = 'Veinseeker';
-  return map;
-})();
-
 function normalizeRole(role) {
   // All spawn queue entries eventually pass through this gate. Returning null
   // rejects unknown roles before body selection or spawn memory is created.
-  if (role === undefined || role === null) return null;
-  var key = String(role);
-  if (!key) return null;
-
-  // Try exact match first, then lowercase alias (e.g. "veinseeker" → Veinseeker).
-  var canonical = ROLE_NORMALIZE_MAP[key] || ROLE_NORMALIZE_MAP[key.toLowerCase()];
-  return canonical || null;
+  return Roles.canonicalSpawnRole(role);
 }
 
 function calculateBodyCost(body) {

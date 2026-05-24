@@ -247,4 +247,4 @@ var roleDismantler = {
   }
 };
 
-module.exports = HarabiCreep.wrapModule(roleDismantler, { task: 'dismantler' });
+module.exports = HarabiCreep.wrapModule(roleDismantler);

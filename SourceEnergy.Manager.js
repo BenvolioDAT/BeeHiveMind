@@ -28,6 +28,7 @@ var VeinseekerConfig = require('role.Veinseeker.Config');
 var RoadPlanner = require('Planner.Road');
 var BeeToolbox = require('BeeToolbox');
 var BodyConfig = require('Spawn.BodyConfig');
+var MemoryUtils = require('core.memory');
 
 var RESERVE_TTL = 100;
 // Economics diagnostics are intentionally estimates. They explain "why this
@@ -43,13 +44,12 @@ var ROLE_CONFIGS = BodyConfig && BodyConfig.ROLE_CONFIGS ? BodyConfig.ROLE_CONFI
 function ensureMemory() {
   // Root Memory bucket for remote-harvest planning. This is not creep memory;
   // it is the home-room plan BeeSpawnManager reads before queuing Veinseeker creeps.
-  if (!Memory.__BHM) Memory.__BHM = {};
-  if (!Memory.__BHM.sourceEnergy) {
-    Memory.__BHM.sourceEnergy = { tick: Game.time, homes: {} };
-  }
-  if (!Memory.__BHM.sourceEnergy.homes) Memory.__BHM.sourceEnergy.homes = {};
-  Memory.__BHM.sourceEnergy.tick = Game.time;
-  return Memory.__BHM.sourceEnergy;
+  var root = MemoryUtils.ensureBhmRoot('sourceEnergy', function () {
+    return { tick: Game.time, homes: {} };
+  });
+  if (!root.homes) root.homes = {};
+  root.tick = Game.time;
+  return root;
 }
 
 function ensureHomeMemory(homeRoom) {

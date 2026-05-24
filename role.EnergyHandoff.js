@@ -1,5 +1,7 @@
 'use strict';
 
+var MemoryUtils = require('core.memory');
+
 var HANDOFF = Object.freeze({
   HANDOFF_ENABLED: true,
   HANDOFF_REQUEST_TTL: 25,
@@ -14,11 +16,10 @@ var HANDOFF = Object.freeze({
 
 function ensureRoomMemory(room) {
   if (!room || !room.name) return null;
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
-  if (!Memory.rooms[room.name].energyHandoffs) Memory.rooms[room.name].energyHandoffs = { requests: {} };
-  if (!Memory.rooms[room.name].energyHandoffs.requests) Memory.rooms[room.name].energyHandoffs.requests = {};
-  return Memory.rooms[room.name].energyHandoffs;
+  var roomMem = MemoryUtils.ensureRoom(room.name);
+  if (!roomMem.energyHandoffs) roomMem.energyHandoffs = { requests: {} };
+  if (!roomMem.energyHandoffs.requests) roomMem.energyHandoffs.requests = {};
+  return roomMem.energyHandoffs;
 }
 
 function trackMigration(roomName, reqMoved, creepMoved) {

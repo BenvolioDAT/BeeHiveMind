@@ -986,4 +986,4 @@ function getBackupHarvestTask(creep) {
     }
   };
 
-module.exports = HarabiCreep.wrapModule(roleQueen, { task: 'queen' });
+module.exports = HarabiCreep.wrapModule(roleQueen);

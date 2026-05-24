@@ -603,4 +603,4 @@ var CFG = Object.freeze({
     }
   };
 
-module.exports = HarabiCreep.wrapModule(roleClaimer, { task: 'claimer' });
+module.exports = HarabiCreep.wrapModule(roleClaimer);

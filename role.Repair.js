@@ -4,4 +4,4 @@
 var RepairLogic = require('role.Repair.Logic');
 var HarabiCreep = require('role.HarabiCreep');
 
-module.exports = HarabiCreep.wrapRole('Repair', RepairLogic.run, { task: 'repair' });
+module.exports = HarabiCreep.wrapRole('Repair', RepairLogic.run);

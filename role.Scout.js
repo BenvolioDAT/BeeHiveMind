@@ -4,4 +4,4 @@
 var ScoutLogic = require('role.Scout.Logic');
 var HarabiCreep = require('role.HarabiCreep');
 
-module.exports = HarabiCreep.wrapRole('Scout', ScoutLogic.run, { task: 'scout' });
+module.exports = HarabiCreep.wrapRole('Scout', ScoutLogic.run);

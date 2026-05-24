@@ -6,6 +6,7 @@
 // and repair systems.
 var CFG = require('role.Veinseeker.Config');
 var BeeToolbox = require('BeeToolbox');
+var Roles = require('core.roles');
 
 function getSourceIdFromMemory(mem) {
   if (!mem) return null;
@@ -27,17 +28,16 @@ function getCreepHomeRoomName(creep) {
 
 function isVeinseekerMemory(mem) {
   if (!mem) return false;
-  var role = mem.role ? String(mem.role).toLowerCase() : '';
-  var task = mem.task ? String(mem.task).toLowerCase() : '';
-  return role === 'veinseeker' || task === 'veinseeker';
+  return Roles.canonicalRoleName(mem.role) === 'Veinseeker' ||
+    Roles.canonicalRoleName(mem.task) === 'Veinseeker';
 }
 
 function isVeinseekerRoleMemory(mem) {
-  return !!(mem && mem.role && String(mem.role).toLowerCase() === 'veinseeker');
+  return !!(mem && Roles.canonicalRoleName(mem.role) === 'Veinseeker');
 }
 
 function isVeinseekerQueueItem(item) {
-  return item && String(item.role || '').toLowerCase() === 'veinseeker' && item.mode !== 'remote';
+  return item && Roles.canonicalRoleName(item.role) === 'Veinseeker' && item.mode !== 'remote';
 }
 
 function getCreepBodyParts(creep) {

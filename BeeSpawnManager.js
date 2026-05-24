@@ -33,6 +33,7 @@ var SourceEnergyManager = require('SourceEnergy.Manager');
 var SourceWorkerManager = require('SourceWorker.Manager');
 var BeeToolbox = require('BeeToolbox');
 var BeeCombatSquads = require('BeeCombatSquads');
+var Roles = require('core.roles');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
 
 // --------------------------- Tunables & Constants ------------------------
@@ -87,40 +88,11 @@ var ROLE_MIN_ENERGY = {
   CombatMedic: 200
 };
 
-var ROLE_ALIAS_MAP = (function () {
-  var map = Object.create(null);
-  var canon = [
-    'Veinseeker',
-    'Builder',
-    'Repair',
-    'Upgrader',
-    'Dismantler',
-    'Scout',
-    'Queen',
-    'Trucker',
-    'Claimer',
-    'CombatArcher',
-    'CombatMedic',
-    'CombatMelee'
-  ];
-  for (var i = 0; i < canon.length; i++) {
-    var name = canon[i];
-    map[name] = name;
-    map[name.toLowerCase()] = name;
-  }
-  map.veinseeker = 'Veinseeker';
-  return map;
-})();
-
 function canonicalRole(role) {
-  if (!role) return null;
-  var key = String(role);
-  if (ROLE_ALIAS_MAP[key]) return ROLE_ALIAS_MAP[key];
-  var lower = key.toLowerCase();
-  if (ROLE_ALIAS_MAP[lower]) return ROLE_ALIAS_MAP[lower];
-  var fallback = key.charAt(0).toUpperCase() + key.slice(1);
-  if (ROLE_ALIAS_MAP[fallback]) return ROLE_ALIAS_MAP[fallback];
-  return key;
+  return Roles.canonicalRoleName(role, {
+    allowUnknown: true,
+    capitalizedFallback: true
+  });
 }
 
 // ------------------------------ Debug utils ------------------------------
@@ -1829,81 +1801,6 @@ function dequeueAndSpawn(spawner) {
   if (tickEvery(DBG_EVERY)) {
     dlog('[Queue]', roomName, 'no spawnable item after non-blocking waits');
   }
-  return false;
-}
-
-function dequeueAndSpawnLegacy(spawner) {
-  // Dequeue is the only place a persistent queue item becomes a creep. It keeps
-  // priority order stable, respects retry cooldowns, checks minimum energy, and
-  // delegates the actual body/memory creation to spawn.logic.spawnRole().
-  if (!spawner || spawner.spawning) return false;
-  var room = spawner.room;
-  var roomName = room.name;
-  var q = ensureRoomQueue(roomName);
-  if (!q.length) {
-    if (tickEvery(DBG_EVERY)) {
-      dlog('🕳️ [Queue]', roomName, 'empty (energy', energyStatus(room) + ')');
-    }
-    return false;
-  }
-
-  q.sort(compareQueueItems);
-
-  var headPriority = q[0].priority;
-  var pickIndex = -1;
-  for (var i = 0; i < q.length; i++) {
-    var it = q[i];
-    if (!it) continue;
-    if (it.priority !== headPriority) {
-      break;
-    }
-    if (it.retryAt && Game.time < it.retryAt) {
-      continue;
-    }
-    pickIndex = i;
-    break;
-  }
-  if (pickIndex === -1) {
-    if (tickEvery(DBG_EVERY)) {
-      dlog('⏸️ [Queue]', roomName, 'head priority cooling down');
-    }
-    return false;
-  }
-
-  var item = q[pickIndex];
-  var needed = minEnergyFor(item.role, item);
-  if ((room.energyAvailable || 0) < needed) {
-    if (tickEvery(DBG_EVERY)) {
-      dlog('⛽ [QueueHold]', roomName, 'prio', item.priority, 'role', item.role,
-        'need', needed, 'have', room.energyAvailable);
-    }
-    return false;
-  }
-
-  dlog('🎬 [SpawnTry]', roomName, 'role=', item.role, 'prio=', item.priority,
-    'age=', (Game.time - item.created), 'energy=', energyStatus(room));
-
-  // Calculate_Spawn_Resource lets us centralize "what counts as energy" logic
-  // (spawns-only vs room energy) without duplicating it inside every manager.
-  var spawnResource = null;
-  if (spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function') {
-    spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
-  }
-
-  var ok = false;
-  if (spawnLogic && typeof spawnLogic.spawnRole === 'function') {
-    ok = spawnLogic.spawnRole(spawner, item.role, spawnResource, item);
-  }
-
-  if (ok) {
-    dlog('✅ [SpawnOK]', roomName, 'spawned', item.role, 'at', spawner.name);
-    q.splice(pickIndex, 1);
-    return true;
-  }
-
-  item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
-  dlog('⏳ [SpawnWait]', roomName, item.role, 'backoff to', item.retryAt,
-    '(energy', energyStatus(room) + ')');
   return false;
 }
 

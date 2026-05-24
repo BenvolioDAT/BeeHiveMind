@@ -40,18 +40,9 @@ var BeeSelectors         = require('BeeSelectors');
 var BeeActions           = require('BeeActions');
 var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
-var Veinseeker           = require('role.Veinseeker');
-var Builder              = require('role.Builder');
-var Queen                = require('role.Queen');
-var Upgrader             = require('role.Upgrader');
-var Scout                = require('role.Scout');
-var Trucker              = require('role.Trucker');
-var Claimer              = require('role.Claimer');
-var CombatArcher         = require('role.CombatArcher');
-var CombatMedic          = require('role.CombatMedic');
-var CombatMelee          = require('role.CombatMelee');
-var roleRepair           = require('role.Repair');
-var roleDismantler       = require('role.Dismantler');
+var Roles                = require('core.roles');
+var RoleRegistry         = require('role.registry');
+var MemoryUtils          = require('core.memory');
 var RoomPlanner          = require('Planner.Room');
 var RoadPlanner          = require('Planner.Road');
 var TradeEnergy          = require('Trade.Energy');
@@ -61,86 +52,12 @@ var BeeSourceEconomy    = require('BeeSourceEconomy');
 
 // Keep references to the role modules so validation can check the intended
 // mapping (e.g. a swapped import would surface as a role name mismatch).
-var roleModules = {
-  Veinseeker: Veinseeker,
-  Builder: Builder,
-  Repair: roleRepair,
-  Upgrader: Upgrader,
-  Dismantler: roleDismantler,
-  Scout: Scout,
-  Queen: Queen,
-  Trucker: Trucker,
-  Claimer: Claimer,
-  CombatArcher: CombatArcher,
-  CombatMedic: CombatMedic,
-  CombatMelee: CombatMelee
-};
-
-// Map role -> run fn (extend as you add roles)
-// Default role map; specific roles may be registered
-// elsewhere by mutating this object.
-var creepRoles = {
-  Veinseeker: roleModules.Veinseeker && roleModules.Veinseeker.run,
-  Builder: roleModules.Builder && roleModules.Builder.run,
-  Repair: roleModules.Repair && roleModules.Repair.run,
-  Upgrader: roleModules.Upgrader && roleModules.Upgrader.run,
-  Dismantler: roleModules.Dismantler && roleModules.Dismantler.run,
-  Scout: roleModules.Scout && roleModules.Scout.run,
-  Queen: roleModules.Queen && roleModules.Queen.run,
-  Trucker: roleModules.Trucker && roleModules.Trucker.run,
-  Claimer: roleModules.Claimer && roleModules.Claimer.run,
-  CombatArcher: roleModules.CombatArcher && roleModules.CombatArcher.run,
-  CombatMedic: roleModules.CombatMedic && roleModules.CombatMedic.run,
-  CombatMelee: roleModules.CombatMelee && roleModules.CombatMelee.run
-};
+var roleModules = RoleRegistry.modules;
+var creepRoles = RoleRegistry.runners;
 
 // Capture missing bindings once so we can quickly spot miswired role imports.
 var warnedMissingRoles = Object.create(null);
 var warnedMismatchedRoleNames = Object.create(null);
-
-/**
- * Helper factory that builds our alias lookup object.
- * Extracted from an IIFE so newer developers can read it step-by-step,
- * place breakpoints, or expand the logic without digging through
- * nested scopes.
- */
-function createRoleAliasMap() {
-  var map = Object.create(null);
-
-  // Canonical roles are the ones that exist in code.  Aliases (like
-  // "worker_bee") are mapped to one of these canonical spellings.
-  var canonicalRoles = [
-    'Idle',
-    'Veinseeker',
-    'Builder',
-    'Repair',
-    'Upgrader',
-    'Dismantler',
-    'Scout',
-    'Queen',
-    'Trucker',
-    'Claimer',
-    'CombatArcher',
-    'CombatMedic',
-    'CombatMelee'
-  ];
-
-  // The loop below intentionally uses a classic "for" so that folks who
-  // are new to Screeps (and maybe coding in general) can easily translate
-  // it to pseudocode or another language.
-  for (var i = 0; i < canonicalRoles.length; i++) {
-    var name = canonicalRoles[i];
-    map[name] = name;
-    map[name.toLowerCase()] = name;
-  }
-
-  // Friendly aliases that appear in historical memory dumps.
-  map.worker_bee = 'Idle';
-  map['Worker_Bee'] = 'Idle';
-  return map;
-}
-
-var ROLE_ALIAS_MAP = createRoleAliasMap();
 
 function migrateLegacySourceWorkersToVeinseeker() {
   if (!Memory.__BHM) Memory.__BHM = {};
@@ -274,15 +191,7 @@ function migrateLegacySourceWorkersToVeinseeker() {
 function canonicalRoleName(name) {
   // Normalize legacy/alias role strings before dispatch. This protects the
   // role runner and quota cache from old creep memory such as "veinseeker".
-  // Defensive coding pattern: immediately handle null/undefined to avoid
-  // sprinkling guard clauses everywhere else.
-  if (!name) return null;
-  if (creepRoles[name]) return name;
-  var key = String(name);
-  if (ROLE_ALIAS_MAP[key]) return ROLE_ALIAS_MAP[key];
-  var lower = key.toLowerCase();
-  if (ROLE_ALIAS_MAP[lower]) return ROLE_ALIAS_MAP[lower];
-  return null;
+  return Roles.canonicalRoleName(name);
 }
 
 function validateRoleBindings() {
@@ -690,14 +599,14 @@ var BeeHiveMind = {
   // Inputs: none
   // Output: none; ensures Memory.rooms entries are non-null objects (prevents later property access errors).
   initializeMemory: function initializeMemory() {
-    if (!Memory.rooms) Memory.rooms = {};
-    var roomNames = Object.keys(Memory.rooms);
+    var roomsMem = MemoryUtils.ensureMemoryRoot('rooms');
+    var roomNames = Object.keys(roomsMem);
     for (var i = 0; i < roomNames.length; i++) {
       var roomName = roomNames[i];
-      if (!Memory.rooms[roomName]) {
+      if (!roomsMem[roomName] || typeof roomsMem[roomName] !== 'object') {
         // Always initialise to an object so downstream code can safely do
         // Memory.rooms[name].foo without crashing.
-        Memory.rooms[roomName] = {};
+        roomsMem[roomName] = {};
       }
     }
   }

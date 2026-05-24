@@ -4,4 +4,4 @@
 var CombatMeleeLogic = require('role.CombatMelee.Logic');
 var HarabiCreep = require('role.HarabiCreep');
 
-module.exports = HarabiCreep.wrapRole('CombatMelee', CombatMeleeLogic.run, { task: 'combat' });
+module.exports = HarabiCreep.wrapRole('CombatMelee', CombatMeleeLogic.run);

@@ -12,21 +12,7 @@
 
 var MovementManager = require('Movement.Manager');
 var BeeToolbox = require('BeeToolbox');
-
-var ROLE_TASKS = {
-  Veinseeker: 'veinseeker',
-  Builder: 'builder',
-  Repair: 'repair',
-  Upgrader: 'upgrader',
-  Dismantler: 'dismantler',
-  Scout: 'scout',
-  Queen: 'queen',
-  Trucker: 'haulUnified',
-  Claimer: 'claimer',
-  CombatArcher: 'combat',
-  CombatMedic: 'combat',
-  CombatMelee: 'combat'
-};
+var Roles = require('core.roles');
 
 var COMBAT_PART_POWER = {};
 COMBAT_PART_POWER[ATTACK] = ATTACK_POWER;
@@ -105,7 +91,7 @@ var HarabiCreep = {
     if (!creep || !creep.memory) return;
     opts = opts || {};
     creep.memory.role = roleName;
-    if (!creep.memory.task) creep.memory.task = opts.task || ROLE_TASKS[roleName] || String(roleName || '').toLowerCase();
+    if (!creep.memory.task) creep.memory.task = opts.task || Roles.taskForRole(roleName);
     ensureHome(creep);
     if (!creep.memory.state) creep.memory.state = opts.defaultState || 'IDLE';
   },
