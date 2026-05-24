@@ -30,6 +30,7 @@ var TruckerConfig = require('role.Trucker.Config');
 var RepairConfig = require('role.Repair.Config');
 var QueenConfig = require('role.Queen.Config');
 var SourceEnergyManager = require('SourceEnergy.Manager');
+var SourceWorkerManager = require('SourceWorker.Manager');
 var BeeToolbox = require('BeeToolbox');
 var BeeCombatSquads = require('BeeCombatSquads');
 var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
@@ -402,13 +403,11 @@ function isVeinseekerQueueItem(item) {
 }
 
 function getVeinseekerSourceIdFromMemory(mem) {
-  if (!mem) return null;
-  return mem.assignedSource || mem.sourceId || mem.replaceSourceId || mem.replacementTargetSourceId || null;
+  return SourceWorkerManager.getSourceIdFromMemory(mem);
 }
 
 function getVeinseekerQueueSourceId(item) {
-  if (!item) return null;
-  return item.sourceId || item.assignedSource || item.replaceSourceId || item.replacementTargetSourceId || null;
+  return SourceWorkerManager.getQueueSourceId(item);
 }
 
 function getCreepHomeRoomName(creep) {
@@ -417,38 +416,6 @@ function getCreepHomeRoomName(creep) {
   if (creep.memory && creep.memory._home) return creep.memory._home;
   if (creep.room && creep.room.name) return creep.room.name;
   return null;
-}
-
-function getCreepBodyParts(creep) {
-  var parts = [];
-  if (!creep || !creep.body) return parts;
-  for (var i = 0; i < creep.body.length; i++) {
-    if (creep.body[i] && creep.body[i].type) {
-      parts.push(creep.body[i].type);
-    }
-  }
-  return parts;
-}
-
-function getCreepBodyCost(creep) {
-  if (!creep) return 0;
-  var memCost = creep.memory && typeof creep.memory.bornBodyCost === 'number'
-    ? creep.memory.bornBodyCost
-    : 0;
-  var parts = getCreepBodyParts(creep);
-  if (parts.length) {
-    return BeeToolbox.calculateBodyCost(parts);
-  }
-  return memCost;
-}
-
-function getCreepBodySignature(creep) {
-  if (!creep) return '';
-  var parts = getCreepBodyParts(creep);
-  if (parts.length) {
-    return BeeToolbox.getBodySignature(parts);
-  }
-  return creep.memory && creep.memory.bornBodySignature ? creep.memory.bornBodySignature : '';
 }
 
 function getVeinseekerDesiredPlan(room) {
@@ -474,148 +441,19 @@ function makeVeinseekerPlanDiag(plan) {
 }
 
 function isVeinseekerSafelyHarvesting(creep, source) {
-  // "Safe" means the old miner is alive long enough, assigned to this source,
-  // and already close enough to keep harvesting while a better body is prepared.
-  if (!creep || !source || !creep.memory) return false;
-  if (creep.spawning) return false;
-  if (!isVeinseekerRole(creep.memory.role)) return false;
-  if (creep.memory.mode === 'remote') return false;
-  if (getVeinseekerSourceIdFromMemory(creep.memory) !== source.id) return false;
-  if (typeof creep.ticksToLive === 'number' && creep.ticksToLive < VEINSEEKER_REPLACEMENT_SAFE_TTL) return false;
-  if (!creep.pos || creep.pos.roomName !== source.pos.roomName) return false;
-  return creep.pos.getRangeTo(source) <= 1;
-}
-
-function createVeinseekerSourceRecord() {
-  return {
-    live: 0,
-    queued: 0,
-    hasCoverage: false,
-    emergencyNeeded: false,
-    upgradeNeeded: false,
-    bestLiveCost: 0,
-    bestLiveName: null,
-    replacementQueued: false,
-    reason: 'not-evaluated',
-    activeLive: 0,
-    bestLiveSignature: '',
-    bestSafeLiveName: null,
-    bestSafeLiveCost: 0,
-    lowestTtlName: null,
-    lowestTtl: null,
-    replacementInProgress: false
-  };
+  return SourceWorkerManager.isHomeVeinseekerSafelyHarvesting(creep, source, {
+    safeTtl: VEINSEEKER_REPLACEMENT_SAFE_TTL
+  });
 }
 
 function buildVeinseekerCoverageReport(room) {
-  var roomName = room && room.name;
-  var desiredPlan = getVeinseekerDesiredPlan(room);
-  var diag = {
-    tick: Game.time,
-    roomName: roomName || null,
-    energyAvailable: room ? room.energyAvailable : 0,
-    energyCapacityAvailable: room ? room.energyCapacityAvailable : 0,
-    desiredPlan: makeVeinseekerPlanDiag(desiredPlan),
-    sources: {},
-    decisions: []
-  };
-  if (!roomName || !room) {
-    return { desiredPlan: desiredPlan, diag: diag, sources: [] };
-  }
-
-  var sources = room.find(FIND_SOURCES) || [];
-  for (var s = 0; s < sources.length; s++) {
-    diag.sources[sources[s].id] = createVeinseekerSourceRecord();
-  }
-
-  var q = ensureRoomQueue(roomName);
-  for (var qi = 0; qi < q.length; qi++) {
-    var item = q[qi];
-    if (!isVeinseekerQueueItem(item)) continue;
-    var qSourceId = getVeinseekerQueueSourceId(item);
-    if (!qSourceId || !diag.sources[qSourceId]) {
-      diag.decisions.push({
-        action: 'ignoreQueuedVeinseeker',
-        reason: 'missing-or-unknown-source',
-        queueIndex: qi
-      });
-      continue;
-    }
-    var qRec = diag.sources[qSourceId];
-    qRec.queued++;
-    if (item.sourceWorkerSpawnMode === 'upgradeReplacement' || item.replaceCreepName || item.replacementFor) {
-      qRec.replacementQueued = true;
-    }
-  }
-
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.my || !creep.memory) continue;
-    if (!isVeinseekerRole(creep.memory.role) || creep.memory.mode === 'remote') continue;
-    if (getCreepHomeRoomName(creep) !== roomName) continue;
-    var sourceId = getVeinseekerSourceIdFromMemory(creep.memory);
-    if (!sourceId || !diag.sources[sourceId]) continue;
-
-    var rec = diag.sources[sourceId];
-    rec.live++;
-    if (!creep.spawning) {
-      rec.activeLive++;
-      rec.hasCoverage = true;
-    }
-
-    var bodyCost = getCreepBodyCost(creep);
-    if (bodyCost > rec.bestLiveCost) {
-      rec.bestLiveCost = bodyCost;
-      rec.bestLiveName = creep.name;
-      rec.bestLiveSignature = getCreepBodySignature(creep);
-    }
-
-    var ttl = typeof creep.ticksToLive === 'number' ? creep.ticksToLive : null;
-    if (ttl !== null && (rec.lowestTtl === null || ttl < rec.lowestTtl)) {
-      rec.lowestTtl = ttl;
-      rec.lowestTtlName = creep.name;
-    }
-
-    if (creep.memory.sourceWorkerSpawnMode === 'upgradeReplacement' && creep.memory.replacementFor) {
-      rec.replacementInProgress = true;
-      rec.replacementQueued = true;
-    }
-
-    var source = Game.getObjectById(sourceId);
-    if (source && isVeinseekerSafelyHarvesting(creep, source) && bodyCost > rec.bestSafeLiveCost) {
-      rec.bestSafeLiveCost = bodyCost;
-      rec.bestSafeLiveName = creep.name;
-    }
-  }
-
-  for (var si = 0; si < sources.length; si++) {
-    var sid = sources[si].id;
-    var srcRec = diag.sources[sid];
-    srcRec.emergencyNeeded = srcRec.live <= 0 && srcRec.queued <= 0;
-    if (desiredPlan && srcRec.bestSafeLiveName && desiredPlan.cost > srcRec.bestLiveCost &&
-        !srcRec.replacementQueued && !srcRec.replacementInProgress) {
-      srcRec.upgradeNeeded = true;
-    }
-    if (srcRec.emergencyNeeded) {
-      srcRec.reason = 'no-active-veinseeker-coverage';
-    } else if (srcRec.upgradeNeeded) {
-      srcRec.reason = 'safe-live-body-below-room-capacity-plan';
-    } else if (srcRec.replacementQueued) {
-      srcRec.reason = 'replacement-already-queued-or-active';
-    } else if (srcRec.queued > 0 && srcRec.activeLive <= 0) {
-      srcRec.reason = 'waiting-for-queued-veinseeker';
-    } else if (srcRec.live > 0 && srcRec.activeLive <= 0) {
-      srcRec.reason = 'veinseeker-spawning';
-    } else {
-      srcRec.reason = 'covered';
-    }
-  }
-
-  ensureRoomMemory(roomName).lastVeinseekerBodyPlan = diag;
-  return { desiredPlan: desiredPlan, diag: diag, sources: sources };
+  return SourceWorkerManager.buildHomeCoverageReport(room, {
+    ensureRoomQueue: ensureRoomQueue,
+    ensureRoomMemory: ensureRoomMemory,
+    spawnLogic: spawnLogic,
+    safeTtl: VEINSEEKER_REPLACEMENT_SAFE_TTL
+  });
 }
-
 function removeLegacyVeinseekerQueueItems(roomName) {
   // Older saves may have source-less Veinseeker items. Source-aware queueing
   // will replace them immediately with one item per source, so keeping them can
@@ -958,123 +796,12 @@ function getRouteDistanceBetweenRooms(homeName, remoteName) {
   return BeeToolbox.getRouteDistanceBetweenRooms(homeName, remoteName);
 }
 
-function countApprovedVeinseekerSourcesForRemote(remoteName) {
-  var mem = Memory.rooms && Memory.rooms[remoteName];
-  if (!mem) return 0;
-
-  var live = Game.rooms[remoteName];
-  if (live) {
-    var found = live.find(FIND_SOURCES);
-    return found ? found.length : 0;
-  }
-
-  if (mem.sources) {
-    var count = 0;
-    for (var sid in mem.sources) {
-      if (Object.prototype.hasOwnProperty.call(mem.sources, sid)) count++;
-    }
-    return count;
-  }
-
-  if (mem.intel && typeof mem.intel.sources === 'number') {
-    return mem.intel.sources || 0;
-  }
-
-  return 0;
-}
-
-
-function getVeinseekerRemoteIntelTick(remoteName) {
-  return BeeToolbox.getBestRemoteIntelTick(remoteName);
-}
-
-function isApprovedVeinseekerRemoteForHome(homeRoom, remoteName, outMeta) {
-  // Approval gate for a remote room before it can contribute Veinseeker sources:
-  // route must exist, range must fit VeinseekerConfig, room must not be unsafe, and
-  // source intel must be fresh enough to avoid spawning into stale Memory.
-  if (!homeRoom || !remoteName) {
-    if (outMeta) outMeta.reason = 'missing-home-or-remote';
-    return false;
-  }
-
-  var maxRange = (VeinseekerConfig && VeinseekerConfig.REMOTE_RADIUS) || 3;
-  var routeDistance = getRouteDistanceBetweenRooms(homeRoom.name, remoteName);
-  if (outMeta) outMeta.routeDistance = routeDistance;
-
-  if (!isFinite(routeDistance)) {
-    if (outMeta) outMeta.reason = 'no-route';
-    return false;
-  }
-
-  if (routeDistance > maxRange) {
-    if (outMeta) outMeta.reason = 'route-too-far';
-    return false;
-  }
-
-  if (isVeinseekerRemoteRoomUnsafe(remoteName)) {
-    if (outMeta) outMeta.reason = 'unsafe-or-hostile';
-    return false;
-  }
-
-  var mem = Memory.rooms && Memory.rooms[remoteName];
-  if (!mem) {
-    if (outMeta) outMeta.reason = 'missing-room-memory';
-    return false;
-  }
-
-  var hasSources = !!mem.sources || !!(mem.intel && typeof mem.intel.sources === 'number');
-  if (!hasSources) {
-    if (outMeta) outMeta.reason = 'missing-source-intel';
-    return false;
-  }
-
-  var intelTick = getVeinseekerRemoteIntelTick(remoteName);
-  var intelTtl = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 3000;
-  if (intelTick == null) {
-    if (!Game.rooms[remoteName]) {
-      if (outMeta) outMeta.reason = 'stale-source-intel';
-      return false;
-    }
-  } else if ((Game.time - intelTick) > intelTtl) {
-    if (outMeta) outMeta.reason = 'stale-source-intel';
-    return false;
-  }
-
-  if (outMeta) outMeta.reason = 'accepted';
-  return true;
-}
 function determineVeinseekerQuota(C, room) {
   // SourceEnergy.Manager owns desiredVeinseeker. BeeSpawnManager only reads that
   // audited plan and turns deficits into spawn queue items.
   if (!room) return 0;
   var home = SourceEnergyManager.ensureHomeMemory(room.name);
   return home.desiredVeinseeker || 0;
-}
-
-function collectApprovedVeinseekerSourcesFromRemote(remoteName, out) {
-  if (!remoteName || !out) return;
-  var mem = Memory.rooms && Memory.rooms[remoteName];
-  if (!mem) return;
-
-  var live = Game.rooms[remoteName];
-  if (live) {
-    var found = live.find(FIND_SOURCES) || [];
-    for (var i = 0; i < found.length; i++) {
-      var srcLiveMem = mem.sources && mem.sources[found[i].id] ? mem.sources[found[i].id] : null;
-      if (srcLiveMem && srcLiveMem.sourceWorkerBlockedUntil && srcLiveMem.sourceWorkerBlockedUntil > Game.time) continue;
-      out.push({ sourceId: found[i].id, targetRoom: remoteName });
-    }
-    return;
-  }
-
-  if (mem.sources) {
-    for (var sid in mem.sources) {
-      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
-      var srcMem = mem.sources[sid];
-      if (srcMem && srcMem.sourceWorkerBlockedUntil && srcMem.sourceWorkerBlockedUntil > Game.time) continue;
-      out.push({ sourceId: sid, targetRoom: remoteName });
-    }
-  }
 }
 
 function pruneBlockedVeinseekerQueueItems(roomName) {
@@ -1126,120 +853,6 @@ function pruneBlockedVeinseekerQueueItems(roomName) {
     removedItems: removedItems
   };
 }
-
-function getSourceMaxSlotsForSpawn(sourceId, targetRoom) {
-  if (!sourceId || !targetRoom) return 0;
-  if (isVeinseekerRemoteRoomUnsafe(targetRoom)) return 0;
-  var mem = Memory.rooms && Memory.rooms[targetRoom];
-  if (!mem) return 0;
-
-  var intelTick = getVeinseekerRemoteIntelTick(targetRoom);
-  var intelTtl = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 3000;
-  if (!Game.rooms[targetRoom] && (intelTick == null || (Game.time - intelTick) > intelTtl)) {
-    return 0;
-  }
-
-  var allowMulti = !(VeinseekerConfig && VeinseekerConfig.ALLOW_MULTI_VEINSEEKER_PER_SOURCE === false);
-  if (!allowMulti) return 1;
-  var maxPerSource = Math.max(1, ((VeinseekerConfig && VeinseekerConfig.MAX_VEINSEEKER_PER_SOURCE) || 1));
-  var minOpenForExtra = (VeinseekerConfig && VeinseekerConfig.MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER) || 2;
-  var source = Game.getObjectById(sourceId);
-  if (!source) return 1;
-  var openTiles = countOpenHarvestTilesForSpawn(source);
-  if (openTiles < minOpenForExtra) return 1;
-  return Math.min(maxPerSource, openTiles);
-}
-
-function countOpenHarvestTilesForSpawn(source) {
-  if (!source || !source.pos || !source.room) return 1;
-  var terrain = source.room.getTerrain();
-  var count = 0;
-  for (var dx = -1; dx <= 1; dx++) {
-    for (var dy = -1; dy <= 1; dy++) {
-      if (dx === 0 && dy === 0) continue;
-      var x = source.pos.x + dx;
-      var y = source.pos.y + dy;
-      if (x < 1 || x > 48 || y < 1 || y > 48) continue;
-      if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
-
-      var look = source.room.lookAt(x, y);
-      var blocked = false;
-      for (var i = 0; i < look.length; i++) {
-        var item = look[i];
-        if (item.type === LOOK_STRUCTURES) {
-          var s = item.structure;
-          if (s.structureType === STRUCTURE_RAMPART && !s.my) { blocked = true; break; }
-          if (s.structureType !== STRUCTURE_ROAD && s.structureType !== STRUCTURE_CONTAINER && s.structureType !== STRUCTURE_RAMPART) {
-            blocked = true; break;
-          }
-        }
-        if (item.type === LOOK_CONSTRUCTION_SITES) {
-          var cs = item.constructionSite;
-          if (cs.structureType !== STRUCTURE_ROAD && cs.structureType !== STRUCTURE_CONTAINER) {
-            blocked = true; break;
-          }
-        }
-      }
-      if (!blocked) count++;
-    }
-  }
-  return count;
-}
-
-function buildVeinseekerSourceSlotPlan(room, approvedSources) {
-  // Diagnostic/planning helper: count how many Veinseeker slots each approved source
-  // can support, then subtract live and queued reservations. The queue path now
-  // primarily uses SourceEnergy.Manager, but this shape is still useful when
-  // inspecting why a home did or did not need another Veinseeker.
-  var plan = {
-    totalSlots: 0,
-    liveUsedSlots: 0,
-    queuedReservedSlots: 0,
-    perSource: Object.create(null)
-  };
-  if (!room || !approvedSources || !approvedSources.length) return plan;
-
-  for (var i = 0; i < approvedSources.length; i++) {
-    var src = approvedSources[i];
-    if (!src || !src.sourceId || !src.targetRoom) continue;
-    var key = src.sourceId;
-    if (plan.perSource[key]) continue;
-    var maxSlots = getSourceMaxSlotsForSpawn(src.sourceId, src.targetRoom);
-    if (maxSlots <= 0) continue;
-    plan.perSource[key] = {
-      sourceId: src.sourceId,
-      targetRoom: src.targetRoom,
-      maxSlots: maxSlots,
-      live: 0,
-      queued: 0
-    };
-    plan.totalSlots += maxSlots;
-  }
-
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.memory) continue;
-    if (creep.memory.task !== 'veinseeker' || creep.memory.mode !== 'remote') continue;
-    if ((creep.memory.home || (creep.room && creep.room.name)) !== room.name) continue;
-    var sid = creep.memory.sourceId;
-    if (!sid || !plan.perSource[sid]) continue;
-    plan.perSource[sid].live++;
-    plan.liveUsedSlots++;
-  }
-
-  var q = ensureRoomQueue(room.name);
-  for (var j = 0; j < q.length; j++) {
-    var item = q[j];
-    if (!item || item.role !== 'Veinseeker' || item.mode !== 'remote') continue;
-    if (!item.sourceId || !plan.perSource[item.sourceId]) continue;
-    plan.perSource[item.sourceId].queued++;
-    plan.queuedReservedSlots++;
-  }
-
-  return plan;
-}
-
 
 function computeEarlyUpgraderQuota(room) {
   if (!room) {
@@ -1621,7 +1234,7 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
 function findRemoteContainerEmergencyRepairRequest(roomName) {
   // Emergency repair can be triggered from either live container status or haul
   // request records. Both are produced by Veinseeker, so keep the field expectations
-  // aligned with role.Veinseeker.Logic.js and role.Repair.Logic.js.
+  // aligned with role.Veinseeker.Remote.js and role.Repair.Logic.js.
   if (!RepairConfig.remoteContainerEmergencyRepairEnabled) return null;
   var statusRequests = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : null;
   var haulRequests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : null;
@@ -1919,22 +1532,6 @@ function fillQueueForRoom(C, room) {
   }
 }
 
-function pickVeinseekerSourceForQueue(plan) {
-  if (!plan || !plan.perSource) return null;
-  var best = null;
-  for (var sid in plan.perSource) {
-    if (!Object.prototype.hasOwnProperty.call(plan.perSource, sid)) continue;
-    var rec = plan.perSource[sid];
-    if (!rec) continue;
-    var used = (rec.live || 0) + (rec.queued || 0);
-    if (used >= rec.maxSlots) continue;
-    if (!best || used < ((best.live || 0) + (best.queued || 0))) {
-      best = rec;
-    }
-  }
-  return best;
-}
-
 function countLiveLocalRoleDirect(roomName, roleName) {
   var count = 0;
   for (var name in Game.creeps) {
@@ -1950,29 +1547,11 @@ function countLiveLocalRoleDirect(roomName, roleName) {
 }
 
 function sourceHasLiveVeinseekerCoverage(roomName, sourceId) {
-  if (!roomName || !sourceId) return false;
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.my || !creep.memory) continue;
-    if (!isVeinseekerRole(creep.memory.role) || creep.memory.mode === 'remote') continue;
-    if (getCreepHomeRoomName(creep) !== roomName) continue;
-    if (getVeinseekerSourceIdFromMemory(creep.memory) !== sourceId) continue;
-    if (creep.spawning) continue;
-    return true;
-  }
-  return false;
+  return SourceWorkerManager.sourceHasLiveHomeCoverage(roomName, sourceId);
 }
 
 function roomHasVeinseekerEmergency(room) {
-  if (!room) return false;
-  var sources = room.find(FIND_SOURCES) || [];
-  for (var i = 0; i < sources.length; i++) {
-    if (!sourceHasLiveVeinseekerCoverage(room.name, sources[i].id)) {
-      return true;
-    }
-  }
-  return false;
+  return SourceWorkerManager.roomHasHomeEmergency(room);
 }
 
 function roomInBaseRecoveryDanger(room) {

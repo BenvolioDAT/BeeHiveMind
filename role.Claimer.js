@@ -3,7 +3,7 @@
 var BeeToolbox = require('BeeToolbox');
 var HarabiCreep = require('role.HarabiCreep');
 
-// Shared debug + tuning config (copied from role.BeeWorker for consistency)
+// Shared debug + tuning config.
 var CFG = Object.freeze({
   // --- Debug toggles (shared) ---
   DEBUG_SAY: false,

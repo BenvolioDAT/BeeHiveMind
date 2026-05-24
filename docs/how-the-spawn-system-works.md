@@ -16,13 +16,11 @@ The spawn system answers two questions every tick:
 5. Run arbitration gates to decide if each queued item can spawn right now.
 6. Spawn the first allowed item that meets energy + gate rules.
 
-## Why so many Spawn.* files?
-To keep `BeeSpawnManager` readable:
-- Quota/backlog helpers in `Spawn.Quotas.js`
-- Policy gates in `Spawn.Arbitration.js`
-- Feedback smoothing in `Spawn.Feedback.js`
-- Recovery history in `Spawn.Stability.js`
-- Body guidance in `Spawn.BodyGuidance.js`
+## Supporting files
+- `spawn.logic.js` chooses body plans and performs the final `spawn.spawnCreep` call.
+- `Spawn.BodyConfig.js` maps role names to body config files.
+- `Spawn.BodyParts.js` centralizes common body part constants.
+- `SourceEnergy.Manager.js` supplies remote-source planning and reservation data for Veinseeker queue decisions.
 
 ## Beginner terms
 - **Quota**: how many creeps of a role the room wants.

@@ -22,6 +22,7 @@
 // -----------------------------------------------------------------------------
 const BeeCombatSquads = require('BeeCombatSquads');
 const BeeToolbox = require('BeeToolbox');
+var SourceWorkerManager = require('SourceWorker.Manager');
 var CFG = require('role.Scout.Config');
 
 function debugLabel(room, pos, text, color) {
@@ -152,16 +153,7 @@ function getMyUsername(creep) { return (creep && creep.owner && creep.owner.user
 function getRoomIntel(roomName) { if (!Memory.rooms) return null; var mr = Memory.rooms[roomName]; return (mr && mr.intel) ? mr.intel : null; }
 function shouldScoutSkipPlayerRoom(roomName, creep) { var intel = getRoomIntel(roomName); if (!intel) return false; var myName = getMyUsername(creep); if (intel.owner && intel.owner !== 'Invader' && intel.owner !== myName) return true; if (intel.reservation && intel.reservation !== 'Invader' && intel.reservation !== myName) return true; return false; }
 function countOpenTilesAroundSource(room, source) {
-  if (!room || !source || !source.pos) return 0;
-  var terrain = room.getTerrain();
-  var open = 0;
-  for (var dx = -1; dx <= 1; dx++) for (var dy = -1; dy <= 1; dy++) {
-    if (!dx && !dy) continue;
-    var x = source.pos.x + dx, y = source.pos.y + dy;
-    if (x < 1 || x > 48 || y < 1 || y > 48) continue;
-    if (terrain.get(x, y) !== TERRAIN_MASK_WALL) open++;
-  }
-  return open;
+  return SourceWorkerManager.countWalkableSeatsAround(source && source.pos);
 }
 function summarizeBestEnergyObject(list, amountFn) {
   var best = null; var bestAmount = 0;
@@ -174,10 +166,8 @@ function summarizeBestEnergyObject(list, amountFn) {
   return { id: best.id, amount: bestAmount, x: best.pos.x, y: best.pos.y, updated: Game.time };
 }
 function buildVisibleSourceIntel(room, source, access) {
-  var containers = source.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; } }) || [];
-  var sites = source.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; } }) || [];
-  var container = containers[0] || null;
-  var site = sites[0] || null;
+  var container = SourceWorkerManager.findSourceContainer(source);
+  var site = SourceWorkerManager.findSourceContainerSite(source);
   var containerInfo = {
     status: container ? 'built' : (site ? 'building' : 'missing'),
     containerId: container ? container.id : null,

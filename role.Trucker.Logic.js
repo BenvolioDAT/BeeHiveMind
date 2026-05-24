@@ -11,7 +11,8 @@
 // * Memory.__BHM.truckerDispatch.lastRun diagnostic fields for the latest
 //   execution pass.
 // Reads/writes:
-// * Memory.__BHM.remoteHaulRequests records produced by Veinseeker remote containers.
+// * Memory.__BHM.remoteHaulRequests records produced by SourceWorker.Manager
+//   for Veinseeker remote containers.
 // * role.EnergyHandoff request memory when handing energy to worker creeps.
 // Usually called by:
 // * BeeHiveMind.runCreeps() through role.Trucker.js.

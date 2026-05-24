@@ -8,7 +8,8 @@
 // * Per-home audit summaries in Memory.rooms[homeRoom].lastRemoteHaulRequestAudit
 //   when chooseJobForTrucker evaluates remote haul requests.
 // Reads:
-// * Memory.__BHM.remoteHaulRequests produced by role.Veinseeker.Logic.js when remote
+// * Memory.__BHM.remoteHaulRequests produced by SourceWorker.Manager via
+//   role.Veinseeker.Remote.js when remote
 //   source containers have enough energy to haul.
 // * Memory.rooms[remoteRoom].intel/hostile/sourceWorkerBlocked fields for safety gates.
 // Usually called by:

@@ -17,7 +17,7 @@
 // * BeeSpawnManager.prepareRoomQueues(), before it computes Veinseeker quota and
 //   enqueues role jobs.
 // Used by:
-// * role.Veinseeker.Logic.js to claim/release live source ownership.
+// * role.Veinseeker.Remote.js to claim/release live source ownership.
 // * BeeSpawnManager.js to reserve/unreserve a source for a queued Veinseeker.
 // Do not casually change:
 // * Reservation TTLs, source status names, or the distinction between
@@ -836,7 +836,7 @@ function getApprovedRemotesFromScout(homeRoom) {
 
 
 function ensureRemoteContainerBuildsMemory() {
-  // Shared with role.Veinseeker.Logic.js. Build records tell the planner/spawner that
+  // Shared with role.Veinseeker.Remote.js. Build records tell the planner/spawner that
   // a source may still need a Veinseeker to create or finish its remote container.
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};

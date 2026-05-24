@@ -8,7 +8,9 @@
 ## Orchestrator vs helpers
 Some roles are split into helper files:
 - `role.Trucker.js` calls Trucker helper modules and owns hauling (local + remote).
-- `role.Queen.js` calls Queen helper modules.
+- `role.Veinseeker.js` calls `role.Veinseeker.Logic.js`, which routes home mining to
+  `role.Veinseeker.Home.js` and remote mining to `role.Veinseeker.Remote.js`.
+- `role.Queen.js` owns home-room logistics directly, with config in `role.Queen.Config.js`.
 
 This keeps the top-level role file easy to read:
 - prepare identity/state
@@ -17,12 +19,14 @@ This keeps the top-level role file easy to read:
 
 ## Movement
 - Roles should request movement through movement helpers.
-- `Movement.Manager.js` resolves movement intents and conflicts.
-- `Movement.Intent.js` stores per-tick move intent metadata.
-- `Movement.Border.js` handles border stabilization rules.
+- `Movement.Manager.js` resolves movement requests and conflicts.
+- `Traveler.js` handles pathing.
+- `BeeActions.js` wraps common actions and sends out-of-range movement through
+  `Movement.Manager`.
 
 ## Debug visuals
-`BeeRoleVisuals.js` provides shared role drawing/say helpers so role files stay cleaner.
+`BeeToolbox` provides shared debug say/line/ring helpers. Full-room overlays live
+in `BeeVisuals*.js`.
 
 ## Harabi-Style Role Rules
 

@@ -10,7 +10,7 @@
 // * Tick-local global.__combatApiCache and global.__beeSquadCache.
 // Usually called by:
 // * Combat role logic through CombatAPI, BeeSpawnManager for squad spawning,
-//   role.Scout.Logic.js and role.Veinseeker.Logic.js for remote-defense intel.
+//   role.Scout.Logic.js and role.Veinseeker.Remote.js for remote-defense intel.
 // Systems that depend on it:
 // * spawn.logic.Spawn_Squad() and BeeSpawnManager remote defense ranking.
 // Do not casually change:

@@ -26,7 +26,7 @@ const MovementManager = require('Movement.Manager');
 const QueenConfig = require('role.Queen.Config');
 const HarabiCreep = require('role.HarabiCreep');
 
-// Shared debug + tuning config (copied from role.BeeWorker for consistency)
+// Shared debug + tuning config.
 var CFG = Object.freeze({
   // --- Debug toggles (shared) ---
   DEBUG_SAY: false,
