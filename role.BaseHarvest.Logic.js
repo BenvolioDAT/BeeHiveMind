@@ -144,6 +144,19 @@ function resolveSourceConflict(creep, source) {
 function shouldQueueForSource(creep, source, seats, used) { if (used < seats) return false; var inc = getIncumbents(creep.room.name, source.id, creep.name); for (var i = 0; i < inc.length; i++) { if (isHandoffPair(creep, inc[i], source.id)) return true; var t = inc[i].ticksToLive; if (typeof t === 'number' && t <= CFG.HANDOFF_TTL) return true; } return false; }
 function findQueueSpotNearSeat(seatPos, myName) { var best = null, bestScore = -Infinity; for (var dx = -1; dx <= 1; dx++) { for (var dy = -1; dy <= 1; dy++) { if (dx === 0 && dy === 0) continue; var p = new RoomPosition(seatPos.x + dx, seatPos.y + dy, seatPos.roomName); if (!isWalkable(p)) continue; var occupied = isTileOccupiedByAlly(p, myName); var score = occupied ? -10 : 0; score += (-p.y * 0.01) + (-p.x * 0.001); if (score > bestScore) { bestScore = score; best = p; } } } return best; }
 
+
+function writeBaseHarvestSlotDiag(roomName, sourceId, seats, used) {
+  if (!roomName) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  Memory.rooms[roomName].lastBaseHarvestSourceSlots = {
+    tick: Game.time,
+    sourceId: sourceId || null,
+    seats: seats || 0,
+    assigned: used || 0
+  };
+}
+
 function assignSource(creep) {
   if (creep.spawning) return;
   if (creep.memory._reassignCooldown && Game.time < creep.memory._reassignCooldown) return creep.memory.assignedSource || null;
@@ -162,7 +175,7 @@ function assignSource(creep) {
     var seatPos = getPreferredSeatPos(s); if (!seatPos) continue;
     var seats = getAdjacentContainerForSource(s) ? 1 : countWalkableSeatsAround(s.pos);
     if (CFG.MAX_HARVESTERS_PER_SOURCE > 0) seats = Math.min(seats, CFG.MAX_HARVESTERS_PER_SOURCE);
-    var used = countAssignedHarvesters(creep.room.name, s.id); var free = seats - used; var willQueue = false;
+    var used = countAssignedHarvesters(creep.room.name, s.id); writeBaseHarvestSlotDiag(creep.room.name, s.id, seats, used); var free = seats - used; var willQueue = false;
     if (free <= 0) { if (!shouldQueueForSource(creep, s, seats, used)) continue; willQueue = true; }
     var range = creep.pos.getRangeTo(seatPos); var score = (free > 0 ? 1000 : 0) - range;
     if (score > bestScore) { bestScore = score; best = { source: s, seatPos: seatPos }; bestWillQueue = willQueue; }

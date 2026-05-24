@@ -27,6 +27,7 @@ var CFG = require('role.Trucker.Config');
 var Dispatcher = require('Trucker.Dispatcher');
 var Handoff = require('role.EnergyHandoff');
 var BeeSelectors = require('BeeSelectors');
+var BeeSourceEconomy = require('BeeSourceEconomy');
 
 function ensureIdentity(creep) {
   // Normalize old or manually spawned haulers into the Trucker contract before
@@ -439,8 +440,111 @@ function claimRemoteRequestForJob(creep, job) { /* unchanged */
   return req;
 }
 
+function drawHaulIntent(creep, target, color) {
+  if (!creep || !target || !target.pos || !Game.map || !Game.map.visual) return;
+  try {
+    Game.map.visual.line(creep.pos, target.pos, {
+      color: color || '#4deeea',
+      opacity: 0.55,
+      width: 1.2,
+      lineStyle: 'dashed'
+    });
+  } catch (err) {}
+}
+
+function getLargestEnergyDropNear(pos, range, minAmount) {
+  if (!pos || !Game.rooms[pos.roomName]) return null;
+  var drops = pos.findInRange(FIND_DROPPED_RESOURCES, range || 1, {
+    filter: function (r) { return r.resourceType === RESOURCE_ENERGY && (r.amount || 0) >= (minAmount || 1); }
+  });
+  var best = null;
+  for (var i = 0; i < drops.length; i++) {
+    if (!best || (drops[i].amount || 0) > (best.amount || 0)) best = drops[i];
+  }
+  return best;
+}
+
+function getLargestEnergyTombstoneNear(pos, range) {
+  if (!pos || !Game.rooms[pos.roomName]) return null;
+  var tombstones = pos.findInRange(FIND_TOMBSTONES, range || 1, {
+    filter: function (t) { return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; }
+  });
+  var best = null;
+  for (var i = 0; i < tombstones.length; i++) {
+    if (!best || (tombstones[i].store[RESOURCE_ENERGY] || 0) > (best.store[RESOURCE_ENERGY] || 0)) best = tombstones[i];
+  }
+  return best;
+}
+
+function findRemoteLooseEnergy(creep, req, source, container) {
+  var anchors = [];
+  if (source && source.pos) anchors.push({ pos: source.pos, range: 3 });
+  if (container && container.pos) anchors.push({ pos: container.pos, range: 2 });
+  var requestRoom = req ? (req.roomName || req.remoteRoom) : null;
+  if (requestRoom && typeof req.x === 'number' && typeof req.y === 'number' && Game.rooms[requestRoom]) {
+    anchors.push({ pos: new RoomPosition(req.x, req.y, requestRoom), range: 2 });
+  }
+
+  var bestDrop = null;
+  var bestTombstone = null;
+  for (var i = 0; i < anchors.length; i++) {
+    var anchor = anchors[i];
+    var drop = getLargestEnergyDropNear(anchor.pos, anchor.range, 50);
+    if (drop && (!bestDrop || drop.amount > bestDrop.amount)) bestDrop = drop;
+    var tombstone = getLargestEnergyTombstoneNear(anchor.pos, anchor.range);
+    if (tombstone && (!bestTombstone || (tombstone.store[RESOURCE_ENERGY] || 0) > (bestTombstone.store[RESOURCE_ENERGY] || 0))) {
+      bestTombstone = tombstone;
+    }
+  }
+  return bestDrop || bestTombstone;
+}
+
+function collectEnergyTarget(creep, target) {
+  if (!creep || !target) return ERR_INVALID_TARGET;
+  var result;
+  if (target.resourceType) {
+    result = creep.pickup(target);
+  } else {
+    result = creep.withdraw(target, RESOURCE_ENERGY);
+  }
+  if (result === ERR_NOT_IN_RANGE && target.pos) {
+    creep.travelTo(target, { range: 1, reusePath: CFG.PATH_REUSE });
+  }
+  if (result === OK && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+    creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home };
+  }
+  return result;
+}
+
 function findLocalCollectTarget(creep) {
   var room = creep.room;
+  BeeSourceEconomy.refreshOwnedRoomSources(room);
+  BeeSourceEconomy.refreshBaseHarvestStats(room);
+  BeeSourceEconomy.refreshTruckerCarryStats(room);
+  BeeSourceEconomy.calculatePendingEnergy(room);
+  var pick = BeeSourceEconomy.getBestPickupSource(room, creep);
+  if (pick) {
+    var amount = creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+    BeeSourceEconomy.reservePickupCarry(room.name, pick.sourceId, creep.name, amount);
+    var sourceObj = Game.getObjectById(pick.sourceId);
+    var container = pick.containerId ? Game.getObjectById(pick.containerId) : null;
+    if (container && (container.store[RESOURCE_ENERGY] || 0) > 0) {
+      Memory.rooms[room.name].lastTruckerSourcePick = { tick: Game.time, trucker: creep.name, selectedSourceId: pick.sourceId, selectedTargetId: container.id, pendingEnergy: pick.pendingEnergy || 0, assignedCarry: amount, reason: 'source_container' };
+      drawHaulIntent(creep, sourceObj || container, '#4deeea');
+      return container;
+    }
+    if (sourceObj) {
+      var nearDrop = getLargestEnergyDropNear(sourceObj.pos, 1, 1);
+      if (nearDrop) {
+        Memory.rooms[room.name].lastTruckerSourcePick = { tick: Game.time, trucker: creep.name, selectedSourceId: pick.sourceId, selectedTargetId: nearDrop.id, pendingEnergy: pick.pendingEnergy || 0, assignedCarry: amount, reason: 'source_drop' };
+        drawHaulIntent(creep, sourceObj, '#4deeea');
+        return nearDrop;
+      }
+      Memory.rooms[room.name].lastTruckerSourcePick = { tick: Game.time, trucker: creep.name, selectedSourceId: pick.sourceId, selectedTargetId: null, pendingEnergy: pick.pendingEnergy || 0, expectedPickupEnergy: Math.floor(pick.expectedPickupEnergy || 0), assignedCarry: amount, reason: 'source_wait' };
+      drawHaulIntent(creep, sourceObj, '#4deeea');
+      return { waitForSourceEnergy: true, sourceId: pick.sourceId, pos: sourceObj.pos };
+    }
+  }
   var drops = room.find(FIND_DROPPED_RESOURCES, { filter: function(r){ return r.resourceType === RESOURCE_ENERGY && r.amount >= 50; } }); if (drops.length) return creep.pos.findClosestByPath(drops);
   var graves = room.find(FIND_TOMBSTONES, { filter: function(t){ return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (graves.length) return creep.pos.findClosestByPath(graves);
   var ruins = room.find(FIND_RUINS, { filter: function(t){ return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (ruins.length) return creep.pos.findClosestByPath(ruins);
@@ -518,6 +622,10 @@ function runLocal(creep, job, diag) {
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0 || job.type === 'LOCAL_COLLECT') {
     var src = findLocalCollectTarget(creep);
     if (!src) { if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) creep.memory.dispatchJob = { id: 'localDeliver:' + creep.memory.home, type: 'LOCAL_DELIVER', homeRoom: creep.memory.home }; return; }
+    if (src.waitForSourceEnergy && src.pos) {
+      if (creep.pos.getRangeTo(src.pos) > 3) creep.travelTo(src.pos, { range: 3, reusePath: CFG.PATH_REUSE });
+      return;
+    }
     var pr = src.amount ? creep.pickup(src) : creep.withdraw(src, RESOURCE_ENERGY);
     if (pr === ERR_NOT_IN_RANGE) creep.travelTo(src, { range: 1, reusePath: CFG.PATH_REUSE });
     return;
@@ -563,7 +671,14 @@ function runRemote(creep, job) { /* same with release on completion handled in r
     clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; return;
   }
   var container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
+  var source = creep.memory.sourceId ? Game.getObjectById(creep.memory.sourceId) : null;
+  if (source) drawHaulIntent(creep, source, '#4deeea');
   if (!container) {
+    var loose = findRemoteLooseEnergy(creep, req, source, null);
+    if (loose) {
+      collectEnergyTarget(creep, loose);
+      return;
+    }
     var reqRoom = creep.memory.requestRoom, reqX = creep.memory.requestX, reqY = creep.memory.requestY;
     if (reqRoom && typeof reqX === 'number' && typeof reqY === 'number') {
       if (creep.room.name !== reqRoom) creep.travelTo(new RoomPosition(reqX, reqY, reqRoom), { range: 1, reusePath: CFG.PATH_REUSE });
@@ -572,9 +687,23 @@ function runRemote(creep, job) { /* same with release on completion handled in r
     return;
   }
   if (creep.pos.roomName !== container.pos.roomName) { creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE }); return; }
+  var looseEnergy = findRemoteLooseEnergy(creep, req, source, container);
+  if (looseEnergy) {
+    collectEnergyTarget(creep, looseEnergy);
+    return;
+  }
   var wr = creep.withdraw(container, RESOURCE_ENERGY);
   if (wr === ERR_NOT_IN_RANGE) creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE });
-  if (wr === ERR_NOT_ENOUGH_RESOURCES && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) { clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; }
+  if (wr === OK && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+    creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home };
+  }
+  if (wr === ERR_NOT_ENOUGH_RESOURCES) {
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home };
+    } else {
+      clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob;
+    }
+  }
 }
 
 function run(creep) {

@@ -58,6 +58,7 @@ var RoadPlanner          = require('Planner.Road');
 var TradeEnergy          = require('Trade.Energy');
 var CpuProfiler         = require('core.cpuProfiler');
 var CoreConfig          = require('core.config');
+var BeeSourceEconomy    = require('BeeSourceEconomy');
 
 // Keep references to the role modules so validation can check the intended
 // mapping (e.g. a swapped import would surface as a role name mismatch).
@@ -249,6 +250,17 @@ if (!global.__BHM) global.__BHM = {};
 // Function header: objectValues(obj)
 // Inputs: plain object
 // Output: array of own enumerable property values (ES5-compatible Object.values replacement).
+
+function refreshSourceEconomyForOwnedRooms() {
+  if (!global.__BHM || !global.__BHM.roomsOwned) return;
+  for (var i = 0; i < global.__BHM.roomsOwned.length; i++) {
+    var room = global.__BHM.roomsOwned[i];
+    BeeSourceEconomy.refreshOwnedRoomSources(room);
+    BeeSourceEconomy.refreshBaseHarvestStats(room);
+    BeeSourceEconomy.refreshTruckerCarryStats(room);
+    BeeSourceEconomy.calculatePendingEnergy(room);
+  }
+}
 function objectValues(obj) {
   var values = [];
   if (!obj) return values;
@@ -440,6 +452,7 @@ var BeeHiveMind = {
     CpuProfiler.measure('runCreeps.total', function () {
       BeeHiveMind.runCreeps(C);
     });
+    CpuProfiler.measure('refreshSourceEconomyForOwnedRooms', refreshSourceEconomyForOwnedRooms);
 
     if (MovementManager && typeof MovementManager.resolveAndMove === 'function') {
       // Execute queued movement intents after all roles finish issuing actions.

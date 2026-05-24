@@ -20,6 +20,7 @@ var Logger      = require('core.logger');
 var LOG_LEVEL   = Logger.LOG_LEVEL;
 var CoreConfig = require('core.config');
 var BeeVisuals = {};
+var SourceEconomyPanel = require('BeeVisuals.SourceEconomyPanel');
 
 // ------------------------------- Settings --------------------------------
 var CFG = {
@@ -219,6 +220,10 @@ BeeVisuals.drawVisuals = function () {
 
   if ((vc.remoteMiningMapEnabled !== false) && (vc.persistentHud === true || budget === 'medium' || budget === 'full')) {
     BeeVisuals.drawRemoteMiningMapVisuals();
+  }
+
+  if (SourceEconomyPanel && SourceEconomyPanel.enabled && SourceEconomyPanel.enabled()) {
+    SourceEconomyPanel.draw(room.name);
   }
 
   if (budget === 'full') {

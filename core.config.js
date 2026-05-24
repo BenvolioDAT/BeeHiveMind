@@ -174,6 +174,7 @@ CoreConfig.settings = Object.freeze({
     remoteMiningMapShowCreeps: true,
     remoteMiningMapShowSources: true,
     remoteMiningMapShowContainers: true,
+    SHOW_SOURCE_ECONOMY_PANEL: true,
   }),
 });
 

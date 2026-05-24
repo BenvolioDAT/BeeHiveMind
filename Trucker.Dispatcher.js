@@ -83,6 +83,28 @@ function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
   return estimatedTravelTicks * 2 + 100;
 }
 
+function estimateRemoteRequestDistance(homeRoom, req) {
+  if (!homeRoom || !req) return 9999;
+  var remoteRoom = req.roomName || req.remoteRoom;
+  if (!remoteRoom) return 9999;
+  var roomDistance = 0;
+  try {
+    var route = Game.map.findRoute(homeRoom, remoteRoom);
+    if (route && route !== ERR_NO_PATH && typeof route.length === 'number') roomDistance = route.length;
+  } catch (err) {}
+  if (!roomDistance || roomDistance < 1) roomDistance = Game.map.getRoomLinearDistance(homeRoom, remoteRoom) || 1;
+  var inRoomDistance = (typeof req.x === 'number' && typeof req.y === 'number') ? 25 : 50;
+  return Math.max(1, roomDistance * 50 + inRoomDistance);
+}
+
+function scoreRemoteRequestForCreep(creep, req) {
+  if (!creep || !req) return 0;
+  var capacity = creep.store ? (creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0) : 0;
+  if (capacity <= 0) return 0;
+  var distance = estimateRemoteRequestDistance(creep.memory.home || (creep.room && creep.room.name), req);
+  return Math.min(capacity, req.amount || 0) / Math.max(1, distance);
+}
+
 function canCreepSafelyTakeRemoteJob(creep, remoteRoom) {
   if (!creep || !remoteRoom) return false;
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) return true;
@@ -270,6 +292,7 @@ function chooseJobForTrucker(creep) {
 
   var reqs = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
   var best = null;
+  var bestScore = -1;
   for (var id in reqs) {
     if (!reqs.hasOwnProperty(id)) continue;
     var r = reqs[id];
@@ -282,11 +305,16 @@ function chooseJobForTrucker(creep) {
     var remoteRoom = r.roomName || r.remoteRoom;
     if (isRemoteRoomUnsafeForTrucker(remoteRoom)) { diag.skippedUnsafe++; remoteAudit.skippedUnsafe++; continue; }
     if (!canCreepSafelyTakeRemoteJob(creep, remoteRoom)) { diag.skippedRemoteTTL++; remoteAudit.skippedTTL++; continue; }
-    var j = { id: 'remote:' + id, type: 'REMOTE_PICKUP', requestId: id, roomName: remoteRoom, containerId: r.containerId, sourceId: r.sourceId, x: r.x, y: r.y, urgent: !!r.urgent, amount: r.amount || 0 };
+    var distance = estimateRemoteRequestDistance(home, r);
+    var score = scoreRemoteRequestForCreep(creep, r);
+    var j = { id: 'remote:' + id, type: 'REMOTE_PICKUP', requestId: id, roomName: remoteRoom, containerId: r.containerId, sourceId: r.sourceId, x: r.x, y: r.y, urgent: !!r.urgent, amount: r.amount || 0, distance: distance, score: score };
     diag.jobsSeen++; diag.remoteJobs++;
-    if (!best || (j.urgent && !best.urgent) || (j.amount > best.amount)) best = j;
+    if (!best || (j.urgent && !best.urgent) || (j.urgent === best.urgent && score > bestScore)) {
+      best = j;
+      bestScore = score;
+    }
   }
-  if (best && claimJob(creep, best, CFG.RESERVATION_TTL)) { diag.jobsClaimed++; remoteAudit.selectedRequestId = best.requestId || null; remoteAudit.selectedRemoteRoom = best.roomName || null; remoteAudit.selectedAmount = best.amount || 0; d.lastRun = diag; if (!Memory.rooms) Memory.rooms = {}; if (!Memory.rooms[home]) Memory.rooms[home] = {}; Memory.rooms[home].lastRemoteHaulRequestAudit = remoteAudit; return best; }
+  if (best && claimJob(creep, best, CFG.RESERVATION_TTL)) { diag.jobsClaimed++; remoteAudit.selectedRequestId = best.requestId || null; remoteAudit.selectedRemoteRoom = best.roomName || null; remoteAudit.selectedAmount = best.amount || 0; remoteAudit.selectedScore = best.score || 0; remoteAudit.selectedDistance = best.distance || null; d.lastRun = diag; if (!Memory.rooms) Memory.rooms = {}; if (!Memory.rooms[home]) Memory.rooms[home] = {}; Memory.rooms[home].lastRemoteHaulRequestAudit = remoteAudit; return best; }
 
   if (claimJob(creep, localCollect, 10)) { diag.jobsClaimed++; d.lastRun = diag; if (!Memory.rooms) Memory.rooms = {}; if (!Memory.rooms[home]) Memory.rooms[home] = {}; Memory.rooms[home].lastRemoteHaulRequestAudit = remoteAudit; return localCollect; }
 
