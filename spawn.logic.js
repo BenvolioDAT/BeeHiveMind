@@ -94,6 +94,7 @@ function normalizeRole(role) {
 }
 
 function calculateBodyCost(body) {
+  if (!body || !body.length) return 0;
   var total = 0;
   for (var i = 0; i < body.length; i++) {
     var part = body[i];
@@ -102,12 +103,112 @@ function calculateBodyCost(body) {
   return total;
 }
 
+function getBodyCost(body) {
+  // Public wrapper for queue managers. Keeping the old internal function name
+  // lets existing code stay readable while newer callers use getBodyCost().
+  return calculateBodyCost(body);
+}
+
 function cloneBody(body) {
   var copy = [];
+  if (!body || !body.length) return copy;
   for (var i = 0; i < body.length; i++) {
     copy.push(body[i]);
   }
   return copy;
+}
+
+function getBodySignature(body) {
+  // A signature is a stable, cheap string that lets Memory show whether two
+  // bodies are the same shape without storing a second full body array.
+  if (!body || !body.length) return '';
+  var parts = [];
+  for (var i = 0; i < body.length; i++) {
+    parts.push(String(body[i]));
+  }
+  return parts.join('|');
+}
+
+function summarizeBody(body) {
+  // Keep the summary beginner-readable in Memory: counts by part plus a short
+  // text value ordered like Screeps body definitions are usually discussed.
+  var summary = {
+    work: 0,
+    carry: 0,
+    move: 0,
+    attack: 0,
+    ranged_attack: 0,
+    heal: 0,
+    tough: 0,
+    claim: 0,
+    totalParts: 0,
+    text: ''
+  };
+  if (!body || !body.length) return summary;
+  for (var i = 0; i < body.length; i++) {
+    var part = String(body[i]);
+    if (Object.prototype.hasOwnProperty.call(summary, part)) {
+      summary[part]++;
+    }
+    summary.totalParts++;
+  }
+
+  var chunks = [];
+  if (summary.work) chunks.push(summary.work + ' WORK');
+  if (summary.carry) chunks.push(summary.carry + ' CARRY');
+  if (summary.move) chunks.push(summary.move + ' MOVE');
+  if (summary.attack) chunks.push(summary.attack + ' ATTACK');
+  if (summary.ranged_attack) chunks.push(summary.ranged_attack + ' RANGED_ATTACK');
+  if (summary.heal) chunks.push(summary.heal + ' HEAL');
+  if (summary.tough) chunks.push(summary.tough + ' TOUGH');
+  if (summary.claim) chunks.push(summary.claim + ' CLAIM');
+  summary.text = chunks.join(', ');
+  return summary;
+}
+
+function makeBodyPlan(roleName, body, cost, tierIndex, energyUsedForPlan) {
+  var canonicalRole = normalizeRole(roleName);
+  if (!canonicalRole || !body || !body.length) return null;
+  return {
+    role: canonicalRole,
+    body: cloneBody(body),
+    cost: cost,
+    signature: getBodySignature(body),
+    summary: summarizeBody(body),
+    tierIndex: tierIndex,
+    energyUsedForPlan: energyUsedForPlan
+  };
+}
+
+function getBestBodyPlanForEnergy(roleName, energy) {
+  // Config arrays are ordered largest-to-smallest. The first affordable entry
+  // is the best plan for the supplied energy number.
+  var canonicalRole = normalizeRole(roleName);
+  if (!canonicalRole) return null;
+  var available = typeof energy === 'number' ? energy : 0;
+  var list = ROLE_CONFIGS[canonicalRole];
+  if (!list || !list.length) return null;
+
+  for (var i = 0; i < list.length; i++) {
+    var body = list[i];
+    var cost = calculateBodyCost(body);
+    if (cost <= available) {
+      return makeBodyPlan(canonicalRole, body, cost, i, available);
+    }
+  }
+  return null;
+}
+
+function getBestBodyPlanForRoomCapacity(roleName, room) {
+  // Capacity planning answers "what should this room be able to support when
+  // full?", which is different from "what can it afford this tick?".
+  var targetRoom = room;
+  if (targetRoom && targetRoom.room) targetRoom = targetRoom.room;
+  if (typeof targetRoom === 'string') targetRoom = Game.rooms[targetRoom];
+  var capacity = targetRoom && typeof targetRoom.energyCapacityAvailable === 'number'
+    ? targetRoom.energyCapacityAvailable
+    : 0;
+  return getBestBodyPlanForEnergy(roleName, capacity);
 }
 
 function getBodyForRole(roleName, energyAvailable) {
@@ -116,7 +217,8 @@ function getBodyForRole(roleName, energyAvailable) {
   if (!roleName) return [];
 
   var energy = typeof energyAvailable === 'number' ? energyAvailable : 0;
-  var list = ROLE_CONFIGS[roleName];
+  var canonicalRole = normalizeRole(roleName);
+  var list = canonicalRole ? ROLE_CONFIGS[canonicalRole] : null;
   if (!list) {
     if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
       spawnLog.debug('No config for role', roleName);
@@ -125,21 +227,18 @@ function getBodyForRole(roleName, energyAvailable) {
   }
 
   // Config arrays are ordered largest→smallest; pick the first body we can afford.
-  for (var i = 0; i < list.length; i++) {
-    var body = list[i];
-    var cost = calculateBodyCost(body);
-    if (cost <= energy) {
-      if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
-        spawnLog.debug('Picked', roleName, 'body [' + body + ']', 'cost', cost, 'avail', energy);
-      }
-      return cloneBody(body);
+  var plan = getBestBodyPlanForEnergy(canonicalRole, energy);
+  if (plan) {
+    if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
+      spawnLog.debug('Picked', canonicalRole, 'body [' + plan.body + ']', 'cost', plan.cost, 'avail', energy);
     }
+    return cloneBody(plan.body);
   }
 
   if (Logger.shouldLog(LOG_LEVEL.DEBUG)) {
     var cheapest = list[list.length - 1];
     var minCost = cheapest ? calculateBodyCost(cheapest) : 0;
-    spawnLog.debug('Insufficient energy for', roleName, 'need at least', minCost, 'have', energy);
+    spawnLog.debug('Insufficient energy for', canonicalRole, 'need at least', minCost, 'have', energy);
   }
   return [];
 }
@@ -178,8 +277,9 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   }
 
   var energy = typeof availableEnergy === 'number' ? availableEnergy : 0;
-  var body = getBodyForRole(canonicalRole, energy);
-  if (!body || !body.length) return false;
+  var bodyPlan = getBestBodyPlanForEnergy(canonicalRole, energy);
+  if (!bodyPlan || !bodyPlan.body || !bodyPlan.body.length) return false;
+  var body = cloneBody(bodyPlan.body);
 
   var creepName = Generate_Creep_Name(canonicalRole);
   if (!creepName) return false;
@@ -194,6 +294,31 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
   }
   if (mem.skipTaskMemory) {
     delete mem.skipTaskMemory;
+  }
+
+  if (canonicalRole === 'BaseHarvest') {
+    // BaseHarvest queue items may target a specific source. Stamp both the new
+    // source-aware fields and the older assignedSource/sourceId fields so the
+    // runtime can keep working during and after the upgrade handoff.
+    var targetSourceId = mem.assignedSource || mem.sourceId || mem.replaceSourceId || mem.replacementTargetSourceId || null;
+    if (targetSourceId) {
+      mem.assignedSource = targetSourceId;
+      mem.sourceId = targetSourceId;
+      if (!mem.replacementTargetSourceId) mem.replacementTargetSourceId = targetSourceId;
+      if (mem.baseHarvestSpawnMode === 'upgradeReplacement' && !mem.replaceSourceId) {
+        mem.replaceSourceId = targetSourceId;
+      }
+    }
+    if (mem.replaceCreepName && !mem.replacementFor) {
+      mem.replacementFor = mem.replaceCreepName;
+    }
+    if (mem.replacementFor && !mem.replaceCreepName) {
+      mem.replaceCreepName = mem.replacementFor;
+    }
+    mem.bornBodyCost = bodyPlan.cost;
+    mem.bornBodySignature = bodyPlan.signature;
+    mem.bornBodySummary = bodyPlan.summary;
+    mem.bornAt = Game.time;
   }
 
   // Keep combat squad data beside the spawn call so new creeps hit the ground
@@ -218,6 +343,17 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     spawnLog.debug('spawnRole', canonicalRole, 'body [' + body + ']', 'cost', calculateBodyCost(body), 'avail', energy, 'result', result);
   }
   if (result === OK) {
+    if (canonicalRole === 'BaseHarvest' && mem.replacementFor) {
+      var oldCreep = Game.creeps[mem.replacementFor];
+      if (oldCreep && oldCreep.memory) {
+        oldCreep.memory.retireAfterReplacementReady = true;
+        oldCreep.memory.retireReason = mem.baseHarvestSpawnMode === 'upgradeReplacement'
+          ? 'baseHarvestBodyUpgrade'
+          : 'baseHarvestTtlReplacement';
+        oldCreep.memory.replacingCreepName = creepName;
+        oldCreep.memory.replacementSourceId = mem.replaceSourceId || mem.assignedSource || mem.sourceId || null;
+      }
+    }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
       spawnLog.info('Spawned', canonicalRole, '=>', creepName);
     }
@@ -512,6 +648,13 @@ function minEnergyFor(roleName) {
 module.exports = {
   ROLE_CONFIGS: ROLE_CONFIGS,
   normalizeRole: normalizeRole,
+  getBodyCost: getBodyCost,
+  calculateBodyCost: calculateBodyCost,
+  cloneBody: cloneBody,
+  getBodySignature: getBodySignature,
+  summarizeBody: summarizeBody,
+  getBestBodyPlanForEnergy: getBestBodyPlanForEnergy,
+  getBestBodyPlanForRoomCapacity: getBestBodyPlanForRoomCapacity,
   getBodyForRole: getBodyForRole,
   spawnRole: spawnRole,
   minEnergyFor: minEnergyFor,

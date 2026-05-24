@@ -22,5 +22,19 @@ module.exports = Object.freeze({
   AVOID_TICKS_AFTER_YIELD: 20,
   HANDOFF_TTL: 120,
   QUEUE_RANGE: 2,
-  TRAVEL_REUSE: 12
+  TRAVEL_REUSE: 12,
+
+  // Body upgrade safety switches. Turn these off from Memory or code only when
+  // you want the older "spawn whatever is currently affordable" behavior.
+  BASEHARVEST_ENABLE_BODY_UPGRADES: true,
+  BASEHARVEST_WAIT_FOR_BEST_BODY: true,
+  BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED: true,
+
+  // Queue safety timers. The manager may wait for a better body only while the
+  // old miner can safely keep the source covered. When these limits are hit it
+  // downgrades, defers, or falls back to emergency behavior instead of freezing.
+  BASEHARVEST_MAX_UPGRADE_WAIT_TICKS: 150,
+  BASEHARVEST_REPLACEMENT_SAFE_TTL: 120,
+  BASEHARVEST_CRITICAL_TTL: 60,
+  BASEHARVEST_HANDOFF_RANGE: 1
 });

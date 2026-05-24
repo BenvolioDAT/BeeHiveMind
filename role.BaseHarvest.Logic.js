@@ -36,12 +36,98 @@ function countWalkableSeatsAround(pos) { var seats = 0; var t = new Room.Terrain
 function getAdjacentContainerForSource(source) { var arr = source.pos.findInRange(FIND_STRUCTURES, 1, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; } }); return (arr && arr.length) ? arr[0] : null; }
 function getPreferredSeatPos(source) { var cont = getAdjacentContainerForSource(source); if (cont) return cont.pos; var candidates = []; for (var dx = -1; dx <= 1; dx++) { for (var dy = -1; dy <= 1; dy++) { if (dx === 0 && dy === 0) continue; var p = new RoomPosition(source.pos.x + dx, source.pos.y + dy, source.pos.roomName); if (isWalkable(p)) candidates.push(p); } } if (!candidates.length) return null; candidates.sort(function(a, b) { return (a.y - b.y) || (a.x - b.x); }); return candidates[0]; }
 function matchesRole(creep, roleName, legacyTask) { if (!creep || !creep.memory) return false; var role = creep.memory.role; if (role && roleName && String(role).toLowerCase() === String(roleName).toLowerCase()) return true; var task = creep.memory.task; var legacy = legacyTask || roleName; if (task && legacy && String(task).toLowerCase() === String(legacy).toLowerCase()) return true; if (task && roleName && String(task).toLowerCase() === String(roleName).toLowerCase()) return true; return false; }
-function getIncumbents(roomName, sourceId, excludeName) { var out = []; for (var name in Game.creeps) { var c = Game.creeps[name]; if (!c || !c.my) continue; if (excludeName && name === excludeName) continue; if (c.memory && matchesRole(c, 'BaseHarvest', 'baseharvest') && c.memory.assignedSource === sourceId && c.room && c.room.name === roomName) out.push(c); } return out; }
+function getAssignedSourceId(creep) { if (!creep || !creep.memory) return null; return creep.memory.assignedSource || creep.memory.sourceId || creep.memory.replaceSourceId || creep.memory.replacementTargetSourceId || null; }
+function getIncumbents(roomName, sourceId, excludeName) { var out = []; for (var name in Game.creeps) { var c = Game.creeps[name]; if (!c || !c.my) continue; if (excludeName && name === excludeName) continue; if (c.memory && matchesRole(c, 'BaseHarvest', 'baseharvest') && getAssignedSourceId(c) === sourceId && c.room && c.room.name === roomName) out.push(c); } return out; }
 function countAssignedHarvesters(roomName, sourceId) { return getIncumbents(roomName, sourceId, null).length; }
 
+function writeHandoffDiag(roomName, sourceId, oldName, replacementName, ready, action, reason) {
+  if (!roomName) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  Memory.rooms[roomName].lastBaseHarvestHandoff = {
+    tick: Game.time,
+    sourceId: sourceId || null,
+    oldCreep: oldName || null,
+    replacement: replacementName || null,
+    replacementReady: !!ready,
+    action: action,
+    reason: reason
+  };
+}
+
+function isReplacementForSource(creep, sourceId) {
+  if (!creep || !creep.memory || !sourceId) return false;
+  if (creep.memory.baseHarvestSpawnMode !== 'upgradeReplacement') return false;
+  return (creep.memory.replaceSourceId || creep.memory.assignedSource || creep.memory.sourceId) === sourceId;
+}
+
+function isHandoffPair(a, b, sourceId) {
+  if (!a || !b || !sourceId || !a.memory || !b.memory) return false;
+  if (a.memory.replacingCreepName === b.name && a.memory.replacementSourceId === sourceId) return true;
+  if (b.memory.replacingCreepName === a.name && b.memory.replacementSourceId === sourceId) return true;
+  if (a.memory.replacementFor === b.name && isReplacementForSource(a, sourceId)) return true;
+  if (b.memory.replacementFor === a.name && isReplacementForSource(b, sourceId)) return true;
+  return false;
+}
+
+function hasActiveWork(creep) {
+  return creep && typeof creep.getActiveBodyparts === 'function' && creep.getActiveBodyparts(WORK) > 0;
+}
+
+function replacementReadyForHandoff(oldCreep, replacement, source) {
+  if (!oldCreep || !replacement || !source || !replacement.memory) return false;
+  if (replacement.spawning) return false;
+  if (!matchesRole(replacement, 'BaseHarvest', 'baseharvest')) return false;
+  if (replacement.memory.replacementFor !== oldCreep.name) return false;
+  if (getAssignedSourceId(replacement) !== source.id) return false;
+  if (!hasActiveWork(replacement)) return false;
+  if (!replacement.pos || replacement.pos.roomName !== source.pos.roomName) return false;
+  if (replacement.pos.getRangeTo(source) <= (CFG.BASEHARVEST_HANDOFF_RANGE || 1)) return true;
+  var seatPos = getPreferredSeatPos(source);
+  if (seatPos && replacement.pos.isEqualTo(seatPos)) return true;
+  var cont = getAdjacentContainerForSource(source);
+  if (cont && replacement.pos.isEqualTo(cont.pos)) return true;
+  return false;
+}
+
+function handleRetirementHandoff(creep, source) {
+  if (!creep || !creep.memory || !source) return false;
+  if (!creep.memory.retireAfterReplacementReady) return false;
+  if (creep.memory.replacementSourceId && creep.memory.replacementSourceId !== source.id) return false;
+  var replacementName = creep.memory.replacingCreepName || null;
+  var replacement = replacementName ? Game.creeps[replacementName] : null;
+  var ready = replacementReadyForHandoff(creep, replacement, source);
+  if (ready) {
+    writeHandoffDiag(creep.room.name, source.id, creep.name, replacementName, true, 'retireOld', 'replacement-ready-at-source');
+    creep.suicide();
+    return true;
+  }
+  writeHandoffDiag(creep.room.name, source.id, creep.name, replacementName, false, 'continueHarvesting', replacement ? 'replacement-not-ready-yet' : 'replacement-missing');
+  return false;
+}
+
+function findHandoffQueueSpot(source, seatPos, myName) {
+  var best = null;
+  var bestScore = -9999;
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var p = new RoomPosition(source.pos.x + dx, source.pos.y + dy, source.pos.roomName);
+      if (!isWalkable(p)) continue;
+      if (seatPos && p.isEqualTo(seatPos)) continue;
+      var occupied = isTileOccupiedByAlly(p, myName);
+      var score = occupied ? -100 : 0;
+      if (seatPos) score -= p.getRangeTo(seatPos);
+      if (score > bestScore) { bestScore = score; best = p; }
+    }
+  }
+  return best;
+}
+
 function resolveSourceConflict(creep, source) {
-  var neighbors = source.pos.findInRange(FIND_MY_CREEPS, 1, { filter: function(c) { return c.name !== creep.name && matchesRole(c, 'BaseHarvest', 'baseharvest') && c.memory.assignedSource === source.id; } });
+  var neighbors = source.pos.findInRange(FIND_MY_CREEPS, 1, { filter: function(c) { return c.name !== creep.name && matchesRole(c, 'BaseHarvest', 'baseharvest') && getAssignedSourceId(c) === source.id; } });
   if (neighbors.length === 0) return false;
+  for (var h = 0; h < neighbors.length; h++) { if (isHandoffPair(creep, neighbors[h], source.id)) return false; }
   if (countAssignedHarvesters(creep.room.name, source.id) <= 1) return false;
   var all = neighbors.concat([creep]); var winner = all[0]; for (var i = 1; i < all.length; i++) { if (all[i].name < winner.name) winner = all[i]; }
   if (winner.name !== creep.name) {
@@ -55,12 +141,18 @@ function resolveSourceConflict(creep, source) {
   return false;
 }
 
-function shouldQueueForSource(creep, source, seats, used) { if (used < seats) return false; var inc = getIncumbents(creep.room.name, source.id, creep.name); for (var i = 0; i < inc.length; i++) { var t = inc[i].ticksToLive; if (typeof t === 'number' && t <= CFG.HANDOFF_TTL) return true; } return false; }
+function shouldQueueForSource(creep, source, seats, used) { if (used < seats) return false; var inc = getIncumbents(creep.room.name, source.id, creep.name); for (var i = 0; i < inc.length; i++) { if (isHandoffPair(creep, inc[i], source.id)) return true; var t = inc[i].ticksToLive; if (typeof t === 'number' && t <= CFG.HANDOFF_TTL) return true; } return false; }
 function findQueueSpotNearSeat(seatPos, myName) { var best = null, bestScore = -Infinity; for (var dx = -1; dx <= 1; dx++) { for (var dy = -1; dy <= 1; dy++) { if (dx === 0 && dy === 0) continue; var p = new RoomPosition(seatPos.x + dx, seatPos.y + dy, seatPos.roomName); if (!isWalkable(p)) continue; var occupied = isTileOccupiedByAlly(p, myName); var score = occupied ? -10 : 0; score += (-p.y * 0.01) + (-p.x * 0.001); if (score > bestScore) { bestScore = score; best = p; } } } return best; }
 
 function assignSource(creep) {
   if (creep.spawning) return;
   if (creep.memory._reassignCooldown && Game.time < creep.memory._reassignCooldown) return creep.memory.assignedSource || null;
+  var pinnedSource = getAssignedSourceId(creep);
+  if (pinnedSource) {
+    creep.memory.assignedSource = pinnedSource;
+    creep.memory.sourceId = pinnedSource;
+    return pinnedSource;
+  }
   if (creep.memory.assignedSource) return creep.memory.assignedSource;
   var sources = creep.room.find(FIND_SOURCES); if (!sources || !sources.length) return null;
   var best = null; var bestScore = -Infinity; var bestWillQueue = false;
@@ -114,6 +206,7 @@ function determineBaseHarvestState(creep) {
 function runHarvestPhase(creep) {
   var sid = assignSource(creep); if (!sid) { debugSay(creep, '❓'); return; }
   var source = Game.getObjectById(sid); if (!source) { creep.memory.assignedSource = null; creep.memory.waitingForSeat = false; return; }
+  if (handleRetirementHandoff(creep, source)) return;
   if (resolveSourceConflict(creep, source)) return;
   var seatPos = (creep.memory.seatRoom === creep.room.name) ? new RoomPosition(creep.memory.seatX, creep.memory.seatY, creep.memory.seatRoom) : getPreferredSeatPos(source);
   if (seatPos) debugRing(creep.room, seatPos, CFG.DRAW.SEAT, "SEAT");
@@ -124,7 +217,7 @@ function runHarvestPhase(creep) {
   var seatBlocked = seatPos ? (isTileOccupiedByAnyCreep(seatPos, creep.name) && !creep.pos.isEqualTo(seatPos)) : false;
   var shouldQ = (seatBlocked || creep.memory.waitingForSeat) && used >= seats && shouldQueueForSource(creep, source, seats, used);
   if (shouldQ) {
-    var queueSpot = findQueueSpotNearSeat(seatPos, creep.name) || seatPos;
+    var queueSpot = isReplacementForSource(creep, source.id) ? (findHandoffQueueSpot(source, seatPos, creep.name) || findQueueSpotNearSeat(seatPos, creep.name) || seatPos) : (findQueueSpotNearSeat(seatPos, creep.name) || seatPos);
     creep.memory.waitingForSeat = true;
     debugSay(creep, '⏳'); debugRing(creep.room, queueSpot, CFG.DRAW.QUEUE, "QUEUE");
     if (!creep.pos.isEqualTo(queueSpot)) { creep.travelTo(queueSpot, { range: 0, reusePath: CFG.TRAVEL_REUSE }); return; }

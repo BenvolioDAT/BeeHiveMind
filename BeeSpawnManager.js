@@ -29,6 +29,7 @@ var LunaConfig  = require('role.Luna.Config');
 var TruckerConfig = require('role.Trucker.Config');
 var RepairConfig = require('role.Repair.Config');
 var QueenConfig = require('role.Queen.Config');
+var BaseHarvestConfig = require('role.BaseHarvest.Config');
 var RemoteHarvestManager = require('RemoteHarvest.Manager');
 var BeeToolbox = require('BeeToolbox');
 var BeeCombatSquads = require('BeeCombatSquads');
@@ -43,6 +44,13 @@ var INVADER_LOCK_TTL      = 1500;
 var REPLACEMENT_TTL = {
   Baseharvest: 80
 };
+
+var BASEHARVEST_ENABLE_BODY_UPGRADES = BaseHarvestConfig.BASEHARVEST_ENABLE_BODY_UPGRADES !== false;
+var BASEHARVEST_WAIT_FOR_BEST_BODY = BaseHarvestConfig.BASEHARVEST_WAIT_FOR_BEST_BODY !== false;
+var BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED = BaseHarvestConfig.BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED !== false;
+var BASEHARVEST_MAX_UPGRADE_WAIT_TICKS = BaseHarvestConfig.BASEHARVEST_MAX_UPGRADE_WAIT_TICKS || 150;
+var BASEHARVEST_REPLACEMENT_SAFE_TTL = BaseHarvestConfig.BASEHARVEST_REPLACEMENT_SAFE_TTL || 120;
+var BASEHARVEST_CRITICAL_TTL = BaseHarvestConfig.BASEHARVEST_CRITICAL_TTL || 60;
 
 var ROLE_PRIORITY = {
   Baseharvest: 100,
@@ -60,6 +68,10 @@ var ROLE_PRIORITY = {
   Dismantler:   30,
   
 };
+
+var BASEHARVEST_EMERGENCY_PRIORITY = 110;
+var BASEHARVEST_NORMAL_PRIORITY = ROLE_PRIORITY.Baseharvest || 100;
+var BASEHARVEST_UPGRADE_PRIORITY = 65;
 
 var ROLE_MIN_ENERGY = {
   Baseharvest: 200,
@@ -348,6 +360,382 @@ function countRoleNeedingReplacement(roomName, role, threshold) {
   return count;
 }
 
+function isBaseHarvestRole(role) {
+  return canonicalRole(role) === 'BaseHarvest';
+}
+
+function isBaseHarvestQueueItem(item) {
+  return item && isBaseHarvestRole(item.role);
+}
+
+function getBaseHarvestSourceIdFromMemory(mem) {
+  if (!mem) return null;
+  return mem.assignedSource || mem.sourceId || mem.replaceSourceId || mem.replacementTargetSourceId || null;
+}
+
+function getBaseHarvestQueueSourceId(item) {
+  if (!item) return null;
+  return item.sourceId || item.assignedSource || item.replaceSourceId || item.replacementTargetSourceId || null;
+}
+
+function getCreepHomeRoomName(creep) {
+  if (!creep) return null;
+  if (creep.memory && creep.memory.home) return creep.memory.home;
+  if (creep.memory && creep.memory._home) return creep.memory._home;
+  if (creep.room && creep.room.name) return creep.room.name;
+  return null;
+}
+
+function getCreepBodyParts(creep) {
+  var parts = [];
+  if (!creep || !creep.body) return parts;
+  for (var i = 0; i < creep.body.length; i++) {
+    if (creep.body[i] && creep.body[i].type) {
+      parts.push(creep.body[i].type);
+    }
+  }
+  return parts;
+}
+
+function getCreepBodyCost(creep) {
+  if (!creep) return 0;
+  var memCost = creep.memory && typeof creep.memory.bornBodyCost === 'number'
+    ? creep.memory.bornBodyCost
+    : 0;
+  var parts = getCreepBodyParts(creep);
+  if (parts.length && spawnLogic && typeof spawnLogic.getBodyCost === 'function') {
+    return spawnLogic.getBodyCost(parts);
+  }
+  return memCost;
+}
+
+function getCreepBodySignature(creep) {
+  if (!creep) return '';
+  var parts = getCreepBodyParts(creep);
+  if (parts.length && spawnLogic && typeof spawnLogic.getBodySignature === 'function') {
+    return spawnLogic.getBodySignature(parts);
+  }
+  return creep.memory && creep.memory.bornBodySignature ? creep.memory.bornBodySignature : '';
+}
+
+function getBaseHarvestDesiredPlan(room) {
+  if (!room || !spawnLogic || typeof spawnLogic.getBestBodyPlanForRoomCapacity !== 'function') return null;
+  return spawnLogic.getBestBodyPlanForRoomCapacity('BaseHarvest', room);
+}
+
+function makeBaseHarvestPlanDiag(plan) {
+  if (!plan) {
+    return {
+      cost: 0,
+      signature: '',
+      summary: null,
+      tierIndex: -1
+    };
+  }
+  return {
+    cost: plan.cost || 0,
+    signature: plan.signature || '',
+    summary: plan.summary || null,
+    tierIndex: typeof plan.tierIndex === 'number' ? plan.tierIndex : -1
+  };
+}
+
+function isBaseHarvestSafelyHarvesting(creep, source) {
+  // "Safe" means the old miner is alive long enough, assigned to this source,
+  // and already close enough to keep harvesting while a better body is prepared.
+  if (!creep || !source || !creep.memory) return false;
+  if (creep.spawning) return false;
+  if (!isBaseHarvestRole(creep.memory.role)) return false;
+  if (getBaseHarvestSourceIdFromMemory(creep.memory) !== source.id) return false;
+  if (typeof creep.ticksToLive === 'number' && creep.ticksToLive < BASEHARVEST_REPLACEMENT_SAFE_TTL) return false;
+  if (!creep.pos || creep.pos.roomName !== source.pos.roomName) return false;
+  return creep.pos.getRangeTo(source) <= 1;
+}
+
+function createBaseHarvestSourceRecord() {
+  return {
+    live: 0,
+    queued: 0,
+    hasCoverage: false,
+    emergencyNeeded: false,
+    upgradeNeeded: false,
+    bestLiveCost: 0,
+    bestLiveName: null,
+    replacementQueued: false,
+    reason: 'not-evaluated',
+    activeLive: 0,
+    bestLiveSignature: '',
+    bestSafeLiveName: null,
+    bestSafeLiveCost: 0,
+    lowestTtlName: null,
+    lowestTtl: null,
+    replacementInProgress: false
+  };
+}
+
+function buildBaseHarvestCoverageReport(room) {
+  var roomName = room && room.name;
+  var desiredPlan = getBaseHarvestDesiredPlan(room);
+  var diag = {
+    tick: Game.time,
+    roomName: roomName || null,
+    energyAvailable: room ? room.energyAvailable : 0,
+    energyCapacityAvailable: room ? room.energyCapacityAvailable : 0,
+    desiredPlan: makeBaseHarvestPlanDiag(desiredPlan),
+    sources: {},
+    decisions: []
+  };
+  if (!roomName || !room) {
+    return { desiredPlan: desiredPlan, diag: diag, sources: [] };
+  }
+
+  var sources = room.find(FIND_SOURCES) || [];
+  for (var s = 0; s < sources.length; s++) {
+    diag.sources[sources[s].id] = createBaseHarvestSourceRecord();
+  }
+
+  var q = ensureRoomQueue(roomName);
+  for (var qi = 0; qi < q.length; qi++) {
+    var item = q[qi];
+    if (!isBaseHarvestQueueItem(item)) continue;
+    var qSourceId = getBaseHarvestQueueSourceId(item);
+    if (!qSourceId || !diag.sources[qSourceId]) {
+      diag.decisions.push({
+        action: 'ignoreQueuedBaseHarvest',
+        reason: 'missing-or-unknown-source',
+        queueIndex: qi
+      });
+      continue;
+    }
+    var qRec = diag.sources[qSourceId];
+    qRec.queued++;
+    if (item.baseHarvestSpawnMode === 'upgradeReplacement' || item.replaceCreepName || item.replacementFor) {
+      qRec.replacementQueued = true;
+    }
+  }
+
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory) continue;
+    if (!isBaseHarvestRole(creep.memory.role)) continue;
+    if (getCreepHomeRoomName(creep) !== roomName) continue;
+    var sourceId = getBaseHarvestSourceIdFromMemory(creep.memory);
+    if (!sourceId || !diag.sources[sourceId]) continue;
+
+    var rec = diag.sources[sourceId];
+    rec.live++;
+    if (!creep.spawning) {
+      rec.activeLive++;
+      rec.hasCoverage = true;
+    }
+
+    var bodyCost = getCreepBodyCost(creep);
+    if (bodyCost > rec.bestLiveCost) {
+      rec.bestLiveCost = bodyCost;
+      rec.bestLiveName = creep.name;
+      rec.bestLiveSignature = getCreepBodySignature(creep);
+    }
+
+    var ttl = typeof creep.ticksToLive === 'number' ? creep.ticksToLive : null;
+    if (ttl !== null && (rec.lowestTtl === null || ttl < rec.lowestTtl)) {
+      rec.lowestTtl = ttl;
+      rec.lowestTtlName = creep.name;
+    }
+
+    if (creep.memory.baseHarvestSpawnMode === 'upgradeReplacement' && creep.memory.replacementFor) {
+      rec.replacementInProgress = true;
+      rec.replacementQueued = true;
+    }
+
+    var source = Game.getObjectById(sourceId);
+    if (source && isBaseHarvestSafelyHarvesting(creep, source) && bodyCost > rec.bestSafeLiveCost) {
+      rec.bestSafeLiveCost = bodyCost;
+      rec.bestSafeLiveName = creep.name;
+    }
+  }
+
+  for (var si = 0; si < sources.length; si++) {
+    var sid = sources[si].id;
+    var srcRec = diag.sources[sid];
+    srcRec.emergencyNeeded = srcRec.live <= 0 && srcRec.queued <= 0;
+    if (desiredPlan && srcRec.bestSafeLiveName && desiredPlan.cost > srcRec.bestLiveCost &&
+        !srcRec.replacementQueued && !srcRec.replacementInProgress) {
+      srcRec.upgradeNeeded = true;
+    }
+    if (srcRec.emergencyNeeded) {
+      srcRec.reason = 'no-active-baseharvest-coverage';
+    } else if (srcRec.upgradeNeeded) {
+      srcRec.reason = 'safe-live-body-below-room-capacity-plan';
+    } else if (srcRec.replacementQueued) {
+      srcRec.reason = 'replacement-already-queued-or-active';
+    } else if (srcRec.queued > 0 && srcRec.activeLive <= 0) {
+      srcRec.reason = 'waiting-for-queued-baseharvest';
+    } else if (srcRec.live > 0 && srcRec.activeLive <= 0) {
+      srcRec.reason = 'baseharvest-spawning';
+    } else {
+      srcRec.reason = 'covered';
+    }
+  }
+
+  ensureRoomMemory(roomName).lastBaseHarvestBodyPlan = diag;
+  return { desiredPlan: desiredPlan, diag: diag, sources: sources };
+}
+
+function removeLegacyBaseHarvestQueueItems(roomName) {
+  // Older saves may have source-less Baseharvest items. Source-aware queueing
+  // will replace them immediately with one item per source, so keeping them can
+  // create duplicate miners with no assignment target.
+  var q = ensureRoomQueue(roomName);
+  var kept = [];
+  var removed = 0;
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (isBaseHarvestQueueItem(item) && !getBaseHarvestQueueSourceId(item)) {
+      removed++;
+      continue;
+    }
+    kept.push(item);
+  }
+  if (removed > 0) {
+    ensureRoomMemory(roomName).lastBaseHarvestLegacyQueueCleanup = {
+      tick: Game.time,
+      removed: removed
+    };
+  }
+  Memory.rooms[roomName].spawnQueue = kept;
+}
+
+function addBaseHarvestPlanFields(opts, plan) {
+  if (!opts || !plan) return opts;
+  opts.desiredBodyCost = plan.cost || 0;
+  opts.desiredBodySignature = plan.signature || '';
+  opts.desiredBodySummary = plan.summary || null;
+  opts.desiredBodyTierIndex = typeof plan.tierIndex === 'number' ? plan.tierIndex : -1;
+  return opts;
+}
+
+function makeQueueSpaceForEmergencyBaseHarvest(roomName) {
+  var q = ensureRoomQueue(roomName);
+  if (q.length < QUEUE_HARD_LIMIT) return true;
+  for (var i = q.length - 1; i >= 0; i--) {
+    var item = q[i];
+    if (isBaseHarvestQueueItem(item) && item.baseHarvestSpawnMode === 'upgradeReplacement') {
+      q.splice(i, 1);
+      ensureRoomMemory(roomName).lastBaseHarvestEmergencyQueueSpace = {
+        tick: Game.time,
+        removedMode: 'upgradeReplacement',
+        removedSourceId: getBaseHarvestQueueSourceId(item),
+        reason: 'emergency-baseharvest-needed-queue-full'
+      };
+      return true;
+    }
+  }
+  return false;
+}
+
+function enqueueBaseHarvestForSource(roomName, sourceId, mode, desiredPlan, extra) {
+  if (mode === 'emergency' && !makeQueueSpaceForEmergencyBaseHarvest(roomName)) {
+    return false;
+  }
+  var opts = {
+    home: roomName,
+    sourceId: sourceId,
+    assignedSource: sourceId,
+    baseHarvestSpawnMode: mode,
+    created: Game.time,
+    priority: mode === 'upgradeReplacement'
+      ? BASEHARVEST_UPGRADE_PRIORITY
+      : (mode === 'emergency' ? BASEHARVEST_EMERGENCY_PRIORITY : BASEHARVEST_NORMAL_PRIORITY)
+  };
+  addBaseHarvestPlanFields(opts, desiredPlan);
+  if (extra) {
+    for (var key in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, key)) {
+        opts[key] = extra[key];
+      }
+    }
+  }
+  return enqueue(roomName, 'Baseharvest', opts);
+}
+
+function queueBaseHarvestSourceNeeds(room, report) {
+  if (!room || !report || !report.diag || !report.sources) return;
+  var roomName = room.name;
+  var sources = report.sources || [];
+  var desiredPlan = report.desiredPlan;
+  for (var i = 0; i < sources.length; i++) {
+    var source = sources[i];
+    var rec = report.diag.sources[source.id];
+    if (!rec) continue;
+
+    if (rec.emergencyNeeded) {
+      if (enqueueBaseHarvestForSource(roomName, source.id, 'emergency', desiredPlan, {
+        priority: BASEHARVEST_EMERGENCY_PRIORITY
+      })) {
+        rec.queued++;
+        rec.reason = 'queued-emergency-no-active-coverage';
+        report.diag.decisions.push({
+          sourceId: source.id,
+          action: 'enqueue',
+          mode: 'emergency',
+          reason: rec.reason
+        });
+      }
+      continue;
+    }
+
+    if (rec.queued > 0 || rec.replacementQueued) {
+      continue;
+    }
+
+    if (rec.lowestTtlName && rec.lowestTtl !== null && rec.lowestTtl <= (REPLACEMENT_TTL.Baseharvest || 80)) {
+      if (enqueueBaseHarvestForSource(roomName, source.id, 'normal', desiredPlan, {
+        priority: BASEHARVEST_NORMAL_PRIORITY,
+        replaceCreepName: rec.lowestTtlName,
+        replacementFor: rec.lowestTtlName,
+        replaceSourceId: source.id
+      })) {
+        rec.queued++;
+        rec.replacementQueued = true;
+        rec.reason = 'queued-normal-low-ttl-replacement';
+        report.diag.decisions.push({
+          sourceId: source.id,
+          action: 'enqueue',
+          mode: 'normal',
+          replaceCreepName: rec.lowestTtlName,
+          reason: rec.reason
+        });
+      }
+      continue;
+    }
+
+    if (BASEHARVEST_ENABLE_BODY_UPGRADES &&
+        BASEHARVEST_UPGRADE_REPLACEMENTS_ENABLED &&
+        rec.upgradeNeeded &&
+        rec.bestSafeLiveName) {
+      if (enqueueBaseHarvestForSource(roomName, source.id, 'upgradeReplacement', desiredPlan, {
+        priority: BASEHARVEST_UPGRADE_PRIORITY,
+        replaceCreepName: rec.bestSafeLiveName,
+        replacementFor: rec.bestSafeLiveName,
+        replaceSourceId: source.id
+      })) {
+        rec.queued++;
+        rec.replacementQueued = true;
+        rec.reason = 'queued-upgrade-replacement';
+        report.diag.decisions.push({
+          sourceId: source.id,
+          action: 'enqueue',
+          mode: 'upgradeReplacement',
+          replaceCreepName: rec.bestSafeLiveName,
+          reason: rec.reason
+        });
+      }
+    }
+  }
+  ensureRoomMemory(roomName).lastBaseHarvestBodyPlan = report.diag;
+}
+
 function enqueue(roomName, role, opts) {
   var q = ensureRoomQueue(roomName);
   if (q.length >= QUEUE_HARD_LIMIT) {
@@ -405,6 +793,10 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   for (var j = 0; j < q.length; j++) {
     var it = q[j];
     if (!it) continue;
+    if (isBaseHarvestQueueItem(it) && getBaseHarvestQueueSourceId(it)) {
+      kept.push(it);
+      continue;
+    }
     var left = remaining[it.role] || 0;
     var usedSoFar = used[it.role] || 0;
     if (usedSoFar < left) {
@@ -1343,6 +1735,7 @@ function fillQueueForRoom(C, room) {
   var roomName = room.name;
   pruneBlockedLunaQueueItems(roomName);
   cleanupRetiredCourierState(roomName);
+  removeLegacyBaseHarvestQueueItems(roomName);
 
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
@@ -1407,6 +1800,7 @@ function fillQueueForRoom(C, room) {
   };
 
   pruneOverfilledQueue(roomName, quotas, C);
+  var baseHarvestCoverageReport = buildBaseHarvestCoverageReport(room);
 
   // Iterate quotas in plain English order so future maintainers can eyeball
   // which roles will be enqueued before touching the code.
@@ -1415,6 +1809,10 @@ function fillQueueForRoom(C, room) {
   var lunaSlotPlan = null;
   for (var i = 0; i < roles.length; i++) {
     var role = roles[i];
+    if (role === 'Baseharvest') {
+      queueBaseHarvestSourceNeeds(room, baseHarvestCoverageReport);
+      continue;
+    }
     var limit = quotas[role] || 0;
     var canonical = canonicalRole(role);
     var active = getRoomLocalLiveCount(C, roomName, canonical);
@@ -1504,7 +1902,325 @@ function pickLunaSourceForQueue(plan) {
   return best;
 }
 
+function countLiveLocalRoleDirect(roomName, roleName) {
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory) continue;
+    if (canonicalRole(creep.memory.role) !== roleName) continue;
+    if (getCreepHomeRoomName(creep) !== roomName) continue;
+    if (creep.spawning) continue;
+    count++;
+  }
+  return count;
+}
+
+function sourceHasLiveBaseHarvestCoverage(roomName, sourceId) {
+  if (!roomName || !sourceId) return false;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory) continue;
+    if (!isBaseHarvestRole(creep.memory.role)) continue;
+    if (getCreepHomeRoomName(creep) !== roomName) continue;
+    if (getBaseHarvestSourceIdFromMemory(creep.memory) !== sourceId) continue;
+    if (creep.spawning) continue;
+    return true;
+  }
+  return false;
+}
+
+function roomHasBaseHarvestEmergency(room) {
+  if (!room) return false;
+  var sources = room.find(FIND_SOURCES) || [];
+  for (var i = 0; i < sources.length; i++) {
+    if (!sourceHasLiveBaseHarvestCoverage(room.name, sources[i].id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function roomInBaseRecoveryDanger(room) {
+  if (!room) return true;
+  if (countLiveLocalRoleDirect(room.name, 'Queen') < 1) return true;
+  if (countLiveLocalRoleDirect(room.name, 'Trucker') < 1) return true;
+  if (roomHasBaseHarvestEmergency(room)) return true;
+  return false;
+}
+
+function queueHasCriticalBaseNeedAfter(q, startIndex, room) {
+  for (var i = startIndex + 1; i < q.length; i++) {
+    var item = q[i];
+    if (!item) continue;
+    if (item.retryAt && Game.time < item.retryAt) continue;
+    var role = canonicalRole(item.role);
+    if (role === 'Queen' || role === 'Trucker') return true;
+    if (role === 'BaseHarvest') {
+      var mode = item.baseHarvestSpawnMode || 'normal';
+      var sourceId = getBaseHarvestQueueSourceId(item);
+      if (mode === 'emergency') return true;
+      if (sourceId && room && !sourceHasLiveBaseHarvestCoverage(room.name, sourceId)) return true;
+    }
+  }
+  return false;
+}
+
+function stampBaseHarvestDesiredPlanOnItem(item, desiredPlan) {
+  if (!item || !desiredPlan) return;
+  item.desiredBodyCost = desiredPlan.cost || 0;
+  item.desiredBodySignature = desiredPlan.signature || '';
+  item.desiredBodySummary = desiredPlan.summary || null;
+  item.desiredBodyTierIndex = typeof desiredPlan.tierIndex === 'number' ? desiredPlan.tierIndex : -1;
+}
+
+function writeBaseHarvestSpawnGate(room, item, minEnergy, action, reason) {
+  if (!room) return;
+  ensureRoomMemory(room.name).lastBaseHarvestSpawnGate = {
+    tick: Game.time,
+    role: item ? item.role : null,
+    mode: item ? (item.baseHarvestSpawnMode || 'normal') : null,
+    sourceId: item ? (item.sourceId || item.replaceSourceId || item.assignedSource || null) : null,
+    energyAvailable: room.energyAvailable || 0,
+    energyCapacityAvailable: room.energyCapacityAvailable || 0,
+    desiredBodyCost: item ? (item.desiredBodyCost || 0) : 0,
+    minEnergy: minEnergy || 0,
+    action: action,
+    reason: reason
+  };
+}
+
+function evaluateBaseHarvestSpawnGate(room, item, q, itemIndex) {
+  var minEnergy = minEnergyFor(item.role);
+  var energyAvailable = room.energyAvailable || 0;
+  var desiredPlan = getBaseHarvestDesiredPlan(room);
+  var sourceId = getBaseHarvestQueueSourceId(item);
+  var mode = item.baseHarvestSpawnMode || 'normal';
+  var age = Game.time - (item.created || Game.time);
+  var desiredCost = minEnergy;
+  var hasCoverage = sourceHasLiveBaseHarvestCoverage(room.name, sourceId);
+  var criticalBehind = queueHasCriticalBaseNeedAfter(q, itemIndex, room);
+  var recoveryDanger = roomInBaseRecoveryDanger(room);
+
+  if (desiredPlan) {
+    stampBaseHarvestDesiredPlanOnItem(item, desiredPlan);
+    desiredCost = desiredPlan.cost || minEnergy;
+  }
+  if (desiredCost > (room.energyCapacityAvailable || 0) && desiredPlan) {
+    desiredCost = desiredPlan.cost || minEnergy;
+  }
+
+  if (!sourceId) {
+    if (energyAvailable >= minEnergy) {
+      return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'legacy-baseharvest-no-source' };
+    }
+    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-baseharvest' };
+  }
+
+  if (mode === 'emergency' || !hasCoverage) {
+    if (energyAvailable >= minEnergy) {
+      return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'emergency-source-not-covered' };
+    }
+    return { action: 'wait', minEnergy: minEnergy, reason: 'emergency-waiting-for-cheapest-body' };
+  }
+
+  if (!BASEHARVEST_ENABLE_BODY_UPGRADES || !BASEHARVEST_WAIT_FOR_BEST_BODY) {
+    if (energyAvailable >= minEnergy) {
+      return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'body-upgrade-wait-disabled' };
+    }
+    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-baseharvest' };
+  }
+
+  if (mode === 'upgradeReplacement') {
+    var checkedOldName = item.replaceCreepName || item.replacementFor || null;
+    var checkedOldCreep = checkedOldName ? Game.creeps[checkedOldName] : null;
+    var checkedOldSource = sourceId ? Game.getObjectById(sourceId) : null;
+    if (!checkedOldCreep || !checkedOldCreep.memory) {
+      if (!hasCoverage) {
+        item.baseHarvestSpawnMode = 'emergency';
+        return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-missing-source-now-emergency' };
+      }
+      return { action: 'skip', minEnergy: minEnergy, reason: 'old-creep-missing-upgrade-cancelled' };
+    }
+    if (typeof checkedOldCreep.ticksToLive === 'number' && checkedOldCreep.ticksToLive <= BASEHARVEST_CRITICAL_TTL) {
+      item.baseHarvestSpawnMode = 'normal';
+      return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-creep-critical-ttl' };
+    }
+    if (!isBaseHarvestSafelyHarvesting(checkedOldCreep, checkedOldSource)) {
+      item.baseHarvestSpawnMode = 'normal';
+      return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-creep-not-safe-for-wait' };
+    }
+    if (energyAvailable >= desiredCost) {
+      return { action: 'spawn', energyForSpawn: desiredCost, minEnergy: minEnergy, reason: 'desired-body-affordable' };
+    }
+    if (energyAvailable < minEnergy) {
+      return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-baseharvest' };
+    }
+    if (recoveryDanger || criticalBehind) {
+      item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
+      item.baseHarvestDeferredAt = Game.time;
+      return { action: 'defer', minEnergy: minEnergy, reason: recoveryDanger ? 'base-recovery-danger' : 'critical-role-behind' };
+    }
+    if (age >= BASEHARVEST_MAX_UPGRADE_WAIT_TICKS) {
+      return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'max-upgrade-wait-reached' };
+    }
+    return { action: 'wait', minEnergy: minEnergy, reason: 'waiting-for-room-capacity-body' };
+  }
+
+  if (energyAvailable >= desiredCost) {
+    return { action: 'spawn', energyForSpawn: desiredCost, minEnergy: minEnergy, reason: 'desired-body-affordable' };
+  }
+
+  if (energyAvailable < minEnergy) {
+    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-baseharvest' };
+  }
+
+  if (item.replaceCreepName || item.replacementFor) {
+    var normalOldName = item.replaceCreepName || item.replacementFor;
+    var normalOldCreep = Game.creeps[normalOldName];
+    if (!normalOldCreep || !normalOldCreep.memory) {
+      if (!hasCoverage) {
+        return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'normal-replacement-old-missing-source-now-emergency' };
+      }
+      return { action: 'skip', minEnergy: minEnergy, reason: 'normal-replacement-old-missing-cancelled' };
+    }
+    if (typeof normalOldCreep.ticksToLive === 'number' &&
+        normalOldCreep.ticksToLive <= BASEHARVEST_REPLACEMENT_SAFE_TTL) {
+      return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'normal-replacement-old-ttl-low' };
+    }
+  }
+
+  if (criticalBehind) {
+    item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
+    item.baseHarvestDeferredAt = Game.time;
+    return { action: 'defer', minEnergy: minEnergy, reason: 'critical-role-behind' };
+  }
+  if (age >= BASEHARVEST_MAX_UPGRADE_WAIT_TICKS) {
+    return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'max-normal-wait-reached' };
+  }
+  return { action: 'wait', minEnergy: minEnergy, reason: 'normal-covered-source-waiting-for-better-body' };
+}
+
+function isNonBlockingBaseHarvestQueuedWait(item) {
+  if (!isBaseHarvestQueueItem(item)) return false;
+  return item.baseHarvestSpawnMode === 'upgradeReplacement' || item.baseHarvestDeferredAt === Game.time;
+}
+
 function dequeueAndSpawn(spawner) {
+  // Safety-first dequeue: BaseHarvest upgrades may wait for a full room body,
+  // but only when they are not blocking Queen, Trucker, or emergency miners.
+  if (!spawner || spawner.spawning) return false;
+  var room = spawner.room;
+  var roomName = room.name;
+  var q = ensureRoomQueue(roomName);
+  if (!q.length) {
+    if (tickEvery(DBG_EVERY)) {
+      dlog('[Queue]', roomName, 'empty (energy', energyStatus(room) + ')');
+    }
+    return false;
+  }
+
+  q.sort(compareQueueItems);
+
+  var skippedNonBlockingBaseHarvest = false;
+  for (var pickIndex = 0; pickIndex < q.length; pickIndex++) {
+    var item = q[pickIndex];
+    if (!item) continue;
+
+    if (item.retryAt && Game.time < item.retryAt) {
+      if (isNonBlockingBaseHarvestQueuedWait(item)) {
+        skippedNonBlockingBaseHarvest = true;
+        continue;
+      }
+      if (!skippedNonBlockingBaseHarvest) {
+        if (tickEvery(DBG_EVERY)) {
+          dlog('[Queue]', roomName, 'head priority cooling down');
+        }
+        return false;
+      }
+      continue;
+    }
+
+    var needed = minEnergyFor(item.role);
+    var spawnResource = null;
+    var gate = null;
+
+    if (isBaseHarvestQueueItem(item)) {
+      gate = evaluateBaseHarvestSpawnGate(room, item, q, pickIndex);
+      writeBaseHarvestSpawnGate(room, item, gate.minEnergy || needed, gate.action, gate.reason);
+      if (gate.action === 'skip') {
+        q.splice(pickIndex, 1);
+        pickIndex--;
+        skippedNonBlockingBaseHarvest = true;
+        continue;
+      }
+      if (gate.action === 'defer') {
+        skippedNonBlockingBaseHarvest = true;
+        continue;
+      }
+      if (gate.action === 'wait') {
+        if (tickEvery(DBG_EVERY)) {
+          dlog('[BaseHarvestGate]', roomName, 'mode', item.baseHarvestSpawnMode || 'normal',
+            'need', item.desiredBodyCost || needed, 'have', room.energyAvailable, gate.reason);
+        }
+        return false;
+      }
+      if (gate.action === 'spawn' || gate.action === 'downgrade') {
+        spawnResource = gate.energyForSpawn || room.energyAvailable || 0;
+      }
+    } else {
+      if ((room.energyAvailable || 0) < needed) {
+        var waitingRole = canonicalRole(item.role);
+        if (waitingRole === 'Queen' || waitingRole === 'Trucker') {
+          if (tickEvery(DBG_EVERY)) {
+            dlog('[QueueHold]', roomName, 'critical role', item.role,
+              'need', needed, 'have', room.energyAvailable);
+          }
+          return false;
+        }
+        if (!skippedNonBlockingBaseHarvest) {
+          if (tickEvery(DBG_EVERY)) {
+            dlog('[QueueHold]', roomName, 'prio', item.priority, 'role', item.role,
+              'need', needed, 'have', room.energyAvailable);
+          }
+          return false;
+        }
+        continue;
+      }
+    }
+
+    dlog('[SpawnTry]', roomName, 'role=', item.role, 'prio=', item.priority,
+      'age=', (Game.time - item.created), 'energy=', energyStatus(room));
+
+    if (spawnResource === null && spawnLogic && typeof spawnLogic.Calculate_Spawn_Resource === 'function') {
+      spawnResource = spawnLogic.Calculate_Spawn_Resource(spawner);
+    }
+
+    var ok = false;
+    if (spawnLogic && typeof spawnLogic.spawnRole === 'function') {
+      ok = spawnLogic.spawnRole(spawner, item.role, spawnResource, item);
+    }
+
+    if (ok) {
+      dlog('[SpawnOK]', roomName, 'spawned', item.role, 'at', spawner.name);
+      q.splice(pickIndex, 1);
+      return true;
+    }
+
+    item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
+    dlog('[SpawnWait]', roomName, item.role, 'backoff to', item.retryAt,
+      '(energy', energyStatus(room) + ')');
+    return false;
+  }
+
+  if (tickEvery(DBG_EVERY)) {
+    dlog('[Queue]', roomName, 'no spawnable item after non-blocking waits');
+  }
+  return false;
+}
+
+function dequeueAndSpawnLegacy(spawner) {
   // Dequeue is the only place a persistent queue item becomes a creep. It keeps
   // priority order stable, respects retry cooldowns, checks minimum energy, and
   // delegates the actual body/memory creation to spawn.logic.spawnRole().
