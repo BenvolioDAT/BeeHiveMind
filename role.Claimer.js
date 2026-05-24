@@ -1,5 +1,7 @@
 'use strict';
 
+var BeeToolbox = require('BeeToolbox');
+
 // Shared debug + tuning config (copied from role.BeeWorker for consistency)
 var CFG = Object.freeze({
   // --- Debug toggles (shared) ---
@@ -66,40 +68,28 @@ var CFG = Object.freeze({
   // =========================
   // Debug helpers
   // =========================
-  function debugSay(creep, msg) {
-    if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+  // Shared BeeToolbox helpers keep the common creep.say/RoomVisual guard code
+  // consistent across roles. Claimer still keeps debugLabel local because that
+  // label uses a background style the generic ring/line helpers do not model.
+  function debugOptions() {
+    return {
+      enabled: CFG.DEBUG_DRAW,
+      width: CFG.DRAW.WIDTH,
+      opacity: CFG.DRAW.OPACITY,
+      font: CFG.DRAW.FONT
+    };
   }
 
-  // Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
-  function getTargetPosition(target) {
-    if (!target) return null;
-    if (target.pos) return target.pos;
-    if (target.x != null && target.y != null && target.roomName) return target;
-    return null;
+  function debugSay(creep, msg) {
+    BeeToolbox.sayIfDebugEnabled(creep, msg, CFG.DEBUG_SAY);
   }
 
   function debugDrawLine(creep, target, color, label) {
-    if (!CFG.DEBUG_DRAW || !creep || !target) return;
-    var room = creep.room; if (!room || !room.visual) return;
-    var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
-    try {
-      room.visual.line(creep.pos, tpos, {
-        color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
-      });
-      if (label) {
-        room.visual.text(label, tpos.x, tpos.y - 0.3, {
-          color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
-        });
-      }
-    } catch (e) {}
+    BeeToolbox.drawDebugLine(creep, target, color, label, debugOptions());
   }
 
   function debugRing(room, pos, color, text) {
-    if (!CFG.DEBUG_DRAW || !room || !room.visual || !pos) return;
-    try {
-      room.visual.circle(pos, { radius: 0.5, fill: "transparent", stroke: color, opacity: CFG.DRAW.OPACITY, width: CFG.DRAW.WIDTH });
-      if (text) room.visual.text(text, pos.x, pos.y - 0.6, { color: color, font: CFG.DRAW.FONT, opacity: CFG.DRAW.OPACITY, align: "center" });
-    } catch (e) {}
+    BeeToolbox.drawDebugRing(room, pos, color, text, debugOptions());
   }
 
   function debugLabel(room, pos, text, color) {

@@ -43,8 +43,10 @@ var CONFIG = {
 function _posOf(t){ return t && t.pos ? t.pos : t; }
 function _roomOf(p){ return p && Game.rooms[p.roomName]; }
 
+// Only speech is generic here. Dismantler line/ring visuals keep custom
+// midpoint labels, radii, and HUD backgrounds that BeeToolbox does not own.
 function debugSay(creep, msg){
-  if (CONFIG.DEBUG_SAY && creep && creep.say) creep.say(msg, true);
+  BeeToolbox.sayIfDebugEnabled(creep, msg, CONFIG.DEBUG_SAY);
 }
 function debugLine(from, to, color, label){
   if (!CONFIG.DEBUG_DRAW || !from || !to) return;

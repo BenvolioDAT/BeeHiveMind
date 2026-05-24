@@ -26,7 +26,9 @@ var CoreConfig = require('core.config');
 function _posOf(t){ return t && t.pos ? t.pos : t; }
 function _roomOf(p){ return p && Game.rooms[p.roomName]; }
 
-function debugSay(creep, msg){ if (CFG.DEBUG_SAY && creep && typeof creep.say === 'function') creep.say(msg, true); }
+// Only the speech helper delegates here. Repair's line/ring helpers stay
+// role-local because they draw midpoint labels and background HUD styling.
+function debugSay(creep, msg){ BeeToolbox.sayIfDebugEnabled(creep, msg, CFG.DEBUG_SAY); }
 function debugLine(from, to, color, label){
   if (!CFG.DEBUG_DRAW || !from || !to) return;
   var f=_posOf(from), t=_posOf(to); if(!f||!t||f.roomName!==t.roomName) return;

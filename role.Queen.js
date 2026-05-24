@@ -21,6 +21,7 @@
 
 const BeeSelectors = require('BeeSelectors');
 const BeeActions = require('BeeActions');
+const BeeToolbox = require('BeeToolbox');
 const MovementManager = require('Movement.Manager');
 const QueenConfig = require('role.Queen.Config');
 
@@ -87,34 +88,26 @@ var CFG = Object.freeze({
 });
 
 // -------------------------
-// Debug helpers (copied for self-containment)
+// Debug helpers
 // -------------------------
+// Shared BeeToolbox debug helpers keep repeated RoomVisual guard and position
+// normalization code out of role files while each role preserves its own flags,
+// colors, widths, and labels.
+function debugOptions() {
+  return {
+    enabled: CFG.DEBUG_DRAW,
+    width: CFG.DRAW.WIDTH,
+    opacity: CFG.DRAW.OPACITY,
+    font: CFG.DRAW.FONT
+  };
+}
+
 function debugSay(creep, msg) {
-  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+  BeeToolbox.sayIfDebugEnabled(creep, msg, CFG.DEBUG_SAY);
 }
 
 function drawLine(creep, target, color, label) {
-  if (!CFG.DEBUG_DRAW || !creep || !target) return;
-  var room = creep.room;
-  if (!room || !room.visual) return;
-  var pos = target.pos || target;
-  if (!pos || pos.roomName !== room.name) return;
-  try {
-    room.visual.line(creep.pos, pos, {
-      color: color,
-      width: CFG.DRAW.WIDTH,
-      opacity: CFG.DRAW.OPACITY,
-      lineStyle: 'solid'
-    });
-    if (label) {
-      room.visual.text(label, pos.x, pos.y - 0.3, {
-        color: color,
-        opacity: CFG.DRAW.OPACITY,
-        font: CFG.DRAW.FONT,
-        align: 'center'
-      });
-    }
-  } catch (e) {}
+  BeeToolbox.drawDebugLine(creep, target, color, label, debugOptions());
 }
 
   // -----------------------------
@@ -424,6 +417,8 @@ function drawLine(creep, target, color, label) {
   function pickWithdrawTask(creep) {
     // Withdrawal source picker. BeeSelectors owns the room scan; Queen applies
     // its preferred source kind order and wraps the chosen target in _task.
+    // This order is gameplay behavior, so keep it role-local until any cleanup
+    // has explicit per-role priority notes and tests.
     var room = creep.room;
     if (!room) return null;
     var pref = (creep.memory && creep.memory.energyPref && creep.memory.energyPref.length)

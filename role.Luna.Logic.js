@@ -65,32 +65,24 @@ var LUNA_REMOTE_INTEL_TTL = CFG.LUNA_REMOTE_INTEL_TTL || 3000;
 // =========================
 // Debug helpers
 // =========================
-function debugSay(creep, msg) {
-  if (CFG.DEBUG_SAY && creep && msg) creep.say(msg, true);
+// BeeToolbox owns the repeated debug say/line plumbing. Luna keeps debugRing
+// role-local because its ring radius/default stroke/RoomVisual width differ
+// from the generic helper and those visuals are useful while tracing remotes.
+function debugOptions() {
+  return {
+    enabled: CFG.DEBUG_DRAW,
+    width: CFG.DRAW.WIDTH,
+    opacity: CFG.DRAW.OPACITY,
+    font: CFG.DRAW.FONT
+  };
 }
 
-// Returns a RoomPosition for any target (object, pos-like, or {x,y,roomName}).
-function getTargetPosition(target) {
-  if (!target) return null;
-  if (target.pos) return target.pos;
-  if (target.x != null && target.y != null && target.roomName) return target;
-  return null;
+function debugSay(creep, msg) {
+  BeeToolbox.sayIfDebugEnabled(creep, msg, CFG.DEBUG_SAY);
 }
 
 function debugDrawLine(creep, target, color, label) {
-  if (!CFG.DEBUG_DRAW || !creep || !target) return;
-  var room = creep.room; if (!room || !room.visual) return;
-  var tpos = getTargetPosition(target); if (!tpos || tpos.roomName !== room.name) return;
-  try {
-    room.visual.line(creep.pos, tpos, {
-      color: color, width: CFG.DRAW.WIDTH, opacity: CFG.DRAW.OPACITY, lineStyle: "solid"
-    });
-    if (label) {
-      room.visual.text(label, tpos.x, tpos.y - 0.3, {
-        color: color, opacity: CFG.DRAW.OPACITY, font: CFG.DRAW.FONT, align: "center"
-      });
-    }
-  } catch (e) {}
+  BeeToolbox.drawDebugLine(creep, target, color, label, debugOptions());
 }
 
 function debugRing(room, pos, color, text) {
@@ -1063,6 +1055,8 @@ function isLunaRoomUnsafe(roomName) {
   // Combined safety check used before assignment, travel, harvesting, and queue
   // pruning. Visible rooms can clear generic stale danger via BeeToolbox, but
   // dangerous live conditions are stamped back into Memory for later ticks.
+  // Do not collapse this into the generic remote helper without behavior tests:
+  // Luna also owns source-level blocks and treats scout-only hostiles specially.
   if (!roomName) return false;
   var room = Game.rooms[roomName];
   if (room) refreshVisibleLunaSafety(room);
