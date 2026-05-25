@@ -674,14 +674,14 @@ function runHarvestPhase(creep) {
   var container = getContainerAtOrAdjacent(creep.pos);
   if (transferToSourceLink(creep, source)) return;
 
-  if (hasEnergyCollector() && container && creep.pos.isEqualTo(container.pos)) {
+  if (hasEnergyCollector() && container && creep.pos.getRangeTo(container) <= 1) {
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
       var transferResult = creep.transfer(container, RESOURCE_ENERGY);
-      if (transferResult === ERR_FULL) {
+      if (transferResult === ERR_FULL && creep.pos.isEqualTo(container.pos)) {
         debugSay(creep, '⬇️');
         creep.drop(RESOURCE_ENERGY);
       } else if (transferResult === ERR_NOT_IN_RANGE) {
-        creep.travelTo(container.pos, { range: 0, reusePath: CFG.TRAVEL_REUSE });
+        creep.travelTo(container.pos, { range: 1, reusePath: CFG.TRAVEL_REUSE });
         return;
       }
     }
@@ -744,23 +744,28 @@ function runCollectorOffload(creep) {
     return;
   }
 
+  if (creep.pos.getRangeTo(container) <= 1) {
+    debugSay(creep, '📦');
+    var transferResult = creep.transfer(container, RESOURCE_ENERGY);
+    if (transferResult === OK) return;
+    if (transferResult === ERR_NOT_IN_RANGE) {
+      creep.travelTo(container.pos, { range: 1, reusePath: CFG.TRAVEL_REUSE });
+      return;
+    }
+    if (transferResult === ERR_FULL && creep.pos.isEqualTo(container.pos)) {
+      debugSay(creep, '⬇️');
+      creep.drop(RESOURCE_ENERGY);
+      return;
+    }
+    return;
+  }
+
   if (!creep.pos.isEqualTo(container.pos)) {
     debugSay(creep, '📦→');
     debugDrawLine(creep, container, CFG.DRAW.OFFLOAD, 'SEAT');
-    creep.travelTo(container.pos, { range: 0, reusePath: CFG.TRAVEL_REUSE });
+    creep.travelTo(container.pos, { range: 1, reusePath: CFG.TRAVEL_REUSE });
     return;
   }
-
-  debugSay(creep, '📦');
-  var transferResult = creep.transfer(container, RESOURCE_ENERGY);
-  if (transferResult === OK) return;
-  if (transferResult === ERR_NOT_IN_RANGE) {
-    creep.travelTo(container.pos, { range: 0, reusePath: CFG.TRAVEL_REUSE });
-    return;
-  }
-
-  debugSay(creep, '⬇️');
-  creep.drop(RESOURCE_ENERGY);
 }
 
 function runOffloadPhase(creep) {

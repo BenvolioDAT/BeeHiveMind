@@ -1588,6 +1588,86 @@ function upsertRemoteContainerStatus(creep, source, container) {
     });
   }
 
+  function getRemoteSeatPosFromMemory(creep) {
+    if (!creep || !creep.memory) return null;
+    if (typeof creep.memory.seatX !== 'number' ||
+        typeof creep.memory.seatY !== 'number' ||
+        !creep.memory.seatRoom) {
+      return null;
+    }
+    return new RoomPosition(creep.memory.seatX, creep.memory.seatY, creep.memory.seatRoom);
+  }
+
+  function rememberRemoteSeat(creep, pos) {
+    if (!creep || !creep.memory || !pos) return;
+    creep.memory.seatX = pos.x;
+    creep.memory.seatY = pos.y;
+    creep.memory.seatRoom = pos.roomName;
+  }
+
+  function remoteSeatBelongsToSource(pos, source) {
+    if (!pos || !source) return false;
+    var seats = SourceWorkerManager.buildHarvestSeatList(source);
+    var key = SourceWorkerManager.getHarvestSeatKey(pos);
+    for (var i = 0; i < seats.length; i++) {
+      if (SourceWorkerManager.getHarvestSeatKey(seats[i]) === key) return true;
+    }
+    return false;
+  }
+
+  function collectRemoteReservedSeats(sourceId, roomName, excludeName) {
+    var reserved = {};
+    if (!sourceId || !roomName) return reserved;
+    for (var name in Game.creeps) {
+      if (!Game.creeps.hasOwnProperty(name)) continue;
+      if (excludeName && name === excludeName) continue;
+      var other = Game.creeps[name];
+      if (!other || !other.memory) continue;
+      var roleName = other.memory.role ? String(other.memory.role).toLowerCase() : '';
+      var taskName = other.memory.task ? String(other.memory.task).toLowerCase() : '';
+      if (taskName !== 'veinseeker' && roleName !== 'veinseeker') continue;
+      if (other.memory.sourceId !== sourceId) continue;
+      if (other.memory.targetRoom !== roomName) continue;
+      var seat = getRemoteSeatPosFromMemory(other);
+      if (!seat) continue;
+      reserved[SourceWorkerManager.getHarvestSeatKey(seat)] = other.name;
+    }
+    return reserved;
+  }
+
+  function writeRemoteSeatProblem(creep, source, reason, anchorPos) {
+    if (!source || !source.id || !creep || !creep.memory) return;
+    var roomName = creep.memory.targetRoom || (source.pos && source.pos.roomName);
+    var srec = getSourceMemory(roomName, source.id);
+    srec.containerSeatProblem = {
+      tick: Game.time,
+      reason: reason || 'remote-no-open-compatible-seat',
+      creep: creep.name,
+      anchor: anchorPos ? { x: anchorPos.x, y: anchorPos.y, roomName: anchorPos.roomName } : null
+    };
+  }
+
+  function chooseRemoteHarvestSeat(creep, source, anchorPos) {
+    var reserved = collectRemoteReservedSeats(source.id, source.pos.roomName, creep.name);
+    var current = getRemoteSeatPosFromMemory(creep);
+    if (current && remoteSeatBelongsToSource(current, source)) {
+      var reservedBy = reserved[SourceWorkerManager.getHarvestSeatKey(current)];
+      if ((!reservedBy || reservedBy === creep.name) &&
+          !SourceWorkerManager.isTileOccupiedByAnyCreep(current, creep.name)) {
+        return current;
+      }
+    }
+
+    var seat = SourceWorkerManager.chooseOpenHarvestSeat(source, creep.name, reserved);
+    if (seat) {
+      rememberRemoteSeat(creep, seat);
+      return seat;
+    }
+
+    writeRemoteSeatProblem(creep, source, 'remote-no-open-compatible-seat', anchorPos);
+    return null;
+  }
+
   function shouldRepairAssignedContainer(creep, container) {
     if (!CFG.remoteContainerRepairEnabled) return false;
     if (!creep || !container || !container.hitsMax) return false;
@@ -1983,28 +2063,39 @@ function upsertRemoteContainerStatus(creep, source, container) {
       creep.memory.assignedSource = sid;
       debugRing(creep.room, src.pos, CFG.DRAW.SRC_COLOR, 'SRC');
 
+      var anchorPos = (container && container.pos) || (site && site.pos) || plannedPos || null;
+      var seatPos = anchorPos ? chooseRemoteHarvestSeat(creep, src, anchorPos) : chooseRemoteHarvestSeat(creep, src, null);
+      var usingFallbackSeat = false;
+      if (!seatPos && anchorPos) {
+        usingFallbackSeat = true;
+        seatPos = anchorPos;
+        rememberRemoteSeat(creep, seatPos);
+        writeRemoteSeatProblem(creep, src, 'remote-compatible-seat-fallback-to-anchor', anchorPos);
+      } else if (seatPos) {
+        rememberRemoteSeat(creep, seatPos);
+      }
+
       if (container) {
         creep.memory.assignedContainer = container.id;
         creep.memory.containerId = container.id;
         srec.containerId = container.id;
-        creep.memory.seatX = container.pos.x;
-        creep.memory.seatY = container.pos.y;
-        creep.memory.seatRoom = container.pos.roomName;
+        delete creep.memory.planX;
+        delete creep.memory.planY;
         upsertRemoteContainerStatus(creep, src, container);
         debugRing(creep.room, container.pos, CFG.DRAW.SEAT, 'SEAT');
       } else if (site) {
         delete creep.memory.assignedContainer;
-        creep.memory.seatX = site.pos.x;
-        creep.memory.seatY = site.pos.y;
-        creep.memory.seatRoom = site.pos.roomName;
+        delete creep.memory.containerId;
+        delete creep.memory.planX;
+        delete creep.memory.planY;
         debugRing(creep.room, site.pos, CFG.DRAW.BUILD_COLOR, 'SITE');
       } else {
         delete creep.memory.assignedContainer;
-        if (creep.memory.planX != null && creep.memory.planY != null) {
-          creep.memory.seatX = creep.memory.planX;
-          creep.memory.seatY = creep.memory.planY;
-          creep.memory.seatRoom = creep.memory.targetRoom;
-          debugRing(creep.room, new RoomPosition(creep.memory.planX, creep.memory.planY, creep.memory.targetRoom), CFG.DRAW.SEAT, 'PLAN');
+        delete creep.memory.containerId;
+        if (plannedPos) {
+          creep.memory.planX = plannedPos.x;
+          creep.memory.planY = plannedPos.y;
+          debugRing(creep.room, plannedPos, CFG.DRAW.SEAT, 'PLAN');
         }
       }
 
@@ -2020,9 +2111,35 @@ function upsertRemoteContainerStatus(creep, source, container) {
       if (container && creep.memory.sourceWorkerRepairingContainer) creep.memory.state = 'REPAIR_CONTAINER';
       else if (!container && site) creep.memory.state = 'BUILD_CONTAINER';
 
-      if (container && !creep.pos.isEqualTo(container.pos)) { debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT'); veinseekerTravelToAssigned(creep, container, { range: 0, reusePath: 10 }, sid, 'seat-travel'); return; }
-      if (!container && site && !creep.pos.isEqualTo(site.pos)) { debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE'); veinseekerTravelToAssigned(creep, site, { range: 0, reusePath: 10 }, sid, 'site-travel'); return; }
-      if (!container && !site && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); veinseekerTravelToAssigned(creep, src, { range: 1, reusePath: 10 }, sid, 'source-travel'); return; }
+      var transferredToContainerThisTick = false;
+      var builtSiteThisTick = false;
+      if (container && !creep.memory.sourceWorkerRepairingContainer &&
+          seatPos && !creep.pos.isEqualTo(seatPos) &&
+          creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
+          creep.pos.getRangeTo(container) <= 1 &&
+          container.store &&
+          container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+        debugDrawLine(creep, container, CFG.DRAW.OFFLOAD, 'CONT');
+        creep.transfer(container, RESOURCE_ENERGY);
+        transferredToContainerThisTick = true;
+      } else if (!container && site &&
+          seatPos && !creep.pos.isEqualTo(seatPos) &&
+          creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
+          creep.pos.getRangeTo(site) <= 3) {
+        debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE');
+        creep.build(site);
+        builtSiteThisTick = true;
+        upsertRemoteContainerBuildStatus(creep, src, container, site, plannedPos);
+      }
+
+      if (seatPos && !creep.pos.isEqualTo(seatPos)) {
+        if (container) debugDrawLine(creep, container, CFG.DRAW.TRAVEL_COLOR, 'SEAT');
+        else if (site) debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE');
+        else debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC');
+        veinseekerTravelToAssigned(creep, seatPos, { range: 0, reusePath: 10 }, sid, usingFallbackSeat ? 'anchor-travel' : 'seat-travel');
+        return;
+      }
+      if (!seatPos && creep.pos.getRangeTo(src) > 1) { debugDrawLine(creep, src, CFG.DRAW.TRAVEL_COLOR, 'SRC'); veinseekerTravelToAssigned(creep, src, { range: 1, reusePath: 10 }, sid, 'source-travel'); return; }
       clearVeinseekerPathFailure(creep, sid);
 
       if (container && creep.memory.sourceWorkerRepairingContainer) {
@@ -2032,7 +2149,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var withdrawAmount = CFG.remoteContainerRepairWithdrawAmount || 50;
         if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
           if (creep.pos.getRangeTo(container) > 3) {
-            veinseekerTravelToAssigned(creep, container, { range: 3, reusePath: 5 }, sid, 'repair-position');
+            veinseekerTravelToAssigned(creep, seatPos || container.pos, { range: seatPos ? 0 : 3, reusePath: 5 }, sid, 'repair-position');
             return;
           }
           creep.repair(container);
@@ -2043,6 +2160,10 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var maxTake = Math.max(0, available - minEnergy);
         var need = Math.min(withdrawAmount, creep.store.getFreeCapacity(RESOURCE_ENERGY), maxTake);
         if (need > 0) {
+          if (creep.pos.getRangeTo(container) > 1) {
+            veinseekerTravelToAssigned(creep, seatPos || container.pos, { range: seatPos ? 0 : 1, reusePath: 5 }, sid, 'repair-withdraw-position');
+            return;
+          }
           creep.withdraw(container, RESOURCE_ENERGY, need);
           return;
         }
@@ -2056,10 +2177,16 @@ function upsertRemoteContainerStatus(creep, source, container) {
       if (rc === OK) clearVeinseekerPathFailure(creep, sid);
       debugDrawLine(creep, src, CFG.DRAW.SRC_COLOR, 'SRC');
 
-      if (container && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+      if (container && !transferredToContainerThisTick &&
+          creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
+          creep.pos.getRangeTo(container) <= 1 &&
+          container.store &&
+          container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         debugDrawLine(creep, container, CFG.DRAW.OFFLOAD, 'CONT');
         creep.transfer(container, RESOURCE_ENERGY);
-      } else if (!container && site && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      } else if (!container && site && !builtSiteThisTick &&
+          creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
+          creep.pos.getRangeTo(site) <= 3) {
         debugDrawLine(creep, site, CFG.DRAW.BUILD_COLOR, 'SITE');
         creep.build(site);
         upsertRemoteContainerBuildStatus(creep, src, container, site, plannedPos);

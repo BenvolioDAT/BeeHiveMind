@@ -499,16 +499,9 @@ function isHarvestSeatWalkable(pos) {
   return true;
 }
 
-function buildHarvestSeatList(source) {
+function buildRawHarvestSeatList(source) {
   var seats = [];
   if (!source || !source.pos) return seats;
-
-  var container = findSourceContainer(source);
-  if (container && container.pos) {
-    seats.push(container.pos);
-    return seats;
-  }
-
   for (var dx = -1; dx <= 1; dx++) {
     for (var dy = -1; dy <= 1; dy++) {
       if (dx === 0 && dy === 0) continue;
@@ -518,6 +511,259 @@ function buildHarvestSeatList(source) {
   }
   seats.sort(function (a, b) { return (a.y - b.y) || (a.x - b.x); });
   return seats;
+}
+
+function ensureSourceMemoryForSource(source) {
+  if (!source || !source.pos || !source.id) return null;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[source.pos.roomName]) Memory.rooms[source.pos.roomName] = {};
+  if (!Memory.rooms[source.pos.roomName].sources) Memory.rooms[source.pos.roomName].sources = {};
+  if (!Memory.rooms[source.pos.roomName].sources[source.id]) Memory.rooms[source.pos.roomName].sources[source.id] = {};
+  return Memory.rooms[source.pos.roomName].sources[source.id];
+}
+
+function writeContainerPlacementDiag(source, selectedPos, coveredSeats, totalSeats, candidateCount, reason, extra) {
+  var srec = ensureSourceMemoryForSource(source);
+  if (!srec) return;
+  var diag = {
+    tick: Game.time,
+    selected: serializeSeat(selectedPos),
+    coveredSeats: coveredSeats || 0,
+    totalSeats: totalSeats || 0,
+    candidateCount: candidateCount || 0,
+    reason: reason || 'unknown'
+  };
+  if (extra) {
+    for (var key in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, key)) diag[key] = extra[key];
+    }
+  }
+  srec.containerPlacement = diag;
+}
+
+function writeContainerSeatProblem(source, anchor, totalSeats, reason) {
+  var srec = ensureSourceMemoryForSource(source);
+  if (!srec) return;
+  srec.containerSeatProblem = {
+    tick: Game.time,
+    reason: reason || 'no-container-compatible-harvest-seats',
+    anchor: anchor && anchor.pos ? serializeSeat(anchor.pos) : null,
+    anchorType: anchor && anchor.type ? anchor.type : null,
+    totalSeats: totalSeats || 0
+  };
+}
+
+function clearContainerSeatProblem(source) {
+  var srec = ensureSourceMemoryForSource(source);
+  if (srec && srec.containerSeatProblem) delete srec.containerSeatProblem;
+}
+
+function isValidSourceContainerTile(source, pos) {
+  if (!source || !source.pos || !pos || !pos.roomName) return false;
+  if (pos.roomName !== source.pos.roomName) return false;
+  if (pos.x <= 0 || pos.x >= 49 || pos.y <= 0 || pos.y >= 49) return false;
+  if (pos.isEqualTo(source.pos) || pos.getRangeTo(source.pos) > 1) return false;
+
+  var terrain = source.room && typeof source.room.getTerrain === 'function'
+    ? source.room.getTerrain()
+    : new Room.Terrain(pos.roomName);
+  if (terrain.get(pos.x, pos.y) === TERRAIN_MASK_WALL) return false;
+
+  var room = source.room || Game.rooms[pos.roomName];
+  if (!room || typeof room.lookAt !== 'function') return true;
+  var look = room.lookAt(pos.x, pos.y);
+  for (var i = 0; i < look.length; i++) {
+    var item = look[i];
+    if (item.type === LOOK_STRUCTURES || item.type === 'structure') {
+      var structure = item.structure;
+      if (!structure) continue;
+      if (structure.structureType === STRUCTURE_RAMPART && !structure.my) return false;
+      if (structure.structureType !== STRUCTURE_ROAD &&
+          structure.structureType !== STRUCTURE_CONTAINER &&
+          structure.structureType !== STRUCTURE_RAMPART) {
+        return false;
+      }
+    }
+    if (item.type === LOOK_CONSTRUCTION_SITES || item.type === 'constructionSite') {
+      var site = item.constructionSite;
+      if (site && site.structureType !== STRUCTURE_CONTAINER) return false;
+    }
+  }
+  return true;
+}
+
+function countContainerCompatibleSeats(containerPos, seats) {
+  if (!containerPos || !seats || !seats.length) return 0;
+  var count = 0;
+  for (var i = 0; i < seats.length; i++) {
+    var seat = seats[i];
+    if (!seat || seat.roomName !== containerPos.roomName) continue;
+    if (seat.getRangeTo(containerPos) <= 1) count++;
+  }
+  return count;
+}
+
+function buildSourceContainerCandidateList(source, seats) {
+  var candidates = [];
+  if (!source || !source.pos) return candidates;
+  seats = seats || buildRawHarvestSeatList(source);
+  var seatKeys = {};
+  for (var si = 0; si < seats.length; si++) {
+    seatKeys[getHarvestSeatKey(seats[si])] = true;
+  }
+  var terrain = source.room && typeof source.room.getTerrain === 'function'
+    ? source.room.getTerrain()
+    : new Room.Terrain(source.pos.roomName);
+
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var pos = new RoomPosition(source.pos.x + dx, source.pos.y + dy, source.pos.roomName);
+      if (!isValidSourceContainerTile(source, pos)) continue;
+      var terrainMask = terrain ? terrain.get(pos.x, pos.y) : null;
+      candidates.push({
+        pos: pos,
+        coveredSeats: countContainerCompatibleSeats(pos, seats),
+        isHarvestSeat: !!seatKeys[getHarvestSeatKey(pos)],
+        isPlain: terrainMask === 0,
+        terrain: terrainMask
+      });
+    }
+  }
+
+  candidates.sort(function (a, b) {
+    if (b.coveredSeats !== a.coveredSeats) return b.coveredSeats - a.coveredSeats;
+    if (b.isHarvestSeat !== a.isHarvestSeat) return b.isHarvestSeat ? 1 : -1;
+    if (b.isPlain !== a.isPlain) return b.isPlain ? 1 : -1;
+    return (a.pos.y - b.pos.y) || (a.pos.x - b.pos.x);
+  });
+  return candidates;
+}
+
+function selectBestSourceContainerCandidate(source, seats) {
+  var candidates = buildSourceContainerCandidateList(source, seats);
+  if (!candidates.length) return null;
+  var best = candidates[0];
+  best.candidateCount = candidates.length;
+  best.totalSeats = seats ? seats.length : 0;
+  return best;
+}
+
+function getBadSiteRelocationDecision(site, best, currentCovered) {
+  if (!site || !best) return { relocate: false, gain: 0, reason: 'missing-site-or-candidate' };
+  var gain = best.coveredSeats - currentCovered;
+  var minGain = typeof CFG.VEINSEEKER_MIN_CONTAINER_SEAT_COVERAGE_GAIN_TO_RELOCATE === 'number'
+    ? CFG.VEINSEEKER_MIN_CONTAINER_SEAT_COVERAGE_GAIN_TO_RELOCATE
+    : 2;
+  if (gain < minGain) return { relocate: false, gain: gain, reason: 'site-coverage-acceptable' };
+  if (CFG.VEINSEEKER_RELOCATE_BAD_CONTAINER_SITES === false) {
+    return { relocate: false, gain: gain, reason: 'relocation-disabled' };
+  }
+  var maxProgress = typeof CFG.VEINSEEKER_BAD_CONTAINER_SITE_MAX_PROGRESS === 'number'
+    ? CFG.VEINSEEKER_BAD_CONTAINER_SITE_MAX_PROGRESS
+    : 250;
+  var progress = site.progress || 0;
+  if (progress > maxProgress) {
+    return { relocate: false, gain: gain, reason: 'site-not-optimal-progress-too-high' };
+  }
+  if (site.my === false) {
+    return { relocate: false, gain: gain, reason: 'site-not-owned' };
+  }
+  return { relocate: true, gain: gain, reason: 'relocate-low-progress-site' };
+}
+
+function getBestSourceContainerAnchor(source) {
+  if (!source || !source.pos) return null;
+  var seats = buildRawHarvestSeatList(source);
+  var best = selectBestSourceContainerCandidate(source, seats);
+  var candidateCount = best ? best.candidateCount : 0;
+  var container = findSourceContainer(source);
+  if (container && container.pos) {
+    var containerCovered = countContainerCompatibleSeats(container.pos, seats);
+    writeContainerPlacementDiag(source, container.pos, containerCovered, seats.length, candidateCount, 'existing-container');
+    return {
+      type: 'container',
+      container: container,
+      site: null,
+      pos: container.pos,
+      plannedPos: container.pos,
+      coveredSeats: containerCovered,
+      totalSeats: seats.length,
+      candidateCount: candidateCount,
+      best: best
+    };
+  }
+
+  var site = findSourceContainerSite(source);
+  if (site && site.pos) {
+    var siteCovered = countContainerCompatibleSeats(site.pos, seats);
+    var decision = getBadSiteRelocationDecision(site, best, siteCovered);
+    var extra = {};
+    if (decision.reason === 'site-not-optimal-progress-too-high') {
+      extra.warning = 'site-not-optimal-progress-too-high';
+    }
+    writeContainerPlacementDiag(source, site.pos, siteCovered, seats.length, candidateCount, 'existing-container-site', extra);
+    return {
+      type: 'site',
+      container: null,
+      site: site,
+      pos: site.pos,
+      plannedPos: site.pos,
+      coveredSeats: siteCovered,
+      totalSeats: seats.length,
+      candidateCount: candidateCount,
+      best: best,
+      relocationDecision: decision
+    };
+  }
+
+  if (!best) {
+    writeContainerPlacementDiag(source, null, 0, seats.length, 0, 'no-valid-container-candidate');
+    return null;
+  }
+  writeContainerPlacementDiag(source, best.pos, best.coveredSeats, seats.length, best.candidateCount, 'planned-best-seat-coverage');
+  return {
+    type: 'planned',
+    container: null,
+    site: null,
+    pos: best.pos,
+    plannedPos: best.pos,
+    coveredSeats: best.coveredSeats,
+    totalSeats: seats.length,
+    candidateCount: best.candidateCount,
+    best: best
+  };
+}
+
+function buildContainerCompatibleHarvestSeatList(source) {
+  var seats = buildRawHarvestSeatList(source);
+  var anchor = getBestSourceContainerAnchor(source);
+  if (!anchor || !anchor.pos) return seats;
+  var compatible = [];
+  for (var i = 0; i < seats.length; i++) {
+    if (seats[i].getRangeTo(anchor.pos) <= 1) compatible.push(seats[i]);
+  }
+  compatible.sort(function (a, b) { return (a.y - b.y) || (a.x - b.x); });
+  return compatible;
+}
+
+function buildHarvestSeatList(source) {
+  var rawSeats = buildRawHarvestSeatList(source);
+  if (!source || !source.pos) return rawSeats;
+  var anchor = getBestSourceContainerAnchor(source);
+  if (anchor && anchor.pos) {
+    var compatible = [];
+    for (var i = 0; i < rawSeats.length; i++) {
+      if (rawSeats[i].getRangeTo(anchor.pos) <= 1) compatible.push(rawSeats[i]);
+    }
+    compatible.sort(function (a, b) { return (a.y - b.y) || (a.x - b.x); });
+    if (compatible.length) {
+      clearContainerSeatProblem(source);
+      return compatible;
+    }
+    writeContainerSeatProblem(source, anchor, rawSeats.length, 'no-compatible-seats-for-container-anchor');
+  }
+  return rawSeats;
 }
 
 function chooseOpenHarvestSeat(source, creepName, reservedSeats) {
@@ -574,6 +820,7 @@ function findSourceContainer(source) {
   var containers = source.pos.findInRange(FIND_STRUCTURES, 1, {
     filter: function (s) { return s.structureType === STRUCTURE_CONTAINER; }
   });
+  containers.sort(function (a, b) { return (a.pos.y - b.pos.y) || (a.pos.x - b.pos.x); });
   return containers.length ? containers[0] : null;
 }
 
@@ -582,51 +829,50 @@ function findSourceContainerSite(source) {
   var sites = source.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
     filter: function (cs) { return cs.structureType === STRUCTURE_CONTAINER; }
   });
+  sites.sort(function (a, b) { return (a.pos.y - b.pos.y) || (a.pos.x - b.pos.x); });
   return sites.length ? sites[0] : null;
 }
 
 function chooseSourceContainerBuildPosition(source) {
   if (!source || !source.pos || !source.room) return null;
-  var terrain = source.room.getTerrain();
-  var best = null;
-  for (var dx = -1; dx <= 1; dx++) {
-    for (var dy = -1; dy <= 1; dy++) {
-      if (dx === 0 && dy === 0) continue;
-      var x = source.pos.x + dx;
-      var y = source.pos.y + dy;
-      if (x < 1 || x > 48 || y < 1 || y > 48) continue;
-      if (terrain.get(x, y) === TERRAIN_MASK_WALL) continue;
-      var blocked = false;
-      var look = source.room.lookAt(x, y);
-      for (var i = 0; i < look.length; i++) {
-        var item = look[i];
-        if (item.type === 'structure' && item.structure &&
-            item.structure.structureType !== STRUCTURE_CONTAINER &&
-            item.structure.structureType !== STRUCTURE_ROAD &&
-            item.structure.structureType !== STRUCTURE_RAMPART) {
-          blocked = true;
-          break;
-        }
-        if (item.type === 'constructionSite' && item.constructionSite &&
-            item.constructionSite.structureType !== STRUCTURE_CONTAINER &&
-            item.constructionSite.structureType !== STRUCTURE_ROAD) {
-          blocked = true;
-          break;
-        }
-      }
-      if (blocked) continue;
-      var range = source.pos.getRangeTo(x, y);
-      if (!best || range < best.range) best = { x: x, y: y, roomName: source.pos.roomName, range: range };
-    }
+  var seats = buildRawHarvestSeatList(source);
+  var best = selectBestSourceContainerCandidate(source, seats);
+  if (!best) {
+    writeContainerPlacementDiag(source, null, 0, seats.length, 0, 'no-valid-container-candidate');
+    return null;
   }
-  return best;
+  writeContainerPlacementDiag(source, best.pos, best.coveredSeats, seats.length, best.candidateCount, 'planned-best-seat-coverage');
+  return best.pos;
 }
 
 function ensureSourceContainerOrSite(source) {
   var container = findSourceContainer(source);
   if (container) return { container: container, site: null, plannedPos: container.pos };
   var site = findSourceContainerSite(source);
-  if (site) return { container: null, site: site, plannedPos: site.pos };
+  if (site) {
+    var seats = buildRawHarvestSeatList(source);
+    var best = selectBestSourceContainerCandidate(source, seats);
+    var siteCovered = countContainerCompatibleSeats(site.pos, seats);
+    var decision = getBadSiteRelocationDecision(site, best, siteCovered);
+    if (decision.relocate && best && best.pos) {
+      var removeResult = site.remove();
+      if (removeResult === OK) {
+        var createResult = source.room.createConstructionSite(best.pos.x, best.pos.y, STRUCTURE_CONTAINER);
+        var relocatedSite = findSourceContainerSite(source);
+        writeContainerPlacementDiag(source, best.pos, best.coveredSeats, seats.length, best.candidateCount, 'planned-best-seat-coverage', {
+          action: 'relocated-low-progress-site',
+          previous: serializeSeat(site.pos)
+        });
+        return { container: null, site: relocatedSite || null, plannedPos: best.pos, createResult: createResult };
+      }
+    }
+    var extra = {};
+    if (decision.reason === 'site-not-optimal-progress-too-high') {
+      extra.warning = 'site-not-optimal-progress-too-high';
+    }
+    writeContainerPlacementDiag(source, site.pos, siteCovered, seats.length, best ? best.candidateCount : 0, 'existing-container-site', extra);
+    return { container: null, site: site, plannedPos: site.pos };
+  }
   var pos = chooseSourceContainerBuildPosition(source);
   if (pos) {
     var rc = source.room.createConstructionSite(pos.x, pos.y, STRUCTURE_CONTAINER);
@@ -654,7 +900,7 @@ function getPreferredSeatPos(source) {
 
 function getSourceSeatCount(source, maxHarvestersPerSource) {
   if (!source || !source.pos) return 0;
-  var seats = findSourceContainer(source) ? 1 : countWalkableSeatsAround(source.pos);
+  var seats = buildHarvestSeatList(source).length || countWalkableSeatsAround(source.pos);
   var max = typeof maxHarvestersPerSource === 'number'
     ? maxHarvestersPerSource
     : (CFG.MAX_HARVESTERS_PER_SOURCE || 0);
@@ -1037,6 +1283,11 @@ module.exports = {
   roomHasHomeEmergency: roomHasHomeEmergency,
   isWalkable: isWalkable,
   getHarvestSeatKey: getHarvestSeatKey,
+  buildRawHarvestSeatList: buildRawHarvestSeatList,
+  isValidSourceContainerTile: isValidSourceContainerTile,
+  countContainerCompatibleSeats: countContainerCompatibleSeats,
+  getBestSourceContainerAnchor: getBestSourceContainerAnchor,
+  buildContainerCompatibleHarvestSeatList: buildContainerCompatibleHarvestSeatList,
   buildHarvestSeatList: buildHarvestSeatList,
   chooseOpenHarvestSeat: chooseOpenHarvestSeat,
   isTileOccupiedByAlly: isTileOccupiedByAlly,
