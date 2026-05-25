@@ -8,7 +8,7 @@
 //   initialising movement and visuals.
 // * Triggers auxiliary systems (Trade.Energy, planners) at deterministic points.
 // Data touched:
-// * global.__BHM.* (tick caches shared with BeeSelectors, role modules).
+// * global.__BHM.* (tick caches shared with core.selectors, role modules).
 // * Memory.rooms[roomName].spawnQueue (array of spawn jobs).
 // * creep.memory.role for implicit role assignment.
 // Entry point: main.js requires BeeHiveMind and calls run() once per tick.
@@ -21,7 +21,7 @@
 //   planners, dispatches role.run(), resolves movement, then delegates spawn
 //   queues to BeeSpawnManager.
 // * Persistent Memory ownership lives in the specialist modules:
-//   BeeMaintenance owns stale cleanup, SourceEnergy.Manager owns remote Veinseeker
+//   core.maintenance owns stale cleanup, SourceEnergy.Manager owns remote Veinseeker
 //   planning, Movement.Manager owns only transient movement intents, and each
 //   role owns its own creep.memory fields.
 
@@ -36,8 +36,8 @@ var LOG_LEVEL           = CoreLogger.LOG_LEVEL;
 var hiveLog             = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 
 var BeeVisualsSpawnPanel = require('BeeVisuals.SpawnPanel'); // UI overlay for spawn queues
-var BeeSelectors         = require('BeeSelectors');
-var BeeActions           = require('BeeActions');
+var CoreSelectors        = require('core.selectors');
+var MovementActions      = require('Movement.Actions');
 var MovementManager      = require('Movement.Manager');
 var BeeSpawnManager      = require('BeeSpawnManager');
 var Roles                = require('core.roles');
@@ -48,7 +48,7 @@ var RoadPlanner          = require('Planner.Road');
 var TradeEnergy          = require('Trade.Energy');
 var CpuProfiler         = require('core.cpuProfiler');
 var CoreConfig          = require('core.config');
-var BeeSourceEconomy    = require('BeeSourceEconomy');
+var SourceEconomy       = require('Source.Economy');
 
 // Keep references to the role modules so validation can check the intended
 // mapping (e.g. a swapped import would surface as a role name mismatch).
@@ -288,10 +288,10 @@ function refreshSourceEconomyForOwnedRooms() {
   if (!global.__BHM || !global.__BHM.roomsOwned) return;
   for (var i = 0; i < global.__BHM.roomsOwned.length; i++) {
     var room = global.__BHM.roomsOwned[i];
-    BeeSourceEconomy.refreshOwnedRoomSources(room);
-    BeeSourceEconomy.refreshVeinseekerStats(room);
-    BeeSourceEconomy.refreshTruckerCarryStats(room);
-    BeeSourceEconomy.calculatePendingEnergy(room);
+    SourceEconomy.refreshOwnedRoomSources(room);
+    SourceEconomy.refreshVeinseekerStats(room);
+    SourceEconomy.refreshTruckerCarryStats(room);
+    SourceEconomy.calculatePendingEnergy(room);
   }
 }
 function objectValues(obj) {
@@ -308,7 +308,7 @@ function objectValues(obj) {
 // Function header: prepareTickCaches()
 // Inputs: none
 // Output: populated global.__BHM cache for this tick (rooms, spawns, counts, selectors).
-// Side-effects: mutates global.__BHM; calls BeeSelectors.prepareRoomSnapshot for each owned room.
+// Side-effects: mutates global.__BHM; calls core.selectors.prepareRoomSnapshot for each owned room.
 function prepareTickCaches() {
   // Build one tick-local snapshot of rooms, spawns, creeps, role counts,
   // construction sites, remotes, and selector room snapshots. Most downstream
@@ -397,12 +397,12 @@ function prepareTickCaches() {
 
   // Room snapshots for selectors sit at the end so they can reuse the cache fields above.
   var snapshots = Object.create(null);
-  if (BeeSelectors && typeof BeeSelectors.prepareRoomSnapshot === 'function') {
+  if (CoreSelectors && typeof CoreSelectors.prepareRoomSnapshot === 'function') {
     for (var n = 0; n < ownedRooms.length; n++) {
       var snapRoom = ownedRooms[n];
       if (!snapRoom || !snapRoom.name) continue;
       try {
-        snapshots[snapRoom.name] = BeeSelectors.prepareRoomSnapshot(snapRoom);
+        snapshots[snapRoom.name] = CoreSelectors.prepareRoomSnapshot(snapRoom);
       } catch (err) {
         hiveLog.debug('⚠️ Selector snapshot failed for', fmt(snapRoom), err);
         // Teaching moment: catching errors allows the tick to continue even
@@ -446,12 +446,11 @@ var BeeHiveMind = {
     CpuProfiler.measure('initializeMemory', BeeHiveMind.initializeMemory);
     CpuProfiler.measure('migrateLegacySourceWorkersToVeinseeker', migrateLegacySourceWorkersToVeinseeker);
 
-    // Expose action/selectors globally for console debugging and legacy modules
-    // expecting global symbols.
+    // Expose action/selectors globally for console debugging.
     // Teaching tip: doing this up-front ensures any role file that executes
     // later in the tick can immediately access the helpers.
-    if (BeeActions) global.BeeActions = BeeActions;
-    if (BeeSelectors) global.BeeSelectors = BeeSelectors;
+    if (MovementActions) global.MovementActions = MovementActions;
+    if (CoreSelectors) global.CoreSelectors = CoreSelectors;
 
     // Verify role bindings once per tick so missing modules are visible in logs.
     CpuProfiler.measure('validateRoleBindings', validateRoleBindings);

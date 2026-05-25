@@ -8,7 +8,7 @@ Run these from repo root:
 
 ```bash
 node --check main.js
-node --check BeeMaintenance.js
+node --check core.maintenance.js
 node --check BeeSpawnManager.js
 node --check BeeToolbox.js
 ```

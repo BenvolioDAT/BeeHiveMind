@@ -22,12 +22,12 @@ const Logger = require('core.logger');
 const MemoryUtils = require('core.memory');
 
 // Core game logic modules
-const BeeMaintenance = require('BeeMaintenance');
+const Maintenance = require('core.maintenance');
 const BeeVisuals = require('BeeVisuals');
 const BeeHiveMind = require('BeeHiveMind');
-var BeeStructureLogic = require('BeeStructureLogic');
+var StructureLogic = require('Structure.Logic');
 const BeeToolbox = require('BeeToolbox');
-const BeeCombatSquads = require('BeeCombatSquads');
+const CombatSquads = require('Combat.Squads');
 const CpuProfiler = require('core.cpuProfiler');
 require('Traveler');
 
@@ -74,7 +74,7 @@ function ensureFirstSpawnMemory() {
 }
 
 function maintainRepairTargets() {
-    // Repair target ownership starts here: BeeMaintenance finds candidates and
+    // Repair target ownership starts here: core.maintenance finds candidates and
     // this function stores the queue for towers and Repair creeps to consume.
     // Periodically refresh which structures need repairs in each visible room.
     if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
@@ -85,7 +85,7 @@ function maintainRepairTargets() {
 
     for (const room of Object.values(Game.rooms)) {
         const roomMem = MemoryUtils.ensureRoom(room.name);
-        roomMem.repairTargets = BeeMaintenance.findStructuresNeedingRepair(room);
+        roomMem.repairTargets = Maintenance.findStructuresNeedingRepair(room);
     }
 }
 
@@ -144,16 +144,16 @@ module.exports.loop = function () {
     CpuProfiler.start('main.total');
     // --- Intel and housekeeping ---
     CpuProfiler.measure('refreshSourceIntel', refreshSourceIntel);
-    CpuProfiler.measure('BeeMaintenance.cleanUpMemory', BeeMaintenance.cleanUpMemory);
+    CpuProfiler.measure('core.maintenance.cleanUpMemory', Maintenance.cleanUpMemory);
     CpuProfiler.measure('maintainRepairTargets', maintainRepairTargets);
     CpuProfiler.measure('ensureFirstSpawnMemory', ensureFirstSpawnMemory);
 
     // --- Primary AI behaviors ---
     CpuProfiler.measure('BeeHiveMind.run', BeeHiveMind.run);
-    CpuProfiler.measure('BeeStructureLogic.runTowerLogic', BeeStructureLogic.runTowerLogic);
-    CpuProfiler.measure('BeeStructureLogic.runLinkManager', BeeStructureLogic.runLinkManager);
+    CpuProfiler.measure('Structure.Logic.runTowerLogic', StructureLogic.runTowerLogic);
+    CpuProfiler.measure('Structure.Logic.runLinkManager', StructureLogic.runLinkManager);
     if (CoreConfig.settings.combat.ENABLE_SQUAD_SPAWNING === true) {
-        BeeCombatSquads.ensureSquadFlags();
+        CombatSquads.ensureSquadFlags();
     }
 
     // --- Visual aids for quick debugging ---
@@ -163,7 +163,7 @@ module.exports.loop = function () {
 
     // --- Less frequent maintenance ---
     if (Game.time % CoreConfig.settings.maintenance.roomSweepInterval === 0) {
-        CpuProfiler.measure('cleanStaleRooms', BeeMaintenance.cleanStaleRooms);
+        CpuProfiler.measure('cleanStaleRooms', Maintenance.cleanStaleRooms);
     }
 
     CpuProfiler.measure('maybeGeneratePixel', maybeGeneratePixel);

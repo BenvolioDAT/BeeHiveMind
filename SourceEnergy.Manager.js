@@ -27,6 +27,7 @@
 var VeinseekerConfig = require('role.Veinseeker.Config');
 var RoadPlanner = require('Planner.Road');
 var BeeToolbox = require('BeeToolbox');
+var BodyUtils = require('core.body');
 var BodyConfig = require('Spawn.BodyConfig');
 var MemoryUtils = require('core.memory');
 
@@ -157,15 +158,15 @@ function finiteOrNull(value) {
 // These helpers read the existing body config and summarize what the room could
 // spawn. They do not ask BeeSpawnManager to enqueue anything.
 function calculateBodyCost(body) {
-  return BeeToolbox.calculateBodyCost(body);
+  return BodyUtils.calculateBodyCost(body);
 }
 
 function countBodyParts(body, part) {
-  return BeeToolbox.countBodyParts(body, part);
+  return BodyUtils.countBodyParts(body, part);
 }
 
 function cloneBody(body) {
-  return BeeToolbox.cloneBody(body);
+  return BodyUtils.cloneBody(body);
 }
 
 function chooseDiagnosticBody(roleName, energyCapacity, context) {

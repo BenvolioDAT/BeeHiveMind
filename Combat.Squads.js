@@ -1,7 +1,7 @@
 'use strict';
 
 // -----------------------------------------------------------------------------
-// BeeCombatSquads.js - combat squad Memory, threat intel, and shared CombatAPI
+// Combat.Squads.js - combat squad Memory, threat intel, and shared CombatAPI
 // Owns:
 // * Memory.squads[flagName] state, members, targetId, rally/target positions,
 //   desired counts, and auto/remote-defense plan metadata.
@@ -24,9 +24,9 @@ var LOG_LEVEL = CoreLogger.LOG_LEVEL;
 var combatLog = CoreLogger.createLogger('CombatSquads', LOG_LEVEL.DEBUG);
 
 /**
- * BeeCombatSquads owns the combat squad state machine and exports a CombatAPI
+ * Combat.Squads owns the combat squad state machine and exports a CombatAPI
  * helper bundle (INIT → FORM → ENGAGE → RETREAT). Roles consume
- * BeeCombatSquads.CombatAPI to resolve shared formation, targets, and state
+ * Combat.Squads.CombatAPI to resolve shared formation, targets, and state
  * while this module continues to surface convenience lookups for legacy
  * callers.
  */
@@ -1190,7 +1190,7 @@ var CombatAPI = {
   getAttackTarget: getAttackTarget
 };
 
-// --- BeeCombatSquads cache + exports -------------------------------------
+// --- Combat.Squads cache + exports ---------------------------------------
 function cacheRoot() {
   // Same cache pattern as CombatAPI: always rebuild once per tick.
   if (!global.__beeSquadCache || global.__beeSquadCache.tick !== Game.time) {
@@ -1415,7 +1415,7 @@ var SquadFlagIntel = {
   ensureSquadMemoryFromFlag: ensureSquadMemoryFromFlag
 };
 
-var BeeCombatSquads = {
+var CombatSquads = {
   resolveCreep: resolveCreep,
   getSquadInfo: getSquadInfo,
   sharedTarget: sharedTarget,
@@ -1428,7 +1428,7 @@ var BeeCombatSquads = {
   getSquadState: function (flagName) { return CombatAPI.getSquadState(flagName); }
 };
 
-module.exports = BeeCombatSquads;
+module.exports = CombatSquads;
 module.exports.CombatAPI = CombatAPI;
 module.exports.ensureSquadFlags = ensureSquadFlags;
 module.exports.SquadFlagIntel = SquadFlagIntel;

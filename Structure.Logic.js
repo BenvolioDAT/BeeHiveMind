@@ -1,12 +1,12 @@
 "use strict";
 
 // -----------------------------------------------------------------------------
-// BeeStructureLogic.js - owned-room tower and link automation
+// Structure.Logic.js - owned-room tower and link automation
 // Owns:
 // * Tower action selection for defense, healing, and repair.
 // * Link sender/receiver selection and transfer attempts.
 // Memory paths read/written:
-// * Memory.rooms[roomName].repairTargets, written by main/BeeMaintenance and
+// * Memory.rooms[roomName].repairTargets, written by main/core.maintenance and
 //   consumed by tower repair logic.
 // * Memory.rooms[roomName]._towerLocks, a short-lived map that keeps towers
 //   from all repairing the same target every tick.
@@ -14,7 +14,7 @@
 // Usually called by:
 // * main.js after BeeHiveMind.run().
 // Systems that depend on it:
-// * role.Repair.Logic.js and BeeMaintenance share the repair target queue with
+// * role.Repair.Logic.js and core.maintenance share the repair target queue with
 //   towers, so field names and queue pruning assumptions matter.
 // Do not casually change:
 // * Repair target queue shape or linkMgr keys; they are the persistence layer
@@ -46,7 +46,7 @@ var CFG = Object.freeze({
 var RESCAN_INTERVAL = 500;
 var MIN_SEND = 100;
 
-var BeeStructureLogic = {
+var StructureLogic = {
   runTowerLogic: function () {
     // Tower priority is defense -> heal -> repair. Repair reads the shared
     // Memory.rooms[room].repairTargets queue but uses _towerLocks so towers do
@@ -143,7 +143,7 @@ var BeeStructureLogic = {
   }
 };
 
-module.exports = BeeStructureLogic;
+module.exports = StructureLogic;
 
 // Tower helper functions
 function fireAllTowers(towers, hostiles) {
@@ -180,7 +180,7 @@ function runHealPhase(towers) {
 
 function pruneRepairQueue(RMem) {
   // Drop completed or missing entries only from the front of the queue. This
-  // preserves BeeMaintenance's sorted repair order for remaining targets.
+  // preserves core.maintenance's sorted repair order for remaining targets.
   while (RMem.repairTargets.length) {
     var head = RMem.repairTargets[0];
     var headObj = head && head.id ? Game.getObjectById(head.id) : null;

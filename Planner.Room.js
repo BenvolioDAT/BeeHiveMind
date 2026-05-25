@@ -4,7 +4,7 @@ var PlannerVisuals = require('Planner.Visuals');
 var PlannerLayout = require('Planner.Layout');
 var PlannerReservations = require('Planner.Reservations');
 var PlannerRamparts = require('Planner.Ramparts');
-var BeeSelectors = require('BeeSelectors');
+var CoreSelectors = require('core.selectors');
 
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
@@ -629,8 +629,8 @@ function ensureHubContainer(room, anchor, snapshot, allowedFn, slotsLeft, global
     return { placed: 0 };
   }
 
-  var builtHub = BeeSelectors.findSpawnHubContainers(room, { rangeFromSpawn: CFG.hubContainerRangeFromSpawn });
-  var siteHub = BeeSelectors.findSpawnHubContainerConstructionSites(room, { rangeFromSpawn: CFG.hubContainerRangeFromSpawn });
+  var builtHub = CoreSelectors.findSpawnHubContainers(room, { rangeFromSpawn: CFG.hubContainerRangeFromSpawn });
+  var siteHub = CoreSelectors.findSpawnHubContainerConstructionSites(room, { rangeFromSpawn: CFG.hubContainerRangeFromSpawn });
   if ((builtHub && builtHub.length) || (siteHub && siteHub.length)) {
     diag.skippedReason = 'hub_already_exists_or_building';
     diag.existingId = builtHub && builtHub.length ? builtHub[0].id : null;

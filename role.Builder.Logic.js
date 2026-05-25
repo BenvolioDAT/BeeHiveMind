@@ -2,7 +2,7 @@
 
 // Builder behavior implementation only. Public role wiring stays in role.Builder.js.
 var CFG = require('role.Builder.Config');
-var BeeSelectors = require('BeeSelectors');
+var CoreSelectors = require('core.selectors');
 var BeeToolbox = require('BeeToolbox');
 var Handoff = require('role.EnergyHandoff');
 
@@ -112,7 +112,7 @@ function getBuilderEnergyDraw(kind) {
 
 function withdrawBuilderHomeEnergy(creep, info) {
   if (!info || !info.target) return null;
-  // BeeSelectors classifies the source type for us. The Builder still owns the
+  // core.selectors classifies the source type for us. The Builder still owns the
   // action result and movement options because role energy priority is behavior.
   var draw = getBuilderEnergyDraw(info.kind);
   debugSay(creep, draw.say);
@@ -153,7 +153,7 @@ function collectEnergy(creep, opts) {
   if (dropped) { debugSay(creep, '🍪'); debugDrawLine(creep, dropped, CFG.DRAW.DROP_COLOR, "DROP"); var pr = creep.pickup(dropped); if (pr === ERR_NOT_IN_RANGE) creep.travelTo(dropped, { range: 1, reusePath: 15 }); return { acted: true, collected: pr === OK, reason: 'pickup_dropped' }; }
 
   if (homeRoom && creep.pos.roomName === homeName) {
-    var homeWorkerEnergy = BeeSelectors.findBestHomeWorkerEnergySource(homeRoom, { includeTerminal: true });
+    var homeWorkerEnergy = CoreSelectors.findBestHomeWorkerEnergySource(homeRoom, { includeTerminal: true });
     var homeWorkerResult = withdrawBuilderHomeEnergy(creep, homeWorkerEnergy);
     if (homeWorkerResult) return homeWorkerResult;
   }

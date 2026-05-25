@@ -35,11 +35,11 @@ CoreConfig.settings = Object.freeze({
     ALLOW_INVADERS_IN_FOREIGN_ROOMS: CoreConfig.ALLOW_INVADERS_IN_FOREIGN_ROOMS,
     /** Treat Source Keeper NPCs as PvE targets. */
     TREAT_SOURCE_KEEPERS_AS_PVE: CoreConfig.TREAT_SOURCE_KEEPERS_AS_PVE,
-    /** Toggle verbose combat logging across BeeCombatSquads + spawning. */
+    /** Toggle verbose combat logging across Combat.Squads + spawning. */
     DEBUG_LOGS: false,
     /**
      * When false, BeeSpawnManager will not spawn combat units through the old
-     * squad/flag system. This does not delete BeeCombatSquads.js and is
+     * squad/flag system. This does not delete Combat.Squads.js and is
      * temporary while local autonomous defense is being built.
      */
     ENABLE_SQUAD_SPAWNING: false,
@@ -65,7 +65,7 @@ CoreConfig.settings = Object.freeze({
     tickModulo: 5,
   }),
   maintenance: Object.freeze({
-    /** How often to rescan repair targets inside BeeMaintenance. */
+    /** How often to rescan repair targets inside core.maintenance. */
     repairScanInterval: 5,
     /** How often main.js asks BeeToolbox to refresh source-container intel. */
     sourceContainerRefreshModulo: 3,

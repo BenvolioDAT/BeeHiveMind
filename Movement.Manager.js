@@ -1,7 +1,7 @@
 // -----------------------------------------------------------------------------
 // Movement.Manager.js – centralised movement intent queue for creeps
 // Responsibilities:
-// * Collects per-tick move requests from tasks/actions (BeeActions.safe*,
+// * Collects per-tick move requests from tasks/actions (MovementActions.safe*,
 //   role.Queen idle, combat scripts) and resolves them in deterministic order.
 // * Delegates actual pathfinding to Traveler (creep.travelTo) when available,
 //   falling back to Screeps moveTo with same options if Traveler absent.
@@ -11,7 +11,7 @@
 // * Local transient state: MovementManager._intents/_indexByCreep (reset each tick).
 // * Reads Game.creeps/Game.rooms to validate intents.
 // Called from: BeeHiveMind.run (startTick() before creep logic,
-//   resolveAndMove() after all roles execute). BeeActions/Task modules call
+//   resolveAndMove() after all roles execute). MovementActions/Task modules call
 //   MovementManager.request() to queue movement.
 // -----------------------------------------------------------------------------
 'use strict';

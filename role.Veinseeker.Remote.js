@@ -18,14 +18,14 @@
 // * BeeHiveMind.runCreeps() through role.Veinseeker.js.
 // Systems that depend on it:
 // * BeeSpawnManager uses the source/build state to decide replacement Veinseeker
-//   quotas; Trucker.Dispatcher consumes remoteHaulRequests; Repair consumes
+//   quotas; role.Trucker.Dispatcher consumes remoteHaulRequests; Repair consumes
 //   remoteContainerStatus for emergency repair work.
 // Do not casually change:
 // * Assignment/release order, container status keys, haul request keys, or
 //   unsafe-room Memory fields. Those are shared cross-module contracts.
 // -----------------------------------------------------------------------------
 const BeeToolbox = require('BeeToolbox');
-const BeeCombatSquads = require('BeeCombatSquads');
+const CombatSquads = require('Combat.Squads');
 const MovementManager = require('Movement.Manager');
 var CFG = require('role.Veinseeker.Config');
 var SourceEnergyManager = require('SourceEnergy.Manager');
@@ -98,8 +98,8 @@ function debugRing(room, pos, color, text) {
 // Threat helpers shared with Scout-style remote intel.
 // =========================
 function ensureCombatIntelMemory() {
-  if (BeeCombatSquads && BeeCombatSquads.SquadFlagIntel && typeof BeeCombatSquads.SquadFlagIntel.ensureMemory === 'function') {
-    return BeeCombatSquads.SquadFlagIntel.ensureMemory();
+  if (CombatSquads && CombatSquads.SquadFlagIntel && typeof CombatSquads.SquadFlagIntel.ensureMemory === 'function') {
+    return CombatSquads.SquadFlagIntel.ensureMemory();
   }
   if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
   if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
@@ -178,9 +178,9 @@ function roomDistanceFromOwnedSpawn(roomName) {
 
 function computeThreatBundle(room) {
   if (!room) return { score: 0, hasThreat: false, bestId: null };
-  if (BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
+  if (CombatSquads && typeof CombatSquads.getLiveThreatForRoom === 'function') {
     try {
-      var data = BeeCombatSquads.getLiveThreatForRoom(room);
+      var data = CombatSquads.getLiveThreatForRoom(room);
       if (data) return data;
     } catch (e) {}
   }

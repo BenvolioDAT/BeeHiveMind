@@ -12,7 +12,7 @@
 //   sourceWorkerBlocked, hostile, hostileRoom, threatLevel, and _invaderLock.
 // * global.__energyTargets as a tick-local cache for energy source lookups.
 // Usually called by:
-// * Veinseeker, Scout, Trucker, Repair, combat roles, BeeMaintenance, and main.js.
+// * Veinseeker, Scout, Trucker, Repair, combat roles, core.maintenance, and main.js.
 // Systems that depend on it:
 // * SourceEnergy.Manager, BeeSpawnManager, and Repair rely on its shared remote
 //   safety checks and remote container identity helpers.
@@ -25,6 +25,7 @@ var Traveler = require('Traveler');
 var Logger = require('core.logger');
 var CoreConfig = require('core.config');
 var MemoryUtils = require('core.memory');
+var BodyUtils = require('core.body');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var toolboxLog = Logger.createLogger('Toolbox', LOG_LEVEL.BASIC);
 var ToolboxConfig = (CoreConfig.settings && CoreConfig.settings.toolbox) || {};
@@ -400,72 +401,6 @@ function isRoomInvaderLocked(roomOrName, opts) {
   return false;
 }
 
-function calculateBodyCost(body) {
-  if (!body || !body.length) return 0;
-  var total = 0;
-  for (var i = 0; i < body.length; i++) {
-    total += BODYPART_COST[body[i]] || 0;
-  }
-  return total;
-}
-
-function countBodyParts(body, part) {
-  if (!body || !body.length) return 0;
-  var count = 0;
-  for (var i = 0; i < body.length; i++) {
-    if (body[i] === part) count++;
-  }
-  return count;
-}
-
-function cloneBody(body) {
-  var out = [];
-  if (!body || !body.length) return out;
-  for (var i = 0; i < body.length; i++) out.push(body[i]);
-  return out;
-}
-
-function getBodySignature(body) {
-  if (!body || !body.length) return '';
-  var parts = [];
-  for (var i = 0; i < body.length; i++) parts.push(String(body[i]));
-  return parts.join('|');
-}
-
-function summarizeBody(body) {
-  var summary = {
-    work: 0,
-    carry: 0,
-    move: 0,
-    attack: 0,
-    ranged_attack: 0,
-    heal: 0,
-    tough: 0,
-    claim: 0,
-    totalParts: 0,
-    text: ''
-  };
-  if (!body || !body.length) return summary;
-
-  for (var i = 0; i < body.length; i++) {
-    var part = String(body[i]);
-    if (Object.prototype.hasOwnProperty.call(summary, part)) summary[part]++;
-    summary.totalParts++;
-  }
-
-  var chunks = [];
-  if (summary.work) chunks.push(summary.work + ' WORK');
-  if (summary.carry) chunks.push(summary.carry + ' CARRY');
-  if (summary.move) chunks.push(summary.move + ' MOVE');
-  if (summary.attack) chunks.push(summary.attack + ' ATTACK');
-  if (summary.ranged_attack) chunks.push(summary.ranged_attack + ' RANGED_ATTACK');
-  if (summary.heal) chunks.push(summary.heal + ' HEAL');
-  if (summary.tough) chunks.push(summary.tough + ' TOUGH');
-  if (summary.claim) chunks.push(summary.claim + ' CLAIM');
-  summary.text = chunks.join(', ');
-  return summary;
-}
-
 function _canEngageTarget(attacker, target) {
   if (!attacker || !target) return false;
   if (_isFriendlyObject(target)) return false;
@@ -836,11 +771,11 @@ var BeeToolbox = {
   estimateRemoteRoundTripTicks: estimateRemoteRoundTripTicks,
   estimateRemoteRequestDistance: estimateRemoteRequestDistance,
   isRoomInvaderLocked: isRoomInvaderLocked,
-  calculateBodyCost: calculateBodyCost,
-  countBodyParts: countBodyParts,
-  cloneBody: cloneBody,
-  getBodySignature: getBodySignature,
-  summarizeBody: summarizeBody,
+  calculateBodyCost: BodyUtils.calculateBodyCost,
+  countBodyParts: BodyUtils.countBodyParts,
+  cloneBody: BodyUtils.cloneBody,
+  getBodySignature: BodyUtils.getBodySignature,
+  summarizeBody: BodyUtils.summarizeBody,
 
   // ---------------------------------------------------------------------------
   // 📒 SOURCE & CONTAINER INTEL

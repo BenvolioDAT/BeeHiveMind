@@ -17,7 +17,7 @@
 // Usually called by:
 // * BeeHiveMind.runCreeps() through role.Trucker.js.
 // Systems that depend on it:
-// * Trucker.Dispatcher assigns remote pickup/local work; BeeSpawnManager reads
+// * role.Trucker.Dispatcher assigns remote pickup/local work; BeeSpawnManager reads
 //   dispatch state to decide remote-capable Trucker quotas.
 // Do not casually change:
 // * request claim/release fields or delivery reservation math; duplicate
@@ -25,10 +25,10 @@
 // -----------------------------------------------------------------------------
 
 var CFG = require('role.Trucker.Config');
-var Dispatcher = require('Trucker.Dispatcher');
+var Dispatcher = require('role.Trucker.Dispatcher');
 var Handoff = require('role.EnergyHandoff');
-var BeeSelectors = require('BeeSelectors');
-var BeeSourceEconomy = require('BeeSourceEconomy');
+var CoreSelectors = require('core.selectors');
+var SourceEconomy = require('Source.Economy');
 
 function ensureIdentity(creep) {
   // Normalize old or manually spawned haulers into the Trucker contract before
@@ -213,7 +213,7 @@ function findPreferredFeederSink(creep, diag) {
   if (room.storage) return { target: null, mode: null, reason: 'storage_feeder_disabled' };
 
   if (CFG.TRUCKER_HUB_CONTAINER_FEEDER_ENABLED !== false) {
-    var hubs = BeeSelectors.findSpawnHubContainers(room, {
+    var hubs = CoreSelectors.findSpawnHubContainers(room, {
       rangeFromSpawn: CFG.HUB_CONTAINER_RANGE_FROM_SPAWN
     });
     if (hubs && hubs.length) {
@@ -237,7 +237,7 @@ function recordExistingDeliveryTarget(creep, diag, target) {
   var mode = 'legacy_fallback';
   if (creep.room && creep.room.storage && target.id === creep.room.storage.id && CFG.TRUCKER_STORAGE_FEEDER_ENABLED !== false) {
     mode = 'storage_feeder';
-  } else if (creep.room && !creep.room.storage && BeeSelectors.isSpawnHubContainer(creep.room, target, {
+  } else if (creep.room && !creep.room.storage && CoreSelectors.isSpawnHubContainer(creep.room, target, {
     rangeFromSpawn: CFG.HUB_CONTAINER_RANGE_FROM_SPAWN
   })) {
     mode = 'hub_container_feeder';
@@ -541,14 +541,14 @@ function collectEnergyTarget(creep, target) {
 
 function findLocalCollectTarget(creep) {
   var room = creep.room;
-  BeeSourceEconomy.refreshOwnedRoomSources(room);
-  BeeSourceEconomy.refreshVeinseekerStats(room);
-  BeeSourceEconomy.refreshTruckerCarryStats(room);
-  BeeSourceEconomy.calculatePendingEnergy(room);
-  var pick = BeeSourceEconomy.getBestPickupSource(room, creep);
+  SourceEconomy.refreshOwnedRoomSources(room);
+  SourceEconomy.refreshVeinseekerStats(room);
+  SourceEconomy.refreshTruckerCarryStats(room);
+  SourceEconomy.calculatePendingEnergy(room);
+  var pick = SourceEconomy.getBestPickupSource(room, creep);
   if (pick) {
     var amount = creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
-    BeeSourceEconomy.reservePickupCarry(room.name, pick.sourceId, creep.name, amount);
+    SourceEconomy.reservePickupCarry(room.name, pick.sourceId, creep.name, amount);
     var sourceObj = Game.getObjectById(pick.sourceId);
     var container = pick.containerId ? Game.getObjectById(pick.containerId) : null;
     if (container && (container.store[RESOURCE_ENERGY] || 0) > 0) {
@@ -572,7 +572,7 @@ function findLocalCollectTarget(creep) {
   var graves = room.find(FIND_TOMBSTONES, { filter: function(t){ return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (graves.length) return creep.pos.findClosestByPath(graves);
   var ruins = room.find(FIND_RUINS, { filter: function(t){ return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (ruins.length) return creep.pos.findClosestByPath(ruins);
   var hubIds = {};
-  var hubs = BeeSelectors.findSpawnHubContainers(room, { rangeFromSpawn: CFG.HUB_CONTAINER_RANGE_FROM_SPAWN });
+  var hubs = CoreSelectors.findSpawnHubContainers(room, { rangeFromSpawn: CFG.HUB_CONTAINER_RANGE_FROM_SPAWN });
   for (var h = 0; h < hubs.length; h++) {
     if (hubs[h] && hubs[h].id) hubIds[hubs[h].id] = true;
   }

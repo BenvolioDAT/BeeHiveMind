@@ -1,7 +1,7 @@
 # Role-wide movement hardening audit (2026-04-28)
 
 ## Scope reviewed
-- Shared movement layers: `Traveler`, `BeeToolbox.BeeTravel`, `MovementManager`, `BeeActions`.
+- Shared movement layers: `Traveler`, `BeeToolbox.BeeTravel`, `MovementManager`, `MovementActions`.
 - Role movement callsites: Builder, Scout, Luna, Repair, Claimer, Courier, Queen, Upgrader, Trucker, BaseHarvest, Dismantler, CombatMelee/Archer/Medic.
 - `role.BeeWorker.js`: not present in this repo.
 
@@ -15,7 +15,7 @@
 | `role.Repair.js` | `go -> BeeTravel/travelTo`, fallback `moveTo` | Partial (fallback path) | Yes (`moveTo` fallback) | No | Medium (if branch idles on border) | Keep fallback but clear `_move` in shared BeeTravel fallback to avoid cache mixing | **Shared fix** |
 | `role.Claimer.js` | direct `creep.travelTo` | Yes | No direct `moveTo`; no local nudge | No | Medium | Keep travelTo; prior duplicate-move fix retained | No (this pass) |
 | `role.Courier.js` | direct `creep.travelTo` | Yes | No | No | Medium | Rely on Traveler + shared BeeTravel hardening; optional future border helper at role entry | No |
-| `role.Queen.js` | `BeeActions` + `MovementManager.request` | Yes (MovementManager resolves via travelTo) | No | No | Low | Keep centralized ownership | No |
+| `role.Queen.js` | `MovementActions` + `MovementManager.request` | Yes (MovementManager resolves via travelTo) | No | No | Low | Keep centralized ownership | No |
 | `role.Upgrader.js` | direct `creep.travelTo` | Yes | No | No | Medium-low | No change | No |
 | `role.Trucker.js` | direct `creep.travelTo` | Yes | No | No | Medium | No change; Traveler should handle room crossings | No |
 | `role.BaseHarvest.js` | direct `creep.travelTo` | Yes | No | No explicit exit target | Medium-low | No change; local role mostly intra-room | No |

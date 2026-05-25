@@ -6,7 +6,7 @@
 // lastRemoteVision. BeeHiveMind calls manageSpawns(C) once per tick, after role
 // logic has had a chance to update haul/status Memory. SourceEnergy.Manager
 // provides Veinseeker source reservations and audits; spawn.logic chooses bodies and
-// performs spawn.spawnCreep; BeeCombatSquads supplies combat pressure. Avoid
+// performs spawn.spawnCreep; Combat.Squads supplies combat pressure. Avoid
 // changing queue priority, quota math, or the order of Veinseeker reserve/enqueue/
 // unreserve calls without checking the SourceEnergy.Manager ownership model.
 
@@ -32,9 +32,9 @@ var QueenConfig = require('role.Queen.Config');
 var SourceEnergyManager = require('SourceEnergy.Manager');
 var SourceWorkerManager = require('SourceWorker.Manager');
 var BeeToolbox = require('BeeToolbox');
-var BeeCombatSquads = require('BeeCombatSquads');
+var CombatSquads = require('Combat.Squads');
 var Roles = require('core.roles');
-var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
+var SquadFlagIntel = CombatSquads.SquadFlagIntel || null;
 
 // --------------------------- Tunables & Constants ------------------------
 var QUEUE_RETRY_COOLDOWN  = 5;
@@ -246,8 +246,8 @@ function evaluateRemoteDefensePlan(squadName) {
     if (intelScore > score) score = intelScore;
   }
   var live = null;
-  if (BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
-    live = BeeCombatSquads.getLiveThreatForRoom(bucket.targetRoom);
+  if (CombatSquads && typeof CombatSquads.getLiveThreatForRoom === 'function') {
+    live = CombatSquads.getLiveThreatForRoom(bucket.targetRoom);
     if (live && typeof live.score === 'number' && live.score > score) score = live.score;
   }
   out.score = score;
@@ -904,8 +904,8 @@ function getLocalDefenseThreat(room) {
   if (!room) return 0;
 
   try {
-    if (BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
-      var liveThreat = BeeCombatSquads.getLiveThreatForRoom(room.name);
+    if (CombatSquads && typeof CombatSquads.getLiveThreatForRoom === 'function') {
+      var liveThreat = CombatSquads.getLiveThreatForRoom(room.name);
       if (typeof liveThreat === 'number') {
         return liveThreat > 0 ? liveThreat : 0;
       }
@@ -917,7 +917,7 @@ function getLocalDefenseThreat(room) {
       }
     }
   } catch (e) {
-    // Ignore BeeCombatSquads threat lookup failures and fall through to local scan.
+    // Ignore Combat.Squads threat lookup failures and fall through to local scan.
   }
 
   var hostiles = room.find(FIND_HOSTILE_CREEPS) || [];
@@ -1868,8 +1868,8 @@ function squadThreatScore(flagName) {
  */
 function gatherSpawnableSquads() {
   var names = [];
-  if (BeeCombatSquads && typeof BeeCombatSquads.listSquadFlags === 'function') {
-    var listed = BeeCombatSquads.listSquadFlags();
+  if (CombatSquads && typeof CombatSquads.listSquadFlags === 'function') {
+    var listed = CombatSquads.listSquadFlags();
     if (listed && listed.length) {
       for (var i = 0; i < listed.length; i++) {
         names.push(listed[i]);
@@ -1992,9 +1992,9 @@ var BeeSpawnManager = {
     // Public entry used by BeeHiveMind. It expects the tick cache C to already
     // contain owned rooms/spawns and live role counts from prepareTickCaches().
     if (!C || !Array.isArray(C.spawns) || !Array.isArray(C.roomsOwned)) return;
-    if (squadSpawningEnabled() && BeeCombatSquads && typeof BeeCombatSquads.refreshAutoDefensePlans === 'function') {
+    if (squadSpawningEnabled() && CombatSquads && typeof CombatSquads.refreshAutoDefensePlans === 'function') {
       // BHM Combat Fix: keep squad plans in sync before evaluating spawn needs.
-      BeeCombatSquads.refreshAutoDefensePlans();
+      CombatSquads.refreshAutoDefensePlans();
     }
     prepareRoomQueues(C);
     runSpawnPass(C);

@@ -19,8 +19,8 @@
 //   and Queens both try to avoid overfilling the same structures.
 // -----------------------------------------------------------------------------
 
-const BeeSelectors = require('BeeSelectors');
-const BeeActions = require('BeeActions');
+const CoreSelectors = require('core.selectors');
+const MovementActions = require('Movement.Actions');
 const BeeToolbox = require('BeeToolbox');
 const MovementManager = require('Movement.Manager');
 const QueenConfig = require('role.Queen.Config');
@@ -256,9 +256,9 @@ function drawLine(creep, target, color, label) {
 
   function roomHasCriticalEnergyNeeds(room) {
     if (!room) return false;
-    var spawnLike = BeeSelectors.findSpawnLikeNeedingEnergy(room);
+    var spawnLike = CoreSelectors.findSpawnLikeNeedingEnergy(room);
     if (spawnLike && spawnLike.length) return true;
-    var towers = BeeSelectors.findTowersNeedingEnergy(room);
+    var towers = CoreSelectors.findTowersNeedingEnergy(room);
     if (towers && towers.length) return true;
     return false;
   }
@@ -387,7 +387,7 @@ function drawLine(creep, target, color, label) {
         if (!task.data || task.data.site !== 'storage') return true;
       } else if (target.structureType === STRUCTURE_CONTAINER) {
         if (!task.data || task.data.site !== 'hub_container') return true;
-        if (!BeeSelectors.isSpawnHubContainerSite(creep.room, target, {
+        if (!CoreSelectors.isSpawnHubContainerSite(creep.room, target, {
           rangeFromSpawn: QueenConfig.HUB_CONTAINER_RANGE_FROM_SPAWN
         })) return true;
       } else {
@@ -416,7 +416,7 @@ function drawLine(creep, target, color, label) {
   // Target selection
   // -----------------------------
   function pickWithdrawTask(creep) {
-    // Withdrawal source picker. BeeSelectors owns the room scan; Queen applies
+    // Withdrawal source picker. core.selectors owns the room scan; Queen applies
     // its preferred source kind order and wraps the chosen target in _task.
     // This order is gameplay behavior, so keep it role-local until any cleanup
     // has explicit per-role priority notes and tests.
@@ -425,7 +425,7 @@ function drawLine(creep, target, color, label) {
     var pref = (creep.memory && creep.memory.energyPref && creep.memory.energyPref.length)
       ? creep.memory.energyPref
       : ['tomb','ruin','storage','drop','hub_container','container','terminal','link'];
-    var list = BeeSelectors.getEnergySourcePriority(room);
+    var list = CoreSelectors.getEnergySourcePriority(room);
     if (!list || !list.length) return null;
 
     var buckets = {};
@@ -442,8 +442,8 @@ function drawLine(creep, target, color, label) {
       if (kind === 'source') continue;
       var arr = buckets[kind];
       if (!arr || !arr.length) continue;
-      var best = BeeSelectors.selectClosestByRange
-        ? BeeSelectors.selectClosestByRange(creep.pos, arr)
+      var best = CoreSelectors.selectClosestByRange
+        ? CoreSelectors.selectClosestByRange(creep.pos, arr)
         : (function (){
             var win = null, bestD = 9999;
             for (var j = 0; j < arr.length; j++) {
@@ -481,12 +481,12 @@ function drawLine(creep, target, color, label) {
     if (roomHasCriticalEnergyNeeds(room)) return null;
 
     if (QueenConfig.QUEEN_BUILD_STORAGE_SITE_ENABLED !== false) {
-      var storageSite = BeeSelectors.findStorageConstructionSite(room);
+      var storageSite = CoreSelectors.findStorageConstructionSite(room);
       if (storageSite) return createTask('build', storageSite.id, { site: 'storage' });
     }
 
     if (QueenConfig.QUEEN_BUILD_HUB_CONTAINER_SITE_ENABLED !== false) {
-      var hubSite = BeeSelectors.findSpawnHubContainerConstructionSite(room, {
+      var hubSite = CoreSelectors.findSpawnHubContainerConstructionSite(room, {
         rangeFromSpawn: QueenConfig.HUB_CONTAINER_RANGE_FROM_SPAWN
       });
       if (hubSite) return createTask('build', hubSite.id, { site: 'hub_container' });
@@ -505,8 +505,8 @@ function drawLine(creep, target, color, label) {
     if (amount <= 0) return null;
     var terminalJob = getRoomTerminalEnergyJob(room);
 
-    var spawnLike = BeeSelectors.findSpawnLikeNeedingEnergy(room);
-    var bestSpawn = BeeSelectors.selectClosestByRange(creep.pos, spawnLike);
+    var spawnLike = CoreSelectors.findSpawnLikeNeedingEnergy(room);
+    var bestSpawn = CoreSelectors.selectClosestByRange(creep.pos, spawnLike);
     if (bestSpawn) {
       if (terminalJob && terminalJob.active && (!terminalJob.lastSkipTick || Game.time - terminalJob.lastSkipTick >= 10)) {
         logTerminalJob(room, 'queen skipped terminal stocking because spawn/extension fill exists');
@@ -520,8 +520,8 @@ function drawLine(creep, target, color, label) {
       }
     }
 
-    var towers = BeeSelectors.findTowersNeedingEnergy(room);
-    var bestTower = BeeSelectors.selectClosestByRange(creep.pos, towers);
+    var towers = CoreSelectors.findTowersNeedingEnergy(room);
+    var bestTower = CoreSelectors.selectClosestByRange(creep.pos, towers);
     if (bestTower) {
       if (terminalJob && terminalJob.active && (!terminalJob.lastSkipTick || Game.time - terminalJob.lastSkipTick >= 10)) {
         logTerminalJob(room, 'queen skipped terminal stocking because tower fill exists');
@@ -553,11 +553,11 @@ function drawLine(creep, target, color, label) {
           }
         });
         if (allLinks && allLinks.length) {
-          nearbyLinks = [BeeSelectors.selectClosestByRange(storagePos, allLinks)];
+          nearbyLinks = [CoreSelectors.selectClosestByRange(storagePos, allLinks)];
         }
       }
 
-      var hubLink = BeeSelectors.selectClosestByRange(creep.pos, nearbyLinks);
+      var hubLink = CoreSelectors.selectClosestByRange(creep.pos, nearbyLinks);
 
       if (hubLink && hubLink.store) {
         var cap  = hubLink.store.getCapacity(RESOURCE_ENERGY) || 0;
@@ -615,9 +615,9 @@ function drawLine(creep, target, color, label) {
 
 function roomNeedsCriticalFill(room) {
   if (!room) return false;
-  var spawnLike = BeeSelectors.findSpawnLikeNeedingEnergy(room);
+  var spawnLike = CoreSelectors.findSpawnLikeNeedingEnergy(room);
   if (spawnLike && spawnLike.length) return true;
-  var towers = BeeSelectors.findTowersNeedingEnergy(room);
+  var towers = CoreSelectors.findTowersNeedingEnergy(room);
   if (towers && towers.length) return true;
   return false;
 }
@@ -788,8 +788,8 @@ function getBackupHarvestTask(creep) {
   }
 
   var chosen = assignedSource;
-  if (!chosen && unclaimedEligible.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, unclaimedEligible);
-  if (!chosen && fallbackEligible.length) chosen = BeeSelectors.selectClosestByRange(creep.pos, fallbackEligible);
+  if (!chosen && unclaimedEligible.length) chosen = CoreSelectors.selectClosestByRange(creep.pos, unclaimedEligible);
+  if (!chosen && fallbackEligible.length) chosen = CoreSelectors.selectClosestByRange(creep.pos, fallbackEligible);
 
   if (!chosen) {
     diag.reason = blockedByVeinseeker > 0 ? 'source_blocked_by_veinseeker' : (noFreeSeatCount > 0 ? 'no_free_harvest_seat' : 'no_eligible_source');
@@ -858,7 +858,7 @@ function getBackupHarvestTask(creep) {
     if (!task || !target) { clearTask(creep); return; }
     drawLine(creep, target, CFG.DRAW.WITHDRAW, 'WD');
     debugSay(creep, '📥');
-    var rc = BeeActions.safeWithdraw(creep, target, RESOURCE_ENERGY, { priority: priority, reusePath: 20 });
+    var rc = MovementActions.safeWithdraw(creep, target, RESOURCE_ENERGY, { priority: priority, reusePath: 20 });
     if (rc === OK) {
       if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) clearTask(creep);
     } else if (rc === ERR_NOT_ENOUGH_RESOURCES || rc === ERR_INVALID_TARGET) {
@@ -873,7 +873,7 @@ function getBackupHarvestTask(creep) {
     if (!task || !target) { clearTask(creep); return; }
     drawLine(creep, target, CFG.DRAW.PICKUP, 'P');
     debugSay(creep, '🍪');
-    var pc = BeeActions.safePickup(creep, target, { priority: priority, reusePath: 10 });
+    var pc = MovementActions.safePickup(creep, target, { priority: priority, reusePath: 10 });
     if (pc === OK) {
       if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) clearTask(creep);
     } else if (pc === ERR_INVALID_TARGET) {
@@ -898,7 +898,7 @@ function getBackupHarvestTask(creep) {
         return;
       }
     }
-    var tr = BeeActions.safeTransfer(creep, target, RESOURCE_ENERGY, transferAmount, { priority: priority, reusePath: 20 });
+    var tr = MovementActions.safeTransfer(creep, target, RESOURCE_ENERGY, transferAmount, { priority: priority, reusePath: 20 });
     if (tr === OK) {
       if (transferAmount != null && task.data && task.data.sink === 'terminal_job') {
         task.data.amount = Math.max(0, (task.data.amount || 0) - transferAmount);
@@ -922,7 +922,7 @@ function getBackupHarvestTask(creep) {
     if (roomHasCriticalEnergyNeeds(creep.room) || creep.room.storage) { clearTask(creep); return; }
     drawLine(creep, target, CFG.DRAW.SOURCE, 'BLD');
     debugSay(creep, 'B');
-    var rc = BeeActions.safeBuild(creep, target, { priority: priority, reusePath: 20 });
+    var rc = MovementActions.safeBuild(creep, target, { priority: priority, reusePath: 20 });
     if (rc === OK) {
       if ((creep.store[RESOURCE_ENERGY] || 0) === 0) clearTask(creep);
       return;

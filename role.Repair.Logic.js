@@ -8,7 +8,7 @@
 // * Memory.__BHM.repairClaims, a short-lived per-target claim map that prevents
 //   multiple Repair creeps from selecting the same target.
 // Reads/writes:
-// * Memory.rooms[roomName].repairTargets maintained by BeeMaintenance/main.
+// * Memory.rooms[roomName].repairTargets maintained by core.maintenance/main.
 // * Memory.__BHM.remoteContainerStatus and remoteHaulRequests produced by Veinseeker;
 //   emergency repair also writes maintenanceUntil/maintenanceBy holds so
 //   Truckers do not drain containers while they are being repaired.
@@ -16,10 +16,10 @@
 // * BeeHiveMind.runCreeps() through role.Repair.js.
 // Do not casually change:
 // * Remote container validation/cleanup logic or maintenance hold field names;
-//   Veinseeker, Trucker, BeeSpawnManager, and BeeMaintenance all read the same records.
+//   Veinseeker, Trucker, BeeSpawnManager, and core.maintenance all read the same records.
 // -----------------------------------------------------------------------------
 var BeeToolbox = require('BeeToolbox');
-var BeeSelectors = require('BeeSelectors');
+var CoreSelectors = require('core.selectors');
 var CFG = require('role.Repair.Config');
 var CoreConfig = require('core.config');
 
@@ -73,7 +73,7 @@ function findWithdrawSource(creep){ return creep.pos.findClosestByPath(FIND_STRU
 function getHomeWorkerEnergyInfo(creep){
   var home = creep.memory.home || Memory.firstSpawnRoom || creep.room.name;
   if (!home || creep.room.name !== home) return null;
-  return BeeSelectors.findBestHomeWorkerEnergySource(creep.room, { includeTerminal: true });
+  return CoreSelectors.findBestHomeWorkerEnergySource(creep.room, { includeTerminal: true });
 }
 function getHomeWorkerEnergyLabel(kind){
   if (kind === 'storage') return "STORE";
@@ -380,7 +380,7 @@ function releaseRepairTarget(creep){
 }
 function getLocalTargets(creep){
   // Local repair candidates come from Memory.rooms[room].repairTargets, which
-  // main.js refreshes via BeeMaintenance.findStructuresNeedingRepair().
+  // main.js refreshes via core.maintenance.findStructuresNeedingRepair().
   Memory.rooms = Memory.rooms || {}; var rm = Memory.rooms[creep.room.name] || {};
   var queue = Array.isArray(rm.repairTargets) ? rm.repairTargets : [];
   var out = [];

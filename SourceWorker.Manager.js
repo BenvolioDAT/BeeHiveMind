@@ -6,6 +6,7 @@
 // and repair systems.
 var CFG = require('role.Veinseeker.Config');
 var BeeToolbox = require('BeeToolbox');
+var BodyUtils = require('core.body');
 var Roles = require('core.roles');
 
 function getSourceIdFromMemory(mem) {
@@ -55,14 +56,14 @@ function getCreepBodyCost(creep) {
     ? creep.memory.bornBodyCost
     : 0;
   var parts = getCreepBodyParts(creep);
-  if (parts.length) return BeeToolbox.calculateBodyCost(parts);
+  if (parts.length) return BodyUtils.calculateBodyCost(parts);
   return memCost;
 }
 
 function getCreepBodySignature(creep) {
   if (!creep) return '';
   var parts = getCreepBodyParts(creep);
-  if (parts.length) return BeeToolbox.getBodySignature(parts);
+  if (parts.length) return BodyUtils.getBodySignature(parts);
   return creep.memory && creep.memory.bornBodySignature ? creep.memory.bornBodySignature : '';
 }
 

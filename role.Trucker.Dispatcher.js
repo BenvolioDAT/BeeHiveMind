@@ -1,7 +1,7 @@
 'use strict';
 
 // -----------------------------------------------------------------------------
-// Trucker.Dispatcher.js - job selection and reservation for Trucker creeps
+// role.Trucker.Dispatcher.js - job selection and reservation for Trucker creeps
 // Owns:
 // * Memory.__BHM.truckerDispatch.claims and assignedByCreep, the short-lived
 //   claim tables that prevent two Truckers from selecting the same job.

@@ -15,12 +15,12 @@
 // * SourceEnergy.Manager reads scoutIntel for remote room/source approval.
 // * BeeSpawnManager may enqueue emergency Scouts when stale remote container
 //   status needs vision.
-// * BeeCombatSquads/SquadFlagIntel receive threat observations from Scouts.
+// * Combat.Squads/SquadFlagIntel receive threat observations from Scouts.
 // Do not casually change:
 // * Intel field names, target bad-target TTL, or remoteVisionRequests fields;
 //   those are shared with spawn, remote harvest, and repair systems.
 // -----------------------------------------------------------------------------
-const BeeCombatSquads = require('BeeCombatSquads');
+const CombatSquads = require('Combat.Squads');
 const BeeToolbox = require('BeeToolbox');
 var SourceWorkerManager = require('SourceWorker.Manager');
 var CFG = require('role.Scout.Config');
@@ -36,9 +36,9 @@ function debugLabel(room, pos, text, color) {
 }
 
 function ensureCombatIntelMemory() {
-  // Shared combat intel root. BeeCombatSquads owns the canonical helper when
+  // Shared combat intel root. Combat.Squads owns the canonical helper when
   // available; the fallback keeps older Memory layouts working.
-  if (BeeCombatSquads && BeeCombatSquads.SquadFlagIntel && typeof BeeCombatSquads.SquadFlagIntel.ensureMemory === 'function') return BeeCombatSquads.SquadFlagIntel.ensureMemory();
+  if (CombatSquads && CombatSquads.SquadFlagIntel && typeof CombatSquads.SquadFlagIntel.ensureMemory === 'function') return CombatSquads.SquadFlagIntel.ensureMemory();
   if (!Memory.squadFlags) Memory.squadFlags = { rooms: {}, bindings: {} };
   if (!Memory.squadFlags.rooms) Memory.squadFlags.rooms = {};
   if (!Memory.squadFlags.bindings) Memory.squadFlags.bindings = {};
@@ -69,8 +69,8 @@ function roomDistanceFromOwnedSpawn(roomName) {
 
 function computeThreatBundle(room) {
   if (!room) return { score: 0, hasThreat: false, bestId: null };
-  if (BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
-    try { var data = BeeCombatSquads.getLiveThreatForRoom(room); if (data) return data; } catch (e) {}
+  if (CombatSquads && typeof CombatSquads.getLiveThreatForRoom === 'function') {
+    try { var data = CombatSquads.getLiveThreatForRoom(room); if (data) return data; } catch (e) {}
   }
   var hostiles = [];
   try { hostiles = room.find(FIND_HOSTILE_CREEPS) || []; } catch (err) {}

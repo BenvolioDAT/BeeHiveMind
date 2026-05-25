@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------------
-// BeeActions.js – safe wrappers around Screeps creep actions
+// Movement.Actions.js - safe wrappers around Screeps creep actions
 // Responsibilities:
 // * Provide consistent range/movement behaviour by funneling ERR_NOT_IN_RANGE
 //   responses into Movement.Manager.request, using standard intent priorities.
@@ -57,7 +57,7 @@ function handleResult(creep, code, target, range, intentKey, opts) {
   return code;
 }
 
-// To keep things approachable for new contributors, BeeActions groups helpers by
+// To keep things approachable for new contributors, MovementActions groups helpers by
 // the type of work they automate: logistics (withdraw/transfer/pickup), worker
 // chores (build/repair/upgrade/harvest) and combat/claim actions.  Every helper
 // follows the same simple recipe:
@@ -68,7 +68,7 @@ function handleResult(creep, code, target, range, intentKey, opts) {
 //      which will queue a move when ERR_NOT_IN_RANGE occurs.
 // Once you memorize that flow you can add new helpers quickly without copying
 // large switch statements.
-var BeeActions = {
+var MovementActions = {
   // ---------------------------------------------------------------------------
   // Logistics helpers – moving energy/items between creeps and structures
   // ---------------------------------------------------------------------------
@@ -233,4 +233,4 @@ var BeeActions = {
   }
 };
 
-module.exports = BeeActions;
+module.exports = MovementActions;

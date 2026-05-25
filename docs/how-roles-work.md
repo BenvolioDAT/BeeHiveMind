@@ -21,7 +21,7 @@ This keeps the top-level role file easy to read:
 - Roles should request movement through movement helpers.
 - `Movement.Manager.js` resolves movement requests and conflicts.
 - `Traveler.js` handles pathing.
-- `BeeActions.js` wraps common actions and sends out-of-range movement through
+- `Movement.Actions.js` wraps common actions and sends out-of-range movement through
   `Movement.Manager`.
 
 ## Debug visuals

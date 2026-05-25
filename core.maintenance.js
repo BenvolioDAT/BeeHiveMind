@@ -1,6 +1,6 @@
 
 // -----------------------------------------------------------------------------
-// BeeMaintenance.js - stale Memory cleanup and repair target discovery
+// core.maintenance.js - stale Memory cleanup and repair target discovery
 // Owns:
 // * Periodic cleanup for dead creep memory, stale/empty Memory.rooms buckets,
 //   source/container assignment leftovers, and remote container status TTLs.
@@ -623,11 +623,11 @@ function findStructuresNeedingRepair(room) {
   return _scanRepairTargets(room, bucket, priorityOrder);
 }
 
-var BeeMaintenance = {
+var Maintenance = {
   cleanStaleRooms: cleanStaleRooms,
   cleanUpMemory: cleanUpMemory,
   findStructuresNeedingRepair: findStructuresNeedingRepair,
   getRepairPriority: getRepairPriority
 };
 
-module.exports = BeeMaintenance;
+module.exports = Maintenance;

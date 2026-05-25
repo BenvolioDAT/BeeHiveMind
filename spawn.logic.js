@@ -14,7 +14,7 @@
 // * BeeSpawnManager.dequeueAndSpawn() for ordinary role queue items.
 // * BeeSpawnManager.trySpawnSquad()/remote-defense flow for combat roles.
 // Depends on:
-// * Spawn.BodyConfig.js for role body tables and BeeCombatSquads for threat
+// * Spawn.BodyConfig.js for role body tables and Combat.Squads for threat
 //   based squad spawning.
 // Do not casually change:
 // * Canonical role names, memory copy behavior, squad memory fields, or body
@@ -24,10 +24,10 @@
 var Logger = require('core.logger');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var spawnLog = Logger.createLogger('Spawn', LOG_LEVEL.BASIC);
-var BeeCombatSquads = require('BeeCombatSquads');
-var SquadFlagIntel = BeeCombatSquads.SquadFlagIntel || null;
+var CombatSquads = require('Combat.Squads');
+var SquadFlagIntel = CombatSquads.SquadFlagIntel || null;
 var CoreConfig = require('core.config');
-var BeeToolbox = require('BeeToolbox');
+var BodyUtils = require('core.body');
 var Roles = require('core.roles');
 // Body definitions now live in Spawn.BodyConfig.js (registry of role body lists).
 var BodyConfig = require('Spawn.BodyConfig');
@@ -60,7 +60,7 @@ function normalizeRole(role) {
 }
 
 function calculateBodyCost(body) {
-  return BeeToolbox.calculateBodyCost(body);
+  return BodyUtils.calculateBodyCost(body);
 }
 
 function getBodyCost(body) {
@@ -70,19 +70,19 @@ function getBodyCost(body) {
 }
 
 function cloneBody(body) {
-  return BeeToolbox.cloneBody(body);
+  return BodyUtils.cloneBody(body);
 }
 
 function getBodySignature(body) {
   // A signature is a stable, cheap string that lets Memory show whether two
   // bodies are the same shape without storing a second full body array.
-  return BeeToolbox.getBodySignature(body);
+  return BodyUtils.getBodySignature(body);
 }
 
 function summarizeBody(body) {
   // Keep the summary beginner-readable in Memory: counts by part plus a short
   // text value ordered like Screeps body definitions are usually discussed.
-  return BeeToolbox.summarizeBody(body);
+  return BodyUtils.summarizeBody(body);
 }
 
 function makeBodyPlan(roleName, body, cost, tierIndex, energyUsedForPlan) {
@@ -515,8 +515,8 @@ function Spawn_Squad(spawn, squadId) {
     ? SquadFlagIntel.threatScoreForRoom(targetRoom)
     : 0;
   var live = null;
-  if (BeeCombatSquads && typeof BeeCombatSquads.getLiveThreatForRoom === 'function') {
-    live = BeeCombatSquads.getLiveThreatForRoom(targetRoom);
+  if (CombatSquads && typeof CombatSquads.getLiveThreatForRoom === 'function') {
+    live = CombatSquads.getLiveThreatForRoom(targetRoom);
     if (live && live.score > threatScore) {
       threatScore = live.score;
     }

@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------------
-// BeeSelectors.js – shared room/remote scanning helpers
+// core.selectors.js - shared room/remote scanning helpers
 // Responsibilities:
 // * Builds cached per-room snapshots (structures, drops, repair targets) so
 //   role modules (role.Builder, role.Repair, role.Trucker, etc.) query once/tick.
@@ -175,7 +175,7 @@ function computeRepairGoal(structure) {
 //         etc.)
 // Side-effects: runs multiple room.find calls (expensive) but cached via
 //               global.__BHM.getCached with ttl 0 (per tick).
-// Consumers: BeeSelectors.* selectors and BeeHiveMind.prepareTickCaches.
+// Consumers: core.selectors selectors and BeeHiveMind.prepareTickCaches.
 function buildSnapshot(room) {
   var key = 'selectors:snapshot:' + room.name;
   return global.__BHM.getCached(key, 0, function () {
@@ -360,7 +360,7 @@ function chooseBestSeatForSource(pos) {
 // Inputs: Source object
 // Output: {container, site, seatPos, containerEnergy, source}
 // Side-effects: checks immediate surroundings for containers/sites; used by
-//               role.Veinseeker.* and BeeSelectors API wrappers.
+//               role.Veinseeker.* and core.selectors API wrappers.
 function getSourceContainerOrSiteImpl(source) {
   if (!source || !source.pos) return { container: null, site: null, seatPos: null, containerEnergy: 0, source: source };
   var pos = source.pos;
@@ -526,7 +526,7 @@ function buildRemoteSourcesSnapshot(homeRoomName) {
   return list;
 }
 
-var BeeSelectors = {
+var CoreSelectors = {
   // -----------------------------------------------------------------------
   // Owned-room snapshot helpers: role modules call these to grab the cached
   // per-room state built in buildSnapshot(). Keeping them grouped reminds
@@ -906,7 +906,7 @@ var BeeSelectors = {
     return snap ? snap.controllerLink : null;
   },
 
-  // Generic combat helpers shared by roles/BeeCombatSquads CombatAPI (ES5-friendly).
+  // Generic combat helpers shared by roles/Combat.Squads CombatAPI (ES5-friendly).
   findClosestByRange: function (origin, objects) {
     if (!origin || !objects || !objects.length) return null;
     var pos = origin.pos ? origin.pos : origin;
@@ -946,4 +946,4 @@ var BeeSelectors = {
   }
 };
 
-module.exports = BeeSelectors;
+module.exports = CoreSelectors;

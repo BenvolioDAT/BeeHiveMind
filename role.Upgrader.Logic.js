@@ -2,7 +2,7 @@
 
 // Upgrader behavior implementation only. Public role wiring stays in role.Upgrader.js.
 var CFG = require('role.Upgrader.Config');
-var BeeSelectors = require('BeeSelectors');
+var CoreSelectors = require('core.selectors');
 var BeeToolbox = require('BeeToolbox');
 var Handoff = require('role.EnergyHandoff');
 
@@ -77,13 +77,13 @@ function tryCleanupEnergy(creep) { if (tryWithdrawTombstone(creep)) return true;
 function tryWithdrawTombstone(creep) { var tomb = creep.pos.findClosestByPath(FIND_TOMBSTONES, { filter: function (t) { return t.store && (t.store[RESOURCE_ENERGY] || 0) > 0; } }); if (!tomb) return false; debugRing(getRoomOfPos(tomb.pos), tomb.pos, CFG.DRAW.DROP, "TOMB"); debugDrawLine(creep, tomb, CFG.DRAW.DROP, "TOMB"); var tr = creep.withdraw(tomb, RESOURCE_ENERGY); if (tr === ERR_NOT_IN_RANGE) creep.travelTo(tomb, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
 function tryWithdrawRuin(creep) { var ruin = creep.pos.findClosestByPath(FIND_RUINS, { filter: function (r) { return r.store && (r.store[RESOURCE_ENERGY] || 0) > 0; } }); if (!ruin) return false; debugRing(getRoomOfPos(ruin.pos), ruin.pos, CFG.DRAW.DROP, "RUIN"); debugDrawLine(creep, ruin, CFG.DRAW.DROP, "RUIN"); var rr = creep.withdraw(ruin, RESOURCE_ENERGY); if (rr === ERR_NOT_IN_RANGE) creep.travelTo(ruin, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
 function getHomeWorkerEnergyDraw(kind) { if (kind === 'storage') return { color: CFG.DRAW.STORE, label: "STO" }; if (kind === 'spawn_hub_container') return { color: CFG.DRAW.CONT, label: "HUB" }; if (kind === 'source_container') return { color: CFG.DRAW.CONT, label: "SRC" }; return { color: CFG.DRAW.CONT, label: "CONT" }; }
-function tryWithdrawHomeWorkerEnergy(creep) { var info = BeeSelectors.findBestHomeWorkerEnergySource(creep.room, { includeTerminal: false }); if (!info || !info.target) return false; var draw = getHomeWorkerEnergyDraw(info.kind); debugRing(getRoomOfPos(info.target.pos), info.target.pos, draw.color, draw.label); debugDrawLine(creep, info.target, draw.color, draw.label); var wr = creep.withdraw(info.target, RESOURCE_ENERGY); if (wr === ERR_NOT_IN_RANGE) creep.travelTo(info.target, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
+function tryWithdrawHomeWorkerEnergy(creep) { var info = CoreSelectors.findBestHomeWorkerEnergySource(creep.room, { includeTerminal: false }); if (!info || !info.target) return false; var draw = getHomeWorkerEnergyDraw(info.kind); debugRing(getRoomOfPos(info.target.pos), info.target.pos, draw.color, draw.label); debugDrawLine(creep, info.target, draw.color, draw.label); var wr = creep.withdraw(info.target, RESOURCE_ENERGY); if (wr === ERR_NOT_IN_RANGE) creep.travelTo(info.target, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }
 function tryWithdrawContainer(creep) {
   var room = creep.room;
   // This is the last refuel fallback. It skips source containers (mining
   // output) and spawn hub containers (early-room buffer) so Upgraders do not
   // quietly drain energy reserved for harvest/logistics flow.
-  var containerWithEnergy = BeeSelectors.findClosestGeneralEnergyContainer(room, creep.pos);
+  var containerWithEnergy = CoreSelectors.findClosestGeneralEnergyContainer(room, creep.pos);
   if (!containerWithEnergy) return false;
 
   debugRing(getRoomOfPos(containerWithEnergy.pos), containerWithEnergy.pos, CFG.DRAW.CONT, "CONT");
