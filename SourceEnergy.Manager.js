@@ -30,6 +30,7 @@ var BeeToolbox = require('BeeToolbox');
 var BodyUtils = require('core.body');
 var BodyConfig = require('Spawn.BodyConfig');
 var MemoryUtils = require('core.memory');
+var CoreConfig = require('core.config');
 
 var RESERVE_TTL = 100;
 // Economics diagnostics are intentionally estimates. They explain "why this
@@ -41,6 +42,20 @@ var DEFAULT_RESERVED_SOURCE_ENERGY_CAPACITY = 3000;
 var DEFAULT_KEEPER_SOURCE_ENERGY_CAPACITY = 4000;
 var DEFAULT_CONTAINER_REPAIR_ENERGY_PER_TICK = 0.10;
 var ROLE_CONFIGS = BodyConfig && BodyConfig.ROLE_CONFIGS ? BodyConfig.ROLE_CONFIGS : {};
+
+function getSourceEnergySettings() {
+  var settings = CoreConfig && CoreConfig.settings;
+  return settings && settings.sourceEnergy ? settings.sourceEnergy : {};
+}
+
+function getRemoteEconomicsConfig() {
+  var cfg = getSourceEnergySettings();
+  return {
+    enabled: cfg.remoteEconomicsEnabled !== false,
+    interval: Math.max(1, Number(cfg.remoteEconomicsInterval) || 250),
+    pathCacheTtl: Math.max(1, Number(cfg.remoteEconomicsPathCacheTtl) || 1500)
+  };
+}
 
 function ensureMemory() {
   // Root Memory bucket for remote-harvest planning. This is not creep memory;
@@ -220,6 +235,32 @@ function getHomeAnchorPos(homeRoom) {
   return new RoomPosition(25, 25, homeRoom);
 }
 
+function posSignature(pos) {
+  if (!pos) return null;
+  return [pos.roomName, pos.x, pos.y].join(':');
+}
+
+function getSourcePosFromMemory(sourceMem) {
+  if (!sourceMem) return null;
+  if (sourceMem.pos && typeof sourceMem.pos.x === 'number' && typeof sourceMem.pos.y === 'number') {
+    return sourceMem.pos;
+  }
+  if (typeof sourceMem.x === 'number' && typeof sourceMem.y === 'number') {
+    return { x: sourceMem.x, y: sourceMem.y, roomName: sourceMem.roomName || sourceMem.remoteRoom || null };
+  }
+  return null;
+}
+
+function getRemoteEconomicsPathCache() {
+  var root = ensureMemory();
+  if (!root.remoteEconomicsPathCache) root.remoteEconomicsPathCache = {};
+  return root.remoteEconomicsPathCache;
+}
+
+function getPathCacheKey(homeRoom, remoteRoom, sourceId) {
+  return [homeRoom, remoteRoom, sourceId || 'unknown'].join('|');
+}
+
 // Cost matrix used only for the visible-path estimate in this report. It keeps
 // the same broad idea as Veinseeker movement: roads are cheap, blocking structures are
 // impassable, containers are allowed because Veinseeker wants to sit on/near them.
@@ -247,16 +288,42 @@ function buildDiagnosticCostMatrix(roomName) {
 // 1) best: a fresh PathFinder result when the source room is visible;
 // 2) good: cached distance fields from Memory if prior code recorded them;
 // 3) unknown: null, with the economics calculation falling back to route range.
-function estimatePathDistance(homeRoom, remoteRoom, sourceObj, sourceMem, routeDistance) {
+function estimatePathDistance(homeRoom, remoteRoom, sourceId, sourceObj, sourceMem, routeDistance, stats) {
+  stats = stats || { pathCacheHits: 0, pathCacheMisses: 0 };
+  var cfg = getRemoteEconomicsConfig();
+  var anchorPos = getHomeAnchorPos(homeRoom);
+  var sourcePos = sourceObj && sourceObj.pos ? sourceObj.pos : getSourcePosFromMemory(sourceMem);
+  var anchorSig = posSignature(anchorPos);
+  var sourceSig = posSignature(sourcePos);
+  var cache = sourceId ? getRemoteEconomicsPathCache() : null;
+  var cacheKey = cache ? getPathCacheKey(homeRoom, remoteRoom, sourceId) : null;
+  var cached = cacheKey ? cache[cacheKey] : null;
+
+  if (cached && cached.tick && (Game.time - cached.tick) <= cfg.pathCacheTtl &&
+      cached.anchorSig === anchorSig && cached.sourceSig === sourceSig &&
+      typeof cached.distance === 'number') {
+    stats.pathCacheHits++;
+    return { distance: cached.distance, source: 'remote-economics-path-cache' };
+  }
+
   if (sourceObj && sourceObj.pos && Game.rooms && Game.rooms[homeRoom] && Game.rooms[remoteRoom]) {
+    stats.pathCacheMisses++;
     try {
-      var ret = PathFinder.search(getHomeAnchorPos(homeRoom), { pos: sourceObj.pos, range: 1 }, {
+      var ret = PathFinder.search(anchorPos, { pos: sourceObj.pos, range: 1 }, {
         maxOps: (VeinseekerConfig && VeinseekerConfig.MAX_PF_OPS) || 3000,
         plainCost: (VeinseekerConfig && VeinseekerConfig.PLAIN_COST) || 2,
         swampCost: (VeinseekerConfig && VeinseekerConfig.SWAMP_COST) || 10,
         roomCallback: buildDiagnosticCostMatrix
       });
       if (!ret.incomplete && ret.path && typeof ret.path.length === 'number') {
+        if (cacheKey && anchorSig && sourceSig) {
+          cache[cacheKey] = {
+            tick: Game.time,
+            distance: ret.path.length,
+            anchorSig: anchorSig,
+            sourceSig: sourceSig
+          };
+        }
         return { distance: ret.path.length, source: 'visible-pathfinder' };
       }
     } catch (e) {}
@@ -520,6 +587,11 @@ function sourceRejectReason(homeRoom, remoteRoom, sourceRec, roomRejectReason, r
 // Recount live and queued Veinseeker directly at report time. This makes the report
 // match the final queue after BeeSpawnManager has finished preparing the room.
 function countLiveVeinseekerForHome(homeRoom) {
+  var C = global.__BHM;
+  if (C && C.liveCountsByHomeRoleMode && C.liveCountsByHomeRoleMode[homeRoom] &&
+      C.liveCountsByHomeRoleMode[homeRoom].Veinseeker) {
+    return C.liveCountsByHomeRoleMode[homeRoom].Veinseeker.remote || 0;
+  }
   var count = 0;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
@@ -534,6 +606,11 @@ function countLiveVeinseekerForHome(homeRoom) {
 }
 
 function countQueuedVeinseekerForHome(homeRoom) {
+  var C = global.__BHM;
+  if (C && C.queueCountsByRoomRoleMode && C.queueCountsByRoomRoleMode[homeRoom] &&
+      C.queueCountsByRoomRoleMode[homeRoom].Veinseeker) {
+    return C.queueCountsByRoomRoleMode[homeRoom].Veinseeker.remote || 0;
+  }
   var queue = (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].spawnQueue) || [];
   var count = 0;
   for (var i = 0; i < queue.length; i++) {
@@ -550,12 +627,33 @@ function buildRemoteSourceEconomicsReport(homeRoom, remoteDiscovery) {
   // Human-facing diagnostics only. This report explains profitability and
   // rejection reasons, but must not enqueue, reserve, release, or block sources.
   if (!homeRoom) return null;
+  var cfg = getRemoteEconomicsConfig();
+  var roomMem = getRoomMemoryBucket(homeRoom);
+  var previousReport = roomMem.lastRemoteSourceEconomics || null;
+  if (!cfg.enabled) {
+    if (previousReport) {
+      previousReport.recalculated = false;
+      previousReport.reusedFromTick = previousReport.tick || previousReport.reusedFromTick || null;
+      previousReport.lastCheckedTick = Game.time;
+      previousReport.disabled = true;
+    }
+    return previousReport;
+  }
+  if (previousReport && typeof previousReport.tick === 'number' && (Game.time - previousReport.tick) < cfg.interval) {
+    previousReport.recalculated = false;
+    previousReport.reusedFromTick = previousReport.tick;
+    previousReport.lastCheckedTick = Game.time;
+    delete previousReport.disabled;
+    previousReport.pathCacheHits = previousReport.pathCacheHits || 0;
+    previousReport.pathCacheMisses = previousReport.pathCacheMisses || 0;
+    return previousReport;
+  }
   // Reuse the discovery result from queue prep when available, so the report
   // explains the same candidate set BeeSpawnManager just evaluated.
   if (!remoteDiscovery) remoteDiscovery = gatherCandidateRemoteRoomsForHome(homeRoom);
   var home = ensureHomeMemory(homeRoom);
-  var roomMem = getRoomMemoryBucket(homeRoom);
   var energyCapacity = getHomeEnergyCapacity(homeRoom);
+  var pathStats = { pathCacheHits: 0, pathCacheMisses: 0 };
   // Miner body is estimated once per home because all candidate sources use the
   // same room energy capacity and Veinseeker body table.
   var minerBody = chooseDiagnosticBody('Veinseeker', energyCapacity, { mode: 'remote' });
@@ -592,7 +690,7 @@ function buildRemoteSourceEconomicsReport(homeRoom, remoteDiscovery) {
 
     for (var j = 0; j < sources.length; j++) {
       var sourceRec = sources[j];
-      var pathEstimate = estimatePathDistance(homeRoom, remoteRoom, sourceRec.sourceObj, sourceRec.sourceMem, routeDistance);
+      var pathEstimate = estimatePathDistance(homeRoom, remoteRoom, sourceRec.sourceId, sourceRec.sourceObj, sourceRec.sourceMem, routeDistance, pathStats);
       var pathDistance = pathEstimate.distance;
       // Haulers need to make a round trip. If exact pathing is unavailable, use
       // route rooms * 50 tiles as a conservative rough distance.
@@ -668,6 +766,10 @@ function buildRemoteSourceEconomicsReport(homeRoom, remoteDiscovery) {
   roomMem.lastRemoteSourceEconomics = {
     tick: Game.time,
     homeRoom: homeRoom,
+    recalculated: true,
+    reusedFromTick: previousReport && typeof previousReport.tick === 'number' ? previousReport.tick : null,
+    pathCacheHits: pathStats.pathCacheHits,
+    pathCacheMisses: pathStats.pathCacheMisses,
     candidateSources: sourceReports.length,
     profitableSources: profitableSources,
     totalEstimatedSpawnUsage: roundNumber(totalEstimatedSpawnUsage, 4),

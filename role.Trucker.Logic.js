@@ -541,10 +541,7 @@ function collectEnergyTarget(creep, target) {
 
 function findLocalCollectTarget(creep) {
   var room = creep.room;
-  SourceEconomy.refreshOwnedRoomSources(room);
-  SourceEconomy.refreshVeinseekerStats(room);
-  SourceEconomy.refreshTruckerCarryStats(room);
-  SourceEconomy.calculatePendingEnergy(room);
+  SourceEconomy.refreshRoomEconomyOnce(room);
   var pick = SourceEconomy.getBestPickupSource(room, creep);
   if (pick) {
     var amount = creep.store.getFreeCapacity(RESOURCE_ENERGY) || 0;

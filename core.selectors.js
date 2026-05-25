@@ -177,6 +177,10 @@ function computeRepairGoal(structure) {
 //               global.__BHM.getCached with ttl 0 (per tick).
 // Consumers: core.selectors selectors and BeeHiveMind.prepareTickCaches.
 function buildSnapshot(room) {
+  var C = global.__BHM;
+  if (C && C.tick === Game.time && C.roomSnapshots && C.roomSnapshots[room.name]) {
+    return C.roomSnapshots[room.name];
+  }
   var key = 'selectors:snapshot:' + room.name;
   return global.__BHM.getCached(key, 0, function () {
     var snapshot = {
@@ -200,6 +204,7 @@ function buildSnapshot(room) {
       linksWithEnergy: [],
       sources: []
     };
+    snapshot.towers = [];
     var controller = room.controller || null;
     // Harvestable sources; remote modules rely on this for fallback.
     var sources = room.find(FIND_SOURCES);
@@ -224,6 +229,7 @@ function buildSnapshot(room) {
         if ((s.energy || 0) < (s.energyCapacity || 0)) snapshot.spawnLikeNeedy.push(s);
       }
       if (s.structureType === STRUCTURE_TOWER) {
+        snapshot.towers.push(s);
         var used = (s.store[RESOURCE_ENERGY] || 0);
         var cap = s.store.getCapacity(RESOURCE_ENERGY) || 1;
         if ((used / cap) <= TOWER_REFILL_AT) snapshot.towerNeedy.push(s);
@@ -261,15 +267,15 @@ function buildSnapshot(room) {
       var spawns = snapshot.mySpawns;
       if (spawns && spawns.length) snapshot.anchor = spawns[0];
     }
-    snapshot.sourceContainers.sort(byEnergyDesc);
-    snapshot.otherContainers.sort(byEnergyDesc);
+    if (snapshot.sourceContainers.length > 1) snapshot.sourceContainers.sort(byEnergyDesc);
+    if (snapshot.otherContainers.length > 1) snapshot.otherContainers.sort(byEnergyDesc);
     snapshot.energyContainers = snapshot.sourceContainers.concat(snapshot.otherContainers);
-    snapshot.dropped.sort(byEnergyDesc);
-    snapshot.tombstones.sort(byEnergyDesc);
-    snapshot.ruins.sort(byEnergyDesc);
-    snapshot.sites.sort(byBuildPriority);
-    snapshot.repairs.sort(byRepairUrgency);
-    snapshot.linksWithEnergy.sort(byEnergyDesc);
+    if (snapshot.dropped.length > 1) snapshot.dropped.sort(byEnergyDesc);
+    if (snapshot.tombstones.length > 1) snapshot.tombstones.sort(byEnergyDesc);
+    if (snapshot.ruins.length > 1) snapshot.ruins.sort(byEnergyDesc);
+    if (snapshot.sites.length > 1) snapshot.sites.sort(byBuildPriority);
+    if (snapshot.repairs.length > 1) snapshot.repairs.sort(byRepairUrgency);
+    if (snapshot.linksWithEnergy.length > 1) snapshot.linksWithEnergy.sort(byEnergyDesc);
     return snapshot;
   });
 }

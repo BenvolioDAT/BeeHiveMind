@@ -1,6 +1,7 @@
 'use strict';
 
 var BeeToolbox = require('BeeToolbox');
+var CpuProfiler = require('core.cpuProfiler');
 
 var ENERGY_PICKUP_MIN = 50;
 var SOURCE_REGEN_TICKS = 300;
@@ -29,6 +30,7 @@ function ensureRoomSourceEconomy(room) {
   if (typeof econ.truckerStoredEnergy !== 'number') econ.truckerStoredEnergy = 0;
   if (typeof econ.pendingEnergy !== 'number') econ.pendingEnergy = 0;
   if (!econ.lastPickupScores) econ.lastPickupScores = {};
+  if (!econ.refreshDiagnostics) econ.refreshDiagnostics = {};
   return econ;
 }
 
@@ -181,6 +183,51 @@ function calculatePendingEnergy(room) {
   return total;
 }
 
+function refreshRoomEconomyNow(room) {
+  refreshOwnedRoomSources(room);
+  refreshVeinseekerStats(room);
+  refreshTruckerCarryStats(room);
+  calculatePendingEnergy(room);
+  return ensureRoomSourceEconomy(room);
+}
+
+function refreshRoomEconomyOnce(room, opts) {
+  if (!room || !room.name) return null;
+  opts = opts || {};
+  var force = opts.force === true;
+  var econ = ensureRoomSourceEconomy(room);
+  if (!econ) return null;
+
+  var previousRefreshTick = typeof econ.lastRefreshTick === 'number' ? econ.lastRefreshTick : null;
+  if (!force && previousRefreshTick === Game.time) {
+    econ.lastRefreshSkipped = true;
+    econ.refreshDiagnostics = {
+      tick: Game.time,
+      lastRefreshedTick: previousRefreshTick,
+      skipped: true,
+      reason: 'already-current'
+    };
+    return econ;
+  }
+
+  econ = CpuProfiler.measure('SourceEconomy.refreshRoomEconomyOnce', function () {
+    return refreshRoomEconomyNow(room);
+  }) || ensureRoomSourceEconomy(room);
+
+  if (econ) {
+    econ.lastRefreshTick = Game.time;
+    econ.lastRefreshSkipped = false;
+    econ.refreshDiagnostics = {
+      tick: Game.time,
+      previousRefreshTick: previousRefreshTick,
+      lastRefreshedTick: Game.time,
+      skipped: false,
+      forced: force
+    };
+  }
+  return econ;
+}
+
 function releaseStalePickupReservations(roomName) {
   var mem = ensureRoomMemory(roomName);
   var econ = mem.sourceEconomy;
@@ -202,8 +249,17 @@ function reservePickupCarry(roomName, sourceId, creepName, carryAmount) {
   var mem = ensureRoomMemory(roomName);
   if (!mem.sourceEconomy) return 0;
   if (!mem.sourceEconomy.pickupReservations) mem.sourceEconomy.pickupReservations = {};
-  mem.sourceEconomy.pickupReservations[creepName] = { sourceId: sourceId, carryAmount: carryAmount || 0, until: Game.time + 20 };
-  return carryAmount || 0;
+  if (!mem.sourceEconomy.pickupCarryBySource) mem.sourceEconomy.pickupCarryBySource = {};
+  var reservations = mem.sourceEconomy.pickupReservations;
+  var carryBySource = mem.sourceEconomy.pickupCarryBySource;
+  var previous = reservations[creepName];
+  if (previous && previous.sourceId) {
+    carryBySource[previous.sourceId] = Math.max(0, (carryBySource[previous.sourceId] || 0) - (previous.carryAmount || 0));
+  }
+  var amount = carryAmount || 0;
+  reservations[creepName] = { sourceId: sourceId, carryAmount: amount, until: Game.time + 20 };
+  carryBySource[sourceId] = (carryBySource[sourceId] || 0) + amount;
+  return amount;
 }
 
 function getBestPickupSource(room, creep) {
@@ -253,6 +309,7 @@ function getBestPickupSource(room, creep) {
 
 module.exports = {
   ensureRoomSourceEconomy: ensureRoomSourceEconomy,
+  refreshRoomEconomyOnce: refreshRoomEconomyOnce,
   refreshOwnedRoomSources: refreshOwnedRoomSources,
   refreshVeinseekerStats: refreshVeinseekerStats,
   refreshTruckerCarryStats: refreshTruckerCarryStats,

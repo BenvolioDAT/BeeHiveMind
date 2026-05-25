@@ -16,6 +16,8 @@
 // -----------------------------------------------------------------------------
 'use strict';
 
+var CoreConfig = require('core.config');
+
 // Movement ownership model:
 // * This module owns only tick-local intent data (_intents, _indexByCreep, and
 //   _order). It does not write persistent Memory.
@@ -51,6 +53,51 @@ function compareIntents(a, b) {
   if (a.creepName < b.creepName) return -1;
   if (a.creepName > b.creepName) return 1;
   return 0;
+}
+
+function getMovementConfig() {
+  var settings = CoreConfig && CoreConfig.settings;
+  return settings && settings.movement ? settings.movement : {};
+}
+
+function isCombatIntent(intentType) {
+  return intentType === 'combat' || intentType === 'attack' ||
+    intentType === 'rangedAttack' || intentType === 'heal' || intentType === 'rangedHeal';
+}
+
+function defaultMaxOpsForIntent(intent) {
+  var cfg = getMovementConfig();
+  if (intent.intentType === 'emergency') return cfg.emergencyMaxOps || 4000;
+  if (isCombatIntent(intent.intentType)) return cfg.combatMaxOps || 2500;
+  if (intent.roomName && intent.startRoom && intent.roomName !== intent.startRoom) return cfg.remoteMaxOps || 2500;
+  if (intent.intentType === 'harvest' || intent.intentType === 'deliver' ||
+      intent.intentType === 'withdraw' || intent.intentType === 'build' ||
+      intent.intentType === 'repair' || intent.intentType === 'upgrade') {
+    return cfg.localMaxOps || 1500;
+  }
+  return cfg.defaultMaxOps || 2000;
+}
+
+function hasMatchingTravelerPath(creep, pos) {
+  var data = creep && creep.memory && creep.memory._trav;
+  var state = data && data.state;
+  if (!data || !data.path || !state || state.length < 7) return false;
+  return state[4] === pos.x && state[5] === pos.y && state[6] === pos.roomName;
+}
+
+function shouldAvoidFreshPathSearch(creep, pos) {
+  if (hasMatchingTravelerPath(creep, pos)) return false;
+  var cfg = getMovementConfig();
+  var guard = Number(cfg.freshPathCpuGuard);
+  if (!(guard > 0)) return false;
+  try {
+    if (!Game.cpu || typeof Game.cpu.getUsed !== 'function') return false;
+    var tickLimit = Number(Game.cpu.tickLimit || Game.cpu.limit || 0);
+    if (!(tickLimit > 0)) return false;
+    return Game.cpu.getUsed() >= Math.max(0, tickLimit - guard);
+  } catch (err) {
+    return false;
+  }
 }
 
 var MovementManager = {
@@ -224,11 +271,13 @@ var MovementManager = {
           if (status && status.status === 'closed') continue;
         } catch (e) {}
       }
+      if (shouldAvoidFreshPathSearch(creep, pos)) continue;
+      var movementCfg = getMovementConfig();
       var travelOpts = {
         range: intent.range,
-        reusePath: (intent.reusePath != null) ? intent.reusePath : 20,
-        ignoreCreeps: (intent.ignoreCreeps != null) ? intent.ignoreCreeps : false,
-        maxOps: (intent.maxOps != null) ? intent.maxOps : 4000,
+        reusePath: (intent.reusePath != null) ? intent.reusePath : (movementCfg.defaultReusePath || 30),
+        ignoreCreeps: (intent.ignoreCreeps != null) ? intent.ignoreCreeps : (movementCfg.defaultIgnoreCreeps !== false),
+        maxOps: (intent.maxOps != null) ? intent.maxOps : defaultMaxOpsForIntent(intent),
         plainCost: intent.plainCost,
         swampCost: intent.swampCost,
         flee: intent.flee || false

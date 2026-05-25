@@ -15,11 +15,20 @@
 //   and SourceEnergy.Manager may treat those rooms as candidate remotes.
 // -----------------------------------------------------------------------------
 
+var CoreConfig = require('core.config');
+var CpuProfiler = require('core.cpuProfiler');
+
+function getRoadPlannerSettings() {
+  var settings = CoreConfig && CoreConfig.settings;
+  return settings && settings.roadPlanner ? settings.roadPlanner : {};
+}
+
 /** =========================
  *  Config (tweak here)
  *  ========================= */
 // Teaching note: road planner runs on a staggered cadence so CPU stays flat.
 // Keep config centralized and ES5-friendly for novice readability.
+var RoadSettings = getRoadPlannerSettings();
 var CFG = Object.freeze({
   // Pathfinding weights
   plainCost: 2,
@@ -28,7 +37,10 @@ var CFG = Object.freeze({
 
   // Pathfinding safety caps (prevent expensive searches on mega routes)
   maxRoomsPlanning: 4,        // cap path search footprint (tune for your empire layout)
-  maxOpsPlanning: 20000,       // PathFinder ops guardrail; lower on CPU pinches
+  maxOpsPlanning: RoadSettings.maxOpsPlanning || 5000, // PathFinder ops guardrail; lower on CPU pinches
+  maxCpuUsedBeforePlanning: RoadSettings.maxCpuUsedBeforePlanning || 18,
+  planningSkippedRetryTicks: RoadSettings.planningSkippedRetryTicks || 10,
+  existingPathPlaceMaxPaths: RoadSettings.existingPathPlaceMaxPaths || 2,
 
   // Placement behavior
   placeBudgetPerTick: 3,      // ROAD sites we attempt per tick across a path
@@ -129,16 +141,39 @@ function shouldSkipTick(homeRoom) {
   return (((_tick() + stagger) % CFG.plannerTickModulo) !== 0);
 }
 
+function canPlanNewRoadPaths() {
+  if (!Game.cpu || typeof Game.cpu.getUsed !== 'function') return true;
+  var threshold = Number(CFG.maxCpuUsedBeforePlanning) || 0;
+  if (threshold <= 0) return true;
+  return Game.cpu.getUsed() < threshold;
+}
+
+function placeExistingPlannedRoads(homeRoom, mem) {
+  if (!mem || !mem.paths) return;
+  var keys = Object.keys(mem.paths);
+  var placedPaths = 0;
+  for (var i = 0; i < keys.length && placedPaths < CFG.existingPathPlaceMaxPaths; i++) {
+    var key = keys[i];
+    var rec = mem.paths[key];
+    if (!rec || rec.done) continue;
+    dripPlaceAlongPath(homeRoom, key, 1);
+    placedPaths++;
+  }
+}
+
 function ensureRemoteRoads(homeRoom) {
   // Public planner entry. It staggers work, refreshes path Memory around the
   // current anchor, then updates local spokes and visible remote spokes.
   // Teaching note: run heavy road work only on its scheduled slice so we
   // avoid pathfinding every tick. Triggers (anchor change) reset the timer.
   if (!isOwnedRoom(homeRoom)) return;
-  if (shouldSkipTick(homeRoom)) return;
-
   var mem = memoryFor(homeRoom);
-  if (mem.nextRoadPlanTick && Game.time < mem.nextRoadPlanTick) return;
+  var scheduled = !shouldSkipTick(homeRoom) && !(mem.nextRoadPlanTick && Game.time < mem.nextRoadPlanTick);
+  if (!scheduled) {
+    placeExistingPlannedRoads(homeRoom, mem);
+    return;
+  }
+  placeExistingPlannedRoads(homeRoom, mem);
 
   if (!mem.lastAnchorSig) mem.lastAnchorSig = null;
 
@@ -156,11 +191,12 @@ function ensureRemoteRoads(homeRoom) {
     mem.lastAnchorSig = anchorSig;
   }
 
-  ensureStagedHomeNetwork(homeRoom, anchor);
-  ensureRemoteSpokes(homeRoom, mem, anchor);
+  var allowPlanning = canPlanNewRoadPaths();
+  ensureStagedHomeNetwork(homeRoom, anchor, allowPlanning);
+  ensureRemoteSpokes(homeRoom, mem, anchor, allowPlanning);
 
   // Throttle future passes; remote route audits can happen less frequently.
-  mem.nextRoadPlanTick = Game.time + 50;
+  mem.nextRoadPlanTick = Game.time + (allowPlanning ? 50 : CFG.planningSkippedRetryTicks);
 }
 
 // ---------- Home network (staged) ----------
@@ -181,11 +217,12 @@ function getAnchorPos(homeRoom) {
  * between two in-room positions. Novice contributors can call this for any
  * “from → goal” pair without touching the lower-level PathFinder code.
  */
-function planTrackPlaceAudit(homeRoom, fromPos, goalPos, key, range = 1) {
+function planTrackPlaceAudit(homeRoom, fromPos, goalPos, key, range = 1, allowPlanning = true) {
   if (!fromPos || !goalPos) return;
   const mem = memoryFor(homeRoom);
 
   if (!mem.paths[key]) {
+    if (!allowPlanning) return;
     const pathRecord = planPathRecord(fromPos, { pos: goalPos, range });
     if (!pathRecord) return;
     mem.paths[key] = pathRecord;
@@ -196,12 +233,14 @@ function planTrackPlaceAudit(homeRoom, fromPos, goalPos, key, range = 1) {
 }
 
 function planPathRecord(fromPos, goal) {
-  const ret = PathFinder.search(fromPos, goal, {
-    plainCost: CFG.plainCost,
-    swampCost: CFG.swampCost,
-    maxRooms: CFG.maxRoomsPlanning,
-    maxOps: CFG.maxOpsPlanning,
-    roomCallback: (roomName) => roomCostMatrix(roomName)
+  const ret = CpuProfiler.measure('RoadPlanner.pathSearch', function () {
+    return PathFinder.search(fromPos, goal, {
+      plainCost: CFG.plainCost,
+      swampCost: CFG.swampCost,
+      maxRooms: CFG.maxRoomsPlanning,
+      maxOps: CFG.maxOpsPlanning,
+      roomCallback: (roomName) => roomCostMatrix(roomName)
+    });
   });
   if (!ret.path || !ret.path.length || ret.incomplete) return null;
   return {
@@ -211,7 +250,7 @@ function planPathRecord(fromPos, goal) {
   };
 }
 
-function ensureStagedHomeNetwork(homeRoom, anchor) {
+function ensureStagedHomeNetwork(homeRoom, anchor, allowPlanning) {
   if (!anchor) return;
 
   // (A) Spokes to sources
@@ -222,14 +261,14 @@ function ensureStagedHomeNetwork(homeRoom, anchor) {
     const range = (harv === src.pos) ? 1 : 0;
     const stage = homeRoom.storage ? 'storage' : 'spawn';
     const key = `${homeRoom.name}:LOCAL:source${i}:from=${stage}`;
-    planTrackPlaceAudit(homeRoom, anchor, harv, key, range);
+    planTrackPlaceAudit(homeRoom, anchor, harv, key, range, allowPlanning);
   }
 
   // (B) Optional spoke to controller
   if (CFG.includeControllerSpoke && homeRoom.controller) {
     const stage = homeRoom.storage ? 'storage' : 'spawn';
     const keyC = `${homeRoom.name}:LOCAL:controller:from=${stage}`;
-    planTrackPlaceAudit(homeRoom, anchor, homeRoom.controller.pos, keyC, 1);
+    planTrackPlaceAudit(homeRoom, anchor, homeRoom.controller.pos, keyC, 1, allowPlanning);
   }
 
   // (C) Spawn ↔ storage backbone once storage exists
@@ -237,7 +276,7 @@ function ensureStagedHomeNetwork(homeRoom, anchor) {
     const spawns = homeRoom.find(FIND_MY_SPAWNS);
     if (spawns.length) {
       const keyS = `${homeRoom.name}:LOCAL:spawn0-to-storage`;
-      planTrackPlaceAudit(homeRoom, spawns[0].pos, homeRoom.storage.pos, keyS, 1);
+      planTrackPlaceAudit(homeRoom, spawns[0].pos, homeRoom.storage.pos, keyS, 1, allowPlanning);
     }
   }
 }
@@ -402,7 +441,7 @@ function discoverActiveRemoteRoomsFromCreeps() {
 
 // ---------- Remote spokes ----------
 
-function ensureRemoteSpokes(homeRoom, mem, anchor) {
+function ensureRemoteSpokes(homeRoom, mem, anchor, allowPlanning) {
   // Remote roads are planned only while the remote room is visible, because
   // terrain and source positions must be current to avoid bad construction.
   const activeRemotes = activeRemotesOncePerTick();
@@ -419,6 +458,7 @@ function ensureRemoteSpokes(homeRoom, mem, anchor) {
     for (const src of sources) {
       const key = `${remoteName}:${src.id}`;
       if (!mem.paths[key]) {
+        if (!allowPlanning) continue;
         const record = planRemotePath(anchor, src);
         if (!record) continue;
         mem.paths[key] = record;

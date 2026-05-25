@@ -24,6 +24,8 @@
 // --------------------------------------------------
 // Tower Logic (merged from tower.logic.js)
 // --------------------------------------------------
+var CoreSelectors = require('core.selectors');
+
 var CFG = Object.freeze({
   DEBUG_SAY: true,
   DEBUG_DRAW: true,
@@ -65,7 +67,10 @@ var StructureLogic = {
       if (!RMem.repairTargets) RMem.repairTargets = [];
       if (!RMem._towerLocks) RMem._towerLocks = {};
 
-      var towers = room.find(FIND_MY_STRUCTURES, {
+      var snap = CoreSelectors && typeof CoreSelectors.prepareRoomSnapshot === 'function'
+        ? CoreSelectors.prepareRoomSnapshot(room)
+        : null;
+      var towers = snap && snap.towers ? snap.towers : room.find(FIND_MY_STRUCTURES, {
         filter: function (s) { return s.structureType === STRUCTURE_TOWER; }
       }) || [];
       if (!towers.length) continue;
@@ -79,26 +84,31 @@ var StructureLogic = {
       }
 
       // Then patch up wounded creeps so they survive the next volley.
-      runHealPhase(towers);
+      var wounded = room.find(FIND_MY_CREEPS, {
+        filter: function (c) { return c.hits < c.hitsMax; }
+      }) || [];
+      runHealPhase(towers, wounded);
 
       // Convert the stored queue into live objects once so towers avoid repeated lookups.
       var validTargets = [];
+      var targetById = {};
       for (var i = 0; i < RMem.repairTargets.length; i++) {
         var entry = RMem.repairTargets[i];
         if (!entry || !entry.id) continue;
         var targetObj = Game.getObjectById(entry.id);
         if (!targetObj || targetObj.hits >= targetObj.hitsMax) continue;
         validTargets.push(targetObj);
+        targetById[targetObj.id] = targetObj;
       }
       if (!validTargets.length) {
         pruneRepairQueue(RMem);
-        cleanupTowerLocks(RMem);
+        cleanupTowerLocks(RMem, targetById);
         continue;
       }
 
-      runRepairPhase(towers, RMem, validTargets);
+      runRepairPhase(towers, RMem, validTargets, targetById);
       pruneRepairQueue(RMem);
-      cleanupTowerLocks(RMem);
+      cleanupTowerLocks(RMem, targetById);
     }
   },
 
@@ -161,14 +171,13 @@ function fireAllTowers(towers, hostiles) {
   }
 }
 
-function runHealPhase(towers) {
+function runHealPhase(towers, wounded) {
+  if (!wounded || !wounded.length) return;
   for (var i = 0; i < towers.length; i++) {
     var tower = towers[i];
     var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
     if (energy < CFG.HEAL_MIN) continue;
-    var patient = tower.pos.findClosestByRange(FIND_MY_CREEPS, {
-      filter: function (c) { return c.hits < c.hitsMax; }
-    });
+    var patient = tower.pos.findClosestByRange(wounded);
     if (!patient) continue;
     tower.heal(patient);
     _tsay(tower, "HEAL");
@@ -189,7 +198,7 @@ function pruneRepairQueue(RMem) {
   }
 }
 
-function runRepairPhase(towers, RMem, validTargets) {
+function runRepairPhase(towers, RMem, validTargets, targetById) {
   var usedTargetIds = {};
   for (var i = 0; i < towers.length; i++) {
     var tower = towers[i];
@@ -198,7 +207,7 @@ function runRepairPhase(towers, RMem, validTargets) {
       _tsay(tower, "idle");
       continue;
     }
-    var target = pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds);
+    var target = pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds, targetById);
     if (!target) {
       _tsay(tower, "idle");
       continue;
@@ -214,10 +223,10 @@ function runRepairPhase(towers, RMem, validTargets) {
   }
 }
 
-function pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds) {
+function pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds, targetById) {
   var lock = RMem._towerLocks[tower.id];
   if (lock && lock.id) {
-    var lockedObj = Game.getObjectById(lock.id);
+    var lockedObj = targetById && targetById[lock.id] ? targetById[lock.id] : Game.getObjectById(lock.id);
     if (lockedObj && lockedObj.hits < lockedObj.hitsMax && !usedTargetIds[lock.id]) {
       usedTargetIds[lock.id] = true;
       return lockedObj;
@@ -235,7 +244,7 @@ function pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds) {
   return null;
 }
 
-function cleanupTowerLocks(RMem) {
+function cleanupTowerLocks(RMem, targetById) {
   for (var towerId in RMem._towerLocks) {
     if (!RMem._towerLocks.hasOwnProperty(towerId)) continue;
     var lock = RMem._towerLocks[towerId];
@@ -243,7 +252,7 @@ function cleanupTowerLocks(RMem) {
       delete RMem._towerLocks[towerId];
       continue;
     }
-    var obj = Game.getObjectById(lock.id);
+    var obj = targetById && targetById[lock.id] ? targetById[lock.id] : Game.getObjectById(lock.id);
     if (!obj || obj.hits >= obj.hitsMax) {
       delete RMem._towerLocks[towerId];
       continue;

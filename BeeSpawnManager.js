@@ -23,6 +23,7 @@ var CoreLogger  = require('core.logger');
 var LOG_LEVEL   = CoreLogger.LOG_LEVEL;
 var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 var CoreConfig  = require('core.config');
+var CpuProfiler = require('core.cpuProfiler');
 
 var spawnLogic  = require('spawn.logic');
 var VeinseekerConfig  = require('role.Veinseeker.Config');
@@ -163,14 +164,19 @@ function getCheapestCombatRoleEnergy() {
 }
 
 function hasBaseRoleDeficit(C, roomName) {
-  var veinseeker = countLiveHomeVeinseekers(roomName);
+  var veinseeker = countLiveHomeVeinseekers(C, roomName);
   // Trucker replaced Courier as the protected base hauler role.
   var trucker = getRoomLocalLiveCount(C, roomName, 'Trucker');
   var queen = getRoomLocalLiveCount(C, roomName, 'Queen');
   return veinseeker < 1 || trucker < 1 || queen < 1;
 }
 
-function countLiveHomeVeinseekers(roomName) {
+function countLiveHomeVeinseekers(C, roomName) {
+  if (C && C.liveCountsByHomeRoleMode && C.liveCountsByHomeRoleMode[roomName] &&
+      C.liveCountsByHomeRoleMode[roomName].Veinseeker) {
+    var modes = C.liveCountsByHomeRoleMode[roomName].Veinseeker;
+    return (modes.home || 0) + (modes.default || 0);
+  }
   var count = 0;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
@@ -185,7 +191,11 @@ function countLiveHomeVeinseekers(roomName) {
   return count;
 }
 
-function countLiveRemoteVeinseekers(roomName) {
+function countLiveRemoteVeinseekers(C, roomName) {
+  if (C && C.liveCountsByHomeRoleMode && C.liveCountsByHomeRoleMode[roomName] &&
+      C.liveCountsByHomeRoleMode[roomName].Veinseeker) {
+    return C.liveCountsByHomeRoleMode[roomName].Veinseeker.remote || 0;
+  }
   var count = 0;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
@@ -200,13 +210,8 @@ function countLiveRemoteVeinseekers(roomName) {
   return count;
 }
 
-function countQueuedRemoteVeinseekers(roomName) {
-  var q = ensureRoomQueue(roomName);
-  var count = 0;
-  for (var i = 0; i < q.length; i++) {
-    if (q[i] && q[i].role === 'Veinseeker' && q[i].mode === 'remote') count++;
-  }
-  return count;
+function countQueuedRemoteVeinseekers(C, roomName) {
+  return queuedCount(C, roomName, 'Veinseeker', 'remote');
 }
 
 function isRemoteDefenseTargetAllowed(targetRoom) {
@@ -286,7 +291,141 @@ function ensureRoomQueue(roomName) {
   return Memory.rooms[roomName].spawnQueue;
 }
 
-function cleanupRetiredCourierState(roomName) {
+function ensureNestedMap(root, key) {
+  if (!root[key]) root[key] = Object.create(null);
+  return root[key];
+}
+
+function clearQueueIndexesForRoom(C, roomName) {
+  if (!C || !roomName) return;
+  ensureNestedMap(C, 'queueCountsByRoomRole')[roomName] = Object.create(null);
+  ensureNestedMap(C, 'queueCountsByRoomRoleMode')[roomName] = Object.create(null);
+  ensureNestedMap(C, 'queueCountsByRoomRoleTask')[roomName] = Object.create(null);
+  if (!C.queueCountsDirtyByRoom) C.queueCountsDirtyByRoom = Object.create(null);
+  C.queueCountsDirtyByRoom[roomName] = false;
+}
+
+function noteQueueItemInIndexes(C, roomName, item) {
+  if (!C || !roomName || !item) return;
+  var roleName = canonicalRole(item.role);
+  if (!roleName) return;
+  var byRole = ensureNestedMap(C, 'queueCountsByRoomRole');
+  var roomRole = ensureNestedMap(byRole, roomName);
+  roomRole[roleName] = (roomRole[roleName] || 0) + 1;
+
+  var byRoleMode = ensureNestedMap(C, 'queueCountsByRoomRoleMode');
+  var roomRoleMode = ensureNestedMap(byRoleMode, roomName);
+  var roleMode = ensureNestedMap(roomRoleMode, roleName);
+  var modeKey = item.mode || 'default';
+  roleMode[modeKey] = (roleMode[modeKey] || 0) + 1;
+
+  var byRoleTask = ensureNestedMap(C, 'queueCountsByRoomRoleTask');
+  var roomRoleTask = ensureNestedMap(byRoleTask, roomName);
+  var roleTask = ensureNestedMap(roomRoleTask, roleName);
+  var taskKey = item.task || 'default';
+  roleTask[taskKey] = (roleTask[taskKey] || 0) + 1;
+}
+
+function refreshQueueIndexesForRoom(C, roomName) {
+  if (!C || !roomName) return null;
+  clearQueueIndexesForRoom(C, roomName);
+  var q = ensureRoomQueue(roomName);
+  for (var i = 0; i < q.length; i++) {
+    noteQueueItemInIndexes(C, roomName, q[i]);
+  }
+  return {
+    byRole: C.queueCountsByRoomRole && C.queueCountsByRoomRole[roomName],
+    byRoleMode: C.queueCountsByRoomRoleMode && C.queueCountsByRoomRoleMode[roomName],
+    byRoleTask: C.queueCountsByRoomRoleTask && C.queueCountsByRoomRoleTask[roomName]
+  };
+}
+
+function markQueueIndexesDirty(C, roomName) {
+  if (!C || !roomName) return;
+  if (!C.queueCountsDirtyByRoom) C.queueCountsDirtyByRoom = Object.create(null);
+  C.queueCountsDirtyByRoom[roomName] = true;
+}
+
+function getQueueIndexesForRoom(C, roomName) {
+  if (!C || C.tick !== Game.time || !roomName) return null;
+  if (!C.queueCountsByRoomRole || !C.queueCountsByRoomRoleMode || !C.queueCountsByRoomRoleTask) {
+    return refreshQueueIndexesForRoom(C, roomName);
+  }
+  if (C.queueCountsDirtyByRoom && C.queueCountsDirtyByRoom[roomName]) {
+    return refreshQueueIndexesForRoom(C, roomName);
+  }
+  if (!C.queueCountsByRoomRole[roomName]) {
+    return refreshQueueIndexesForRoom(C, roomName);
+  }
+  return {
+    byRole: C.queueCountsByRoomRole[roomName],
+    byRoleMode: C.queueCountsByRoomRoleMode[roomName] || {},
+    byRoleTask: C.queueCountsByRoomRoleTask[roomName] || {}
+  };
+}
+
+function queuedCount(C, roomName, role, mode, task) {
+  var roleName = canonicalRole(role);
+  var indexes = getQueueIndexesForRoom(C, roomName);
+  if (indexes && roleName) {
+    if (task) {
+      var roleTask = indexes.byRoleTask && indexes.byRoleTask[roleName];
+      return roleTask ? (roleTask[task] || 0) : 0;
+    }
+    if (mode) {
+      var roleMode = indexes.byRoleMode && indexes.byRoleMode[roleName];
+      return roleMode ? (roleMode[mode] || 0) : 0;
+    }
+    return indexes.byRole ? (indexes.byRole[roleName] || 0) : 0;
+  }
+
+  var q = ensureRoomQueue(roomName);
+  var count = 0;
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (!item || canonicalRole(item.role) !== roleName) continue;
+    if (mode && item.mode !== mode) continue;
+    if (task && item.task !== task) continue;
+    count++;
+  }
+  return count;
+}
+
+function isQueueSortedForTick(C, roomName) {
+  return !!(C && C.queueSortedTickByRoom && C.queueSortedTickByRoom[roomName] === Game.time);
+}
+
+function markQueueSorted(C, roomName) {
+  if (!C || !roomName) return;
+  if (!C.queueSortedTickByRoom) C.queueSortedTickByRoom = Object.create(null);
+  C.queueSortedTickByRoom[roomName] = Game.time;
+}
+
+function sortRoomQueueOnce(C, roomName) {
+  var q = ensureRoomQueue(roomName);
+  if (!q.length) return q;
+  if (!isQueueSortedForTick(C, roomName)) {
+    q.sort(compareQueueItems);
+    markQueueSorted(C, roomName);
+  }
+  return q;
+}
+
+function insertQueueItem(C, roomName, q, item) {
+  if (isQueueSortedForTick(C, roomName)) {
+    for (var i = 0; i < q.length; i++) {
+      if (compareQueueItems(item, q[i]) < 0) {
+        q.splice(i, 0, item);
+        noteQueueItemInIndexes(C, roomName, item);
+        return;
+      }
+    }
+  }
+  q.push(item);
+  noteQueueItemInIndexes(C, roomName, item);
+}
+
+function cleanupRetiredCourierState(roomName, C) {
   // Historical Memory may still contain Courier queue items/creeps. This keeps
   // old saves compatible by migrating them to Trucker before quota math runs.
   var q = ensureRoomQueue(roomName);
@@ -305,16 +444,31 @@ function cleanupRetiredCourierState(roomName) {
   Memory.rooms[roomName].spawnQueue = kept;
 
   var migratedCreeps = 0;
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.memory) continue;
-    var home = creep.memory.home || (creep.room && creep.room.name);
-    if (home !== roomName) continue;
-    var creepRole = creep.memory.role == null ? '' : String(creep.memory.role).toLowerCase();
-    if (creepRole === 'courier') {
-      creep.memory.role = 'Trucker';
-      migratedCreeps++;
+  var creepList = C && C.creeps ? C.creeps : null;
+  if (creepList) {
+    for (var ci = 0; ci < creepList.length; ci++) {
+      var cachedCreep = creepList[ci];
+      if (!cachedCreep || !cachedCreep.memory) continue;
+      var cachedHome = cachedCreep.memory.home || (cachedCreep.room && cachedCreep.room.name);
+      if (cachedHome !== roomName) continue;
+      var cachedRole = cachedCreep.memory.role == null ? '' : String(cachedCreep.memory.role).toLowerCase();
+      if (cachedRole === 'courier') {
+        cachedCreep.memory.role = 'Trucker';
+        migratedCreeps++;
+      }
+    }
+  } else {
+    for (var name in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+      var creep = Game.creeps[name];
+      if (!creep || !creep.memory) continue;
+      var home = creep.memory.home || (creep.room && creep.room.name);
+      if (home !== roomName) continue;
+      var creepRole = creep.memory.role == null ? '' : String(creep.memory.role).toLowerCase();
+      if (creepRole === 'courier') {
+        creep.memory.role = 'Trucker';
+        migratedCreeps++;
+      }
     }
   }
 
@@ -324,17 +478,6 @@ function cleanupRetiredCourierState(roomName) {
     migratedCreeps: migratedCreeps,
     notes: 'retired role cleanup'
   };
-}
-
-function queuedCount(roomName, role) {
-  var q = ensureRoomQueue(roomName);
-  var count = 0;
-  for (var i = 0; i < q.length; i++) {
-    if (q[i] && q[i].role === role) {
-      count++;
-    }
-  }
-  return count;
 }
 
 function getRoomLocalLiveCount(C, roomName, role) {
@@ -349,8 +492,17 @@ function getRoomLocalLiveCount(C, roomName, role) {
   return roomCounts[role] || 0;
 }
 
-function countRoleNeedingReplacement(roomName, role, threshold) {
+function countRoleNeedingReplacement(C, roomName, role, threshold) {
   if (!roomName || !role || !threshold || threshold <= 0) return 0;
+  if (C && C.lowTtlByHomeRole && C.lowTtlByHomeRole[roomName] && C.lowTtlByHomeRole[roomName][role]) {
+    var lowTtl = C.lowTtlByHomeRole[roomName][role];
+    var cachedCount = 0;
+    for (var i = 0; i < lowTtl.length; i++) {
+      var rec = lowTtl[i];
+      if (rec && typeof rec.ttl === 'number' && rec.ttl <= threshold) cachedCount++;
+    }
+    return cachedCount;
+  }
   var count = 0;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
@@ -459,13 +611,14 @@ function addVeinseekerPlanFields(opts, plan) {
   return opts;
 }
 
-function makeQueueSpaceForEmergencyVeinseeker(roomName) {
+function makeQueueSpaceForEmergencyVeinseeker(roomName, C) {
   var q = ensureRoomQueue(roomName);
   if (q.length < QUEUE_HARD_LIMIT) return true;
   for (var i = q.length - 1; i >= 0; i--) {
     var item = q[i];
     if (isVeinseekerQueueItem(item) && item.sourceWorkerSpawnMode === 'upgradeReplacement') {
       q.splice(i, 1);
+      refreshQueueIndexesForRoom(C, roomName);
       ensureRoomMemory(roomName).lastVeinseekerEmergencyQueueSpace = {
         tick: Game.time,
         removedMode: 'upgradeReplacement',
@@ -478,8 +631,8 @@ function makeQueueSpaceForEmergencyVeinseeker(roomName) {
   return false;
 }
 
-function enqueueVeinseekerForSource(roomName, sourceId, mode, desiredPlan, extra) {
-  if (mode === 'emergency' && !makeQueueSpaceForEmergencyVeinseeker(roomName)) {
+function enqueueVeinseekerForSource(roomName, sourceId, mode, desiredPlan, extra, C) {
+  if (mode === 'emergency' && !makeQueueSpaceForEmergencyVeinseeker(roomName, C)) {
     return false;
   }
   var opts = {
@@ -502,7 +655,7 @@ function enqueueVeinseekerForSource(roomName, sourceId, mode, desiredPlan, extra
       }
     }
   }
-  return enqueue(roomName, 'Veinseeker', opts);
+  return enqueue(roomName, 'Veinseeker', opts, C);
 }
 
 function copyVeinseekerSourceStatus(rec, status) {
@@ -558,7 +711,7 @@ function isLowTtlVeinseekerReplacementAllowed(rec) {
   return rec.lowestTtl <= (REPLACEMENT_TTL.Veinseeker || 80);
 }
 
-function queueVeinseekerSourceNeeds(room, report) {
+function queueVeinseekerSourceNeeds(room, report, C) {
   if (!room || !report || !report.diag || !report.sources) return;
   var roomName = room.name;
   var sources = report.sources || [];
@@ -577,7 +730,7 @@ function queueVeinseekerSourceNeeds(room, report) {
     if (rec.emergencyNeeded) {
       if (enqueueVeinseekerForSource(roomName, source.id, 'emergency', desiredPlan, {
         priority: VEINSEEKER_EMERGENCY_PRIORITY
-      })) {
+      }, C)) {
         rec.queued++;
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-emergency-no-active-coverage';
@@ -612,7 +765,7 @@ function queueVeinseekerSourceNeeds(room, report) {
         replaceCreepName: rec.lowestTtlName,
         replacementFor: rec.lowestTtlName,
         replaceSourceId: source.id
-      })) {
+      }, C)) {
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-normal-low-ttl-replacement';
         report.diag.decisions.push({
@@ -648,7 +801,7 @@ function queueVeinseekerSourceNeeds(room, report) {
     if (rec.freeWork > 0 && rec.live > 0) {
       if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
         priority: VEINSEEKER_NORMAL_PRIORITY
-      })) {
+      }, C)) {
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-normal-source-work-deficit';
         report.diag.decisions.push({
@@ -680,7 +833,7 @@ function queueVeinseekerSourceNeeds(room, report) {
         replaceCreepName: rec.bestSafeLiveName,
         replacementFor: rec.bestSafeLiveName,
         replaceSourceId: source.id
-      })) {
+      }, C)) {
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-upgrade-replacement';
         report.diag.decisions.push({
@@ -709,10 +862,10 @@ function queueVeinseekerSourceNeeds(room, report) {
   ensureRoomMemory(roomName).lastVeinseekerBodyPlan = report.diag;
 }
 
-function queueRemoteVeinseekerNeeds(roomName) {
+function queueRemoteVeinseekerNeeds(C, roomName) {
   var desired = determineVeinseekerQuota(null, { name: roomName }) || 0;
-  var live = countLiveRemoteVeinseekers(roomName);
-  var queued = countQueuedRemoteVeinseekers(roomName);
+  var live = countLiveRemoteVeinseekers(C, roomName);
+  var queued = countQueuedRemoteVeinseekers(C, roomName);
   var deficit = Math.max(0, desired - live - queued);
   var diag = {
     tick: Game.time,
@@ -737,7 +890,7 @@ function queueRemoteVeinseekerNeeds(roomName) {
       sourceId: pick.sourceId,
       targetRoom: pick.targetRoom,
       priority: ROLE_PRIORITY.Veinseeker || 70
-    });
+    }, C);
     if (ok) {
       diag.enqueued++;
     } else {
@@ -750,7 +903,7 @@ function queueRemoteVeinseekerNeeds(roomName) {
   ensureRoomMemory(roomName).lastVeinseekerRemoteQueue = diag;
 }
 
-function enqueue(roomName, role, opts) {
+function enqueue(roomName, role, opts, C) {
   var q = ensureRoomQueue(roomName);
   if (q.length >= QUEUE_HARD_LIMIT) {
     dlog('🐝 [Queue]', roomName, 'queue full (', q.length, '/', QUEUE_HARD_LIMIT, '), skip enqueue of', role);
@@ -774,7 +927,7 @@ function enqueue(roomName, role, opts) {
     }
   }
 
-  q.push(item);
+  insertQueueItem(C, roomName, q, item);
   dlog('➕ [Queue]', roomName, 'enqueued', role, '(prio', item.priority + ')');
   return true;
 }
@@ -789,7 +942,7 @@ function pruneOverfilledQueue(roomName, quotas, C) {
   var q = ensureRoomQueue(roomName);
   var before = q.length;
 
-  q.sort(compareQueueItems);
+  sortRoomQueueOnce(C, roomName);
 
   // Defensive habit: track how many spawn slots remain per role so we do not
   // waste CPU dequeuing later.
@@ -819,6 +972,8 @@ function pruneOverfilledQueue(roomName, quotas, C) {
     }
   }
   Memory.rooms[roomName].spawnQueue = kept;
+  refreshQueueIndexesForRoom(C, roomName);
+  markQueueSorted(C, roomName);
 
   var dropped = before - kept.length;
   if (dropped > 0 || tickEvery(DBG_EVERY)) {
@@ -1097,12 +1252,41 @@ function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
   return BeeToolbox.estimateRemoteRoundTripTicks(homeRoom, remoteRoom);
 }
 
-function countHomeTruckersByAssignment(roomName) {
+function countHomeTruckersByAssignment(C, roomName) {
   var local = 0;
   var remote = 0;
   var remotePickup = 0;
   var remoteReturn = 0;
   var remoteCapable = 0;
+  var cachedTruckers = C && C.creepsByHomeRole && C.creepsByHomeRole[roomName] && C.creepsByHomeRole[roomName].Trucker;
+  if (cachedTruckers) {
+    for (var idx = 0; idx < cachedTruckers.length; idx++) {
+      var cached = cachedTruckers[idx];
+      if (!cached || !cached.memory) continue;
+      var cachedJob = cached.memory.dispatchJob;
+      if (cachedJob && (cachedJob.type === 'REMOTE_PICKUP' || cachedJob.type === 'REMOTE_RETURN')) {
+        remote++;
+        if (cachedJob.type === 'REMOTE_PICKUP') remotePickup++;
+        if (cachedJob.type === 'REMOTE_RETURN') remoteReturn++;
+        if (cachedJob.type === 'REMOTE_RETURN') {
+          remoteCapable++;
+        } else {
+          var cachedRemoteRoom = cachedJob.roomName || cached.memory.requestRoom || cached.memory.targetRoom;
+          var cachedRequired = estimateRemoteRoundTripTicks(roomName, cachedRemoteRoom);
+          if (typeof cached.ticksToLive !== 'number' || cached.ticksToLive >= cachedRequired || (cached.store && cached.store.getUsedCapacity(RESOURCE_ENERGY) > 0)) remoteCapable++;
+        }
+      } else {
+        local++;
+      }
+    }
+    return {
+      truckersOnLocalJobs: local,
+      truckersOnRemoteJobs: remote,
+      truckersOnRemotePickup: remotePickup,
+      truckersOnRemoteReturn: remoteReturn,
+      remoteCapableTruckers: remoteCapable
+    };
+  }
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
     var c = Game.creeps[name];
@@ -1242,31 +1426,45 @@ function hasRemoteContainerRepairDemand(roomName) {
   }
   return false;
 }
-function countRemoteEmergencyRepairAssignments(roomName) {
+function countRemoteEmergencyRepairAssignments(C, roomName) {
   if (!roomName) return 0;
-  var count = 0;
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.memory) continue;
-    if (canonicalRole(creep.memory.role) !== 'Repair') continue;
-    if (creep.memory.task !== 'remoteContainerEmergencyRepair') continue;
-    if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
-    count++;
+  var live = null;
+  var cachedRepair = C && C.creepsByHomeRole && C.creepsByHomeRole[roomName] && C.creepsByHomeRole[roomName].Repair;
+  if (cachedRepair) {
+    live = 0;
+    for (var ci = 0; ci < cachedRepair.length; ci++) {
+      var cached = cachedRepair[ci];
+      if (cached && cached.memory && cached.memory.task === 'remoteContainerEmergencyRepair') live++;
+    }
   }
-  var q = ensureRoomQueue(roomName);
-  for (var i = 0; i < q.length; i++) {
-    var item = q[i];
-    if (!item || item.role !== 'Repair') continue;
-    if (item.task !== 'remoteContainerEmergencyRepair') continue;
-    if ((item.home || roomName) !== roomName) continue;
-    count++;
+  if (live === null) {
+    live = 0;
+    for (var name in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+      var creep = Game.creeps[name];
+      if (!creep || !creep.memory) continue;
+      if (canonicalRole(creep.memory.role) !== 'Repair') continue;
+      if (creep.memory.task !== 'remoteContainerEmergencyRepair') continue;
+      if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
+      live++;
+    }
   }
-  return count;
+  return live + queuedCount(C, roomName, 'Repair', null, 'remoteContainerEmergencyRepair');
 }
 
-function countLocalRepairCreeps(roomName) {
+function countLocalRepairCreeps(C, roomName) {
   if (!roomName) return 0;
+  var cachedRepair = C && C.creepsByHomeRole && C.creepsByHomeRole[roomName] && C.creepsByHomeRole[roomName].Repair;
+  if (cachedRepair) {
+    var cachedCount = 0;
+    for (var ci = 0; ci < cachedRepair.length; ci++) {
+      var cached = cachedRepair[ci];
+      if (!cached || !cached.memory) continue;
+      if (cached.memory.task === 'remoteContainerEmergencyRepair') continue;
+      cachedCount++;
+    }
+    return cachedCount;
+  }
   var count = 0;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
@@ -1280,16 +1478,26 @@ function countLocalRepairCreeps(roomName) {
   return count;
 }
 
-function isRepairAlreadyAssignedToContainer(roomName, containerId) {
+function isRepairAlreadyAssignedToContainer(C, roomName, containerId) {
   if (!roomName || !containerId) return false;
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.memory) continue;
-    if (canonicalRole(creep.memory.role) !== 'Repair') continue;
-    if (creep.memory.task !== 'remoteContainerEmergencyRepair') continue;
-    if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
-    if (creep.memory.containerId === containerId) return true;
+  var repairCreeps = C && C.creepsByHomeRole && C.creepsByHomeRole[roomName] && C.creepsByHomeRole[roomName].Repair;
+  if (repairCreeps) {
+    for (var rc = 0; rc < repairCreeps.length; rc++) {
+      var cachedCreep = repairCreeps[rc];
+      if (!cachedCreep || !cachedCreep.memory) continue;
+      if (cachedCreep.memory.task !== 'remoteContainerEmergencyRepair') continue;
+      if (cachedCreep.memory.containerId === containerId) return true;
+    }
+  } else {
+    for (var name in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+      var creep = Game.creeps[name];
+      if (!creep || !creep.memory) continue;
+      if (canonicalRole(creep.memory.role) !== 'Repair') continue;
+      if (creep.memory.task !== 'remoteContainerEmergencyRepair') continue;
+      if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
+      if (creep.memory.containerId === containerId) return true;
+    }
   }
   var q = ensureRoomQueue(roomName);
   for (var i = 0; i < q.length; i++) {
@@ -1301,7 +1509,7 @@ function isRepairAlreadyAssignedToContainer(roomName, containerId) {
   return false;
 }
 
-function findEmergencyRepairRequestInBucket(requests, roomName) {
+function findEmergencyRepairRequestInBucket(C, requests, roomName) {
   if (!requests) return null;
   var staleTicks = (TruckerConfig && TruckerConfig.REQUEST_STALE_TICKS) || 100;
   var startPct = RepairConfig.remoteContainerEmergencyRepairStartPct || 0.40;
@@ -1324,22 +1532,22 @@ function findEmergencyRepairRequestInBucket(requests, roomName) {
       req.maintenanceUntil > Game.time &&
       req.maintenanceReason === 'emergencyRemoteRepair';
     if (heldByEmergencyRepair) continue;
-    if (isRepairAlreadyAssignedToContainer(roomName, req.containerId)) continue;
+    if (isRepairAlreadyAssignedToContainer(C, roomName, req.containerId)) continue;
     return req;
   }
   return null;
 }
 
-function findRemoteContainerEmergencyRepairRequest(roomName) {
+function findRemoteContainerEmergencyRepairRequest(C, roomName) {
   // Emergency repair can be triggered from either live container status or haul
   // request records. Both are produced by Veinseeker, so keep the field expectations
   // aligned with role.Veinseeker.Remote.js and role.Repair.Logic.js.
   if (!RepairConfig.remoteContainerEmergencyRepairEnabled) return null;
   var statusRequests = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : null;
   var haulRequests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : null;
-  var statusReq = findEmergencyRepairRequestInBucket(statusRequests, roomName);
+  var statusReq = findEmergencyRepairRequestInBucket(C, statusRequests, roomName);
   if (statusReq) return statusReq;
-  return findEmergencyRepairRequestInBucket(haulRequests, roomName);
+  return findEmergencyRepairRequestInBucket(C, haulRequests, roomName);
 }
 
 
@@ -1360,7 +1568,15 @@ function ensureRemoteVisionRequestFromStatus(req, homeRoom) {
   };
   return map[key];
 }
-function findScoutAssignedToRemoteVisionRequest(roomName, requestKey) {
+function findScoutAssignedToRemoteVisionRequest(C, roomName, requestKey) {
+  var scouts = C && C.creepsByHomeRole && C.creepsByHomeRole[roomName] && C.creepsByHomeRole[roomName].Scout;
+  if (scouts) {
+    for (var si = 0; si < scouts.length; si++) {
+      var cachedScout = scouts[si];
+      if (cachedScout && cachedScout.memory && cachedScout.memory.remoteVisionRequestId === requestKey) return cachedScout;
+    }
+    return null;
+  }
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
     var creep = Game.creeps[name];
@@ -1384,7 +1600,7 @@ function isScoutSuitableForRequest(creep, roomName, requestKey, selected) {
   var dist = Game.map.getRoomLinearDistance(creep.pos.roomName, targetRoom);
   return dist <= 2;
 }
-function queueEmergencyVisionScoutIfNeeded(roomName) {
+function queueEmergencyVisionScoutIfNeeded(C, roomName) {
   // Bridge from stale remote container status to Scout spawning. The request
   // itself lives in Memory.__BHM.remoteVisionRequests; this function only queues
   // a temporary Scout when no suitable live Scout is already handling it.
@@ -1393,12 +1609,19 @@ function queueEmergencyVisionScoutIfNeeded(roomName) {
   var reqs = ensureRemoteVisionRequests();
   var pending = 0; var selected = null; var selectedKey = null;
   for (var k in reqs) { if (!Object.prototype.hasOwnProperty.call(reqs,k)) continue; var r=reqs[k]; if (!r || r.resolvedAt) continue; if (r.homeRoom===roomName) { pending++; if (!selected || (r.priority||0)>(selected.priority||0)) { selected=r; selectedKey=k; } } }
-  var assignedScout = selectedKey ? findScoutAssignedToRemoteVisionRequest(roomName, selectedKey) : null;
+  var assignedScout = selectedKey ? findScoutAssignedToRemoteVisionRequest(C, roomName, selectedKey) : null;
   var suitableScoutFound = !!assignedScout;
   if (!suitableScoutFound && selectedKey) {
-    for (var n in Game.creeps) {
-      if (!Object.prototype.hasOwnProperty.call(Game.creeps, n)) continue;
-      if (isScoutSuitableForRequest(Game.creeps[n], roomName, selectedKey, selected)) { assignedScout = Game.creeps[n]; suitableScoutFound = true; break; }
+    var scouts = C && C.creepsByHomeRole && C.creepsByHomeRole[roomName] && C.creepsByHomeRole[roomName].Scout;
+    if (scouts) {
+      for (var s = 0; s < scouts.length; s++) {
+        if (isScoutSuitableForRequest(scouts[s], roomName, selectedKey, selected)) { assignedScout = scouts[s]; suitableScoutFound = true; break; }
+      }
+    } else {
+      for (var n in Game.creeps) {
+        if (!Object.prototype.hasOwnProperty.call(Game.creeps, n)) continue;
+        if (isScoutSuitableForRequest(Game.creeps[n], roomName, selectedKey, selected)) { assignedScout = Game.creeps[n]; suitableScoutFound = true; break; }
+      }
     }
   }
   var queuedScout = false;
@@ -1406,7 +1629,7 @@ function queueEmergencyVisionScoutIfNeeded(roomName) {
     var q = ensureRoomQueue(roomName);
     var alreadyQueued = false;
     for (var i=0;i<q.length;i++) { var item=q[i]; if (item && item.role==='Scout' && item.task==='remoteVisionEmergency' && item.remoteVisionRequestId===selectedKey) { alreadyQueued=true; break; } }
-    if (!alreadyQueued) queuedScout = enqueue(roomName, 'Scout', { task:'remoteVisionEmergency', home: roomName, remoteVisionRequestId: selectedKey, targetRoom: selected.targetRoom });
+    if (!alreadyQueued) queuedScout = enqueue(roomName, 'Scout', { task:'remoteVisionEmergency', home: roomName, remoteVisionRequestId: selectedKey, targetRoom: selected.targetRoom }, C);
   }
   roomMem.lastRemoteVision = { pendingRequests: pending, selectedRequest: selectedKey, assignedScout: assignedScout ? assignedScout.name : null, suitableScoutFound: suitableScoutFound, queuedScout: queuedScout, reason: selectedKey ? (suitableScoutFound ? 'existingScoutSuitable' : (queuedScout ? 'queuedEmergencyScout' : 'queueSkipped')) : 'noPendingRequest' };
 }
@@ -1437,15 +1660,15 @@ function computeRoomQuotas(C, room) {
   var localDefense = computeLocalDefenseQuotas(room);
   var localRepairQuota = computeLocalRepairQuotaForRoom(room);
   var maxRemoteEmergencyPerHome = Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1);
-  var activeRemoteEmergencyRepairs = countRemoteEmergencyRepairAssignments(room.name);
+  var activeRemoteEmergencyRepairs = countRemoteEmergencyRepairAssignments(C, room.name);
   var selectedEmergencyRequest = null;
   var emergencyRepairQuota = 0;
   if (maxRemoteEmergencyPerHome > 0 && activeRemoteEmergencyRepairs < maxRemoteEmergencyPerHome) {
-    selectedEmergencyRequest = findRemoteContainerEmergencyRepairRequest(room.name);
+    selectedEmergencyRequest = findRemoteContainerEmergencyRepairRequest(C, room.name);
     emergencyRepairQuota = selectedEmergencyRequest ? 1 : 0;
   }
   var repairQuota = localRepairQuota + emergencyRepairQuota;
-  var liveLocalRepair = countLocalRepairCreeps(room.name);
+  var liveLocalRepair = countLocalRepairCreeps(C, room.name);
   var liveRemoteEmergencyRepair = activeRemoteEmergencyRepairs;
   var roomMem = ensureRoomMemory(room.name);
   roomMem.lastRepairQuota = {
@@ -1495,11 +1718,12 @@ function fillQueueForRoom(C, room) {
   // 3) write quota diagnostics,
   // 4) enqueue deficits, reserving Veinseeker sources before adding queue items.
   var quotas = computeRoomQuotas(C, room);
-  queueEmergencyVisionScoutIfNeeded(room.name);
+  queueEmergencyVisionScoutIfNeeded(C, room.name);
   var roomName = room.name;
   pruneBlockedVeinseekerQueueItems(roomName);
-  cleanupRetiredCourierState(roomName);
+  cleanupRetiredCourierState(roomName, C);
   removeLegacyVeinseekerQueueItems(roomName);
+  refreshQueueIndexesForRoom(C, roomName);
 
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
@@ -1512,8 +1736,8 @@ function fillQueueForRoom(C, room) {
   var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
   var remoteTruckerQuota = truckerQuotaMeta.remoteDesiredTruckers || 0;
   var liveTruckers = getRoomLocalLiveCount(C, roomName, "Trucker");
-  var queuedTruckers = queuedCount(roomName, "Trucker");
-  var assignmentCounts = countHomeTruckersByAssignment(roomName);
+  var queuedTruckers = queuedCount(C, roomName, "Trucker");
+  var assignmentCounts = countHomeTruckersByAssignment(C, roomName);
   var effectiveActiveTruckers = Math.min(
     assignmentCounts.truckersOnLocalJobs,
     truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota
@@ -1565,8 +1789,8 @@ function fillQueueForRoom(C, room) {
 
   pruneOverfilledQueue(roomName, quotas, C);
   var sourceWorkerCoverageReport = buildVeinseekerCoverageReport(room);
-  queueVeinseekerSourceNeeds(room, sourceWorkerCoverageReport);
-  queueRemoteVeinseekerNeeds(roomName);
+  queueVeinseekerSourceNeeds(room, sourceWorkerCoverageReport, C);
+  queueRemoteVeinseekerNeeds(C, roomName);
 
   // Iterate quotas in plain English order so future maintainers can eyeball
   // which roles will be enqueued before touching the code.
@@ -1577,7 +1801,7 @@ function fillQueueForRoom(C, room) {
     var limit = quotas[role] || 0;
     var canonical = canonicalRole(role);
     var active = getRoomLocalLiveCount(C, roomName, canonical);
-    var queued = queuedCount(roomName, role);
+    var queued = queuedCount(C, roomName, role);
     if (role === 'Trucker') {
       active = effectiveActiveTruckers;
     }
@@ -1588,7 +1812,7 @@ function fillQueueForRoom(C, room) {
     // workers instead of blindly over-spawning to fill a temporary dip.
     var replacementNeed = 0;
     if (REPLACEMENT_TTL[role]) {
-      replacementNeed = countRoleNeedingReplacement(roomName, canonical, REPLACEMENT_TTL[role]);
+      replacementNeed = countRoleNeedingReplacement(C, roomName, canonical, REPLACEMENT_TTL[role]);
       if (replacementNeed > 1) replacementNeed = 1;
     }
     var effectiveLimit = limit + replacementNeed;
@@ -1606,9 +1830,9 @@ function fillQueueForRoom(C, room) {
     for (var j = 0; j < deficit; j++) {
       if (role === 'Repair') {
         var emergencyReq = repairDiag && repairDiag.selectedEmergencyRequest
-          ? findRemoteContainerEmergencyRepairRequest(roomName)
+          ? findRemoteContainerEmergencyRepairRequest(C, roomName)
           : null;
-        if (emergencyReq && countRemoteEmergencyRepairAssignments(roomName) < Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1)) {
+        if (emergencyReq && countRemoteEmergencyRepairAssignments(C, roomName) < Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1)) {
           enqueue(roomName, role, {
             task: 'remoteContainerEmergencyRepair',
             home: roomName,
@@ -1618,7 +1842,7 @@ function fillQueueForRoom(C, room) {
             requestId: emergencyReq.id,
             x: emergencyReq.x,
             y: emergencyReq.y
-          });
+          }, C);
           if (repairDiag) {
             repairDiag.queuedRemoteEmergencyRepair = (repairDiag.queuedRemoteEmergencyRepair || 0) + 1;
             repairDiag.queueDecision = 'queuedRemoteEmergencyRepair';
@@ -1626,12 +1850,15 @@ function fillQueueForRoom(C, room) {
           continue;
         }
       }
-      enqueue(roomName, role);
+      enqueue(roomName, role, null, C);
     }
   }
 }
 
-function countLiveLocalRoleDirect(roomName, roleName) {
+function countLiveLocalRoleDirect(C, roomName, roleName) {
+  if (C && C.liveCountsByHomeRole && C.liveCountsByHomeRole[roomName]) {
+    return C.liveCountsByHomeRole[roomName][roleName] || 0;
+  }
   var count = 0;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
@@ -1653,10 +1880,10 @@ function roomHasVeinseekerEmergency(room) {
   return SourceWorkerManager.roomHasHomeEmergency(room);
 }
 
-function roomInBaseRecoveryDanger(room) {
+function roomInBaseRecoveryDanger(C, room) {
   if (!room) return true;
-  if (countLiveLocalRoleDirect(room.name, 'Queen') < 1) return true;
-  if (countLiveLocalRoleDirect(room.name, 'Trucker') < 1) return true;
+  if (countLiveLocalRoleDirect(C, room.name, 'Queen') < 1) return true;
+  if (countLiveLocalRoleDirect(C, room.name, 'Trucker') < 1) return true;
   if (roomHasVeinseekerEmergency(room)) return true;
   return false;
 }
@@ -1717,7 +1944,7 @@ function writeVeinseekerSpawnGate(room, item, minEnergy, action, reason, status)
   ensureRoomMemory(room.name).lastVeinseekerSpawnGate = diag;
 }
 
-function evaluateVeinseekerSpawnGate(room, item, q, itemIndex) {
+function evaluateVeinseekerSpawnGate(room, item, q, itemIndex, C) {
   var minEnergy = minEnergyFor(item.role, item);
   var energyAvailable = room.energyAvailable || 0;
   var desiredPlan = getVeinseekerDesiredPlan(room);
@@ -1726,7 +1953,7 @@ function evaluateVeinseekerSpawnGate(room, item, q, itemIndex) {
   var age = Game.time - (item.created || Game.time);
   var desiredCost = minEnergy;
   var criticalBehind = queueHasCriticalBaseNeedAfter(q, itemIndex, room);
-  var recoveryDanger = roomInBaseRecoveryDanger(room);
+  var recoveryDanger = roomInBaseRecoveryDanger(C, room);
   var sourceStatus = null;
   var hasCoverage = sourceHasLiveVeinseekerCoverage(room.name, sourceId);
 
@@ -1875,7 +2102,7 @@ function isNonBlockingVeinseekerQueuedWait(item) {
   return item.sourceWorkerSpawnMode === 'upgradeReplacement' || item.sourceWorkerDeferredAt === Game.time;
 }
 
-function dequeueAndSpawn(spawner) {
+function dequeueAndSpawn(spawner, C) {
   // Safety-first dequeue: Veinseeker upgrades may wait for a full room body,
   // but only when they are not blocking Queen, Trucker, or emergency miners.
   if (!spawner || spawner.spawning) return false;
@@ -1889,7 +2116,7 @@ function dequeueAndSpawn(spawner) {
     return false;
   }
 
-  q.sort(compareQueueItems);
+  sortRoomQueueOnce(C, roomName);
 
   var skippedNonBlockingVeinseeker = false;
   for (var pickIndex = 0; pickIndex < q.length; pickIndex++) {
@@ -1915,10 +2142,11 @@ function dequeueAndSpawn(spawner) {
     var gate = null;
 
     if (isVeinseekerQueueItem(item)) {
-      gate = evaluateVeinseekerSpawnGate(room, item, q, pickIndex);
+      gate = evaluateVeinseekerSpawnGate(room, item, q, pickIndex, C);
       writeVeinseekerSpawnGate(room, item, gate.minEnergy || needed, gate.action, gate.reason, gate.sourceStatus);
       if (gate.action === 'skip') {
         q.splice(pickIndex, 1);
+        refreshQueueIndexesForRoom(C, roomName);
         pickIndex--;
         skippedNonBlockingVeinseeker = true;
         continue;
@@ -1973,6 +2201,7 @@ function dequeueAndSpawn(spawner) {
     if (ok) {
       dlog('[SpawnOK]', roomName, 'spawned', item.role, 'at', spawner.name);
       q.splice(pickIndex, 1);
+      refreshQueueIndexesForRoom(C, roomName);
       return true;
     }
 
@@ -2012,10 +2241,13 @@ function prepareRoomQueues(C) {
     }
     ensureRoomQueue(room.name);
     pruneBlockedVeinseekerQueueItems(room.name);
+    refreshQueueIndexesForRoom(C, room.name);
     fillQueueForRoom(C, room);
     // This call is intentionally last: it observes the final live/queued Veinseeker
     // counts for the tick, but it does not enqueue, dequeue, reserve, or assign.
-    SourceEnergyManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
+    CpuProfiler.measure('SourceEnergy.remoteEconomicsReport', function () {
+      SourceEnergyManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
+    });
   }
 }
 
@@ -2166,7 +2398,7 @@ function runSpawnPass(C) {
     if (squadSpawningEnabled() && trySpawnSquad(spawner, squadState)) {
       continue;
     }
-    dequeueAndSpawn(spawner);
+    dequeueAndSpawn(spawner, C);
   }
 }
 
@@ -2180,7 +2412,9 @@ var BeeSpawnManager = {
       // BHM Combat Fix: keep squad plans in sync before evaluating spawn needs.
       CombatSquads.refreshAutoDefensePlans();
     }
-    prepareRoomQueues(C);
+    CpuProfiler.measure('BeeSpawnManager.prepareRoomQueues', function () {
+      prepareRoomQueues(C);
+    });
     runSpawnPass(C);
   }
 };

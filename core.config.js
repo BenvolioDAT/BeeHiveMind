@@ -77,16 +77,38 @@ CoreConfig.settings = Object.freeze({
     remoteContainerStatusCriticalMemoryTtl: 50000,
   }),
   cpuProfiler: Object.freeze({
+    // For a before/after CPU check, set enabled true and reportEvery 500,
+    // let it run for 500 ticks, then compare the named section averages.
     enabled: false,
     reportEvery: 100,
     minSectionCpuToReport: 0.05,
-    includeRoleBreakdown: true
+    includeRoleBreakdown: false
+  }),
+  sourceEnergy: Object.freeze({
+    remoteEconomicsEnabled: true,
+    remoteEconomicsInterval: 250,
+    remoteEconomicsPathCacheTtl: 1500
   }),
   movement: Object.freeze({
+    defaultReusePath: 30,
+    defaultMaxOps: 2000,
+    defaultIgnoreCreeps: true,
+    localMaxOps: 1500,
+    remoteMaxOps: 2500,
+    emergencyMaxOps: 4000,
+    combatMaxOps: 2500,
+    freshPathCpuGuard: 2,
     DEBUG_NO_ROUTE: false,
     NO_ROUTE_LOG_INTERVAL: 250,
     NO_ROUTE_CACHE_TTL: 150,
   }),
+  roadPlanner: Object.freeze({
+    maxOpsPlanning: 5000,
+    maxCpuUsedBeforePlanning: 18,
+    planningSkippedRetryTicks: 10,
+    existingPathPlaceMaxPaths: 2
+  }),
+  tradeEnergyInterval: 7,
   toolbox: Object.freeze({
     sourceContainerScanInterval: 50,
     defaultInvaderLockTtl: 1500,

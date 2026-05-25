@@ -592,12 +592,14 @@ function _scanRepairTargets(room, bucket, priorityOrder) {
     targets.push({ id: s.id, hits: s.hits, hitsMax: s.hitsMax, type: s.structureType, priority: getRepairPriority(s) });
   }
 
-  targets.sort(function (a, b) {
-    var pa = getRepairPriority(a);
-    var pb = getRepairPriority(b);
-    if (pa !== pb) return pa - pb;
-    return a.hits - b.hits;
-  });
+  if (targets.length > 1) {
+    targets.sort(function (a, b) {
+      var pa = getRepairPriority(a);
+      var pb = getRepairPriority(b);
+      if (pa !== pb) return pa - pb;
+      return a.hits - b.hits;
+    });
+  }
 
   bucket.cachedRepairTargets = targets;
   bucket.nextRepairScanTick = _now() + CFG.REPAIR_SCAN_INTERVAL;

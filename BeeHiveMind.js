@@ -49,6 +49,7 @@ var TradeEnergy          = require('Trade.Energy');
 var CpuProfiler         = require('core.cpuProfiler');
 var CoreConfig          = require('core.config');
 var SourceEconomy       = require('Source.Economy');
+var BeeToolbox          = require('BeeToolbox');
 
 // Keep references to the role modules so validation can check the intended
 // mapping (e.g. a swapped import would surface as a role name mismatch).
@@ -288,10 +289,7 @@ function refreshSourceEconomyForOwnedRooms() {
   if (!global.__BHM || !global.__BHM.roomsOwned) return;
   for (var i = 0; i < global.__BHM.roomsOwned.length; i++) {
     var room = global.__BHM.roomsOwned[i];
-    SourceEconomy.refreshOwnedRoomSources(room);
-    SourceEconomy.refreshVeinseekerStats(room);
-    SourceEconomy.refreshTruckerCarryStats(room);
-    SourceEconomy.calculatePendingEnergy(room);
+    SourceEconomy.refreshRoomEconomyOnce(room);
   }
 }
 function objectValues(obj) {
@@ -303,6 +301,89 @@ function objectValues(obj) {
     }
   }
   return values;
+}
+
+function ensureNestedMap(root, key) {
+  if (!root[key]) root[key] = Object.create(null);
+  return root[key];
+}
+
+function ensureCountRecord(root, key, defaults) {
+  if (!root[key]) {
+    var rec = {};
+    for (var field in defaults) {
+      if (Object.prototype.hasOwnProperty.call(defaults, field)) rec[field] = defaults[field];
+    }
+    root[key] = rec;
+  }
+  return root[key];
+}
+
+function addCreepToHomeRoleIndex(index, homeRoom, roleName, creep) {
+  if (!homeRoom || !roleName || !creep) return;
+  var byRole = ensureNestedMap(index, homeRoom);
+  if (!byRole[roleName]) byRole[roleName] = [];
+  byRole[roleName].push(creep);
+}
+
+function addCreepToHomeRoleModeIndex(index, homeRoom, roleName, mode, creep) {
+  if (!homeRoom || !roleName || !creep) return;
+  var byRole = ensureNestedMap(index, homeRoom);
+  var byMode = ensureNestedMap(byRole, roleName);
+  var modeKey = mode || 'default';
+  if (!byMode[modeKey]) byMode[modeKey] = [];
+  byMode[modeKey].push(creep);
+}
+
+function incrementHomeRoleCount(index, homeRoom, roleName, amount) {
+  if (!homeRoom || !roleName) return;
+  var byRole = ensureNestedMap(index, homeRoom);
+  byRole[roleName] = (byRole[roleName] || 0) + (amount || 1);
+}
+
+function incrementHomeRoleModeCount(index, homeRoom, roleName, mode, amount) {
+  if (!homeRoom || !roleName) return;
+  var byRole = ensureNestedMap(index, homeRoom);
+  var byMode = ensureNestedMap(byRole, roleName);
+  var modeKey = mode || 'default';
+  byMode[modeKey] = (byMode[modeKey] || 0) + (amount || 1);
+}
+
+function indexLowTtlCreep(index, homeRoom, roleName, creep) {
+  if (!homeRoom || !roleName || !creep || typeof creep.ticksToLive !== 'number') return;
+  var byRole = ensureNestedMap(index, homeRoom);
+  if (!byRole[roleName]) byRole[roleName] = [];
+  byRole[roleName].push({
+    name: creep.name,
+    ttl: creep.ticksToLive,
+    spawning: !!creep.spawning
+  });
+}
+
+function incrementQueueCountIndexes(byRole, byRoleMode, byRoleTask, roomName, item) {
+  if (!roomName || !item) return;
+  var roleName = canonicalRoleName(item.role) || item.role;
+  if (!roleName) return;
+  var roomRole = ensureNestedMap(byRole, roomName);
+  roomRole[roleName] = (roomRole[roleName] || 0) + 1;
+
+  var roomRoleMode = ensureNestedMap(byRoleMode, roomName);
+  var roleMode = ensureNestedMap(roomRoleMode, roleName);
+  var modeKey = item.mode || 'default';
+  roleMode[modeKey] = (roleMode[modeKey] || 0) + 1;
+
+  var roomRoleTask = ensureNestedMap(byRoleTask, roomName);
+  var roleTask = ensureNestedMap(roomRoleTask, roleName);
+  var taskKey = item.task || 'default';
+  roleTask[taskKey] = (roleTask[taskKey] || 0) + 1;
+}
+
+function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
+  if (BeeToolbox && typeof BeeToolbox.estimateRemoteRoundTripTicks === 'function') {
+    return BeeToolbox.estimateRemoteRoundTripTicks(homeRoom, remoteRoom);
+  }
+  if (!homeRoom || !remoteRoom || !Game.map) return 9999;
+  return Math.max(1, (Game.map.getRoomLinearDistance(homeRoom, remoteRoom) || 1) * 100);
 }
 
 // Function header: prepareTickCaches()
@@ -338,10 +419,73 @@ function prepareTickCaches() {
   var roleCounts = Object.create(null);
   var roleCountsByRoom = Object.create(null);
   var veinseekerCountsByHome = Object.create(null);
+  var creepsByHomeRole = Object.create(null);
+  var creepsByHomeRoleMode = Object.create(null);
+  var liveCountsByHomeRole = Object.create(null);
+  var liveCountsByHomeRoleMode = Object.create(null);
+  var lowTtlByHomeRole = Object.create(null);
+  var truckerAssignmentCountsByHome = Object.create(null);
+  var repairAssignmentCountsByHome = Object.create(null);
   var creepNames = Object.keys(Game.creeps);
   for (var j = 0; j < creepNames.length; j++) {
     var creep = Game.creeps[creepNames[j]];
     creeps.push(creep);
+
+    var roleName = ensureCreepRole(creep);
+    var homeRoom = (creep.memory && creep.memory.home) || null;
+    if (!homeRoom && creep.memory && creep.memory._home) homeRoom = creep.memory._home;
+    if (!homeRoom && creep.memory && creep.memory.targetRoom) homeRoom = creep.memory.targetRoom;
+    if (!homeRoom && creep.room) homeRoom = creep.room.name;
+    var mode = creep.memory && creep.memory.mode ? creep.memory.mode : 'default';
+
+    addCreepToHomeRoleIndex(creepsByHomeRole, homeRoom, roleName, creep);
+    addCreepToHomeRoleModeIndex(creepsByHomeRoleMode, homeRoom, roleName, mode, creep);
+    indexLowTtlCreep(lowTtlByHomeRole, homeRoom, roleName, creep);
+
+    if (!creep.spawning) {
+      incrementHomeRoleCount(liveCountsByHomeRole, homeRoom, roleName, 1);
+      incrementHomeRoleModeCount(liveCountsByHomeRoleMode, homeRoom, roleName, mode, 1);
+    }
+
+    if (roleName === 'Trucker' && homeRoom) {
+      var truckerCounts = ensureCountRecord(truckerAssignmentCountsByHome, homeRoom, {
+        truckersOnLocalJobs: 0,
+        truckersOnRemoteJobs: 0,
+        truckersOnRemotePickup: 0,
+        truckersOnRemoteReturn: 0,
+        remoteCapableTruckers: 0
+      });
+      var job = creep.memory && creep.memory.dispatchJob;
+      if (job && (job.type === 'REMOTE_PICKUP' || job.type === 'REMOTE_RETURN')) {
+        truckerCounts.truckersOnRemoteJobs++;
+        if (job.type === 'REMOTE_PICKUP') truckerCounts.truckersOnRemotePickup++;
+        if (job.type === 'REMOTE_RETURN') truckerCounts.truckersOnRemoteReturn++;
+        if (job.type === 'REMOTE_RETURN') {
+          truckerCounts.remoteCapableTruckers++;
+        } else {
+          var remoteRoom = job.roomName || creep.memory.requestRoom || creep.memory.targetRoom;
+          var requiredTtl = estimateRemoteRoundTripTicks(homeRoom, remoteRoom);
+          var carryingEnergy = creep.store && creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0;
+          if (typeof creep.ticksToLive !== 'number' || creep.ticksToLive >= requiredTtl || carryingEnergy) {
+            truckerCounts.remoteCapableTruckers++;
+          }
+        }
+      } else {
+        truckerCounts.truckersOnLocalJobs++;
+      }
+    }
+
+    if (roleName === 'Repair' && homeRoom) {
+      var repairCounts = ensureCountRecord(repairAssignmentCountsByHome, homeRoom, {
+        liveLocalRepair: 0,
+        liveRemoteEmergencyRepair: 0
+      });
+      if (creep.memory && creep.memory.task === 'remoteContainerEmergencyRepair') {
+        repairCounts.liveRemoteEmergencyRepair++;
+      } else {
+        repairCounts.liveLocalRepair++;
+      }
+    }
 
     // Avoid counting expiring creeps against quotas
     var ttl = creep.ticksToLive;
@@ -349,13 +493,8 @@ function prepareTickCaches() {
       continue;
     }
 
-    var roleName = ensureCreepRole(creep);
     roleCounts[roleName] = (roleCounts[roleName] || 0) + 1;
 
-    var homeRoom = (creep.memory && creep.memory.home) || null;
-    if (!homeRoom && creep.memory && creep.memory._home) homeRoom = creep.memory._home;
-    if (!homeRoom && creep.memory && creep.memory.targetRoom) homeRoom = creep.memory.targetRoom;
-    if (!homeRoom && creep.room) homeRoom = creep.room.name;
     if (homeRoom) {
       if (!roleCountsByRoom[homeRoom]) roleCountsByRoom[homeRoom] = Object.create(null);
       roleCountsByRoom[homeRoom][roleName] = (roleCountsByRoom[homeRoom][roleName] || 0) + 1;
@@ -368,6 +507,20 @@ function prepareTickCaches() {
       if (home) {
         veinseekerCountsByHome[home] = (veinseekerCountsByHome[home] || 0) + 1;
       }
+    }
+  }
+
+  // Spawn queues: scan once up-front. SpawnManager refreshes these indexes only
+  // when it mutates a room queue later in the tick.
+  var queueCountsByRoomRole = Object.create(null);
+  var queueCountsByRoomRoleMode = Object.create(null);
+  var queueCountsByRoomRoleTask = Object.create(null);
+  for (var qi = 0; qi < ownedRooms.length; qi++) {
+    var queueRoom = ownedRooms[qi];
+    var queueMem = Memory.rooms && Memory.rooms[queueRoom.name];
+    var queue = queueMem && Array.isArray(queueMem.spawnQueue) ? queueMem.spawnQueue : [];
+    for (var qj = 0; qj < queue.length; qj++) {
+      incrementQueueCountIndexes(queueCountsByRoomRole, queueCountsByRoomRoleMode, queueCountsByRoomRoleTask, queueRoom.name, queue[qj]);
     }
   }
 
@@ -402,7 +555,9 @@ function prepareTickCaches() {
       var snapRoom = ownedRooms[n];
       if (!snapRoom || !snapRoom.name) continue;
       try {
-        snapshots[snapRoom.name] = CoreSelectors.prepareRoomSnapshot(snapRoom);
+        snapshots[snapRoom.name] = CpuProfiler.measure('core.selectors.prepareRoomSnapshot', function () {
+          return CoreSelectors.prepareRoomSnapshot(snapRoom);
+        });
       } catch (err) {
         hiveLog.debug('⚠️ Selector snapshot failed for', fmt(snapRoom), err);
         // Teaching moment: catching errors allows the tick to continue even
@@ -420,6 +575,18 @@ function prepareTickCaches() {
   C.roleCounts      = roleCounts;
   C.roleCountsByRoom = roleCountsByRoom;
   C.veinseekerCountsByHome = veinseekerCountsByHome;
+  C.creepsByHomeRole = creepsByHomeRole;
+  C.creepsByHomeRoleMode = creepsByHomeRoleMode;
+  C.liveCountsByHomeRole = liveCountsByHomeRole;
+  C.liveCountsByHomeRoleMode = liveCountsByHomeRoleMode;
+  C.lowTtlByHomeRole = lowTtlByHomeRole;
+  C.queueCountsByRoomRole = queueCountsByRoomRole;
+  C.queueCountsByRoomRoleMode = queueCountsByRoomRoleMode;
+  C.queueCountsByRoomRoleTask = queueCountsByRoomRoleTask;
+  C.queueCountsDirtyByRoom = Object.create(null);
+  C.queueSortedTickByRoom = Object.create(null);
+  C.truckerAssignmentCountsByHome = truckerAssignmentCountsByHome;
+  C.repairAssignmentCountsByHome = repairAssignmentCountsByHome;
   C.roomSiteCounts  = byRoom;
   C.totalSites      = totalSites;
   C.remotesByHome   = remotesByHome;
@@ -503,10 +670,13 @@ var BeeHiveMind = {
 
     // 4) Trading
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
-      // if (Game.time % 3 === 0) TradeEnergy.runAll();
-      CpuProfiler.measure('TradeEnergy.runAll', function () {
-        TradeEnergy.runAll();
-      });
+      var tradeInterval = CoreConfig.settings && CoreConfig.settings.tradeEnergyInterval;
+      tradeInterval = Math.max(1, Number(tradeInterval) || 7);
+      if (Game.time % tradeInterval === 0) {
+        CpuProfiler.measure('TradeEnergy.runAll', function () {
+          TradeEnergy.runAll();
+        });
+      }
     }
     CpuProfiler.end('BeeHiveMind.total');
   },
@@ -524,7 +694,9 @@ var BeeHiveMind = {
       RoomPlanner.ensureSites(room);
     }
     if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
-      RoadPlanner.ensureRemoteRoads(room);
+      CpuProfiler.measure('RoadPlanner.ensureRemoteRoads', function () {
+        RoadPlanner.ensureRemoteRoads(room);
+      });
     }
   },
 
