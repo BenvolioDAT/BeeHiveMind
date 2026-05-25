@@ -505,15 +505,30 @@ function enqueueVeinseekerForSource(roomName, sourceId, mode, desiredPlan, extra
   return enqueue(roomName, 'Veinseeker', opts);
 }
 
+function copyVeinseekerSourceStatus(rec, status) {
+  if (!rec || !status) return rec;
+  var fields = [
+    'sourceId', 'seats', 'live', 'queued', 'liveWork', 'queuedWork',
+    'spawnPending', 'spawnPendingWork', 'desiredWork', 'freeWork',
+    'saturatedByWork', 'saturatedBySeats', 'hasOpenSeat', 'selectedSeat',
+    'hasCoverage', 'emergencyNeeded', 'upgradeNeeded', 'bestLiveCost',
+    'bestLiveName', 'replacementQueued', 'reason', 'activeLive',
+    'bestLiveSignature', 'bestSafeLiveName', 'bestSafeLiveCost',
+    'lowestTtlName', 'lowestTtl', 'replacementInProgress'
+  ];
+  for (var i = 0; i < fields.length; i++) {
+    rec[fields[i]] = status[fields[i]];
+  }
+  return rec;
+}
+
 function refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan) {
   if (!roomName || !source || !rec) return;
-  if (typeof rec.desiredWork !== 'number') rec.desiredWork = SourceWorkerManager.getDesiredWorkForSource(source);
-  if (typeof rec.seats !== 'number') rec.seats = SourceWorkerManager.buildHarvestSeatList(source).length;
-  rec.liveWork = SourceWorkerManager.countLiveAssignedWork(roomName, source.id);
-  rec.queuedWork = SourceWorkerManager.countQueuedAssignedWork(roomName, source.id, desiredPlan);
-  rec.freeWork = Math.max(0, rec.desiredWork - rec.liveWork - rec.queuedWork);
-  rec.saturatedByWork = rec.desiredWork > 0 && (rec.liveWork + rec.queuedWork) >= rec.desiredWork;
-  rec.saturatedBySeats = rec.seats <= 0 || (rec.live + rec.queued) >= rec.seats;
+  var status = SourceWorkerManager.getSourceMiningStatus(roomName, source, desiredPlan, {
+    ensureRoomQueue: ensureRoomQueue,
+    safeTtl: VEINSEEKER_REPLACEMENT_SAFE_TTL
+  });
+  copyVeinseekerSourceStatus(rec, status);
 }
 
 function noteVeinseekerSourceSkip(report, sourceId, rec, reason) {
@@ -527,8 +542,20 @@ function noteVeinseekerSourceSkip(report, sourceId, rec, reason) {
     liveWork: rec.liveWork,
     queuedWork: rec.queuedWork,
     desiredWork: rec.desiredWork,
-    seats: rec.seats
+    freeWork: rec.freeWork,
+    seats: rec.seats,
+    saturatedByWork: !!rec.saturatedByWork,
+    saturatedBySeats: !!rec.saturatedBySeats,
+    hasOpenSeat: !!rec.hasOpenSeat,
+    selectedSeat: rec.selectedSeat || null
   });
+}
+
+function isLowTtlVeinseekerReplacementAllowed(rec) {
+  if (!rec) return false;
+  if (!rec.lowestTtlName || rec.lowestTtl === null) return false;
+  if (rec.queued > 0 || rec.replacementQueued || rec.replacementInProgress) return false;
+  return rec.lowestTtl <= (REPLACEMENT_TTL.Veinseeker || 80);
 }
 
 function queueVeinseekerSourceNeeds(room, report) {
@@ -546,14 +573,6 @@ function queueVeinseekerSourceNeeds(room, report) {
       noteVeinseekerSourceSkip(report, source.id, rec, 'skip-no-desired-work');
       continue;
     }
-    if (rec.saturatedByWork) {
-      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-source-work-saturated');
-      continue;
-    }
-    if (rec.saturatedBySeats) {
-      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-source-seat-saturated');
-      continue;
-    }
 
     if (rec.emergencyNeeded) {
       if (enqueueVeinseekerForSource(roomName, source.id, 'emergency', desiredPlan, {
@@ -566,6 +585,16 @@ function queueVeinseekerSourceNeeds(room, report) {
           sourceId: source.id,
           action: 'enqueue',
           mode: 'emergency',
+          live: rec.live,
+          queued: rec.queued,
+          liveWork: rec.liveWork,
+          queuedWork: rec.queuedWork,
+          desiredWork: rec.desiredWork,
+          freeWork: rec.freeWork,
+          seats: rec.seats,
+          saturatedByWork: !!rec.saturatedByWork,
+          saturatedBySeats: !!rec.saturatedBySeats,
+          selectedSeat: rec.selectedSeat || null,
           reason: rec.reason
         });
       }
@@ -573,35 +602,17 @@ function queueVeinseekerSourceNeeds(room, report) {
     }
 
     if (rec.queued > 0 || rec.replacementQueued) {
+      noteVeinseekerSourceSkip(report, source.id, rec, rec.replacementQueued ? 'skip-replacement-already-queued' : 'skip-queued-veinseeker-covers-source');
       continue;
     }
 
-    if (rec.freeWork > 0 && rec.live > 0) {
-      if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
-        priority: VEINSEEKER_NORMAL_PRIORITY
-      })) {
-        rec.queued++;
-        refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
-        rec.reason = 'queued-normal-source-work-deficit';
-        report.diag.decisions.push({
-          sourceId: source.id,
-          action: 'enqueue',
-          mode: 'normal',
-          reason: rec.reason
-        });
-      }
-      continue;
-    }
-
-    if (rec.lowestTtlName && rec.lowestTtl !== null && rec.lowestTtl <= (REPLACEMENT_TTL.Veinseeker || 80)) {
+    if (isLowTtlVeinseekerReplacementAllowed(rec)) {
       if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
         priority: VEINSEEKER_NORMAL_PRIORITY,
         replaceCreepName: rec.lowestTtlName,
         replacementFor: rec.lowestTtlName,
         replaceSourceId: source.id
       })) {
-        rec.queued++;
-        rec.replacementQueued = true;
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-normal-low-ttl-replacement';
         report.diag.decisions.push({
@@ -609,6 +620,51 @@ function queueVeinseekerSourceNeeds(room, report) {
           action: 'enqueue',
           mode: 'normal',
           replaceCreepName: rec.lowestTtlName,
+          live: rec.live,
+          queued: rec.queued,
+          liveWork: rec.liveWork,
+          queuedWork: rec.queuedWork,
+          desiredWork: rec.desiredWork,
+          freeWork: rec.freeWork,
+          seats: rec.seats,
+          saturatedByWork: !!rec.saturatedByWork,
+          saturatedBySeats: !!rec.saturatedBySeats,
+          selectedSeat: rec.selectedSeat || null,
+          reason: rec.reason
+        });
+      }
+      continue;
+    }
+
+    if (rec.saturatedByWork) {
+      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-source-work-saturated');
+      continue;
+    }
+    if (rec.saturatedBySeats || !rec.hasOpenSeat) {
+      noteVeinseekerSourceSkip(report, source.id, rec, rec.saturatedBySeats ? 'skip-source-seat-saturated' : 'skip-no-open-harvest-seat');
+      continue;
+    }
+
+    if (rec.freeWork > 0 && rec.live > 0) {
+      if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
+        priority: VEINSEEKER_NORMAL_PRIORITY
+      })) {
+        refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
+        rec.reason = 'queued-normal-source-work-deficit';
+        report.diag.decisions.push({
+          sourceId: source.id,
+          action: 'enqueue',
+          mode: 'normal',
+          live: rec.live,
+          queued: rec.queued,
+          liveWork: rec.liveWork,
+          queuedWork: rec.queuedWork,
+          desiredWork: rec.desiredWork,
+          freeWork: rec.freeWork,
+          seats: rec.seats,
+          saturatedByWork: !!rec.saturatedByWork,
+          saturatedBySeats: !!rec.saturatedBySeats,
+          selectedSeat: rec.selectedSeat || null,
           reason: rec.reason
         });
       }
@@ -625,8 +681,6 @@ function queueVeinseekerSourceNeeds(room, report) {
         replacementFor: rec.bestSafeLiveName,
         replaceSourceId: source.id
       })) {
-        rec.queued++;
-        rec.replacementQueued = true;
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-upgrade-replacement';
         report.diag.decisions.push({
@@ -634,10 +688,23 @@ function queueVeinseekerSourceNeeds(room, report) {
           action: 'enqueue',
           mode: 'upgradeReplacement',
           replaceCreepName: rec.bestSafeLiveName,
+          live: rec.live,
+          queued: rec.queued,
+          liveWork: rec.liveWork,
+          queuedWork: rec.queuedWork,
+          desiredWork: rec.desiredWork,
+          freeWork: rec.freeWork,
+          seats: rec.seats,
+          saturatedByWork: !!rec.saturatedByWork,
+          saturatedBySeats: !!rec.saturatedBySeats,
+          selectedSeat: rec.selectedSeat || null,
           reason: rec.reason
         });
       }
+      continue;
     }
+
+    noteVeinseekerSourceSkip(report, source.id, rec, 'skip-no-source-work-deficit');
   }
   ensureRoomMemory(roomName).lastVeinseekerBodyPlan = report.diag;
 }
@@ -1619,9 +1686,9 @@ function stampVeinseekerDesiredPlanOnItem(item, desiredPlan) {
   item.desiredBodyTierIndex = typeof desiredPlan.tierIndex === 'number' ? desiredPlan.tierIndex : -1;
 }
 
-function writeVeinseekerSpawnGate(room, item, minEnergy, action, reason) {
+function writeVeinseekerSpawnGate(room, item, minEnergy, action, reason, status) {
   if (!room) return;
-  ensureRoomMemory(room.name).lastVeinseekerSpawnGate = {
+  var diag = {
     tick: Game.time,
     role: item ? item.role : null,
     mode: item ? (item.sourceWorkerSpawnMode || 'normal') : null,
@@ -1633,6 +1700,21 @@ function writeVeinseekerSpawnGate(room, item, minEnergy, action, reason) {
     action: action,
     reason: reason
   };
+  if (status) {
+    diag.seats = status.seats || 0;
+    diag.live = status.live || 0;
+    diag.queued = status.queued || 0;
+    diag.liveWork = status.liveWork || 0;
+    diag.queuedWork = status.queuedWork || 0;
+    diag.desiredWork = status.desiredWork || 0;
+    diag.freeWork = status.freeWork || 0;
+    diag.saturatedByWork = !!status.saturatedByWork;
+    diag.saturatedBySeats = !!status.saturatedBySeats;
+    diag.hasOpenSeat = !!status.hasOpenSeat;
+    diag.selectedSeat = status.selectedSeat || null;
+    diag.statusReason = status.reason || null;
+  }
+  ensureRoomMemory(room.name).lastVeinseekerSpawnGate = diag;
 }
 
 function evaluateVeinseekerSpawnGate(room, item, q, itemIndex) {
@@ -1643,9 +1725,15 @@ function evaluateVeinseekerSpawnGate(room, item, q, itemIndex) {
   var mode = item.sourceWorkerSpawnMode || 'normal';
   var age = Game.time - (item.created || Game.time);
   var desiredCost = minEnergy;
-  var hasCoverage = sourceHasLiveVeinseekerCoverage(room.name, sourceId);
   var criticalBehind = queueHasCriticalBaseNeedAfter(q, itemIndex, room);
   var recoveryDanger = roomInBaseRecoveryDanger(room);
+  var sourceStatus = null;
+  var hasCoverage = sourceHasLiveVeinseekerCoverage(room.name, sourceId);
+
+  function done(result) {
+    result.sourceStatus = sourceStatus;
+    return result;
+  }
 
   if (desiredPlan) {
     stampVeinseekerDesiredPlanOnItem(item, desiredPlan);
@@ -1657,67 +1745,103 @@ function evaluateVeinseekerSpawnGate(room, item, q, itemIndex) {
 
   if (!sourceId) {
     if (energyAvailable >= minEnergy) {
-      return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'legacy-veinseeker-no-source' };
+      return done({ action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'legacy-veinseeker-no-source' });
     }
-    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' };
+    return done({ action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' });
+  }
+
+  var checkedSourceForGate = Game.getObjectById(sourceId);
+  if (!checkedSourceForGate) {
+    return done({ action: 'skip', minEnergy: minEnergy, reason: 'source-missing-for-home-veinseeker' });
+  }
+
+  sourceStatus = SourceWorkerManager.getSourceMiningStatus(room.name, checkedSourceForGate, desiredPlan, {
+    ensureRoomQueue: function () { return q; },
+    excludeQueueIndex: itemIndex,
+    safeTtl: VEINSEEKER_REPLACEMENT_SAFE_TTL
+  });
+  hasCoverage = sourceStatus ? sourceStatus.hasCoverage : hasCoverage;
+
+  var isReplacementItem = !!(item.replaceCreepName || item.replacementFor || mode === 'upgradeReplacement');
+  if (isReplacementItem && sourceStatus &&
+      (sourceStatus.queued > 0 || sourceStatus.replacementQueued || sourceStatus.replacementInProgress)) {
+    return done({ action: 'skip', minEnergy: minEnergy, reason: 'replacement-already-pending-for-source' });
+  }
+
+  if (!isReplacementItem && sourceStatus) {
+    if (sourceStatus.desiredWork <= 0) {
+      return done({ action: 'skip', minEnergy: minEnergy, reason: 'source-has-no-work-demand' });
+    }
+    if (sourceStatus.saturatedByWork) {
+      return done({ action: 'skip', minEnergy: minEnergy, reason: 'source-already-work-saturated' });
+    }
+    if (sourceStatus.saturatedBySeats) {
+      return done({ action: 'skip', minEnergy: minEnergy, reason: 'source-already-seat-saturated' });
+    }
+    if (!sourceStatus.hasOpenSeat) {
+      return done({ action: 'skip', minEnergy: minEnergy, reason: 'source-has-no-open-seat' });
+    }
+    if (sourceStatus.freeWork <= 0) {
+      return done({ action: 'skip', minEnergy: minEnergy, reason: 'source-work-demand-already-covered' });
+    }
   }
 
   if (mode === 'emergency' || !hasCoverage) {
     if (energyAvailable >= minEnergy) {
-      return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'emergency-source-not-covered' };
+      return done({ action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'emergency-source-not-covered' });
     }
-    return { action: 'wait', minEnergy: minEnergy, reason: 'emergency-waiting-for-cheapest-body' };
+    return done({ action: 'wait', minEnergy: minEnergy, reason: 'emergency-waiting-for-cheapest-body' });
   }
 
   if (!VEINSEEKER_ENABLE_BODY_UPGRADES || !VEINSEEKER_WAIT_FOR_BEST_BODY) {
     if (energyAvailable >= minEnergy) {
-      return { action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'body-upgrade-wait-disabled' };
+      return done({ action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'body-upgrade-wait-disabled' });
     }
-    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' };
+    return done({ action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' });
   }
 
   if (mode === 'upgradeReplacement') {
     var checkedOldName = item.replaceCreepName || item.replacementFor || null;
     var checkedOldCreep = checkedOldName ? Game.creeps[checkedOldName] : null;
-    var checkedOldSource = sourceId ? Game.getObjectById(sourceId) : null;
+    var checkedOldSource = checkedSourceForGate;
     if (!checkedOldCreep || !checkedOldCreep.memory) {
       if (!hasCoverage) {
         item.sourceWorkerSpawnMode = 'emergency';
-        return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-missing-source-now-emergency' };
+        return done({ action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-missing-source-now-emergency' });
       }
-      return { action: 'skip', minEnergy: minEnergy, reason: 'old-creep-missing-upgrade-cancelled' };
+      return done({ action: 'skip', minEnergy: minEnergy, reason: 'old-creep-missing-upgrade-cancelled' });
     }
     if (typeof checkedOldCreep.ticksToLive === 'number' && checkedOldCreep.ticksToLive <= VEINSEEKER_CRITICAL_TTL) {
       item.sourceWorkerSpawnMode = 'normal';
-      return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-creep-critical-ttl' };
+      return done({ action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-creep-critical-ttl' });
     }
     if (!isVeinseekerSafelyHarvesting(checkedOldCreep, checkedOldSource)) {
       item.sourceWorkerSpawnMode = 'normal';
-      return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-creep-not-safe-for-wait' };
+      return done({ action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'old-creep-not-safe-for-wait' });
     }
     if (energyAvailable >= desiredCost) {
-      return { action: 'spawn', energyForSpawn: desiredCost, minEnergy: minEnergy, reason: 'desired-body-affordable' };
+      return done({ action: 'spawn', energyForSpawn: desiredCost, minEnergy: minEnergy, reason: 'desired-body-affordable' });
     }
     if (energyAvailable < minEnergy) {
-      return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' };
+      return done({ action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' });
     }
     if (recoveryDanger || criticalBehind) {
       item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
       item.sourceWorkerDeferredAt = Game.time;
-      return { action: 'defer', minEnergy: minEnergy, reason: recoveryDanger ? 'base-recovery-danger' : 'critical-role-behind' };
+      return done({ action: 'defer', minEnergy: minEnergy, reason: recoveryDanger ? 'base-recovery-danger' : 'critical-role-behind' });
     }
     if (age >= VEINSEEKER_MAX_UPGRADE_WAIT_TICKS) {
-      return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'max-upgrade-wait-reached' };
+      return done({ action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'max-upgrade-wait-reached' });
     }
-    return { action: 'wait', minEnergy: minEnergy, reason: 'waiting-for-room-capacity-body' };
+    return done({ action: 'wait', minEnergy: minEnergy, reason: 'waiting-for-room-capacity-body' });
   }
 
   if (energyAvailable >= desiredCost) {
-    return { action: 'spawn', energyForSpawn: desiredCost, minEnergy: minEnergy, reason: 'desired-body-affordable' };
+    return done({ action: 'spawn', energyForSpawn: desiredCost, minEnergy: minEnergy, reason: 'desired-body-affordable' });
   }
 
   if (energyAvailable < minEnergy) {
-    return { action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' };
+    return done({ action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' });
   }
 
   if (item.replaceCreepName || item.replacementFor) {
@@ -1725,25 +1849,25 @@ function evaluateVeinseekerSpawnGate(room, item, q, itemIndex) {
     var normalOldCreep = Game.creeps[normalOldName];
     if (!normalOldCreep || !normalOldCreep.memory) {
       if (!hasCoverage) {
-        return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'normal-replacement-old-missing-source-now-emergency' };
+        return done({ action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'normal-replacement-old-missing-source-now-emergency' });
       }
-      return { action: 'skip', minEnergy: minEnergy, reason: 'normal-replacement-old-missing-cancelled' };
+      return done({ action: 'skip', minEnergy: minEnergy, reason: 'normal-replacement-old-missing-cancelled' });
     }
     if (typeof normalOldCreep.ticksToLive === 'number' &&
         normalOldCreep.ticksToLive <= VEINSEEKER_REPLACEMENT_SAFE_TTL) {
-      return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'normal-replacement-old-ttl-low' };
+      return done({ action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'normal-replacement-old-ttl-low' });
     }
   }
 
   if (criticalBehind) {
     item.retryAt = Game.time + QUEUE_RETRY_COOLDOWN;
     item.sourceWorkerDeferredAt = Game.time;
-    return { action: 'defer', minEnergy: minEnergy, reason: 'critical-role-behind' };
+    return done({ action: 'defer', minEnergy: minEnergy, reason: 'critical-role-behind' });
   }
   if (age >= VEINSEEKER_MAX_UPGRADE_WAIT_TICKS) {
-    return { action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'max-normal-wait-reached' };
+    return done({ action: 'downgrade', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'max-normal-wait-reached' });
   }
-  return { action: 'wait', minEnergy: minEnergy, reason: 'normal-covered-source-waiting-for-better-body' };
+  return done({ action: 'wait', minEnergy: minEnergy, reason: 'normal-covered-source-waiting-for-better-body' });
 }
 
 function isNonBlockingVeinseekerQueuedWait(item) {
@@ -1792,7 +1916,7 @@ function dequeueAndSpawn(spawner) {
 
     if (isVeinseekerQueueItem(item)) {
       gate = evaluateVeinseekerSpawnGate(room, item, q, pickIndex);
-      writeVeinseekerSpawnGate(room, item, gate.minEnergy || needed, gate.action, gate.reason);
+      writeVeinseekerSpawnGate(room, item, gate.minEnergy || needed, gate.action, gate.reason, gate.sourceStatus);
       if (gate.action === 'skip') {
         q.splice(pickIndex, 1);
         pickIndex--;

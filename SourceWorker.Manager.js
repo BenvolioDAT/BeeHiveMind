@@ -33,10 +33,6 @@ function isVeinseekerMemory(mem) {
     Roles.canonicalRoleName(mem.task) === 'Veinseeker';
 }
 
-function isVeinseekerRoleMemory(mem) {
-  return !!(mem && Roles.canonicalRoleName(mem.role) === 'Veinseeker');
-}
-
 function isVeinseekerQueueItem(item) {
   return item && Roles.canonicalRoleName(item.role) === 'Veinseeker' && item.mode !== 'remote';
 }
@@ -87,7 +83,7 @@ function countWorkPartsInSignature(signature) {
   return count;
 }
 
-function getCreepWorkParts(creep) {
+function getCreepAssignedWorkParts(creep) {
   if (!creep) return 0;
   var parts = getCreepBodyParts(creep);
   if (parts.length) return countWorkPartsInBody(parts);
@@ -102,6 +98,14 @@ function getCreepWorkParts(creep) {
     return creep.getActiveBodyparts(getWorkPartConstant());
   }
   return 0;
+}
+
+function getCreepActiveWorkParts(creep) {
+  if (!creep) return 0;
+  if (typeof creep.getActiveBodyparts === 'function') {
+    return creep.getActiveBodyparts(getWorkPartConstant());
+  }
+  return getCreepAssignedWorkParts(creep);
 }
 
 function getQueuedItemWorkParts(item, desiredPlan) {
@@ -123,11 +127,18 @@ function getQueuedItemWorkParts(item, desiredPlan) {
 }
 
 function getDesiredWorkForSource(source) {
-  if (!source || typeof source.energyCapacity !== 'number') return 0;
+  var energyCapacity = null;
+  if (source && typeof source.energyCapacity === 'number' && source.energyCapacity > 0) {
+    energyCapacity = source.energyCapacity;
+  } else if (typeof SOURCE_ENERGY_CAPACITY === 'number' && SOURCE_ENERGY_CAPACITY > 0) {
+    energyCapacity = SOURCE_ENERGY_CAPACITY;
+  } else {
+    energyCapacity = 3000;
+  }
   var regenTime = typeof ENERGY_REGEN_TIME === 'number' ? ENERGY_REGEN_TIME : 300;
   var harvestPower = typeof HARVEST_POWER === 'number' ? HARVEST_POWER : 2;
   if (regenTime <= 0 || harvestPower <= 0) return 0;
-  return Math.ceil(source.energyCapacity / regenTime / harvestPower);
+  return Math.ceil(energyCapacity / regenTime / harvestPower);
 }
 
 function countLiveAssignedWork(roomName, sourceId) {
@@ -137,10 +148,11 @@ function countLiveAssignedWork(roomName, sourceId) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
     var creep = Game.creeps[name];
     if (!creep || !creep.my || !creep.memory) continue;
-    if (!isVeinseekerRoleMemory(creep.memory) || creep.memory.mode === 'remote') continue;
+    if (!isVeinseekerMemory(creep.memory) || creep.memory.mode === 'remote') continue;
+    if (creep.spawning) continue;
     if (getCreepHomeRoomName(creep) !== roomName) continue;
     if (getSourceIdFromMemory(creep.memory) !== sourceId) continue;
-    total += getCreepWorkParts(creep);
+    total += getCreepActiveWorkParts(creep);
   }
   return total;
 }
@@ -156,6 +168,14 @@ function countQueuedAssignedWork(roomName, sourceId, desiredPlan) {
     total += getQueuedItemWorkParts(item, desiredPlan);
   }
   return total;
+}
+
+function getLiveAssignedWorkForSource(roomName, sourceId) {
+  return countLiveAssignedWork(roomName, sourceId);
+}
+
+function getQueuedAssignedWorkForSource(roomName, sourceId, desiredPlan) {
+  return countQueuedAssignedWork(roomName, sourceId, desiredPlan);
 }
 
 function getDesiredBodyPlan(room, spawnLogic) {
@@ -181,7 +201,7 @@ function isHomeVeinseekerSafelyHarvesting(creep, source, opts) {
     : (CFG.VEINSEEKER_REPLACEMENT_SAFE_TTL || 120);
   if (!creep || !source || !creep.memory) return false;
   if (creep.spawning) return false;
-  if (!isVeinseekerRoleMemory(creep.memory)) return false;
+  if (!isVeinseekerMemory(creep.memory)) return false;
   if (creep.memory.mode === 'remote') return false;
   if (getSourceIdFromMemory(creep.memory) !== source.id) return false;
   if (typeof creep.ticksToLive === 'number' && creep.ticksToLive < safeTtl) return false;
@@ -191,15 +211,20 @@ function isHomeVeinseekerSafelyHarvesting(creep, source, opts) {
 
 function createHomeCoverageRecord() {
   return {
+    sourceId: null,
     seats: 0,
     live: 0,
     queued: 0,
     liveWork: 0,
     queuedWork: 0,
+    spawnPending: 0,
+    spawnPendingWork: 0,
     desiredWork: 0,
     freeWork: 0,
     saturatedByWork: false,
     saturatedBySeats: false,
+    hasOpenSeat: false,
+    selectedSeat: null,
     hasCoverage: false,
     emergencyNeeded: false,
     upgradeNeeded: false,
@@ -234,6 +259,148 @@ function writeHomeCoverageDiag(roomName, diag, opts) {
   Memory.rooms[roomName].lastVeinseekerBodyPlan = diag;
 }
 
+function getSeatPosFromMemory(mem) {
+  if (!mem) return null;
+  if (typeof mem.seatX !== 'number' ||
+      typeof mem.seatY !== 'number' ||
+      !mem.seatRoom) {
+    return null;
+  }
+  return new RoomPosition(mem.seatX, mem.seatY, mem.seatRoom);
+}
+
+function serializeSeat(pos) {
+  if (!pos) return null;
+  return { x: pos.x, y: pos.y, roomName: pos.roomName };
+}
+
+function collectReservedHarvestSeats(roomName, sourceId, excludeName) {
+  var reserved = {};
+  if (!roomName || !sourceId) return reserved;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    if (excludeName && name === excludeName) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory) continue;
+    if (!isVeinseekerMemory(creep.memory) || creep.memory.mode === 'remote') continue;
+    if (getCreepHomeRoomName(creep) !== roomName) continue;
+    if (getSourceIdFromMemory(creep.memory) !== sourceId) continue;
+    var seat = getSeatPosFromMemory(creep.memory);
+    if (!seat) continue;
+    reserved[getHarvestSeatKey(seat)] = creep.name;
+  }
+  return reserved;
+}
+
+function applySourceMiningRecordTotals(rec) {
+  rec.freeWork = Math.max(0, rec.desiredWork - rec.liveWork - rec.queuedWork);
+  rec.saturatedByWork = rec.desiredWork > 0 && (rec.liveWork + rec.queuedWork) >= rec.desiredWork;
+  rec.saturatedBySeats = rec.seats <= 0 || (rec.live + rec.queued) >= rec.seats;
+  rec.hasOpenSeat = !!rec.selectedSeat && !rec.saturatedBySeats;
+  rec.hasCoverage = rec.liveWork > 0;
+  rec.emergencyNeeded = rec.liveWork <= 0 && rec.queuedWork <= 0 &&
+    rec.desiredWork > 0 && rec.seats > 0 && rec.hasOpenSeat;
+
+  if (rec.seats <= 0) rec.reason = 'no-harvest-seats';
+  else if (rec.replacementQueued || rec.replacementInProgress) rec.reason = 'replacement-already-queued-or-active';
+  else if (rec.queued > 0 && rec.liveWork <= 0) rec.reason = 'waiting-for-queued-veinseeker';
+  else if (rec.emergencyNeeded) rec.reason = 'emergency-needed';
+  else if (rec.saturatedByWork) rec.reason = 'source-work-saturated';
+  else if (rec.saturatedBySeats) rec.reason = 'source-seat-saturated';
+  else if (rec.freeWork > 0) rec.reason = 'source-work-deficit';
+  else rec.reason = 'covered';
+}
+
+function getSourceMiningStatus(roomName, source, desiredPlan, opts) {
+  opts = opts || {};
+  var sourceId = source && source.id ? source.id : (opts.sourceId || null);
+  var rec = createHomeCoverageRecord();
+  rec.sourceId = sourceId;
+  rec.desiredWork = getDesiredWorkForSource(source);
+
+  var seats = source ? buildHarvestSeatList(source) : [];
+  rec.seats = seats.length;
+
+  if (roomName && sourceId) {
+    var q = getRoomQueue(roomName, opts);
+    for (var qi = 0; qi < q.length; qi++) {
+      if (opts.excludeQueueIndex === qi) continue;
+      var item = q[qi];
+      if (!isVeinseekerQueueItem(item)) continue;
+      if (getQueueSourceId(item) !== sourceId) continue;
+      rec.queued++;
+      rec.queuedWork += getQueuedItemWorkParts(item, desiredPlan);
+      if (item.sourceWorkerSpawnMode === 'upgradeReplacement' || item.replaceCreepName || item.replacementFor) {
+        rec.replacementQueued = true;
+      }
+    }
+
+    for (var name in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+      var creep = Game.creeps[name];
+      if (!creep || !creep.my || !creep.memory) continue;
+      if (!isVeinseekerMemory(creep.memory) || creep.memory.mode === 'remote') continue;
+      if (getCreepHomeRoomName(creep) !== roomName) continue;
+      if (getSourceIdFromMemory(creep.memory) !== sourceId) continue;
+
+      if (creep.spawning) {
+        var pendingWork = getCreepAssignedWorkParts(creep) || getCreepActiveWorkParts(creep);
+        rec.queued++;
+        rec.spawnPending++;
+        rec.spawnPendingWork += pendingWork;
+        rec.queuedWork += pendingWork;
+        if (creep.memory.sourceWorkerSpawnMode === 'upgradeReplacement' ||
+            creep.memory.replaceCreepName || creep.memory.replacementFor) {
+          rec.replacementInProgress = true;
+          rec.replacementQueued = true;
+        }
+        continue;
+      }
+
+      rec.live++;
+      rec.activeLive++;
+      rec.liveWork += getCreepActiveWorkParts(creep);
+
+      var bodyCost = getCreepBodyCost(creep);
+      if (bodyCost > rec.bestLiveCost) {
+        rec.bestLiveCost = bodyCost;
+        rec.bestLiveName = creep.name;
+        rec.bestLiveSignature = getCreepBodySignature(creep);
+      }
+
+      var ttl = typeof creep.ticksToLive === 'number' ? creep.ticksToLive : null;
+      if (ttl !== null && (rec.lowestTtl === null || ttl < rec.lowestTtl)) {
+        rec.lowestTtl = ttl;
+        rec.lowestTtlName = creep.name;
+      }
+
+      if (creep.memory.sourceWorkerSpawnMode === 'upgradeReplacement' && creep.memory.replacementFor) {
+        rec.replacementInProgress = true;
+        rec.replacementQueued = true;
+      }
+
+      if (source && isHomeVeinseekerSafelyHarvesting(creep, source, opts) && bodyCost > rec.bestSafeLiveCost) {
+        rec.bestSafeLiveCost = bodyCost;
+        rec.bestSafeLiveName = creep.name;
+      }
+    }
+  }
+
+  var reserved = collectReservedHarvestSeats(roomName, sourceId, opts.excludeCreepName || opts.creepName || null);
+  var selectedSeat = source ? chooseOpenHarvestSeat(source, opts.creepName || null, reserved) : null;
+  rec.selectedSeat = serializeSeat(selectedSeat);
+  applySourceMiningRecordTotals(rec);
+
+  if (desiredPlan && rec.bestSafeLiveName && desiredPlan.cost > rec.bestLiveCost &&
+      rec.freeWork > 0 && !rec.saturatedBySeats &&
+      !rec.replacementQueued && !rec.replacementInProgress) {
+    rec.upgradeNeeded = true;
+    rec.reason = 'safe-live-body-below-room-capacity-plan';
+  }
+
+  return rec;
+}
+
 function buildHomeCoverageReport(room, opts) {
   opts = opts || {};
   var roomName = room && room.name;
@@ -250,13 +417,12 @@ function buildHomeCoverageReport(room, opts) {
   if (!roomName || !room) return { desiredPlan: desiredPlan, diag: diag, sources: [] };
 
   var sources = room.find(FIND_SOURCES) || [];
+  var knownSources = {};
   for (var s = 0; s < sources.length; s++) {
     var sourceForRecord = sources[s];
-    var record = createHomeCoverageRecord();
-    record.seats = buildHarvestSeatList(sourceForRecord).length;
-    record.desiredWork = getDesiredWorkForSource(sourceForRecord);
-    record.freeWork = record.desiredWork;
+    var record = getSourceMiningStatus(roomName, sourceForRecord, desiredPlan, opts);
     diag.sources[sourceForRecord.id] = record;
+    knownSources[sourceForRecord.id] = true;
   }
 
   var q = getRoomQueue(roomName, opts);
@@ -264,83 +430,9 @@ function buildHomeCoverageReport(room, opts) {
     var item = q[qi];
     if (!isVeinseekerQueueItem(item)) continue;
     var qSourceId = getQueueSourceId(item);
-    if (!qSourceId || !diag.sources[qSourceId]) {
+    if (!qSourceId || !knownSources[qSourceId]) {
       diag.decisions.push({ action: 'ignoreQueuedVeinseeker', reason: 'missing-or-unknown-source', queueIndex: qi });
-      continue;
     }
-    var qRec = diag.sources[qSourceId];
-    qRec.queued++;
-    qRec.queuedWork += getQueuedItemWorkParts(item, desiredPlan);
-    if (item.sourceWorkerSpawnMode === 'upgradeReplacement' || item.replaceCreepName || item.replacementFor) {
-      qRec.replacementQueued = true;
-    }
-  }
-
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.my || !creep.memory) continue;
-    if (!isVeinseekerRoleMemory(creep.memory) || creep.memory.mode === 'remote') continue;
-    if (getCreepHomeRoomName(creep) !== roomName) continue;
-    var sourceId = getSourceIdFromMemory(creep.memory);
-    if (!sourceId || !diag.sources[sourceId]) continue;
-
-    var rec = diag.sources[sourceId];
-    rec.live++;
-    rec.liveWork += getCreepWorkParts(creep);
-    if (!creep.spawning) {
-      rec.activeLive++;
-      rec.hasCoverage = true;
-    }
-
-    var bodyCost = getCreepBodyCost(creep);
-    if (bodyCost > rec.bestLiveCost) {
-      rec.bestLiveCost = bodyCost;
-      rec.bestLiveName = creep.name;
-      rec.bestLiveSignature = getCreepBodySignature(creep);
-    }
-
-    var ttl = typeof creep.ticksToLive === 'number' ? creep.ticksToLive : null;
-    if (ttl !== null && (rec.lowestTtl === null || ttl < rec.lowestTtl)) {
-      rec.lowestTtl = ttl;
-      rec.lowestTtlName = creep.name;
-    }
-
-    if (creep.memory.sourceWorkerSpawnMode === 'upgradeReplacement' && creep.memory.replacementFor) {
-      rec.replacementInProgress = true;
-      rec.replacementQueued = true;
-    }
-
-    var source = Game.getObjectById(sourceId);
-    if (source && isHomeVeinseekerSafelyHarvesting(creep, source, opts) && bodyCost > rec.bestSafeLiveCost) {
-      rec.bestSafeLiveCost = bodyCost;
-      rec.bestSafeLiveName = creep.name;
-    }
-  }
-
-  for (var si = 0; si < sources.length; si++) {
-    var sid = sources[si].id;
-    var srcRec = diag.sources[sid];
-    srcRec.freeWork = Math.max(0, srcRec.desiredWork - srcRec.liveWork - srcRec.queuedWork);
-    srcRec.saturatedByWork = srcRec.desiredWork > 0 && (srcRec.liveWork + srcRec.queuedWork) >= srcRec.desiredWork;
-    srcRec.saturatedBySeats = srcRec.seats <= 0 || (srcRec.live + srcRec.queued) >= srcRec.seats;
-    srcRec.emergencyNeeded = srcRec.live <= 0 && srcRec.queued <= 0 &&
-      srcRec.desiredWork > 0 && srcRec.seats > 0;
-    if (desiredPlan && srcRec.bestSafeLiveName && desiredPlan.cost > srcRec.bestLiveCost &&
-        srcRec.freeWork > 0 && !srcRec.saturatedBySeats &&
-        !srcRec.replacementQueued && !srcRec.replacementInProgress) {
-      srcRec.upgradeNeeded = true;
-    }
-    if (srcRec.seats <= 0) srcRec.reason = 'no-harvest-seats';
-    else if (srcRec.saturatedByWork) srcRec.reason = 'source-work-saturated';
-    else if (srcRec.saturatedBySeats) srcRec.reason = 'source-seat-saturated';
-    else if (srcRec.emergencyNeeded) srcRec.reason = 'no-active-veinseeker-coverage';
-    else if (srcRec.upgradeNeeded) srcRec.reason = 'safe-live-body-below-room-capacity-plan';
-    else if (srcRec.replacementQueued) srcRec.reason = 'replacement-already-queued-or-active';
-    else if (srcRec.queued > 0 && srcRec.activeLive <= 0) srcRec.reason = 'waiting-for-queued-veinseeker';
-    else if (srcRec.live > 0 && srcRec.activeLive <= 0) srcRec.reason = 'veinseeker-spawning';
-    else if (srcRec.freeWork > 0) srcRec.reason = 'source-work-deficit';
-    else srcRec.reason = 'covered';
   }
 
   writeHomeCoverageDiag(roomName, diag, opts);
@@ -353,7 +445,7 @@ function sourceHasLiveHomeCoverage(roomName, sourceId) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
     var creep = Game.creeps[name];
     if (!creep || !creep.my || !creep.memory) continue;
-    if (!isVeinseekerRoleMemory(creep.memory) || creep.memory.mode === 'remote') continue;
+    if (!isVeinseekerMemory(creep.memory) || creep.memory.mode === 'remote') continue;
     if (getCreepHomeRoomName(creep) !== roomName) continue;
     if (getSourceIdFromMemory(creep.memory) !== sourceId) continue;
     if (creep.spawning) continue;
@@ -936,6 +1028,9 @@ module.exports = {
   getDesiredWorkForSource: getDesiredWorkForSource,
   countLiveAssignedWork: countLiveAssignedWork,
   countQueuedAssignedWork: countQueuedAssignedWork,
+  getLiveAssignedWorkForSource: getLiveAssignedWorkForSource,
+  getQueuedAssignedWorkForSource: getQueuedAssignedWorkForSource,
+  getSourceMiningStatus: getSourceMiningStatus,
   buildHomeCoverageReport: buildHomeCoverageReport,
   isHomeVeinseekerSafelyHarvesting: isHomeVeinseekerSafelyHarvesting,
   sourceHasLiveHomeCoverage: sourceHasLiveHomeCoverage,

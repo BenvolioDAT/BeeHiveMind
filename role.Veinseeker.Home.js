@@ -89,13 +89,44 @@ function rememberSeat(creep, pos) {
 }
 
 function countCreepWorkParts(creep) {
-  if (!creep || !creep.body) return 0;
+  if (!creep) return 0;
   var workPart = typeof WORK === 'undefined' ? 'work' : WORK;
+  if (typeof creep.getActiveBodyparts === 'function') {
+    return creep.getActiveBodyparts(workPart);
+  }
+  if (!creep.body) return 0;
   var count = 0;
   for (var i = 0; i < creep.body.length; i++) {
     if (creep.body[i] && creep.body[i].type === workPart) count++;
   }
   return count;
+}
+
+function getCreepPriorityData(creep, source) {
+  var ttl = creep && typeof creep.ticksToLive === 'number' ? creep.ticksToLive : 9999;
+  var bornAt = creep && creep.memory && typeof creep.memory.bornAt === 'number'
+    ? creep.memory.bornAt
+    : (Game.time - (1500 - ttl));
+  var seat = getSeatPosFromMemory(creep);
+  return {
+    work: countCreepWorkParts(creep),
+    bornAt: bornAt,
+    atSeat: seat && creep && creep.pos && creep.pos.isEqualTo(seat) ? 1 : 0,
+    range: source && creep && creep.pos ? creep.pos.getRangeTo(source) : 50,
+    name: creep && creep.name ? creep.name : ''
+  };
+}
+
+function compareIncumbentsForSource(source) {
+  return function (a, b) {
+    var ap = getCreepPriorityData(a, source);
+    var bp = getCreepPriorityData(b, source);
+    if (bp.work !== ap.work) return bp.work - ap.work;
+    if (ap.bornAt !== bp.bornAt) return ap.bornAt - bp.bornAt;
+    if (bp.atSeat !== ap.atSeat) return bp.atSeat - ap.atSeat;
+    if (ap.range !== bp.range) return ap.range - bp.range;
+    return ap.name < bp.name ? -1 : (ap.name > bp.name ? 1 : 0);
+  };
 }
 
 function seatBelongsToSource(pos, source) {
@@ -165,26 +196,38 @@ function countAssignedHarvesters(roomName, sourceId) {
   return getIncumbents(roomName, sourceId, null).length;
 }
 
+function hasHandoffPartnerForSource(creep, sourceId) {
+  if (!creep || !sourceId) return false;
+  var incumbents = getIncumbents(creep.room.name, sourceId, creep.name);
+  for (var i = 0; i < incumbents.length; i++) {
+    if (isHandoffPair(creep, incumbents[i], sourceId)) return true;
+  }
+  return false;
+}
+
 function shouldYieldPinnedSource(creep, source, rec) {
   if (!creep || !source || !rec) return false;
   if (rec.seats <= 0) return true;
   if (!rec.saturatedBySeats && !rec.saturatedByWork) return false;
+  if (hasHandoffPartnerForSource(creep, source.id)) return false;
 
   var incumbents = getIncumbents(creep.room.name, source.id, null);
-  incumbents.sort(function (a, b) {
-    return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
-  });
+  incumbents.sort(compareIncumbentsForSource(source));
 
-  var usedSeats = 0;
-  var usedWork = 0;
+  var keptSeats = 0;
+  var keptWork = 0;
   for (var i = 0; i < incumbents.length; i++) {
+    var work = countCreepWorkParts(incumbents[i]);
+    var canKeep = work > 0 &&
+      keptSeats < rec.seats &&
+      (rec.desiredWork <= 0 || keptWork < rec.desiredWork);
     if (incumbents[i].name === creep.name) {
-      if (usedSeats >= rec.seats) return true;
-      if (rec.desiredWork > 0 && usedWork >= rec.desiredWork) return true;
-      return false;
+      return !canKeep;
     }
-    usedSeats++;
-    usedWork += countCreepWorkParts(incumbents[i]);
+    if (canKeep) {
+      keptSeats++;
+      keptWork += work;
+    }
   }
   return false;
 }
@@ -314,40 +357,39 @@ function findQueueSpotNearSeat(seatPos, myName) {
 }
 
 function resolveSourceConflict(creep, source) {
-  var neighbors = source.pos.findInRange(FIND_MY_CREEPS, 1, {
-    filter: function (other) {
-      return other.name !== creep.name &&
-        matchesRole(other, 'Veinseeker', 'veinseeker') &&
-        getAssignedSourceId(other) === source.id;
-    }
-  }) || [];
-
-  if (!neighbors.length) return false;
-  for (var i = 0; i < neighbors.length; i++) {
-    if (isHandoffPair(creep, neighbors[i], source.id)) return false;
-  }
+  var incumbents = getIncumbents(creep.room.name, source.id, null);
+  if (incumbents.length <= 1) return false;
+  if (hasHandoffPartnerForSource(creep, source.id)) return false;
 
   var seats = SourceWorkerManager.buildHarvestSeatList(source).length;
   var mySeat = getSeatPosFromMemory(creep);
   var mySeatKey = mySeat ? SourceWorkerManager.getHarvestSeatKey(mySeat) : null;
   var sameSeatConflict = !mySeatKey;
-  for (var si = 0; si < neighbors.length; si++) {
-    var otherSeat = getSeatPosFromMemory(neighbors[si]);
+  for (var si = 0; si < incumbents.length; si++) {
+    if (incumbents[si].name === creep.name) continue;
+    var otherSeat = getSeatPosFromMemory(incumbents[si]);
     var otherSeatKey = otherSeat ? SourceWorkerManager.getHarvestSeatKey(otherSeat) : null;
     if (!otherSeatKey || otherSeatKey === mySeatKey) {
       sameSeatConflict = true;
       break;
     }
   }
-  if (!sameSeatConflict && countAssignedHarvesters(creep.room.name, source.id) <= seats) return false;
-  if (countAssignedHarvesters(creep.room.name, source.id) <= 1) return false;
 
-  var all = neighbors.concat([creep]);
-  var winner = all[0];
-  for (var j = 1; j < all.length; j++) {
-    if (all[j].name < winner.name) winner = all[j];
+  var report = SourceWorkerManager.buildHomeCoverageReport(creep.room, { writeDiag: false });
+  var rec = report && report.diag && report.diag.sources ? report.diag.sources[source.id] : null;
+  if (!rec) return false;
+  if (!sameSeatConflict && !rec.saturatedBySeats && !rec.saturatedByWork && incumbents.length <= seats) {
+    return false;
   }
-  if (winner.name === creep.name) return false;
+  if (sameSeatConflict && !rec.saturatedBySeats && !rec.saturatedByWork) {
+    var forcedRec = {};
+    for (var key in rec) {
+      if (Object.prototype.hasOwnProperty.call(rec, key)) forcedRec[key] = rec[key];
+    }
+    forcedRec.saturatedBySeats = true;
+    rec = forcedRec;
+  }
+  if (!shouldYieldPinnedSource(creep, source, rec)) return false;
 
   creep.memory._avoidSourceId = source.id;
   creep.memory._avoidUntil = Game.time + CFG.AVOID_TICKS_AFTER_YIELD;
@@ -384,6 +426,10 @@ function writeVeinseekerSlotDiag(roomName, sourceId, rec) {
     queuedWork: rec ? (rec.queuedWork || 0) : 0,
     desiredWork: rec ? (rec.desiredWork || 0) : 0,
     freeWork: rec ? (rec.freeWork || 0) : 0,
+    saturatedByWork: rec ? !!rec.saturatedByWork : false,
+    saturatedBySeats: rec ? !!rec.saturatedBySeats : false,
+    hasOpenSeat: rec ? !!rec.hasOpenSeat : false,
+    selectedSeat: rec ? (rec.selectedSeat || null) : null,
     reason: rec ? (rec.reason || null) : null
   };
 }
@@ -429,16 +475,20 @@ function assignSource(creep) {
     writeVeinseekerSlotDiag(creep.room.name, source.id, rec);
     if (rec.desiredWork <= 0) continue;
     if (rec.freeWork <= 0 || rec.saturatedByWork) continue;
-    if (rec.seats <= 0 || rec.saturatedBySeats) continue;
+    if (rec.seats <= 0 || rec.saturatedBySeats || !rec.hasOpenSeat) continue;
 
     var seatPos = SourceWorkerManager.chooseOpenHarvestSeat(source, creep.name, reservedSeats);
     if (!seatPos) continue;
 
     var assigned = (rec.live || 0) + (rec.queued || 0);
     var openSeats = Math.max(0, (rec.seats || 0) - assigned);
-    var score = (rec.freeWork * 10000) +
-      (openSeats * 1000) -
-      (assigned * 250) -
+    var workAssigned = (rec.liveWork || 0) + (rec.queuedWork || 0);
+    var fillRatio = rec.desiredWork > 0 ? (workAssigned / rec.desiredWork) : 1;
+    if (fillRatio < 0) fillRatio = 0;
+    var score = ((1 - fillRatio) * 10000) +
+      ((rec.freeWork || 0) * 100) +
+      (openSeats * 50) -
+      (assigned * 200) -
       creep.pos.getRangeTo(seatPos);
     if (score > bestScore) {
       bestScore = score;
