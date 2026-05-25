@@ -505,6 +505,32 @@ function enqueueVeinseekerForSource(roomName, sourceId, mode, desiredPlan, extra
   return enqueue(roomName, 'Veinseeker', opts);
 }
 
+function refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan) {
+  if (!roomName || !source || !rec) return;
+  if (typeof rec.desiredWork !== 'number') rec.desiredWork = SourceWorkerManager.getDesiredWorkForSource(source);
+  if (typeof rec.seats !== 'number') rec.seats = SourceWorkerManager.buildHarvestSeatList(source).length;
+  rec.liveWork = SourceWorkerManager.countLiveAssignedWork(roomName, source.id);
+  rec.queuedWork = SourceWorkerManager.countQueuedAssignedWork(roomName, source.id, desiredPlan);
+  rec.freeWork = Math.max(0, rec.desiredWork - rec.liveWork - rec.queuedWork);
+  rec.saturatedByWork = rec.desiredWork > 0 && (rec.liveWork + rec.queuedWork) >= rec.desiredWork;
+  rec.saturatedBySeats = rec.seats <= 0 || (rec.live + rec.queued) >= rec.seats;
+}
+
+function noteVeinseekerSourceSkip(report, sourceId, rec, reason) {
+  rec.reason = reason;
+  report.diag.decisions.push({
+    sourceId: sourceId,
+    action: 'skip',
+    reason: reason,
+    live: rec.live,
+    queued: rec.queued,
+    liveWork: rec.liveWork,
+    queuedWork: rec.queuedWork,
+    desiredWork: rec.desiredWork,
+    seats: rec.seats
+  });
+}
+
 function queueVeinseekerSourceNeeds(room, report) {
   if (!room || !report || !report.diag || !report.sources) return;
   var roomName = room.name;
@@ -515,11 +541,26 @@ function queueVeinseekerSourceNeeds(room, report) {
     var rec = report.diag.sources[source.id];
     if (!rec) continue;
 
+    refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
+    if (rec.desiredWork <= 0) {
+      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-no-desired-work');
+      continue;
+    }
+    if (rec.saturatedByWork) {
+      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-source-work-saturated');
+      continue;
+    }
+    if (rec.saturatedBySeats) {
+      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-source-seat-saturated');
+      continue;
+    }
+
     if (rec.emergencyNeeded) {
       if (enqueueVeinseekerForSource(roomName, source.id, 'emergency', desiredPlan, {
         priority: VEINSEEKER_EMERGENCY_PRIORITY
       })) {
         rec.queued++;
+        refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-emergency-no-active-coverage';
         report.diag.decisions.push({
           sourceId: source.id,
@@ -535,6 +576,23 @@ function queueVeinseekerSourceNeeds(room, report) {
       continue;
     }
 
+    if (rec.freeWork > 0 && rec.live > 0) {
+      if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
+        priority: VEINSEEKER_NORMAL_PRIORITY
+      })) {
+        rec.queued++;
+        refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
+        rec.reason = 'queued-normal-source-work-deficit';
+        report.diag.decisions.push({
+          sourceId: source.id,
+          action: 'enqueue',
+          mode: 'normal',
+          reason: rec.reason
+        });
+      }
+      continue;
+    }
+
     if (rec.lowestTtlName && rec.lowestTtl !== null && rec.lowestTtl <= (REPLACEMENT_TTL.Veinseeker || 80)) {
       if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
         priority: VEINSEEKER_NORMAL_PRIORITY,
@@ -544,6 +602,7 @@ function queueVeinseekerSourceNeeds(room, report) {
       })) {
         rec.queued++;
         rec.replacementQueued = true;
+        refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-normal-low-ttl-replacement';
         report.diag.decisions.push({
           sourceId: source.id,
@@ -568,6 +627,7 @@ function queueVeinseekerSourceNeeds(room, report) {
       })) {
         rec.queued++;
         rec.replacementQueued = true;
+        refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-upgrade-replacement';
         report.diag.decisions.push({
           sourceId: source.id,

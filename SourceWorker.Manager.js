@@ -67,6 +67,97 @@ function getCreepBodySignature(creep) {
   return creep.memory && creep.memory.bornBodySignature ? creep.memory.bornBodySignature : '';
 }
 
+function getWorkPartConstant() {
+  return typeof WORK === 'undefined' ? 'work' : WORK;
+}
+
+function countWorkPartsInBody(body) {
+  if (!body || !body.length) return 0;
+  return BodyUtils.countBodyParts(body, getWorkPartConstant());
+}
+
+function countWorkPartsInSignature(signature) {
+  if (!signature) return 0;
+  var workPart = String(getWorkPartConstant());
+  var parts = String(signature).split('|');
+  var count = 0;
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] === workPart) count++;
+  }
+  return count;
+}
+
+function getCreepWorkParts(creep) {
+  if (!creep) return 0;
+  var parts = getCreepBodyParts(creep);
+  if (parts.length) return countWorkPartsInBody(parts);
+  if (creep.memory && creep.memory.bornBodySummary &&
+      typeof creep.memory.bornBodySummary.work === 'number') {
+    return creep.memory.bornBodySummary.work;
+  }
+  if (creep.memory && creep.memory.bornBodySignature) {
+    return countWorkPartsInSignature(creep.memory.bornBodySignature);
+  }
+  if (typeof creep.getActiveBodyparts === 'function') {
+    return creep.getActiveBodyparts(getWorkPartConstant());
+  }
+  return 0;
+}
+
+function getQueuedItemWorkParts(item, desiredPlan) {
+  if (item && item.desiredBodySummary && typeof item.desiredBodySummary.work === 'number') {
+    return item.desiredBodySummary.work;
+  }
+  if (item && item.body && item.body.length) return countWorkPartsInBody(item.body);
+  if (item && item.desiredBodySignature) {
+    var fromSignature = countWorkPartsInSignature(item.desiredBodySignature);
+    if (fromSignature > 0) return fromSignature;
+  }
+  if (desiredPlan && desiredPlan.summary && typeof desiredPlan.summary.work === 'number') {
+    return desiredPlan.summary.work;
+  }
+  if (desiredPlan && desiredPlan.body && desiredPlan.body.length) {
+    return countWorkPartsInBody(desiredPlan.body);
+  }
+  return 1;
+}
+
+function getDesiredWorkForSource(source) {
+  if (!source || typeof source.energyCapacity !== 'number') return 0;
+  var regenTime = typeof ENERGY_REGEN_TIME === 'number' ? ENERGY_REGEN_TIME : 300;
+  var harvestPower = typeof HARVEST_POWER === 'number' ? HARVEST_POWER : 2;
+  if (regenTime <= 0 || harvestPower <= 0) return 0;
+  return Math.ceil(source.energyCapacity / regenTime / harvestPower);
+}
+
+function countLiveAssignedWork(roomName, sourceId) {
+  if (!roomName || !sourceId) return 0;
+  var total = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory) continue;
+    if (!isVeinseekerRoleMemory(creep.memory) || creep.memory.mode === 'remote') continue;
+    if (getCreepHomeRoomName(creep) !== roomName) continue;
+    if (getSourceIdFromMemory(creep.memory) !== sourceId) continue;
+    total += getCreepWorkParts(creep);
+  }
+  return total;
+}
+
+function countQueuedAssignedWork(roomName, sourceId, desiredPlan) {
+  if (!roomName || !sourceId) return 0;
+  var total = 0;
+  var q = getRoomQueue(roomName, null);
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (!isVeinseekerQueueItem(item)) continue;
+    if (getQueueSourceId(item) !== sourceId) continue;
+    total += getQueuedItemWorkParts(item, desiredPlan);
+  }
+  return total;
+}
+
 function getDesiredBodyPlan(room, spawnLogic) {
   if (!room || !spawnLogic || typeof spawnLogic.getBestBodyPlanForRoomCapacity !== 'function') return null;
   return spawnLogic.getBestBodyPlanForRoomCapacity('Veinseeker', room, { mode: 'home' });
@@ -100,8 +191,15 @@ function isHomeVeinseekerSafelyHarvesting(creep, source, opts) {
 
 function createHomeCoverageRecord() {
   return {
+    seats: 0,
     live: 0,
     queued: 0,
+    liveWork: 0,
+    queuedWork: 0,
+    desiredWork: 0,
+    freeWork: 0,
+    saturatedByWork: false,
+    saturatedBySeats: false,
     hasCoverage: false,
     emergencyNeeded: false,
     upgradeNeeded: false,
@@ -152,7 +250,14 @@ function buildHomeCoverageReport(room, opts) {
   if (!roomName || !room) return { desiredPlan: desiredPlan, diag: diag, sources: [] };
 
   var sources = room.find(FIND_SOURCES) || [];
-  for (var s = 0; s < sources.length; s++) diag.sources[sources[s].id] = createHomeCoverageRecord();
+  for (var s = 0; s < sources.length; s++) {
+    var sourceForRecord = sources[s];
+    var record = createHomeCoverageRecord();
+    record.seats = buildHarvestSeatList(sourceForRecord).length;
+    record.desiredWork = getDesiredWorkForSource(sourceForRecord);
+    record.freeWork = record.desiredWork;
+    diag.sources[sourceForRecord.id] = record;
+  }
 
   var q = getRoomQueue(roomName, opts);
   for (var qi = 0; qi < q.length; qi++) {
@@ -165,6 +270,7 @@ function buildHomeCoverageReport(room, opts) {
     }
     var qRec = diag.sources[qSourceId];
     qRec.queued++;
+    qRec.queuedWork += getQueuedItemWorkParts(item, desiredPlan);
     if (item.sourceWorkerSpawnMode === 'upgradeReplacement' || item.replaceCreepName || item.replacementFor) {
       qRec.replacementQueued = true;
     }
@@ -181,6 +287,7 @@ function buildHomeCoverageReport(room, opts) {
 
     var rec = diag.sources[sourceId];
     rec.live++;
+    rec.liveWork += getCreepWorkParts(creep);
     if (!creep.spawning) {
       rec.activeLive++;
       rec.hasCoverage = true;
@@ -214,16 +321,25 @@ function buildHomeCoverageReport(room, opts) {
   for (var si = 0; si < sources.length; si++) {
     var sid = sources[si].id;
     var srcRec = diag.sources[sid];
-    srcRec.emergencyNeeded = srcRec.live <= 0 && srcRec.queued <= 0;
+    srcRec.freeWork = Math.max(0, srcRec.desiredWork - srcRec.liveWork - srcRec.queuedWork);
+    srcRec.saturatedByWork = srcRec.desiredWork > 0 && (srcRec.liveWork + srcRec.queuedWork) >= srcRec.desiredWork;
+    srcRec.saturatedBySeats = srcRec.seats <= 0 || (srcRec.live + srcRec.queued) >= srcRec.seats;
+    srcRec.emergencyNeeded = srcRec.live <= 0 && srcRec.queued <= 0 &&
+      srcRec.desiredWork > 0 && srcRec.seats > 0;
     if (desiredPlan && srcRec.bestSafeLiveName && desiredPlan.cost > srcRec.bestLiveCost &&
+        srcRec.freeWork > 0 && !srcRec.saturatedBySeats &&
         !srcRec.replacementQueued && !srcRec.replacementInProgress) {
       srcRec.upgradeNeeded = true;
     }
-    if (srcRec.emergencyNeeded) srcRec.reason = 'no-active-veinseeker-coverage';
+    if (srcRec.seats <= 0) srcRec.reason = 'no-harvest-seats';
+    else if (srcRec.saturatedByWork) srcRec.reason = 'source-work-saturated';
+    else if (srcRec.saturatedBySeats) srcRec.reason = 'source-seat-saturated';
+    else if (srcRec.emergencyNeeded) srcRec.reason = 'no-active-veinseeker-coverage';
     else if (srcRec.upgradeNeeded) srcRec.reason = 'safe-live-body-below-room-capacity-plan';
     else if (srcRec.replacementQueued) srcRec.reason = 'replacement-already-queued-or-active';
     else if (srcRec.queued > 0 && srcRec.activeLive <= 0) srcRec.reason = 'waiting-for-queued-veinseeker';
     else if (srcRec.live > 0 && srcRec.activeLive <= 0) srcRec.reason = 'veinseeker-spawning';
+    else if (srcRec.freeWork > 0) srcRec.reason = 'source-work-deficit';
     else srcRec.reason = 'covered';
   }
 
@@ -260,6 +376,68 @@ function isWalkable(pos) {
   if (pos.x <= 0 || pos.x >= 49 || pos.y <= 0 || pos.y >= 49) return false;
   var terrain = new Room.Terrain(pos.roomName);
   return terrain.get(pos.x, pos.y) !== TERRAIN_MASK_WALL;
+}
+
+function getHarvestSeatKey(pos) {
+  if (!pos) return '';
+  return pos.roomName + ':' + pos.x + ':' + pos.y;
+}
+
+function isHarvestSeatWalkable(pos) {
+  if (!isWalkable(pos)) return false;
+  var room = Game.rooms[pos.roomName];
+  if (!room) return true;
+  var look = room.lookAt(pos.x, pos.y);
+  for (var i = 0; i < look.length; i++) {
+    var item = look[i];
+    if (item.type === LOOK_STRUCTURES || item.type === 'structure') {
+      var structure = item.structure;
+      if (structure.structureType === STRUCTURE_RAMPART && !structure.my) return false;
+      if (structure.structureType !== STRUCTURE_ROAD &&
+          structure.structureType !== STRUCTURE_CONTAINER &&
+          structure.structureType !== STRUCTURE_RAMPART) {
+        return false;
+      }
+    }
+    if (item.type === LOOK_CONSTRUCTION_SITES || item.type === 'constructionSite') {
+      var site = item.constructionSite;
+      if (site.structureType !== STRUCTURE_ROAD && site.structureType !== STRUCTURE_CONTAINER) return false;
+    }
+  }
+  return true;
+}
+
+function buildHarvestSeatList(source) {
+  var seats = [];
+  if (!source || !source.pos) return seats;
+
+  var container = findSourceContainer(source);
+  if (container && container.pos) {
+    seats.push(container.pos);
+    return seats;
+  }
+
+  for (var dx = -1; dx <= 1; dx++) {
+    for (var dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      var pos = new RoomPosition(source.pos.x + dx, source.pos.y + dy, source.pos.roomName);
+      if (isHarvestSeatWalkable(pos)) seats.push(pos);
+    }
+  }
+  seats.sort(function (a, b) { return (a.y - b.y) || (a.x - b.x); });
+  return seats;
+}
+
+function chooseOpenHarvestSeat(source, creepName, reservedSeats) {
+  var seats = buildHarvestSeatList(source);
+  for (var i = 0; i < seats.length; i++) {
+    var seat = seats[i];
+    var reservedBy = reservedSeats ? reservedSeats[getHarvestSeatKey(seat)] : null;
+    if (reservedBy && reservedBy !== creepName) continue;
+    if (isTileOccupiedByAnyCreep(seat, creepName)) continue;
+    return seat;
+  }
+  return null;
 }
 
 function isTileOccupiedByAlly(pos, myName) {
@@ -755,11 +933,17 @@ module.exports = {
   getQueueSourceId: getQueueSourceId,
   getCreepHomeRoomName: getCreepHomeRoomName,
   isVeinseekerMemory: isVeinseekerMemory,
+  getDesiredWorkForSource: getDesiredWorkForSource,
+  countLiveAssignedWork: countLiveAssignedWork,
+  countQueuedAssignedWork: countQueuedAssignedWork,
   buildHomeCoverageReport: buildHomeCoverageReport,
   isHomeVeinseekerSafelyHarvesting: isHomeVeinseekerSafelyHarvesting,
   sourceHasLiveHomeCoverage: sourceHasLiveHomeCoverage,
   roomHasHomeEmergency: roomHasHomeEmergency,
   isWalkable: isWalkable,
+  getHarvestSeatKey: getHarvestSeatKey,
+  buildHarvestSeatList: buildHarvestSeatList,
+  chooseOpenHarvestSeat: chooseOpenHarvestSeat,
   isTileOccupiedByAlly: isTileOccupiedByAlly,
   isTileOccupiedByAnyCreep: isTileOccupiedByAnyCreep,
   countWalkableSeatsAround: countWalkableSeatsAround,
