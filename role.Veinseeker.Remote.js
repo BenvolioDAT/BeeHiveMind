@@ -62,6 +62,7 @@ var VEINSEEKER_PATH_FAIL_LIMIT = CFG.VEINSEEKER_PATH_FAIL_LIMIT || 3;
 var VEINSEEKER_STUCK_SOURCE_BLOCK_TICKS = CFG.VEINSEEKER_STUCK_SOURCE_BLOCK_TICKS || 8;
 var VEINSEEKER_STUCK_SOURCE_BLOCK_TTL = CFG.VEINSEEKER_STUCK_SOURCE_BLOCK_TTL || 250;
 var VEINSEEKER_REMOTE_INTEL_TTL = CFG.VEINSEEKER_REMOTE_INTEL_TTL || 3000;
+var VEINSEEKER_UNASSIGNED_SUICIDE_TICKS = (typeof CFG.VEINSEEKER_UNASSIGNED_SUICIDE_TICKS === 'number') ? CFG.VEINSEEKER_UNASSIGNED_SUICIDE_TICKS : 750;
 
 // =========================
 // Debug helpers
@@ -1029,6 +1030,7 @@ function isVeinseekerRoomUnsafe(roomName) {
 function logVeinseekerNoSafeSource(creep, details) {
   if (!creep || !details) return;
   var interval = CFG.NO_SAFE_ASSIGN_LOG_INTERVAL || 25;
+  if (creep.memory) creep.memory._lastNoSafeAssignDetails = String(details).slice(0, 250);
   if (creep.memory && creep.memory._lastNoSafeAssignLog && (Game.time - creep.memory._lastNoSafeAssignLog) < interval) return;
   if (creep.memory) creep.memory._lastNoSafeAssignLog = Game.time;
   console.log('🛑 Veinseeker ' + creep.name + ' no safe assignment: ' + details);
@@ -1505,7 +1507,10 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     // Primary Veinseeker assignment flow. Prefer the scored remote-source picker,
     // mirror the claim into SourceEnergy.Manager, and fall back to legacy room
     // selection only when the scored picker cannot find a safe source.
-    if (creep.memory.sourceId) return true;
+    if (creep.memory.sourceId && creep.memory.targetRoom) {
+      clearRemoteUnassignedTimeout(creep);
+      return true;
+    }
 
     var pick = pickRemoteSource(creep);
     if (pick){
@@ -1513,16 +1518,19 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       creep.memory.targetRoom = pick.roomName;
       creep.memory.assigned   = true;
       creep.memory._assignTick = Game.time;
+      clearRemoteUnassignedTimeout(creep);
       SourceEnergyManager.claimSource(creep, pick.id, pick.roomName);
       return true;
     }
 
     roleVeinseeker.initializeAndAssign(creep);
-    if (!creep.memory.sourceId){
+    if (!creep.memory.targetRoom || !creep.memory.sourceId){
+      if (maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment')) return false;
       idleAtAnchor(creep, 'IDLE');
       return false;
     }
     creep.memory._assignTick = creep.memory._assignTick || Game.time;
+    clearRemoteUnassignedTimeout(creep);
     return true;
   }
 
@@ -1554,6 +1562,49 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     else if (creep.pos.roomName !== creep.memory.targetRoom) state = 'TRAVEL';
     creep.memory.state = state;
     return state;
+  }
+
+  function clearRemoteUnassignedTimeout(creep) {
+    if (!creep || !creep.memory) return;
+    delete creep.memory._remoteUnassignedSince;
+    delete creep.memory._remoteUnassignedReason;
+  }
+
+  function getRemoteVeinseekerAge(creep) {
+    if (!creep || !creep.memory) return null;
+    if (typeof creep.memory.bornAt === 'number') return Math.max(0, Game.time - creep.memory.bornAt);
+    if (typeof creep.ticksToLive === 'number' && typeof CREEP_LIFE_TIME === 'number') {
+      return Math.max(0, CREEP_LIFE_TIME - creep.ticksToLive);
+    }
+    return null;
+  }
+
+  function maybeSuicideIfRemoteUnassignedTooLong(creep, reason) {
+    if (!creep || !creep.memory || creep.spawning) return false;
+    if (creep.memory.targetRoom && creep.memory.sourceId) {
+      clearRemoteUnassignedTimeout(creep);
+      return false;
+    }
+
+    if (typeof creep.memory._remoteUnassignedSince !== 'number') {
+      creep.memory._remoteUnassignedSince = Game.time;
+    }
+    creep.memory._remoteUnassignedReason = reason || creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment';
+
+    var age = getRemoteVeinseekerAge(creep);
+    var unassignedTicks = Math.max(0, Game.time - creep.memory._remoteUnassignedSince);
+    var expired = age !== null
+      ? age >= VEINSEEKER_UNASSIGNED_SUICIDE_TICKS
+      : unassignedTicks >= VEINSEEKER_UNASSIGNED_SUICIDE_TICKS;
+
+    if (!expired) return false;
+
+    var detail = creep.memory._remoteUnassignedReason;
+    var ageText = age !== null ? age : ('unassigned ' + unassignedTicks);
+    console.log('Veinseeker ' + creep.name + ' suiciding after ' + ageText + ' ticks without a remote assignment. reason=' + detail);
+    SourceEnergyManager.releaseSource(creep);
+    creep.suicide();
+    return true;
   }
 
 
@@ -1699,7 +1750,10 @@ function upsertRemoteContainerStatus(creep, source, container) {
       var state = determineVeinseekerState(creep);
 
       if (shouldReleaseForEndOfLife(creep)) return;
-      if (respectCooldown(creep)) return;
+      if (respectCooldown(creep)) {
+        if (state === 'UNASSIGNED') maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'retarget-cooldown-unassigned');
+        return;
+      }
       if (handleForcedYield(creep)) return;
       if (releaseIfLocalOwnedVeinseekerAssignment(creep)) return;
 
@@ -1743,11 +1797,13 @@ function upsertRemoteContainerStatus(creep, source, container) {
       if (state === 'UNASSIGNED') {
         roleVeinseeker.initializeAndAssign(creep);
         if (!creep.memory.targetRoom || !creep.memory.sourceId){
+          if (maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment')) return;
           if (Game.time % 25 === 0) console.log('🚫 Forager '+creep.name+' could not be assigned a room/source.');
           return;
         }
       }
 
+      clearRemoteUnassignedTimeout(creep);
       var targetRoomObj = Game.rooms[creep.memory.targetRoom];
       if (targetRoomObj && BeeToolbox && BeeToolbox.logSourcesInRoom){ try { BeeToolbox.logSourcesInRoom(targetRoomObj); } catch (e) {} }
 

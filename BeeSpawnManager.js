@@ -526,6 +526,10 @@ function isVeinseekerQueueItem(item) {
   return item && isVeinseekerRole(item.role) && item.mode !== 'remote';
 }
 
+function isRemoteVeinseekerQueueItem(item) {
+  return item && isVeinseekerRole(item.role) && item.mode === 'remote';
+}
+
 function getVeinseekerSourceIdFromMemory(mem) {
   return SourceWorkerManager.getSourceIdFromMemory(mem);
 }
@@ -1058,6 +1062,52 @@ function determineVeinseekerQuota(C, room) {
   return home.desiredVeinseeker || 0;
 }
 
+function remoteSourceHasLiveVeinseekerCoverage(homeRoom, sourceId) {
+  if (!homeRoom || !sourceId) return false;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    if (!SourceWorkerManager.isVeinseekerMemory(creep.memory)) continue;
+    if (creep.memory.mode !== 'remote') continue;
+    if (getCreepHomeRoomName(creep) !== homeRoom) continue;
+    if (getVeinseekerSourceIdFromMemory(creep.memory) !== sourceId) continue;
+    return true;
+  }
+  return false;
+}
+
+function shouldReleaseRemoteVeinseekerQueueReservation(reason) {
+  return reason !== 'duplicate-source-queue' &&
+    reason !== 'source-already-assigned' &&
+    reason !== 'source-already-covered';
+}
+
+function getRemoteVeinseekerQueuePruneReason(roomName, item, seenQueuedSources) {
+  if (!item.targetRoom) return 'missing-target-room';
+  if (!item.sourceId) return 'missing-source-id';
+
+  var localOwnedCheck = (SourceEnergyManager && typeof SourceEnergyManager.isLocalOwnedRoomForVeinseeker === 'function')
+    ? SourceEnergyManager.isLocalOwnedRoomForVeinseeker(roomName, item.targetRoom)
+    : { blocked: false };
+  if (localOwnedCheck && localOwnedCheck.blocked) return localOwnedCheck.reason || 'local-owned-room';
+  if (isVeinseekerRemoteRoomUnsafe(item.targetRoom)) return 'room-unsafe';
+
+  var sMem = Memory.rooms && Memory.rooms[item.targetRoom] && Memory.rooms[item.targetRoom].sources && Memory.rooms[item.targetRoom].sources[item.sourceId];
+  if (sMem && sMem.sourceWorkerBlockedUntil && sMem.sourceWorkerBlockedUntil > Game.time) return 'source-blocked';
+
+  if (seenQueuedSources && seenQueuedSources[item.sourceId]) return 'duplicate-source-queue';
+
+  var home = SourceEnergyManager.ensureHomeMemory(roomName);
+  var rec = home && home.sources ? home.sources[item.sourceId] : null;
+  if (!rec) return 'source-not-in-plan';
+  if (rec.remoteRoom && item.targetRoom && rec.remoteRoom !== item.targetRoom) return 'source-target-mismatch';
+  if (rec.assignedVeinseeker && Game.creeps[rec.assignedVeinseeker]) return 'source-already-assigned';
+  if (remoteSourceHasLiveVeinseekerCoverage(roomName, item.sourceId)) return 'source-already-covered';
+
+  return null;
+}
+
 function pruneBlockedVeinseekerQueueItems(roomName) {
   // Queue cleanup must run before new quota fills. If a remote room/source was
   // blocked after a Veinseeker was queued, release the SourceEnergy reservation so a
@@ -1066,27 +1116,17 @@ function pruneBlockedVeinseekerQueueItems(roomName) {
   var kept = [];
   var removed = 0;
   var removedItems = [];
+  var seenQueuedSources = Object.create(null);
   for (var i = 0; i < q.length; i++) {
     var it = q[i];
-    if (!it || it.role !== 'Veinseeker' || it.mode !== 'remote') { kept.push(it); continue; }
+    if (!isRemoteVeinseekerQueueItem(it)) { kept.push(it); continue; }
 
-    var reason = null;
-    if (!it.targetRoom) {
-      reason = 'missing-target-room';
-    } else {
-      var localOwnedCheck = (SourceEnergyManager && typeof SourceEnergyManager.isLocalOwnedRoomForVeinseeker === 'function') ? SourceEnergyManager.isLocalOwnedRoomForVeinseeker(roomName, it.targetRoom) : { blocked: false };
-      if (localOwnedCheck && localOwnedCheck.blocked) reason = localOwnedCheck.reason || 'local-owned-room';
-      else if (isVeinseekerRemoteRoomUnsafe(it.targetRoom)) reason = 'room-unsafe';
-    }
-    if (!reason) {
-      var sMem = Memory.rooms && Memory.rooms[it.targetRoom] && Memory.rooms[it.targetRoom].sources && Memory.rooms[it.targetRoom].sources[it.sourceId];
-      if (sMem && sMem.sourceWorkerBlockedUntil && sMem.sourceWorkerBlockedUntil > Game.time) {
-        reason = 'source-blocked';
-      }
-    }
+    var reason = getRemoteVeinseekerQueuePruneReason(roomName, it, seenQueuedSources);
 
     if (reason) {
-      if (it.sourceId) SourceEnergyManager.unreserveSourceForQueue(roomName, it.sourceId);
+      if (it.sourceId && shouldReleaseRemoteVeinseekerQueueReservation(reason)) {
+        SourceEnergyManager.unreserveSourceForQueue(roomName, it.sourceId);
+      }
       removed++;
       removedItems.push({
         sourceId: it.sourceId || null,
@@ -1096,6 +1136,7 @@ function pruneBlockedVeinseekerQueueItems(roomName) {
       continue;
     }
 
+    if (it.sourceId) seenQueuedSources[it.sourceId] = true;
     kept.push(it);
   }
   var roomMem = ensureRoomMemory(roomName);
