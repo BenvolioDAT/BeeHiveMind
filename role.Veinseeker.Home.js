@@ -755,7 +755,10 @@ function runHarvestPhase(creep) {
         creep.travelTo(container.pos, { range: 1, reusePath: CFG.TRAVEL_REUSE });
         return;
       } else if (transferResult === ERR_FULL) {
-        dropSourceOverflowEnergy(creep, source, container, 'source-container-full-before-harvest');
+         if (dropSourceOverflowEnergy(creep, source, container, 'source-container-full-before-harvest')) return;
+         writeSourceOverflowDiag(creep, source, container, 'drop', 'source-container-full-before-harvest');
+         debugSay(creep, '⬇️');
+         creep.drop(RESOURCE_ENERGY);
       }
     }
   }

@@ -665,8 +665,18 @@ function runLocal(creep, job, diag) {
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) clearDeliveryReservation(creep);
 
   var preferredFeederActive = hasActivePreferredFeederSink(creep);
-  if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && hasUrgentLocalDeliveryTarget(creep)) { creep.memory.dispatchJob = { id: 'localDeliver:' + creep.memory.home, type: 'LOCAL_DELIVER', homeRoom: creep.memory.home }; }
+  //if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && hasUrgentLocalDeliveryTarget(creep)) { creep.memory.dispatchJob = { id: 'localDeliver:' + creep.memory.home, type: 'LOCAL_DELIVER', homeRoom: creep.memory.home }; }
+  if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 && hasUrgentLocalDeliveryTarget(creep)) {
+    creep.memory.dispatchJob = {
+      id: 'localDeliver:' + creep.memory.home,
+      type: 'LOCAL_DELIVER',
+      homeRoom: creep.memory.home
+    };
 
+    // Important: update the local job variable too.
+    // Otherwise this tick may still behave like the old LOCAL_COLLECT job.
+    job = creep.memory.dispatchJob;
+  }
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0 || job.type === 'LOCAL_COLLECT') {
     var src = findLocalCollectTarget(creep);
     if (!src) { if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) creep.memory.dispatchJob = { id: 'localDeliver:' + creep.memory.home, type: 'LOCAL_DELIVER', homeRoom: creep.memory.home }; return; }
@@ -724,7 +734,7 @@ function runRemote(creep, job) {
   var container = targetType === 'container' && creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
   var source = creep.memory.sourceId ? Game.getObjectById(creep.memory.sourceId) : null;
   if (source) drawHaulIntent(creep, source, '#4deeea');
-  if (directTarget) {
+  if (directTarget && targetType !== 'container') {
     var directResult = collectEnergyTarget(creep, directTarget);
     if (directResult === ERR_NOT_ENOUGH_RESOURCES && creep.store.getUsedCapacity(RESOURCE_ENERGY) <= 0) {
       clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob;
