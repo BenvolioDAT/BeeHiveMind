@@ -92,9 +92,12 @@ function shouldAvoidFreshPathSearch(creep, pos) {
   if (!(guard > 0)) return false;
   try {
     if (!Game.cpu || typeof Game.cpu.getUsed !== 'function') return false;
-    var tickLimit = Number(Game.cpu.tickLimit || Game.cpu.limit || 0);
-    if (!(tickLimit > 0)) return false;
-    return Game.cpu.getUsed() >= Math.max(0, tickLimit - guard);
+    var bucketMin = Number(cfg.freshPathMinBucket || 0);
+    if (bucketMin > 0 && typeof Game.cpu.bucket === 'number' && Game.cpu.bucket < bucketMin) return true;
+    var useLimit = cfg.freshPathUseCpuLimit !== false;
+    var baseline = useLimit ? Number(Game.cpu.limit || Game.cpu.tickLimit || 0) : Number(Game.cpu.tickLimit || Game.cpu.limit || 0);
+    if (!(baseline > 0)) return false;
+    return Game.cpu.getUsed() >= Math.max(0, baseline - guard);
   } catch (err) {
     return false;
   }

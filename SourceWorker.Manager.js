@@ -672,6 +672,16 @@ function getBadSiteRelocationDecision(site, best, currentCovered) {
   return { relocate: true, gain: gain, reason: 'relocate-low-progress-site' };
 }
 
+function getExistingContainerCoverageDiag(best, currentCovered) {
+  if (!best || !best.pos || best.coveredSeats <= currentCovered) return null;
+  return {
+    warning: 'existing-container-covers-fewer-seats-than-best-candidate',
+    bestCandidate: serializeSeat(best.pos),
+    bestCoveredSeats: best.coveredSeats || 0,
+    coverageGap: (best.coveredSeats || 0) - (currentCovered || 0)
+  };
+}
+
 function getBestSourceContainerAnchor(source) {
   if (!source || !source.pos) return null;
   var seats = buildRawHarvestSeatList(source);
@@ -680,7 +690,8 @@ function getBestSourceContainerAnchor(source) {
   var container = findSourceContainer(source);
   if (container && container.pos) {
     var containerCovered = countContainerCompatibleSeats(container.pos, seats);
-    writeContainerPlacementDiag(source, container.pos, containerCovered, seats.length, candidateCount, 'existing-container');
+    writeContainerPlacementDiag(source, container.pos, containerCovered, seats.length, candidateCount, 'existing-container',
+      getExistingContainerCoverageDiag(best, containerCovered));
     return {
       type: 'container',
       container: container,
@@ -847,7 +858,15 @@ function chooseSourceContainerBuildPosition(source) {
 
 function ensureSourceContainerOrSite(source) {
   var container = findSourceContainer(source);
-  if (container) return { container: container, site: null, plannedPos: container.pos };
+  if (container) {
+    var containerSeats = buildRawHarvestSeatList(source);
+    var containerBest = selectBestSourceContainerCandidate(source, containerSeats);
+    var containerCovered = countContainerCompatibleSeats(container.pos, containerSeats);
+    writeContainerPlacementDiag(source, container.pos, containerCovered, containerSeats.length,
+      containerBest ? containerBest.candidateCount : 0, 'existing-container',
+      getExistingContainerCoverageDiag(containerBest, containerCovered));
+    return { container: container, site: null, plannedPos: container.pos };
+  }
   var site = findSourceContainerSite(source);
   if (site) {
     var seats = buildRawHarvestSeatList(source);

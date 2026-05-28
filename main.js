@@ -29,6 +29,7 @@ var StructureLogic = require('Structure.Logic');
 const BeeToolbox = require('BeeToolbox');
 const CombatSquads = require('Combat.Squads');
 const CpuProfiler = require('core.cpuProfiler');
+const CpuBudget = require('core.cpuBudget');
 require('Traveler');
 
 const LOG_LEVEL = CoreConfig.LOG_LEVEL;
@@ -77,13 +78,19 @@ function maintainRepairTargets() {
     // Repair target ownership starts here: core.maintenance finds candidates and
     // this function stores the queue for towers and Repair creeps to consume.
     // Periodically refresh which structures need repairs in each visible room.
-    if (Memory.GameTickRepairCounter === undefined) Memory.GameTickRepairCounter = 0;
-    Memory.GameTickRepairCounter++;
-    if (Memory.GameTickRepairCounter < CoreConfig.settings.maintenance.repairScanInterval) return;
-
-    Memory.GameTickRepairCounter = 0;
-
+    // Stagger per room so multi-room repair scans do not pile onto one tick.
+    const maintenanceCfg = CoreConfig.settings.maintenance || {};
+    const baseInterval = maintenanceCfg.repairScanInterval || 7;
+    const lowInterval = maintenanceCfg.repairScanLowBucketInterval || (baseInterval * 3);
+    const interval = CpuBudget.intervalByBucket(baseInterval, lowInterval);
+    if (!CpuBudget.canSpend({
+        minBucket: maintenanceCfg.minBucketForRepairScan || 0,
+        maxCpuUsed: (CoreConfig.settings.cpuBudget || {}).optionalWorkMaxCpuUsed
+    })) {
+        return;
+    }
     for (const room of Object.values(Game.rooms)) {
+        if (!CpuBudget.isTickForKey(room.name + ':repair', interval)) continue;
         const roomMem = MemoryUtils.ensureRoom(room.name);
         roomMem.repairTargets = Maintenance.findStructuresNeedingRepair(room);
     }
@@ -94,10 +101,20 @@ function refreshSourceIntel() {
     // helpers. Veinseeker remote container status has its own dedicated Memory path.
     // Keep an eye on source containers so harvesters stay supplied.
     const maintenanceCfg = CoreConfig.settings.maintenance || {};
-    const cadence = maintenanceCfg.sourceContainerRefreshModulo || 3;
-    if (cadence > 1 && Game.time % cadence !== 0) return;
+    const cadence = CpuBudget.intervalByBucket(
+        maintenanceCfg.sourceContainerRefreshModulo || 5,
+        maintenanceCfg.sourceContainerRefreshLowBucketModulo || 15,
+        maintenanceCfg.minBucketForSourceIntelRefresh || 1000
+    );
+    if (!CpuBudget.canSpend({
+        minBucket: maintenanceCfg.minBucketForSourceIntelRefresh || 0,
+        maxCpuUsed: (CoreConfig.settings.cpuBudget || {}).optionalWorkMaxCpuUsed
+    })) {
+        return;
+    }
 
     for (const room of Object.values(Game.rooms)) {
+        if (!CpuBudget.isTickForKey(room.name + ':sourceIntel', cadence)) continue;
         BeeToolbox.logSourceContainersInRoom(room);
     }
 }

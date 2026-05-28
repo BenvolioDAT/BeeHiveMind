@@ -1633,6 +1633,58 @@ function upsertRemoteContainerStatus(creep, source, container) {
     });
   }
 
+  function getContainerFreeEnergy(container) {
+    if (!container || !container.store) return 0;
+    return container.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+  }
+
+  function writeRemoteOverflowDiag(creep, source, container, action, reason) {
+    if (!creep || !source || !source.id) return;
+    var roomName = source.pos ? source.pos.roomName : creep.memory.targetRoom;
+    var srec = getSourceMemory(roomName, source.id);
+    var diag = {
+      tick: Game.time,
+      creepName: creep.name,
+      homeRoom: getHomeName(creep),
+      remoteRoom: roomName || null,
+      sourceId: source.id,
+      containerId: container && container.id ? container.id : null,
+      action: action || 'drop',
+      reason: reason || 'remote-source-container-overflow',
+      carried: creep.store ? (creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0) : 0,
+      containerEnergy: container && container.store ? (container.store[RESOURCE_ENERGY] || 0) : null,
+      containerCapacity: container && container.store ? (container.store.getCapacity(RESOURCE_ENERGY) || 0) : null
+    };
+    srec.overflow = diag;
+    var homeName = getHomeName(creep);
+    if (homeName) {
+      if (!Memory.rooms) Memory.rooms = {};
+      if (!Memory.rooms[homeName]) Memory.rooms[homeName] = {};
+      Memory.rooms[homeName].lastRemoteVeinseekerOverflow = diag;
+    }
+  }
+
+  function dropRemoteSourceOverflow(creep, source, container, reason) {
+    if (!creep || !source || !creep.store || creep.store.getUsedCapacity(RESOURCE_ENERGY) <= 0) return false;
+    if (container && getContainerFreeEnergy(container) > 0) return false;
+    var nearSource = source.pos && creep.pos.getRangeTo(source) <= 1;
+    var nearContainer = container && creep.pos.getRangeTo(container) <= 1;
+    if (!nearSource && !nearContainer) return false;
+
+    // Full remote containers should create haul pressure, not leave the miner
+    // full and idle. Drop only beside the source/container so pickup is local.
+    if (container) {
+      upsertRemoteContainerStatus(creep, source, container);
+      upsertRemoteHaulRequest(creep, source, container);
+    }
+    publishRemoteLooseEnergyRequests(creep, source, container);
+    writeRemoteOverflowDiag(creep, source, container, 'drop', reason);
+    debugSay(creep, 'overflow');
+    debugRing(creep.room, creep.pos, CFG.DRAW.OFFLOAD, 'DROP');
+    creep.drop(RESOURCE_ENERGY);
+    return true;
+  }
+
   function findAssignedSourceContainer(creep, source) {
     return SourceWorkerManager.findAssignedSourceContainer(creep, source, {
       getSourceMemory: getSourceMemory
@@ -2176,8 +2228,18 @@ function upsertRemoteContainerStatus(creep, source, container) {
           container.store &&
           container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         debugDrawLine(creep, container, CFG.DRAW.OFFLOAD, 'CONT');
-        creep.transfer(container, RESOURCE_ENERGY);
+        var preSeatTransfer = creep.transfer(container, RESOURCE_ENERGY);
+        if (preSeatTransfer === ERR_FULL) {
+          dropRemoteSourceOverflow(creep, src, container, 'remote-container-full-before-seat');
+        }
         transferredToContainerThisTick = true;
+      } else if (container && !creep.memory.sourceWorkerRepairingContainer &&
+          seatPos && !creep.pos.isEqualTo(seatPos) &&
+          creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
+          creep.pos.getRangeTo(container) <= 1 &&
+          container.store &&
+          container.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) {
+        dropRemoteSourceOverflow(creep, src, container, 'remote-container-full-before-seat');
       } else if (!container && site &&
           seatPos && !creep.pos.isEqualTo(seatPos) &&
           creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
@@ -2239,7 +2301,16 @@ function upsertRemoteContainerStatus(creep, source, container) {
           container.store &&
           container.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         debugDrawLine(creep, container, CFG.DRAW.OFFLOAD, 'CONT');
-        creep.transfer(container, RESOURCE_ENERGY);
+        var postHarvestTransfer = creep.transfer(container, RESOURCE_ENERGY);
+        if (postHarvestTransfer === ERR_FULL) {
+          dropRemoteSourceOverflow(creep, src, container, 'remote-container-full-after-harvest');
+        }
+      } else if (container && !transferredToContainerThisTick &&
+          creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
+          creep.pos.getRangeTo(container) <= 1 &&
+          container.store &&
+          container.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) {
+        dropRemoteSourceOverflow(creep, src, container, 'remote-container-full-after-harvest');
       } else if (!container && site && !builtSiteThisTick &&
           creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
           creep.pos.getRangeTo(site) <= 3) {
@@ -2247,6 +2318,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         creep.build(site);
         upsertRemoteContainerBuildStatus(creep, src, container, site, plannedPos);
       } else if (!container && !site && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+        writeRemoteOverflowDiag(creep, src, null, 'drop', 'remote-no-container-or-site');
         creep.drop(RESOURCE_ENERGY);
       }
       if (container) upsertRemoteHaulRequest(creep, src, container);

@@ -31,6 +31,7 @@ var BodyUtils = require('core.body');
 var BodyConfig = require('Spawn.BodyConfig');
 var MemoryUtils = require('core.memory');
 var CoreConfig = require('core.config');
+var CpuBudget = require('core.cpuBudget');
 
 var RESERVE_TTL = 100;
 // Economics diagnostics are intentionally estimates. They explain "why this
@@ -53,7 +54,9 @@ function getRemoteEconomicsConfig() {
   return {
     enabled: cfg.remoteEconomicsEnabled !== false,
     interval: Math.max(1, Number(cfg.remoteEconomicsInterval) || 250),
-    pathCacheTtl: Math.max(1, Number(cfg.remoteEconomicsPathCacheTtl) || 1500)
+    pathCacheTtl: Math.max(1, Number(cfg.remoteEconomicsPathCacheTtl) || 1500),
+    minBucket: Math.max(0, Number(cfg.remoteEconomicsMinBucket) || 0),
+    maxCpuUsed: Math.max(0, Number(cfg.remoteEconomicsMaxCpuUsed) || 0)
   };
 }
 
@@ -648,6 +651,15 @@ function buildRemoteSourceEconomicsReport(homeRoom, remoteDiscovery) {
     previousReport.pathCacheMisses = previousReport.pathCacheMisses || 0;
     return previousReport;
   }
+  if (previousReport && !CpuBudget.canSpend({ minBucket: cfg.minBucket, maxCpuUsed: cfg.maxCpuUsed })) {
+    previousReport.recalculated = false;
+    previousReport.reusedFromTick = previousReport.tick || previousReport.reusedFromTick || null;
+    previousReport.lastCheckedTick = Game.time;
+    previousReport.deferredReason = 'cpu-budget';
+    previousReport.pathCacheHits = previousReport.pathCacheHits || 0;
+    previousReport.pathCacheMisses = previousReport.pathCacheMisses || 0;
+    return previousReport;
+  }
   // Reuse the discovery result from queue prep when available, so the report
   // explains the same candidate set BeeSpawnManager just evaluated.
   if (!remoteDiscovery) remoteDiscovery = gatherCandidateRemoteRoomsForHome(homeRoom);
@@ -1035,22 +1047,37 @@ function buildSourcePlanForHome(homeRoom, remoteRooms) {
   return home;
 }
 
-function auditAssignmentsForHome(homeRoom) {
+function getRemoteVeinseekerCreepsForHome(homeRoom, C) {
+  if (C && C.creepsByHomeRoleMode && C.creepsByHomeRoleMode[homeRoom] &&
+      C.creepsByHomeRoleMode[homeRoom].Veinseeker &&
+      C.creepsByHomeRoleMode[homeRoom].Veinseeker.remote) {
+    return C.creepsByHomeRoleMode[homeRoom].Veinseeker.remote;
+  }
+  var out = [];
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory) continue;
+    if (creep.memory.role !== 'Veinseeker' && creep.memory.task !== 'veinseeker') continue;
+    if (creep.memory.mode !== 'remote') continue;
+    var chome = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
+    if (chome !== homeRoom) continue;
+    out.push(creep);
+  }
+  return out;
+}
+
+function auditAssignmentsForHome(homeRoom, C) {
   // Reconcile the plan with reality: live Veinseeker creeps, queued Veinseeker spawn items,
   // expired queue reservations, blocked source Memory, duplicate assignments,
   // and unfinished container work all converge into lastSourceEnergyPlan.
   var home = ensureHomeMemory(homeRoom);
   var bySource = {};
   var liveCount = 0;
-
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var c = Game.creeps[name];
+  var remoteCreeps = getRemoteVeinseekerCreepsForHome(homeRoom, C);
+  for (var i = 0; i < remoteCreeps.length; i++) {
+    var c = remoteCreeps[i];
     if (!c || !c.memory) continue;
-    if (c.memory.role !== 'Veinseeker' && c.memory.task !== 'veinseeker') continue;
-    if (c.memory.mode !== 'remote') continue;
-    var chome = c.memory.home || c.memory._home || (c.room && c.room.name);
-    if (chome !== homeRoom) continue;
     liveCount++;
     if (!c.memory.sourceId) continue;
     if (!bySource[c.memory.sourceId]) bySource[c.memory.sourceId] = [];

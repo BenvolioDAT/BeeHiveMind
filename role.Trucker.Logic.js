@@ -29,6 +29,7 @@ var Dispatcher = require('role.Trucker.Dispatcher');
 var Handoff = require('role.EnergyHandoff');
 var CoreSelectors = require('core.selectors');
 var SourceEconomy = require('Source.Economy');
+var BeeToolbox = require('BeeToolbox');
 
 function ensureIdentity(creep) {
   // Normalize old or manually spawned haulers into the Trucker contract before
@@ -387,13 +388,15 @@ function clearRemoteRequestAssignment(creep) {
 
 function isActiveRemoteRequest(req, homeName) { /* unchanged */
   // Remote requests are valid only while fresh, large enough, same-home, and
-  // not under maintenance. The dispatcher and runner intentionally share this
-  // predicate so claimed jobs can be dropped when Memory changes.
+  // not under maintenance or unsafe. The dispatcher and runner intentionally
+  // share this predicate so claimed jobs can be dropped when Memory changes.
   if (!req || !req.id || !homeName) return false;
   if (req.homeRoom !== homeName) return false;
   if (CFG.shouldBlockRemoteHaulForMaintenance(req)) return false;
   if ((req.amount || 0) < CFG.MIN_HAUL_REQUEST_ENERGY) return false;
   if ((Game.time - (req.updated || 0)) > CFG.REQUEST_STALE_TICKS) return false;
+  var remoteRoom = req.roomName || req.remoteRoom;
+  if (remoteRoom && BeeToolbox.isRemoteRoomUnsafe(remoteRoom)) return false;
   return true;
 }
 function isRemoteRequestReservedByOther(req, creepName) { if (!req) return false; return !!(req.assignedTo && req.assignedTo !== creepName && (req.assignedUntil || 0) > Game.time); }
@@ -599,8 +602,33 @@ function pickClosestWithEffectiveFree(creep, candidates, diag) {
   return creep.pos.findClosestByPath(candidates, { filter: function(s){ return getEffectiveFreeCapacity(s, RESOURCE_ENERGY) > 0; } }) || best;
 }
 
+function findUrgentLocalDeliverTarget(creep, diag) {
+  // Urgent consumers must beat storage/hub feeder sinks, but still respect the
+  // same effective-capacity reservations used by normal delivery.
+  var room = creep.room;
+  var spExt = room.find(FIND_STRUCTURES, { filter: function(s){ return (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) && s.store; } });
+  var target = pickClosestWithEffectiveFree(creep, spExt, diag);
+  if (target) {
+    recordDeliverySelection(creep, diag, target, 'urgent_local', null);
+    return target;
+  }
+
+  var towers = room.find(FIND_STRUCTURES, { filter: function(s){ if (s.structureType !== STRUCTURE_TOWER || !s.store) return false; var cap = s.store.getCapacity(RESOURCE_ENERGY) || 0; if (cap <= 0) return false; return (s.store[RESOURCE_ENERGY] || 0) < Math.floor(cap * CFG.TOWER_REFILL_AT_OR_BELOW); } });
+  target = pickClosestWithEffectiveFree(creep, towers, diag);
+  if (target) {
+    recordDeliverySelection(creep, diag, target, 'urgent_local', null);
+    return target;
+  }
+  return null;
+}
+
 function findLocalDeliverTarget(creep, diag) {
   var room = creep.room;
+  if (hasUrgentLocalDeliveryTarget(creep)) {
+    var urgentTarget = findUrgentLocalDeliverTarget(creep, diag);
+    if (urgentTarget) return urgentTarget;
+  }
+
   var feeder = findPreferredFeederSink(creep, diag);
   if (feeder.target) {
     recordDeliverySelection(creep, diag, feeder.target, feeder.mode, null);
@@ -653,7 +681,7 @@ function runLocal(creep, job, diag) {
 
   var urgentTargetExists = hasUrgentLocalDeliveryTarget(creep);
   var dst = creep.memory.deliveryTargetId ? Game.getObjectById(creep.memory.deliveryTargetId) : null;
-  if (urgentTargetExists && dst && isNonUrgentStorageLikeTarget(dst) && !isUrgentDeliveryTarget(dst) && !preferredFeederActive) {
+  if (urgentTargetExists && dst && isNonUrgentStorageLikeTarget(dst) && !isUrgentDeliveryTarget(dst)) {
     clearDeliveryReservation(creep, dst);
     dst = null;
     delete creep.memory.deliveryTargetId;

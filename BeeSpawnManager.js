@@ -24,6 +24,7 @@ var LOG_LEVEL   = CoreLogger.LOG_LEVEL;
 var spawnLog    = CoreLogger.createLogger('HiveMind', LOG_LEVEL.BASIC);
 var CoreConfig  = require('core.config');
 var CpuProfiler = require('core.cpuProfiler');
+var CpuBudget   = require('core.cpuBudget');
 
 var spawnLogic  = require('spawn.logic');
 var VeinseekerConfig  = require('role.Veinseeker.Config');
@@ -524,6 +525,19 @@ function isVeinseekerRole(role) {
 
 function isVeinseekerQueueItem(item) {
   return item && isVeinseekerRole(item.role) && item.mode !== 'remote';
+}
+
+function getSourceEnergySettings() {
+  var settings = CoreConfig && CoreConfig.settings;
+  return settings && settings.sourceEnergy ? settings.sourceEnergy : {};
+}
+
+function roomHasOwnedSpawn(C, roomName) {
+  if (!roomName) return false;
+  if (C && C.spawnsByRoom && C.spawnsByRoom[roomName]) return C.spawnsByRoom[roomName].length > 0;
+  var room = Game.rooms[roomName];
+  if (!room || !room.find) return false;
+  return room.find(FIND_MY_SPAWNS).length > 0;
 }
 
 function isRemoteVeinseekerQueueItem(item) {
@@ -1108,6 +1122,30 @@ function getRemoteVeinseekerQueuePruneReason(roomName, item, seenQueuedSources) 
   return null;
 }
 
+function writeRemoteVeinseekerSpawnGate(roomName, item, action, reason) {
+  var roomMem = ensureRoomMemory(roomName);
+  roomMem.lastVeinseekerRemoteSpawnGate = {
+    tick: Game.time,
+    action: action,
+    reason: reason || null,
+    sourceId: item && item.sourceId ? item.sourceId : null,
+    targetRoom: item && item.targetRoom ? item.targetRoom : null
+  };
+}
+
+function validateRemoteVeinseekerSpawnItem(roomName, item) {
+  var reason = getRemoteVeinseekerQueuePruneReason(roomName, item, null);
+  if (reason) {
+    if (item && item.sourceId && shouldReleaseRemoteVeinseekerQueueReservation(reason)) {
+      SourceEnergyManager.unreserveSourceForQueue(roomName, item.sourceId);
+    }
+    writeRemoteVeinseekerSpawnGate(roomName, item, 'skip', reason);
+    return reason;
+  }
+  writeRemoteVeinseekerSpawnGate(roomName, item, 'spawnable', null);
+  return null;
+}
+
 function pruneBlockedVeinseekerQueueItems(roomName) {
   // Queue cleanup must run before new quota fills. If a remote room/source was
   // blocked after a Veinseeker was queued, release the SourceEnergy reservation so a
@@ -1149,7 +1187,7 @@ function pruneBlockedVeinseekerQueueItems(roomName) {
   };
 }
 
-function computeEarlyUpgraderQuota(room) {
+function computeEarlyUpgraderQuota(C, room) {
   if (!room) {
     return 1;
   }
@@ -1164,16 +1202,26 @@ function computeEarlyUpgraderQuota(room) {
 
   var sourceContainerEnergy = 0;
   var sourceContainerCapacity = 0;
-  var sources = room.find(FIND_SOURCES);
-  for (var i = 0; i < sources.length; i++) {
-    var source = sources[i];
-    var nearby = source.pos.findInRange(FIND_STRUCTURES, 1);
-    for (var j = 0; j < nearby.length; j++) {
-      var structure = nearby[j];
-      if (structure.structureType !== STRUCTURE_CONTAINER) continue;
-      if (!structure.store) continue;
-      sourceContainerEnergy += structure.store[RESOURCE_ENERGY] || 0;
-      sourceContainerCapacity += structure.store.getCapacity(RESOURCE_ENERGY) || 0;
+  var snap = C && C.roomSnapshots && C.roomSnapshots[room.name] ? C.roomSnapshots[room.name] : null;
+  if (snap && snap.sourceContainers) {
+    for (var sc = 0; sc < snap.sourceContainers.length; sc++) {
+      var container = snap.sourceContainers[sc];
+      if (!container || !container.store) continue;
+      sourceContainerEnergy += container.store[RESOURCE_ENERGY] || 0;
+      sourceContainerCapacity += container.store.getCapacity(RESOURCE_ENERGY) || 0;
+    }
+  } else {
+    var sources = room.find(FIND_SOURCES);
+    for (var i = 0; i < sources.length; i++) {
+      var source = sources[i];
+      var nearby = source.pos.findInRange(FIND_STRUCTURES, 1);
+      for (var j = 0; j < nearby.length; j++) {
+        var structure = nearby[j];
+        if (structure.structureType !== STRUCTURE_CONTAINER) continue;
+        if (!structure.store) continue;
+        sourceContainerEnergy += structure.store[RESOURCE_ENERGY] || 0;
+        sourceContainerCapacity += structure.store.getCapacity(RESOURCE_ENERGY) || 0;
+      }
     }
   }
 
@@ -1183,7 +1231,7 @@ function computeEarlyUpgraderQuota(room) {
   }
 
   var droppedEnergy = 0;
-  var drops = room.find(FIND_DROPPED_RESOURCES);
+  var drops = snap && snap.dropped ? snap.dropped : room.find(FIND_DROPPED_RESOURCES);
   for (var k = 0; k < drops.length; k++) {
     var drop = drops[k];
     if (drop.resourceType === RESOURCE_ENERGY) {
@@ -1271,14 +1319,15 @@ function computeLocalDefenseQuotas(room) {
   };
 }
 
-function getLocalContainerPressure(roomName) {
+function getLocalContainerPressure(roomName, C) {
   var out = { localPressure: 'none', containersOverUrgent: 0, containersOverCritical: 0 };
   var room = Game.rooms[roomName];
   if (!room) return out;
   var pickupAt = Math.max(0, TruckerConfig.LOCAL_CONTAINER_PICKUP_AT || 1000);
   var urgentAt = Math.max(pickupAt, TruckerConfig.LOCAL_CONTAINER_URGENT_AT || 1600);
   var criticalAt = Math.max(urgentAt, TruckerConfig.LOCAL_CONTAINER_CRITICAL_AT || 1900);
-  var containers = room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store; } });
+  var snap = C && C.roomSnapshots && C.roomSnapshots[roomName] ? C.roomSnapshots[roomName] : null;
+  var containers = snap && snap.allContainers ? snap.allContainers : room.find(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_CONTAINER && s.store; } });
   for (var i = 0; i < containers.length; i++) {
     var energy = containers[i].store[RESOURCE_ENERGY] || 0;
     if (energy >= urgentAt) out.containersOverUrgent++;
@@ -1362,10 +1411,13 @@ function countHomeTruckersByAssignment(C, roomName) {
 }
 
 
-function computeTruckerQuotaForHome(roomName) {
+function computeTruckerQuotaForHome(roomName, C) {
   // Trucker quota is workload-based. Veinseeker creates remoteHaulRequests; this
   // helper counts fresh/safe/large-enough requests, adds local container
   // pressure, and returns both a final quota and skip diagnostics.
+  if (C && C.truckerQuotaByHome && C.truckerQuotaByHome[roomName] && C.truckerQuotaByHome[roomName].tick === Game.time) {
+    return C.truckerQuotaByHome[roomName];
+  }
   var requests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
   var active = 0;
   var urgent = 0;
@@ -1390,7 +1442,7 @@ function computeTruckerQuotaForHome(roomName) {
     remoteRoomsSeen[req.remoteRoom || req.roomName || ('unknown:' + id)] = true;
   }
   var activeRemoteRooms = Object.keys(remoteRoomsSeen).length;
-  var localPressure = getLocalContainerPressure(roomName);
+  var localPressure = getLocalContainerPressure(roomName, C);
   var localDesiredTruckers = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
   if (localPressure.localPressure === 'urgent' || localPressure.localPressure === 'critical') localDesiredTruckers += 1;
   var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
@@ -1406,7 +1458,8 @@ function computeTruckerQuotaForHome(roomName) {
   var finalTruckerQuota = localDesiredTruckers + remoteDesired;
   if (maxTotalTruckers > 0) finalTruckerQuota = Math.min(finalTruckerQuota, maxTotalTruckers);
 
-  return {
+  var result = {
+    tick: Game.time,
     activeRequests: active,
     urgentRequests: urgent,
     remoteEnergyWaiting: remoteEnergyWaiting,
@@ -1423,6 +1476,11 @@ function computeTruckerQuotaForHome(roomName) {
       wrongHome: wrongHomeSkipped
     }
   };
+  if (C) {
+    if (!C.truckerQuotaByHome) C.truckerQuotaByHome = Object.create(null);
+    C.truckerQuotaByHome[roomName] = result;
+  }
+  return result;
 }
 
 function hasMeaningfulRepairTarget(target) {
@@ -1439,10 +1497,11 @@ function hasMeaningfulRepairTarget(target) {
   return false;
 }
 
-function computeLocalRepairQuotaForRoom(room) {
+function computeLocalRepairQuotaForRoom(C, room) {
   if (!room) return 0;
   if (hasRemoteContainerRepairDemand(room.name)) return 1;
-  var towers = room.find(FIND_MY_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_TOWER; } });
+  var snap = C && C.roomSnapshots && C.roomSnapshots[room.name] ? C.roomSnapshots[room.name] : null;
+  var towers = snap && snap.towers ? snap.towers : room.find(FIND_MY_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_TOWER; } });
   if (towers && towers.length > 0) return 0;
   var mem = (Memory.rooms && Memory.rooms[room.name]) || {};
   var queue = Array.isArray(mem.repairTargets) ? mem.repairTargets : [];
@@ -1699,7 +1758,7 @@ function computeRoomQuotas(C, room) {
   // Central quota fan-in. Every role-specific signal writes its own diagnostic
   // before the combined quotas object is returned to fillQueueForRoom().
   var localDefense = computeLocalDefenseQuotas(room);
-  var localRepairQuota = computeLocalRepairQuotaForRoom(room);
+  var localRepairQuota = computeLocalRepairQuotaForRoom(C, room);
   var maxRemoteEmergencyPerHome = Math.max(0, RepairConfig.remoteContainerEmergencyRepairMaxPerHome || 1);
   var activeRemoteEmergencyRepairs = countRemoteEmergencyRepairAssignments(C, room.name);
   var selectedEmergencyRequest = null;
@@ -1731,12 +1790,12 @@ function computeRoomQuotas(C, room) {
 
   // Teaching habit: start with conservative defaults, then patch in signals
   // (builder need, remote miners, etc.) so every change is a single diff.
-  var truckerQuotaMeta = computeTruckerQuotaForHome(room.name);
+  var truckerQuotaMeta = computeTruckerQuotaForHome(room.name, C);
   var truckerQuota = truckerQuotaMeta.finalTruckerQuota || 0;
 
   var quotas = {
     Queen:        determineQueenQuota(room),
-    Upgrader:     computeEarlyUpgraderQuota(room),
+    Upgrader:     computeEarlyUpgraderQuota(C, room),
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
     Repair:       repairQuota,
@@ -1768,7 +1827,7 @@ function fillQueueForRoom(C, room) {
 
   if (!Memory.rooms) Memory.rooms = {};
   if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
-  var truckerQuotaMeta = computeTruckerQuotaForHome(roomName);
+  var truckerQuotaMeta = computeTruckerQuotaForHome(roomName, C);
   Memory.rooms[roomName].lastRoleQuotas = {
     tick: Game.time,
     quotas: quotas
@@ -2164,6 +2223,17 @@ function dequeueAndSpawn(spawner, C) {
     var item = q[pickIndex];
     if (!item) continue;
 
+    if (isRemoteVeinseekerQueueItem(item)) {
+      var remoteBlockReason = validateRemoteVeinseekerSpawnItem(roomName, item);
+      if (remoteBlockReason) {
+        q.splice(pickIndex, 1);
+        refreshQueueIndexesForRoom(C, roomName);
+        pickIndex--;
+        skippedNonBlockingVeinseeker = true;
+        continue;
+      }
+    }
+
     if (item.retryAt && Game.time < item.retryAt) {
       if (isNonBlockingVeinseekerQueuedWait(item)) {
         skippedNonBlockingVeinseeker = true;
@@ -2258,6 +2328,42 @@ function dequeueAndSpawn(spawner, C) {
   return false;
 }
 
+function shouldRefreshRemoteSourcePlan(roomName) {
+  var cfg = getSourceEnergySettings();
+  var roomMem = ensureRoomMemory(roomName);
+  var lastPlan = roomMem.lastSourceEnergyPlan || null;
+  var lastTick = lastPlan && typeof lastPlan.tick === 'number' ? lastPlan.tick : null;
+  if (lastTick === null) return { refresh: true, reason: 'missing-plan' };
+
+  var maxStale = Math.max(1, Number(cfg.remotePlanMaxStaleTicks) || 25);
+  if ((Game.time - lastTick) >= maxStale) return { refresh: true, reason: 'max-stale' };
+
+  var interval = CpuBudget.intervalByBucket(
+    cfg.remotePlanInterval || 3,
+    cfg.remotePlanLowBucketInterval || 9,
+    cfg.remotePlanFastRefreshMinBucket || 3000
+  );
+  if (CpuBudget.isTickForKey(roomName + ':remotePlan', interval)) {
+    return { refresh: true, reason: 'scheduled', interval: interval };
+  }
+  return { refresh: false, reason: 'staggered', interval: interval, lastTick: lastTick };
+}
+
+function writeRemoteSourcePlanSchedule(roomName, schedule, refreshed) {
+  var roomMem = ensureRoomMemory(roomName);
+  roomMem.lastRemoteSourcePlanSchedule = {
+    tick: Game.time,
+    refreshed: !!refreshed,
+    reason: schedule && schedule.reason ? schedule.reason : null,
+    interval: schedule && schedule.interval ? schedule.interval : null,
+    lastPlanTick: schedule && schedule.lastTick != null ? schedule.lastTick : (
+      roomMem.lastSourceEnergyPlan && typeof roomMem.lastSourceEnergyPlan.tick === 'number'
+        ? roomMem.lastSourceEnergyPlan.tick
+        : null
+    )
+  };
+}
+
 // Teaching habit: split orchestration into obvious verbs (prepare, run) so
 // extending the manager later is painless.
 function prepareRoomQueues(C) {
@@ -2267,28 +2373,35 @@ function prepareRoomQueues(C) {
   var rooms = C.roomsOwned;
   for (var i = 0; i < rooms.length; i++) {
     var room = rooms[i];
-    if (!room.find(FIND_MY_SPAWNS).length) continue;
+    if (!roomHasOwnedSpawn(C, room.name)) continue;
     // Remote harvest setup has three separate phases:
     // 1) discover which rooms are possible remotes,
     // 2) update the Veinseeker source plan/audit used by existing queue behavior,
     // 3) after queue prep, write a read-only economics report for humans.
-    var remoteDiscovery = SourceEnergyManager.gatherCandidateRemoteRoomsForHome(room);
-    SourceEnergyManager.buildSourcePlanForHome(room.name, remoteDiscovery.acceptedRemoteRooms || []);
-    SourceEnergyManager.auditAssignmentsForHome(room.name);
-    if (Memory.rooms && Memory.rooms[room.name] && Memory.rooms[room.name].lastSourceEnergyPlan) {
-      Memory.rooms[room.name].lastSourceEnergyPlan.candidateRemoteRooms = remoteDiscovery.candidateRemoteRooms || [];
-      Memory.rooms[room.name].lastSourceEnergyPlan.acceptedRemoteRooms = remoteDiscovery.acceptedRemoteRooms || [];
-      Memory.rooms[room.name].lastSourceEnergyPlan.rejectedRemoteRooms = remoteDiscovery.rejectedRemoteRooms || [];
+    var remotePlanSchedule = shouldRefreshRemoteSourcePlan(room.name);
+    var remoteDiscovery = null;
+    if (remotePlanSchedule.refresh) {
+      remoteDiscovery = SourceEnergyManager.gatherCandidateRemoteRoomsForHome(room);
+      SourceEnergyManager.buildSourcePlanForHome(room.name, remoteDiscovery.acceptedRemoteRooms || []);
+      SourceEnergyManager.auditAssignmentsForHome(room.name, C);
+      if (Memory.rooms && Memory.rooms[room.name] && Memory.rooms[room.name].lastSourceEnergyPlan) {
+        Memory.rooms[room.name].lastSourceEnergyPlan.candidateRemoteRooms = remoteDiscovery.candidateRemoteRooms || [];
+        Memory.rooms[room.name].lastSourceEnergyPlan.acceptedRemoteRooms = remoteDiscovery.acceptedRemoteRooms || [];
+        Memory.rooms[room.name].lastSourceEnergyPlan.rejectedRemoteRooms = remoteDiscovery.rejectedRemoteRooms || [];
+      }
+      writeRemoteSourcePlanSchedule(room.name, remotePlanSchedule, true);
+    } else {
+      writeRemoteSourcePlanSchedule(room.name, remotePlanSchedule, false);
     }
     ensureRoomQueue(room.name);
-    pruneBlockedVeinseekerQueueItems(room.name);
-    refreshQueueIndexesForRoom(C, room.name);
     fillQueueForRoom(C, room);
     // This call is intentionally last: it observes the final live/queued Veinseeker
     // counts for the tick, but it does not enqueue, dequeue, reserve, or assign.
-    CpuProfiler.measure('SourceEnergy.remoteEconomicsReport', function () {
-      SourceEnergyManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
-    });
+    if (remotePlanSchedule.refresh) {
+      CpuProfiler.measure('SourceEnergy.remoteEconomicsReport', function () {
+        SourceEnergyManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
+      });
+    }
   }
 }
 

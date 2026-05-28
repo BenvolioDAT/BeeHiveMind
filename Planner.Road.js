@@ -17,6 +17,7 @@
 
 var CoreConfig = require('core.config');
 var CpuProfiler = require('core.cpuProfiler');
+var CpuBudget = require('core.cpuBudget');
 
 function getRoadPlannerSettings() {
   var settings = CoreConfig && CoreConfig.settings;
@@ -39,6 +40,7 @@ var CFG = Object.freeze({
   maxRoomsPlanning: 4,        // cap path search footprint (tune for your empire layout)
   maxOpsPlanning: RoadSettings.maxOpsPlanning || 5000, // PathFinder ops guardrail; lower on CPU pinches
   maxCpuUsedBeforePlanning: RoadSettings.maxCpuUsedBeforePlanning || 18,
+  minBucketForPlanning: RoadSettings.minBucketForPlanning || 0,
   planningSkippedRetryTicks: RoadSettings.planningSkippedRetryTicks || 10,
   existingPathPlaceMaxPaths: RoadSettings.existingPathPlaceMaxPaths || 2,
 
@@ -142,10 +144,10 @@ function shouldSkipTick(homeRoom) {
 }
 
 function canPlanNewRoadPaths() {
-  if (!Game.cpu || typeof Game.cpu.getUsed !== 'function') return true;
-  var threshold = Number(CFG.maxCpuUsedBeforePlanning) || 0;
-  if (threshold <= 0) return true;
-  return Game.cpu.getUsed() < threshold;
+  return CpuBudget.canSpend({
+    minBucket: CFG.minBucketForPlanning,
+    maxCpuUsed: CFG.maxCpuUsedBeforePlanning
+  });
 }
 
 function placeExistingPlannedRoads(homeRoom, mem) {

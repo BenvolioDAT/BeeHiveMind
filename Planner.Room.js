@@ -5,6 +5,14 @@ var PlannerLayout = require('Planner.Layout');
 var PlannerReservations = require('Planner.Reservations');
 var PlannerRamparts = require('Planner.Ramparts');
 var CoreSelectors = require('core.selectors');
+var CpuBudget = require('core.cpuBudget');
+
+function getRoomPlannerSettings() {
+  var settings = CoreConfig && CoreConfig.settings;
+  return settings && settings.roomPlanner ? settings.roomPlanner : {};
+}
+
+var RoomPlannerSettings = getRoomPlannerSettings();
 
 // Teaching note: this planner intentionally keeps its knobs in one object
 // so novice contributors can tweak behavior without spelunking the code.
@@ -13,7 +21,11 @@ var CoreSelectors = require('core.selectors');
 var CFG = Object.freeze({
   maxSitesPerTick: 5,
   csiteSafetyLimit: 40,
-  tickModulo: 2,
+  tickModulo: RoomPlannerSettings.tickModulo || 2,
+  lowBucketTickModulo: RoomPlannerSettings.lowBucketTickModulo || RoomPlannerSettings.tickModulo || 2,
+  maxCpuUsedBeforePlanning: RoomPlannerSettings.maxCpuUsedBeforePlanning || 0,
+  minBucketForPlanning: RoomPlannerSettings.minBucketForPlanning || 0,
+  planningSkippedRetryTicks: RoomPlannerSettings.planningSkippedRetryTicks || 10,
   noPlacementCooldownPlaced: 4,
   noPlacementCooldownNone: 10,
   hubContainerRangeFromSpawn: 3
@@ -109,15 +121,23 @@ function isOwnedRoom(room) {
 }
 
 function shouldSkipTick(room) {
-  if (CFG.tickModulo <= 1) return false;
+  var modulo = CpuBudget.intervalByBucket(CFG.tickModulo, CFG.lowBucketTickModulo, CFG.minBucketForPlanning);
+  if (modulo <= 1) return false;
   // Spread planner work across rooms by summing the room name characters.
   var offset = 0;
   var name = room.name;
   for (var i = 0; i < name.length; i++) {
     offset += name.charCodeAt(i);
   }
-  offset = offset % CFG.tickModulo;
-  return ((Game.time + offset) % CFG.tickModulo) !== 0;
+  offset = offset % modulo;
+  return ((Game.time + offset) % modulo) !== 0;
+}
+
+function canSpendPlannerCpu() {
+  return CpuBudget.canSpend({
+    minBucket: CFG.minBucketForPlanning,
+    maxCpuUsed: CFG.maxCpuUsedBeforePlanning
+  });
 }
 
 function plannerMemory(room) {
@@ -709,6 +729,10 @@ function ensureSites(room) {
 
   var mem = plannerMemory(room);
   if (mem.nextPlanTick && Game.time < mem.nextPlanTick) return;
+  if (!canSpendPlannerCpu()) {
+    mem.nextPlanTick = Game.time + CFG.planningSkippedRetryTicks;
+    return;
+  }
 
   // Trigger: rerun immediately when RCL increases so new limits are applied.
   var rcl = (room.controller && room.controller.level) || 0;

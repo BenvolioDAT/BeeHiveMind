@@ -50,6 +50,7 @@ var CpuProfiler         = require('core.cpuProfiler');
 var CoreConfig          = require('core.config');
 var SourceEconomy       = require('Source.Economy');
 var BeeToolbox          = require('BeeToolbox');
+var CpuBudget           = require('core.cpuBudget');
 
 // Keep references to the role modules so validation can check the intended
 // mapping (e.g. a swapped import would surface as a role name mismatch).
@@ -287,9 +288,22 @@ if (!global.__BHM) global.__BHM = {};
 
 function refreshSourceEconomyForOwnedRooms() {
   if (!global.__BHM || !global.__BHM.roomsOwned) return;
+  var cpuCfg = CoreConfig.settings && CoreConfig.settings.cpuBudget ? CoreConfig.settings.cpuBudget : {};
+  var sourceCfg = CoreConfig.settings && CoreConfig.settings.sourceEnergy ? CoreConfig.settings.sourceEnergy : {};
+  var interval = CpuBudget.intervalByBucket(
+    sourceCfg.sourceEconomyRefreshInterval || 2,
+    sourceCfg.sourceEconomyRefreshLowBucketInterval || 6
+  );
+  if (!CpuBudget.canSpend({
+    minBucket: sourceCfg.sourceEconomyRefreshMinBucket || 1000,
+    maxCpuUsed: cpuCfg.optionalWorkMaxCpuUsed || 16
+  })) {
+    return;
+  }
   for (var i = 0; i < global.__BHM.roomsOwned.length; i++) {
     var room = global.__BHM.roomsOwned[i];
-    SourceEconomy.refreshRoomEconomyOnce(room);
+    if (!CpuBudget.isTickForKey(room.name + ':sourceEconomy', interval)) continue;
+    SourceEconomy.refreshRoomEconomyOnce(room, { creeps: global.__BHM.creeps });
   }
 }
 function objectValues(obj) {
@@ -413,6 +427,14 @@ function prepareTickCaches() {
 
   // Spawns: simple snapshot; objectValues keeps the ES5-compatible conversion.
   var spawns = objectValues(Game.spawns);
+  var spawnsByRoom = Object.create(null);
+  for (var si = 0; si < spawns.length; si++) {
+    var spawn = spawns[si];
+    var spawnRoomName = spawn && spawn.room && spawn.room.name;
+    if (!spawnRoomName) continue;
+    if (!spawnsByRoom[spawnRoomName]) spawnsByRoom[spawnRoomName] = [];
+    spawnsByRoom[spawnRoomName].push(spawn);
+  }
 
   // Creeps: single pass to keep counts near the data source.
   var creeps = [];
@@ -571,6 +593,7 @@ function prepareTickCaches() {
   C.roomsMap        = ownedMap;
   C.roomSnapshots   = snapshots;
   C.spawns          = spawns;
+  C.spawnsByRoom    = spawnsByRoom;
   C.creeps          = creeps;
   C.roleCounts      = roleCounts;
   C.roleCountsByRoom = roleCountsByRoom;
@@ -672,7 +695,10 @@ var BeeHiveMind = {
     if (TradeEnergy && typeof TradeEnergy.runAll === 'function') {
       var tradeInterval = CoreConfig.settings && CoreConfig.settings.tradeEnergyInterval;
       tradeInterval = Math.max(1, Number(tradeInterval) || 7);
-      if (Game.time % tradeInterval === 0) {
+      if (Game.time % tradeInterval === 0 && CpuBudget.canSpend({
+        minBucket: CoreConfig.settings.tradeEnergyMinBucket || 0,
+        maxCpuUsed: CoreConfig.settings.tradeEnergyMaxCpuUsed || 0
+      })) {
         CpuProfiler.measure('TradeEnergy.runAll', function () {
           TradeEnergy.runAll();
         });

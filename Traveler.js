@@ -103,6 +103,14 @@ class Traveler {
                 return ERR_BUSY;
             }
             state.destination = destination;
+            if (this.shouldSkipFreshPathSearch(options)) {
+                state.cpu = 0;
+                if (options.returnData) {
+                    options.returnData.pathfinderSkipped = "cpu-budget";
+                }
+                this.serializeState(creep, destination, state, travelData);
+                return ERR_BUSY;
+            }
             let cpu = Game.cpu.getUsed();
             let ret = this.findTravelPath(creep.pos, destination, options);
             let cpuUsed = Game.cpu.getUsed() - cpu;
@@ -166,6 +174,29 @@ class Traveler {
             return destination.pos;
         }
         return destination;
+    }
+    static shouldSkipFreshPathSearch(options = {}) {
+        if (options.ignoreCpuGuard) return false;
+        const intentType = options.intentType || "";
+        if (intentType === "emergency" || intentType === "combat" || intentType === "attack" ||
+            intentType === "rangedAttack" || intentType === "heal" || intentType === "rangedHeal") {
+            return false;
+        }
+        const settings = CoreConfig && CoreConfig.settings && CoreConfig.settings.movement ? CoreConfig.settings.movement : {};
+        const guard = Number(settings.freshPathCpuGuard || 0);
+        if (!(guard > 0)) return false;
+        try {
+            if (!Game.cpu || typeof Game.cpu.getUsed !== "function") return false;
+            const minBucket = Number(settings.freshPathMinBucket || 0);
+            if (minBucket > 0 && typeof Game.cpu.bucket === "number" && Game.cpu.bucket < minBucket) return true;
+            const useLimit = settings.freshPathUseCpuLimit !== false;
+            const baseline = useLimit ? Number(Game.cpu.limit || Game.cpu.tickLimit || 0) : Number(Game.cpu.tickLimit || Game.cpu.limit || 0);
+            if (!(baseline > 0)) return false;
+            return Game.cpu.getUsed() >= Math.max(0, baseline - guard);
+        }
+        catch (err) {
+            return false;
+        }
     }
     /**
      * check if room should be avoided by findRoute algorithm

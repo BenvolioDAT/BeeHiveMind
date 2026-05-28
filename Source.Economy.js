@@ -53,6 +53,17 @@ function estimateInterRoomDistance(fromPos, toPos) {
   return Math.max(1, routeLength * 50 + 25);
 }
 
+function getCreepList(creeps) {
+  if (creeps && Array.isArray(creeps)) return creeps;
+  if (global.__BHM && global.__BHM.tick === Game.time && Array.isArray(global.__BHM.creeps)) {
+    return global.__BHM.creeps;
+  }
+  var names = Object.keys(Game.creeps);
+  var list = [];
+  for (var i = 0; i < names.length; i++) list.push(Game.creeps[names[i]]);
+  return list;
+}
+
 function getSourceDistance(room, creep, rec, sourceObj) {
   if (rec && typeof rec.distance === 'number' && rec.distance > 0) return rec.distance;
   var sourcePos = sourceObj && sourceObj.pos ? sourceObj.pos : (rec && rec.pos ? new RoomPosition(rec.pos.x, rec.pos.y, rec.pos.roomName) : null);
@@ -128,12 +139,12 @@ function refreshOwnedRoomSources(room) {
   return econ;
 }
 
-function refreshVeinseekerStats(room) {
+function refreshVeinseekerStats(room, creeps) {
   var econ = ensureRoomSourceEconomy(room);
   if (!econ || !econ.sources) return;
-  var names = Object.keys(Game.creeps);
-  for (var i = 0; i < names.length; i++) {
-    var c = Game.creeps[names[i]];
+  var list = getCreepList(creeps);
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i];
     if (!c || !c.memory || c.memory.role !== 'Veinseeker' || c.memory.mode !== 'home') continue;
     var sid = c.memory.assignedSource || c.memory.sourceId;
     if (!sid || !econ.sources[sid]) continue;
@@ -142,15 +153,15 @@ function refreshVeinseekerStats(room) {
   }
 }
 
-function refreshTruckerCarryStats(room) {
+function refreshTruckerCarryStats(room, creeps) {
   var econ = ensureRoomSourceEconomy(room);
   if (!econ) return;
   econ.truckerCarry = 0;
   econ.truckerCarryTotal = 0;
   econ.truckerStoredEnergy = 0;
-  var names = Object.keys(Game.creeps);
-  for (var i = 0; i < names.length; i++) {
-    var c = Game.creeps[names[i]];
+  var list = getCreepList(creeps);
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i];
     if (!c || !c.memory || c.memory.role !== 'Trucker') continue;
     if ((c.memory.home || c.room.name) !== room.name) continue;
     econ.truckerStoredEnergy += c.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
@@ -183,10 +194,11 @@ function calculatePendingEnergy(room) {
   return total;
 }
 
-function refreshRoomEconomyNow(room) {
+function refreshRoomEconomyNow(room, opts) {
+  opts = opts || {};
   refreshOwnedRoomSources(room);
-  refreshVeinseekerStats(room);
-  refreshTruckerCarryStats(room);
+  refreshVeinseekerStats(room, opts.creeps);
+  refreshTruckerCarryStats(room, opts.creeps);
   calculatePendingEnergy(room);
   return ensureRoomSourceEconomy(room);
 }
@@ -211,7 +223,7 @@ function refreshRoomEconomyOnce(room, opts) {
   }
 
   econ = CpuProfiler.measure('SourceEconomy.refreshRoomEconomyOnce', function () {
-    return refreshRoomEconomyNow(room);
+    return refreshRoomEconomyNow(room, opts);
   }) || ensureRoomSourceEconomy(room);
 
   if (econ) {

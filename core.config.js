@@ -24,6 +24,18 @@ const CoreConfig = {
 
 // Secondary settings split by system to make intent clear for new players.
 CoreConfig.settings = Object.freeze({
+  cpuBudget: Object.freeze({
+    /** Global switch for optional-work shedding. Essential creep/spawn logic still runs. */
+    enabled: true,
+    /** Below this bucket, optional systems switch to their low-bucket cadence. */
+    lowBucketThreshold: 3000,
+    /** Below this bucket, only essential work should run. */
+    criticalBucketThreshold: 800,
+    /** Leave a little room before the engine hard-stops the tick. */
+    tickLimitReserve: 1.5,
+    /** Shard3-friendly soft ceiling for optional work on a 20 CPU baseline. */
+    optionalWorkMaxCpuUsed: 16,
+  }),
   logging: Object.freeze({
     /** Default log level applied on boot. */
     defaultLevel: LOG_LEVEL.NONE,
@@ -66,11 +78,15 @@ CoreConfig.settings = Object.freeze({
   }),
   maintenance: Object.freeze({
     /** How often to rescan repair targets inside core.maintenance. */
-    repairScanInterval: 5,
+    repairScanInterval: 7,
+    /** Low-bucket repair scan cadence; repairs can wait unless towers are defending. */
+    repairScanLowBucketInterval: 21,
     /** How often main.js asks BeeToolbox to refresh source-container intel. */
-    sourceContainerRefreshModulo: 3,
+    sourceContainerRefreshModulo: 5,
+    sourceContainerRefreshLowBucketModulo: 15,
+    minBucketForSourceIntelRefresh: 1000,
     /** How long before the stale room sweep runs. */
-    roomSweepInterval: 50,
+    roomSweepInterval: 100,
     remoteContainerStatusSweepInterval: 500,
     remoteContainerStatusStaleTicks: 150,
     remoteContainerStatusMemoryTtl: 20000,
@@ -86,8 +102,17 @@ CoreConfig.settings = Object.freeze({
   }),
   sourceEnergy: Object.freeze({
     remoteEconomicsEnabled: true,
-    remoteEconomicsInterval: 250,
-    remoteEconomicsPathCacheTtl: 1500
+    remoteEconomicsInterval: 500,
+    remoteEconomicsPathCacheTtl: 3000,
+    remoteEconomicsMinBucket: 7000,
+    remoteEconomicsMaxCpuUsed: 12,
+    remotePlanInterval: 3,
+    remotePlanLowBucketInterval: 9,
+    remotePlanMaxStaleTicks: 25,
+    remotePlanFastRefreshMinBucket: 3000,
+    sourceEconomyRefreshInterval: 2,
+    sourceEconomyRefreshLowBucketInterval: 6,
+    sourceEconomyRefreshMinBucket: 1000
   }),
   movement: Object.freeze({
     defaultReusePath: 30,
@@ -97,18 +122,30 @@ CoreConfig.settings = Object.freeze({
     remoteMaxOps: 2500,
     emergencyMaxOps: 4000,
     combatMaxOps: 2500,
-    freshPathCpuGuard: 2,
+    freshPathCpuGuard: 4,
+    freshPathUseCpuLimit: true,
+    freshPathMinBucket: 1000,
     DEBUG_NO_ROUTE: false,
     NO_ROUTE_LOG_INTERVAL: 250,
     NO_ROUTE_CACHE_TTL: 150,
   }),
   roadPlanner: Object.freeze({
-    maxOpsPlanning: 5000,
-    maxCpuUsedBeforePlanning: 18,
-    planningSkippedRetryTicks: 10,
-    existingPathPlaceMaxPaths: 2
+    maxOpsPlanning: 2500,
+    maxCpuUsedBeforePlanning: 12,
+    minBucketForPlanning: 2500,
+    planningSkippedRetryTicks: 25,
+    existingPathPlaceMaxPaths: 1
   }),
-  tradeEnergyInterval: 7,
+  roomPlanner: Object.freeze({
+    tickModulo: 3,
+    maxCpuUsedBeforePlanning: 14,
+    minBucketForPlanning: 1500,
+    lowBucketTickModulo: 9,
+    planningSkippedRetryTicks: 15
+  }),
+  tradeEnergyInterval: 11,
+  tradeEnergyMinBucket: 5000,
+  tradeEnergyMaxCpuUsed: 12,
   toolbox: Object.freeze({
     sourceContainerScanInterval: 50,
     defaultInvaderLockTtl: 1500,

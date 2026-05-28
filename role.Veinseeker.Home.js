@@ -549,18 +549,87 @@ function transferToSourceLink(creep, source) {
   return false;
 }
 
-function countCreepsWithRole(roleName, legacyTask) {
+function getCreepHomeRoomName(creep) {
+  if (!creep) return null;
+  if (creep.memory && creep.memory.home) return creep.memory.home;
+  if (creep.memory && creep.memory._home) return creep.memory._home;
+  if (creep.memory && creep.memory.homeRoom) return creep.memory.homeRoom;
+  return creep.room && creep.room.name ? creep.room.name : null;
+}
+
+function countEnergyCollectorsForHome(homeRoom) {
   var count = 0;
+  if (!homeRoom) return count;
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    if (matchesRole(Game.creeps[name], roleName, legacyTask)) count++;
+    var collector = Game.creeps[name];
+    if (!collector || collector.spawning || !collector.memory) continue;
+    if (getCreepHomeRoomName(collector) !== homeRoom) continue;
+    if (matchesRole(collector, 'Trucker', 'haulUnified') || matchesRole(collector, 'Queen', 'queen')) count++;
   }
   return count;
 }
 
-function hasEnergyCollector() {
-  return countCreepsWithRole('Trucker', 'haulUnified') > 0 ||
-    countCreepsWithRole('Queen', 'queen') > 0;
+function hasEnergyCollector(creep) {
+  // Collector presence is home-local; a hauler in another room cannot protect
+  // this source container from filling and stalling its miner.
+  return countEnergyCollectorsForHome(getCreepHomeRoomName(creep)) > 0;
+}
+
+function getContainerFreeEnergy(container) {
+  if (!container || !container.store) return 0;
+  return container.store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+}
+
+function writeSourceOverflowDiag(creep, source, container, action, reason) {
+  var roomName = source && source.pos ? source.pos.roomName : (creep && creep.room && creep.room.name);
+  if (!roomName) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[roomName]) Memory.rooms[roomName] = {};
+  var diag = {
+    tick: Game.time,
+    creepName: creep && creep.name ? creep.name : null,
+    sourceId: source && source.id ? source.id : null,
+    containerId: container && container.id ? container.id : null,
+    action: action || 'drop',
+    reason: reason || 'source-container-overflow',
+    carried: creep && creep.store ? (creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0) : 0,
+    containerEnergy: container && container.store ? (container.store[RESOURCE_ENERGY] || 0) : null,
+    containerCapacity: container && container.store ? (container.store.getCapacity(RESOURCE_ENERGY) || 0) : null
+  };
+  Memory.rooms[roomName].lastVeinseekerOverflow = diag;
+  if (source && source.id) {
+    if (!Memory.rooms[roomName].sources) Memory.rooms[roomName].sources = {};
+    if (!Memory.rooms[roomName].sources[source.id]) Memory.rooms[roomName].sources[source.id] = {};
+    Memory.rooms[roomName].sources[source.id].overflow = diag;
+  }
+}
+
+function findOverflowSource(creep, container) {
+  if (!creep || !creep.room) return null;
+  if (container && container.pos) {
+    var nearContainer = container.pos.findInRange(FIND_SOURCES, 1) || [];
+    if (nearContainer.length) return nearContainer[0];
+  }
+  return creep.pos.findClosestByRange(FIND_SOURCES, {
+    filter: function (source) { return creep.pos.getRangeTo(source) <= 1; }
+  });
+}
+
+function dropSourceOverflowEnergy(creep, source, container, reason) {
+  if (!creep || !creep.store || creep.store.getUsedCapacity(RESOURCE_ENERGY) <= 0) return false;
+  if (container && getContainerFreeEnergy(container) > 0) return false;
+  var nearSource = source && creep.pos.getRangeTo(source) <= 1;
+  var nearContainer = container && creep.pos.getRangeTo(container) <= 1;
+  if (!nearSource && !nearContainer) return false;
+
+  // When the source container is full and no local collector target is valid,
+  // drop beside the source/container so hauling can recover the overflow.
+  writeSourceOverflowDiag(creep, source, container, 'drop', reason);
+  debugSay(creep, 'overflow');
+  debugRing(creep.room, creep.pos, CFG.DRAW.OFFLOAD, 'DROP');
+  creep.drop(RESOURCE_ENERGY);
+  return true;
 }
 
 function ensureVeinseekerIdentity(creep) {
@@ -674,22 +743,29 @@ function runHarvestPhase(creep) {
   var container = getContainerAtOrAdjacent(creep.pos);
   if (transferToSourceLink(creep, source)) return;
 
-  if (hasEnergyCollector() && container && creep.pos.getRangeTo(container) <= 1) {
+  if (hasEnergyCollector(creep) && container && creep.pos.getRangeTo(container) <= 1) {
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
       var transferResult = creep.transfer(container, RESOURCE_ENERGY);
       if (transferResult === ERR_FULL && creep.pos.isEqualTo(container.pos)) {
+        if (dropSourceOverflowEnergy(creep, source, container, 'source-container-full-before-harvest')) return;
+        writeSourceOverflowDiag(creep, source, container, 'drop', 'source-container-full-before-harvest');
         debugSay(creep, '⬇️');
         creep.drop(RESOURCE_ENERGY);
       } else if (transferResult === ERR_NOT_IN_RANGE) {
         creep.travelTo(container.pos, { range: 1, reusePath: CFG.TRAVEL_REUSE });
         return;
+      } else if (transferResult === ERR_FULL) {
+        dropSourceOverflowEnergy(creep, source, container, 'source-container-full-before-harvest');
       }
     }
   }
 
   debugSay(creep, '⛏️');
   debugDrawLine(creep, source, CFG.DRAW.SOURCE, 'HARV');
-  creep.harvest(source);
+  var harvestResult = creep.harvest(source);
+  if (harvestResult === ERR_FULL && container) {
+    dropSourceOverflowEnergy(creep, source, container, 'source-container-full-harvest-stalled');
+  }
 }
 
 function findClosestEnergyDropoff(creep, structureType) {
@@ -752,7 +828,12 @@ function runCollectorOffload(creep) {
       creep.travelTo(container.pos, { range: 1, reusePath: CFG.TRAVEL_REUSE });
       return;
     }
+    if (transferResult === ERR_FULL && !creep.pos.isEqualTo(container.pos)) {
+      dropSourceOverflowEnergy(creep, findOverflowSource(creep, container), container, 'source-container-full-offload');
+      return;
+    }
     if (transferResult === ERR_FULL && creep.pos.isEqualTo(container.pos)) {
+      if (dropSourceOverflowEnergy(creep, findOverflowSource(creep, container), container, 'source-container-full-offload')) return;
       debugSay(creep, '⬇️');
       creep.drop(RESOURCE_ENERGY);
       return;
@@ -769,7 +850,7 @@ function runCollectorOffload(creep) {
 }
 
 function runOffloadPhase(creep) {
-  if (!hasEnergyCollector()) {
+  if (!hasEnergyCollector(creep)) {
     runFallbackOffload(creep);
     return;
   }
