@@ -72,7 +72,7 @@ CoreConfig.settings = Object.freeze({
     /** Toggle CPU bucket based pixel generation. */
     enabled: true,
     /** Minimum bucket value before attempting pixel generation. */
-    bucketThreshold: 9950,
+    bucketThreshold: 1000,
     /** Optional modulus so pixels are generated every N ticks. */
     tickModulo: 5,
   }),
@@ -104,7 +104,7 @@ CoreConfig.settings = Object.freeze({
     remoteEconomicsEnabled: true,
     remoteEconomicsInterval: 500,
     remoteEconomicsPathCacheTtl: 3000,
-    remoteEconomicsMinBucket: 7000,
+    remoteEconomicsMinBucket: 1000,
     remoteEconomicsMaxCpuUsed: 12,
     remotePlanInterval: 3,
     remotePlanLowBucketInterval: 9,
