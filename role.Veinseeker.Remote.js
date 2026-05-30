@@ -362,6 +362,7 @@ function softenRemoteDefensePlan(roomName) {
       console.log('🚫 Veinseeker room blocked ' + roomName + ' reason=' + rm.sourceWorkerBlockedReason + ' until=' + rm.sourceWorkerBlockedUntil);
     }
   }
+  
   function recordVeinseekerPathFailure(creep, sourceId, reason) {
     if (!creep || !creep.memory) return 0;
 
@@ -416,9 +417,10 @@ if (failReason === 'path-to-room' ||
         creep.memory._lastRoomTravelReleaseLog = Game.time;
       }
 
-      creep.memory._pathFailCount = 0;
-      releaseAssignment(creep);
-      return 0;
+        creep.memory._pathFailCount = 0;
+        markAvoidRoom(creep, roomName, AVOID_TTL);
+        releaseAssignment(creep);
+        return 0;
     }
 
     creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
@@ -597,6 +599,27 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
   function shouldAvoid(creep, sid){ var a=ensureAvoidanceMemory(creep); var t=a[sid]; return (typeof t==='number' && Game.time<t); }
   function markAvoid(creep, sid, ttl){ var a=ensureAvoidanceMemory(creep); a[sid] = Game.time + (ttl!=null?ttl:AVOID_TTL); }
   function avoidRemaining(creep, sid){ var a=ensureAvoidanceMemory(creep); var t=a[sid]; if (typeof t!=='number') return 0; var left=t-Game.time; return left>0?left:0; }
+
+  function ensureRoomAvoidanceMemory(creep) {
+  if (!creep.memory._avoidRooms) creep.memory._avoidRooms = {};
+  return creep.memory._avoidRooms;
+  }
+
+  function shouldAvoidRoom(creep, roomName) {
+    if (!creep || !creep.memory || !roomName) return false;
+
+    var avoidRooms = ensureRoomAvoidanceMemory(creep);
+    var until = avoidRooms[roomName];
+
+    return typeof until === 'number' && Game.time < until;
+  }
+
+  function markAvoidRoom(creep, roomName, ttl) {
+    if (!creep || !creep.memory || !roomName) return;
+
+    var avoidRooms = ensureRoomAvoidanceMemory(creep);
+    avoidRooms[roomName] = Game.time + (ttl != null ? ttl : AVOID_TTL);
+  }
 
   // ============================
   // Per-tick *claim* (same-tick contention guard)
@@ -879,14 +902,35 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
   // ============================
   if (!Memory._pfCost) Memory._pfCost = {};
 
+  function isUsablePathCost(cost) {
+  return typeof cost === 'number' &&
+    cost >= 0 &&
+    cost !== Infinity &&
+    !isNaN(cost);
+  }
+
   function pfCostCached(anchorPos, targetPos, sourceId) {
+    if (!anchorPos || !targetPos || !sourceId) return Infinity;
+
     var key = anchorPos.roomName + ':' + sourceId;
     var rec = Memory._pfCost[key];
-    if (rec && (Game.time - rec.t) < PF_CACHE_TTL) return rec.c;
+
+    // Old or bad Memory can contain null/undefined/NaN path costs.
+    // Never trust cached path cost unless it is a real finite number.
+    if (rec && (Game.time - rec.t) < PF_CACHE_TTL && isUsablePathCost(rec.c)) {
+      return rec.c;
+    }
+
     var c = pfCost(anchorPos, targetPos);
+
+    if (!isUsablePathCost(c)) {
+      c = Infinity;
+    }
+
     Memory._pfCost[key] = { c: c, t: Game.time };
     return c;
   }
+
   function pfCost(anchorPos, targetPos) {
     var ret = PathFinder.search(
       anchorPos,
@@ -1243,7 +1287,9 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     }
     var neighborRooms = scoutPlanUsed ? scoutPlan.approvedRooms.slice(0) : bfsNeighborRooms(homeName, REMOTE_RADIUS);
     var roomRanks = [];
-    for (i = 0; i < neighborRooms.length; i++) { rn = neighborRooms[i]; roomRanks.push({ roomName: rn, routeDistance: getRouteDistanceBetweenRooms(homeName, rn), linearDistance: Game.map.getRoomLinearDistance(homeName, rn) }); }
+    for (i = 0; i < neighborRooms.length; i++) { rn = neighborRooms[i]; if (shouldAvoidRoom(creep, rn)) continue;
+       roomRanks.push({ roomName: rn, routeDistance: getRouteDistanceBetweenRooms(homeName, rn), linearDistance: Game.map.getRoomLinearDistance(homeName, rn) }); 
+      }
     roomRanks.sort(function (a, b) { if (a.routeDistance !== b.routeDistance) return a.routeDistance - b.routeDistance; if (a.linearDistance !== b.linearDistance) return a.linearDistance - b.linearDistance; return a.roomName < b.roomName ? -1 : 1; });
     neighborRooms = []; for (i = 0; i < roomRanks.length; i++) neighborRooms.push(roomRanks[i].roomName);
     var candidates=[], avoided=[], i, rn;
@@ -1274,7 +1320,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
           markVeinseekerSourceBlocked(rn, s.id, 'source-inaccessible-blocked-by-structures', VEINSEEKER_INACCESSIBLE_BLOCK_TTL);
           continue;
         }
-        var cost = pfCostCached(anchor, s.pos, s.id); if (cost===Infinity) continue;
+        var cost = pfCostCached(anchor, s.pos, s.id);
+          if (!isUsablePathCost(cost)) continue;
         var lin = Game.map.getRoomLinearDistance(homeName, rn);
         var routeDistance = getRouteDistanceBetweenRooms(homeName, rn);
 
@@ -1332,8 +1379,14 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         if (assigned2 >= cap2) continue;
 
         var lin2 = Game.map.getRoomLinearDistance(homeName, rn);
+
         var routeDistance2 = getRouteDistanceBetweenRooms(homeName, rn);
-        if (routeDistance2 === Infinity) continue;
+        if (routeDistance2 === Infinity ||
+            routeDistance2 == null ||
+            isNaN(routeDistance2)) {
+          continue;
+        }
+
         var synth = (lin2*350)+800;
         var sticky2 = (creep.memory.sourceId===sid) ? 1 : 0;
         var stackPenalty2 = assigned2 > 0 ? VEINSEEKER_SECONDARY_SOURCE_SCORE_PENALTY : 0;
@@ -2024,6 +2077,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
         var rm = Memory.rooms[roomName];
         if (!rm || !rm.sources) return false;
         if (!inRadius[roomName]) return false;
+        if (shouldAvoidRoom(creep, roomName)) return false;
         var localOwnedReason = getVeinseekerLocalOwnedRoomBlockReason(homeName, roomName);
         if (localOwnedReason) return false;
         if (rm.hostile) return false;
@@ -2037,7 +2091,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       });
     },
 
-    findRoomWithLeastForagers: function(rooms, homeName){
+    findRoomWithLeastForagers: function(creep,rooms, homeName){
       if (!rooms || !rooms.length) return null;
 
       var inRadius = {};
@@ -2047,6 +2101,11 @@ function upsertRemoteContainerStatus(creep, source, container) {
       var best=null, lowest=Infinity;
       for (var j=0;j<rooms.length;j++){
         var rn=rooms[j];
+
+        // If this creep recently failed room travel to this remote room,
+        // skip it for a short time instead of picking it again immediately.
+        if (shouldAvoidRoom(creep, rn)) continue;
+
         if (!inRadius[rn]) continue;
         if (isVeinseekerLocalOwnedRoom(homeName, rn)) continue;
         if (isVeinseekerRoomUnsafe(rn)) continue;
@@ -2071,7 +2130,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       // or manually spawned Veinseeker creeps find a safe source from room Memory.
       var targetRooms = roleVeinseeker.getNearbyRoomsWithSources(creep);
       if (!creep.memory.targetRoom || !creep.memory.sourceId){
-        var least = roleVeinseeker.findRoomWithLeastForagers(targetRooms, getHomeName(creep));
+        var least = roleVeinseeker.findRoomWithLeastForagers(creep, targetRooms, getHomeName(creep));
         if (!least){
           var report = roleVeinseeker.buildNoSafeAssignmentReport(creep);
           logVeinseekerNoSafeSource(creep, report);
