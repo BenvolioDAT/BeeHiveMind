@@ -842,38 +842,23 @@ function queueVeinseekerSourceNeeds(room, report, C) {
       continue;
     }
 
-    if (VEINSEEKER_ENABLE_BODY_UPGRADES &&
-        VEINSEEKER_UPGRADE_REPLACEMENTS_ENABLED &&
-        rec.upgradeNeeded &&
-        rec.bestSafeLiveName) {
-      if (enqueueVeinseekerForSource(roomName, source.id, 'upgradeReplacement', desiredPlan, {
-        priority: VEINSEEKER_UPGRADE_PRIORITY,
-        replaceCreepName: rec.bestSafeLiveName,
-        replacementFor: rec.bestSafeLiveName,
-        replaceSourceId: source.id
-      }, C)) {
-        refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
-        rec.reason = 'queued-upgrade-replacement';
-        report.diag.decisions.push({
-          sourceId: source.id,
-          action: 'enqueue',
-          mode: 'upgradeReplacement',
-          replaceCreepName: rec.bestSafeLiveName,
-          live: rec.live,
-          queued: rec.queued,
-          liveWork: rec.liveWork,
-          queuedWork: rec.queuedWork,
-          desiredWork: rec.desiredWork,
-          freeWork: rec.freeWork,
-          seats: rec.seats,
-          saturatedByWork: !!rec.saturatedByWork,
-          saturatedBySeats: !!rec.saturatedBySeats,
-          selectedSeat: rec.selectedSeat || null,
-          reason: rec.reason
-        });
-      }
-      continue;
-    }
+  if (rec.upgradeNeeded && rec.bestSafeLiveName) {
+    // Proactive Veinseeker body-upgrade replacement is intentionally disabled.
+    //
+    // Why:
+    // The old upgradeReplacement path could spend spawn time replacing a working
+    // miner with the same body tier if room energy was below the desired body cost
+    // when spawn.logic selected the body. That caused pointless replacement churn.
+    //
+    // Normal coverage, emergency miners, and low-TTL replacement still happen above.
+    noteVeinseekerSourceSkip(
+      report,
+      source.id,
+      rec,
+      'skip-upgrade-replacement-disabled'
+    );
+    continue;
+  }
 
     noteVeinseekerSourceSkip(report, source.id, rec, 'skip-no-source-work-deficit');
   }
