@@ -2155,8 +2155,18 @@ function upsertRemoteContainerStatus(creep, source, container) {
       }
 
       var stuckTicks = typeof creep.memory._stuck === 'number' ? creep.memory._stuck : 0;
-      if (stuckTicks >= VEINSEEKER_STUCK_SOURCE_BLOCK_TICKS){
-        markVeinseekerSourceBlocked(creep.memory.targetRoom, sid, 'stuck-source-path', VEINSEEKER_STUCK_SOURCE_BLOCK_TTL);
+
+      // A remote miner is supposed to stand still once it reaches the source.
+      // Being stationary beside the source is productive, not stuck.
+      if (creep.pos.getRangeTo(src) <= 1) {
+        creep.memory._stuck = 0;
+      } else if (stuckTicks >= VEINSEEKER_STUCK_SOURCE_BLOCK_TICKS) {
+        markVeinseekerSourceBlocked(
+          creep.memory.targetRoom,
+          sid,
+          'stuck-source-path',
+          VEINSEEKER_STUCK_SOURCE_BLOCK_TTL
+        );
         releaseAssignment(creep);
         idleAtAnchor(creep, 'STUCK');
         return;
