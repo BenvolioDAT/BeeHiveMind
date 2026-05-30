@@ -389,13 +389,41 @@ function softenRemoteDefensePlan(roomName) {
     // Do NOT mark the whole remote source/room blocked from this alone.
     // A valid remote room can look "blocked" forever if one travel attempt poisons
     // Memory. Instead, put only this creep on a short retarget cooldown.
-    if (failReason === 'path-to-room' ||
-        failReason === 'room-travel' ||
-        failReason === 'path-to-room-incomplete' ||
-        failReason === 'room-travel-incomplete') {
-      creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
-      return creep.memory._pathFailCount;
+if (failReason === 'path-to-room' ||
+    failReason === 'room-travel' ||
+    failReason === 'path-to-room-incomplete' ||
+    failReason === 'room-travel-incomplete') {
+
+  // Room travel can fail from temporary Traveler/router weirdness, traffic,
+  // stale route cache, or bad edge positioning. Do not poison the whole remote
+  // room/source from this alone.
+  //
+  // But also do not let one creep retry the same failed assignment forever.
+  // Once the same assigned source has failed several times, release only this
+  // creep's assignment. releaseAssignment() already puts the source into this
+  // creep's short avoid list, so it can try a different source after cooldown.
+  if (creep.memory._pathFailCount >= VEINSEEKER_PATH_FAIL_LIMIT) {
+    if (!creep.memory._lastRoomTravelReleaseLog ||
+          (Game.time - creep.memory._lastRoomTravelReleaseLog) >= 25) {
+        console.log(
+          '🚦 Veinseeker ' + creep.name +
+          ' releasing room-travel assignment without blocking room/source' +
+          ' room=' + roomName +
+          ' sid=' + (sid ? sid.slice(-6) : 'none') +
+          ' reason=' + failReason +
+          ' count=' + creep.memory._pathFailCount
+        );
+        creep.memory._lastRoomTravelReleaseLog = Game.time;
+      }
+
+      creep.memory._pathFailCount = 0;
+      releaseAssignment(creep);
+      return 0;
     }
+
+    creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+    return creep.memory._pathFailCount;
+  }
 
     if (creep.memory._pathFailCount >= VEINSEEKER_PATH_FAIL_LIMIT && sid && roomName) {
       markVeinseekerSourceBlocked(
@@ -446,7 +474,16 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
   }
   if (returnData.pathfinderReturn && returnData.pathfinderReturn.incomplete && creep.memory && creep.memory._stuck >= STUCK_WINDOW) {
     recordVeinseekerPathFailure(creep, sourceId, (failReason || 'path') + '-incomplete');
+    return rc;
   }
+
+  // If travelTo did not report ERR_NO_PATH and the pathfinder did not report an
+  // incomplete stuck path, treat this as a usable travel attempt and clear the
+  // old path-failure counter for this source.
+  if (rc === OK || rc === ERR_TIRED || rc === ERR_BUSY) {
+    clearVeinseekerPathFailure(creep, sourceId);
+  }
+
   return rc;
 }
 
@@ -1576,14 +1613,54 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     return true;
   }
 
+function getAssignedRemoteSourceTravelPos(creep) {
+  if (!creep || !creep.memory || !creep.memory.targetRoom || !creep.memory.sourceId) {
+    return null;
+  }
+
+  var roomName = creep.memory.targetRoom;
+  var sid = creep.memory.sourceId;
+
+  // If the room is visible, use the real source position.
+  var sourceObj = Game.getObjectById(sid);
+  if (sourceObj && sourceObj.pos) return sourceObj.pos;
+
+  // Otherwise use source memory from remote room intel.
+  var roomMem = Memory.rooms && Memory.rooms[roomName];
+  var sourceMem = roomMem && roomMem.sources && roomMem.sources[sid];
+
+  if (sourceMem) {
+    if (typeof sourceMem.x === 'number' && typeof sourceMem.y === 'number') {
+      return new RoomPosition(sourceMem.x, sourceMem.y, roomName);
+    }
+
+    if (sourceMem.pos &&
+        typeof sourceMem.pos.x === 'number' &&
+        typeof sourceMem.pos.y === 'number') {
+      return new RoomPosition(sourceMem.pos.x, sourceMem.pos.y, roomName);
+    }
+  }
+
+  return null;
+}
+
   function travelToAssignedRoom(creep) {
     if (!creep.memory.targetRoom || creep.pos.roomName === creep.memory.targetRoom) return false;
 
-    var dest = new RoomPosition(25,25,creep.memory.targetRoom);
-    debugSay(creep, '➡️'+creep.memory.targetRoom);
-    debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, "ROOM");
+    var sourceTravelPos = getAssignedRemoteSourceTravelPos(creep);
+    var dest = sourceTravelPos || new RoomPosition(25, 25, creep.memory.targetRoom);
+    var range = sourceTravelPos ? 1 : 20;
 
-    veinseekerTravelToAssigned(creep, dest, { range: 20, reusePath: 20 }, creep.memory.sourceId, 'path-to-room');
+    debugSay(creep, '➡️' + creep.memory.targetRoom);
+    debugDrawLine(creep, dest, CFG.DRAW.TRAVEL_COLOR, sourceTravelPos ? 'SRCROOM' : 'ROOM');
+
+    veinseekerTravelToAssigned(
+      creep,
+      dest,
+      { range: range, reusePath: 20 },
+      creep.memory.sourceId,
+      'path-to-room'
+    );
 
     return true;
   }
