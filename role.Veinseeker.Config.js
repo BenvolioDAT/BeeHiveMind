@@ -50,7 +50,7 @@ module.exports = Object.freeze({
   VEINSEEKER_UNASSIGNED_SUICIDE_TICKS: 750,
   VEINSEEKER_HANDOFF_RANGE: 1,
   MAX_VEINSEEKER_PER_SOURCE: 1, // Veinseeker is one seated remote container miner per source.
-  VEINSEEKER_REMOTE_INTEL_TTL: 3000,
+  VEINSEEKER_REMOTE_INTEL_TTL: 500,
   ALLOW_MULTI_VEINSEEKER_PER_SOURCE: true, // Keep strict one-Veinseeker-per-source assignment.
   MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER: 2,
   PREFER_EMPTY_SOURCES_BEFORE_STACKING: true,
