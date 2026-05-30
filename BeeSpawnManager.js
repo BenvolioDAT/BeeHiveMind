@@ -1026,11 +1026,11 @@ function getBuilderNeed(C, room) {
   if (totalSites <= 0) {
     need = 0;
   } else if (totalSites >= 15) {
-    need = 4;
+    need = 6;
   } else if (totalSites >= 8) {
-    need = 3;
+    need = 5;
   } else {
-    need = 2;
+    need = 4;
   }
 
   if (need > maxByRcl) {
