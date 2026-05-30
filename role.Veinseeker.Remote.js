@@ -362,23 +362,65 @@ function softenRemoteDefensePlan(roomName) {
       console.log('🚫 Veinseeker room blocked ' + roomName + ' reason=' + rm.sourceWorkerBlockedReason + ' until=' + rm.sourceWorkerBlockedUntil);
     }
   }
-function recordVeinseekerPathFailure(creep, sourceId, reason) {
+  function recordVeinseekerPathFailure(creep, sourceId, reason) {
     if (!creep || !creep.memory) return 0;
+
     var sid = sourceId || creep.memory.sourceId;
     var roomName = creep.memory.targetRoom || creep.pos.roomName;
+    var failReason = reason || 'path-fail';
+
     if (creep.memory._pathFailSid !== sid) creep.memory._pathFailCount = 0;
     creep.memory._pathFailSid = sid;
     creep.memory._pathFailCount = (creep.memory._pathFailCount || 0) + 1;
+
     if (shouldLogVeinseekerBlock('fail:' + creep.name + ':' + sid, 250)) {
-      console.log('⚠️ Veinseeker path fail ' + creep.name + ' sid=' + (sid ? sid.slice(-6) : 'none') + ' count=' + creep.memory._pathFailCount + ' reason=' + reason);
+      console.log(
+        '⚠️ Veinseeker path fail ' +
+        creep.name +
+        ' sid=' + (sid ? sid.slice(-6) : 'none') +
+        ' count=' + creep.memory._pathFailCount +
+        ' reason=' + failReason
+      );
     }
+
+    // Room-travel failures are noisy and can happen from temporary routing,
+    // border travel, traffic, incomplete Traveler paths, or route cache weirdness.
+    //
+    // Do NOT mark the whole remote source/room blocked from this alone.
+    // A valid remote room can look "blocked" forever if one travel attempt poisons
+    // Memory. Instead, put only this creep on a short retarget cooldown.
+    if (failReason === 'path-to-room' ||
+        failReason === 'room-travel' ||
+        failReason === 'path-to-room-incomplete' ||
+        failReason === 'room-travel-incomplete') {
+      creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+      return creep.memory._pathFailCount;
+    }
+
     if (creep.memory._pathFailCount >= VEINSEEKER_PATH_FAIL_LIMIT && sid && roomName) {
-      markVeinseekerSourceBlocked(roomName, sid, reason || 'path-fail', VEINSEEKER_BLOCKED_SOURCE_TTL);
-      if (creep.pos.roomName !== roomName) markVeinseekerRoomBlocked(roomName, 'path-to-room-failed', VEINSEEKER_BLOCKED_ROOM_TTL);
+      markVeinseekerSourceBlocked(
+        roomName,
+        sid,
+        failReason,
+        VEINSEEKER_BLOCKED_SOURCE_TTL
+      );
+
+      // Only non-room-travel failures may block the room. This keeps one bad
+      // source-seat/source-path from turning a whole visible usable remote into
+      // "no safe assignment."
+      if (creep.pos.roomName !== roomName) {
+        markVeinseekerRoomBlocked(
+          roomName,
+          failReason,
+          VEINSEEKER_BLOCKED_ROOM_TTL
+        );
+      }
+
       releaseAssignment(creep);
     }
-  return creep.memory._pathFailCount;
-}
+
+    return creep.memory._pathFailCount;
+  }
 function clearVeinseekerPathFailure(creep, sourceId) {
   if (!creep || !creep.memory) return;
   var sid = sourceId || creep.memory.sourceId;
