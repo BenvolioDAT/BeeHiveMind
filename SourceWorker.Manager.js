@@ -236,8 +236,6 @@ function createHomeCoverageRecord() {
     bestLiveSignature: '',
     bestSafeLiveName: null,
     bestSafeLiveCost: 0,
-    bestSafeLiveWork: 0,
-    bestSafeLiveSignature: '',
     lowestTtlName: null,
     lowestTtl: null,
     replacementInProgress: false
@@ -381,12 +379,9 @@ function getSourceMiningStatus(roomName, source, desiredPlan, opts) {
         rec.replacementQueued = true;
       }
 
-      // Track bestSafeLive creep metrics for upgrade validation
       if (source && isHomeVeinseekerSafelyHarvesting(creep, source, opts) && bodyCost > rec.bestSafeLiveCost) {
         rec.bestSafeLiveCost = bodyCost;
         rec.bestSafeLiveName = creep.name;
-        rec.bestSafeLiveSignature = getCreepBodySignature(creep);
-        rec.bestSafeLiveWork = getCreepActiveWorkParts(creep);
       }
     }
   }
@@ -396,12 +391,7 @@ function getSourceMiningStatus(roomName, source, desiredPlan, opts) {
   rec.selectedSeat = serializeSeat(selectedSeat);
   applySourceMiningRecordTotals(rec);
 
-  // BUG FIX: Stricter upgrade validation
-  // Only set upgradeNeeded if desired plan has BOTH better cost AND better signature AND more work parts
-  if (desiredPlan && rec.bestSafeLiveName && desiredPlan.cost > rec.bestSafeLiveCost &&
-      desiredPlan.signature !== rec.bestSafeLiveSignature &&
-      desiredPlan.summary && typeof desiredPlan.summary.work === 'number' &&
-      desiredPlan.summary.work > rec.bestSafeLiveWork &&
+  if (desiredPlan && rec.bestSafeLiveName && desiredPlan.cost > rec.bestLiveCost &&
       rec.freeWork > 0 && !rec.saturatedBySeats &&
       !rec.replacementQueued && !rec.replacementInProgress) {
     rec.upgradeNeeded = true;
