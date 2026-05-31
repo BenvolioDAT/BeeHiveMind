@@ -72,8 +72,6 @@ var LEGACY_ALIASES = Object.freeze({
   harvester: ROLE.VEINSEEKER,
   sourceworker: ROLE.VEINSEEKER,
   baseharvest: ROLE.VEINSEEKER,
-  luna: ROLE.VEINSEEKER,
-  remoteharvest: ROLE.VEINSEEKER,
   courier: ROLE.TRUCKER
 });
 

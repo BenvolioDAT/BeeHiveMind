@@ -6,7 +6,7 @@
 // * Live Veinseeker creep memory: role/task/home/sourceId/targetRoom/assigned,
 //   assignedContainer/containerId, seat coordinates, repair state, and movement
 //   breadcrumbs such as _stuck/_retargetAt/_forceYield.
-// * Legacy Memory.remoteAssignments same-tick/live ownership records.
+// * Same-tick source claim protection through Memory._sourceClaim.
 // * Remote container producer records:
 //   Memory.__BHM.remoteContainerStatus,
 //   Memory.__BHM.remoteContainerBuilds,
@@ -662,65 +662,30 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
   }
 
   // ============================
-  // remoteAssignments model
+  // Live Veinseeker ownership helpers
   // ============================
-  function ensureAssignmentsMem(){ if(!Memory.remoteAssignments) Memory.remoteAssignments={}; return Memory.remoteAssignments; }
-  // Normalises a mining assignment entry so later logic can rely on keys existing.
-  function ensureMiningAssignment(entry, roomName){
-    // Legacy saves used a plain number here. Newer code uses a richer record
-    // with owner/owners/maxSlots so multi-Veinseeker source ownership can be audited.
-    if (!entry || typeof entry !== 'object') entry = { count: 0, owner: null, roomName: roomName||null, since: null };
-    if (typeof entry.count !== 'number') entry.count = 0;
-    if (!('owner' in entry)) entry.owner = null;
-    if (!('roomName' in entry)) entry.roomName = roomName||null;
-    if (!('since' in entry)) entry.since = null;
-    if (!Array.isArray(entry.owners)) {
-      if (entry.owner) entry.owners = [entry.owner];
-      else entry.owners = [];
-    }
-    if (typeof entry.maxSlots !== 'number') entry.maxSlots = MAX_VEINSEEKER_PER_SOURCE;
-    if (typeof entry.lastAudit !== 'number') entry.lastAudit = 0;
-    return entry;
-  }
-  function maCount(memAssign, sid){
-    var e = memAssign[sid];
-    if (!e) return 0;
-    if (typeof e === 'number') return e; // backward compat
-    return typeof e.count === 'number' ? e.count : 0;
-  }
-  function maOwner(memAssign, sid){
-    var e = memAssign[sid];
-    if (!e || typeof e === 'number') return null;
-    return e.owner || null;
-  }
-  function maOwners(memAssign, sid){
-    var e = ensureMiningAssignment(memAssign[sid], null);
-    return e.owners || [];
+  function isLiveVeinseekerCreep(creep) {
+    return !!(creep && creep.memory &&
+      (creep.memory.role === 'Veinseeker' || creep.memory.task === 'veinseeker'));
   }
   function getLiveVeinseekerContendersForSource(sid){
     var contenders = [];
     for (var name in Game.creeps){
       var c = Game.creeps[name];
-      if (!c || !c.memory) continue;
-      if (c.memory.task === 'veinseeker' && c.memory.sourceId === sid) contenders.push(c);
+      if (!isLiveVeinseekerCreep(c)) continue;
+      if (c.memory.sourceId === sid) contenders.push(c);
     }
     return contenders;
   }
-  function ownersMatchLiveContenders(entry, contenders, sid){
-    var e = ensureMiningAssignment(entry, null);
-    var owners = e.owners || [];
-    if (owners.length !== contenders.length) return false;
-    if ((e.owner || null) !== (owners[0] || null)) return false;
-
-    var liveMap = {};
-    for (var i = 0; i < contenders.length; i++) liveMap[contenders[i].name] = true;
-    for (var j = 0; j < owners.length; j++) {
-      var ownerName = owners[j];
-      var oc = Game.creeps[ownerName];
-      if (!liveMap[ownerName]) return false;
-      if (!oc || !oc.memory || oc.memory.task !== 'veinseeker' || oc.memory.sourceId !== sid) return false;
-    }
-    return true;
+  function getLiveVeinseekerOwnerNamesForSource(sid) {
+    var contenders = getLiveVeinseekerContendersForSource(sid);
+    var names = [];
+    for (var i = 0; i < contenders.length; i++) names.push(contenders[i].name);
+    names.sort();
+    return names;
+  }
+  function getLiveVeinseekerCountForSource(sid) {
+    return getLiveVeinseekerContendersForSource(sid).length;
   }
   function getSourceMaxSlots(sid) {
     return SourceWorkerManager.getSourceMaxSlots(sid, null, {
@@ -729,134 +694,56 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
       minOpenForExtra: MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER
     });
   }
+  function getPlannedSourceMaxSlots(homeName, sid) {
+    return getSourceEnergySourceRecord(homeName, sid) ? 1 : getSourceMaxSlots(sid);
+  }
   function rankContenderForSource(a, sourcePos){
     var assignTick = (a && a.memory && typeof a.memory._assignTick === 'number') ? a.memory._assignTick : 0;
     var dist = sourcePos && a && a.pos ? a.pos.getRangeTo(sourcePos) : 999;
     return { creep: a, assignTick: assignTick, dist: dist };
   }
-  function maSetOwner(memAssign, sid, owner, roomName){
-    var e = ensureMiningAssignment(memAssign[sid], roomName);
-    if (owner && e.owners.indexOf(owner) === -1) e.owners.push(owner);
-    e.owner = owner; e.roomName = roomName || e.roomName; e.since = Game.time;
-    e.maxSlots = getSourceMaxSlots(sid);
-    e.lastAudit = Game.time;
-    memAssign[sid] = e;
-    if (e.roomName) touchSourceActive(e.roomName, sid);
-  }
-  function maClearOwner(memAssign, sid){
-    var e = ensureMiningAssignment(memAssign[sid], null);
-    e.owner = null; e.since = null;
-    e.owners = [];
-    e.count = 0;
-    e.lastAudit = Game.time;
-    memAssign[sid] = e;
-  }
-  function maInc(memAssign, sid, roomName){
-    var e = ensureMiningAssignment(memAssign[sid], roomName);
-    var current = typeof e.count === 'number' ? e.count : 0;
-    e.count = current + 1;
-    memAssign[sid]=e;
-  }
-  function maDec(memAssign, sid){
-    var e = ensureMiningAssignment(memAssign[sid], null);
-    var current = typeof e.count === 'number' ? e.count : 0;
-    e.count = Math.max(0, current - 1);
-    memAssign[sid]=e;
-  }
-
-  // ============================
-  // Ownership / duplicate resolver
-  // ============================
-  function resolveOwnershipForSid(sid){
-    // Authoritative duplicate resolver for live Veinseeker creeps on one source. It
-    // ranks contenders and marks losing creeps with _forceYield instead of
-    // moving them immediately; the main run loop handles the release safely.
-    var memAssign = ensureAssignmentsMem();
-    var e = ensureMiningAssignment(memAssign[sid], null);
-
+  function getPrimaryLiveVeinseekerForSource(sid) {
     var contenders = getLiveVeinseekerContendersForSource(sid);
-
-    if (!contenders.length){
-      maClearOwner(memAssign, sid);
-      return null;
-    }
-
+    if (!contenders.length) return null;
     var src = Game.getObjectById(sid);
     var srcPos = src && src.pos ? src.pos : null;
-    var maxSlots = getSourceMaxSlots(sid);
     var ranked = contenders.map(function(c){ return rankContenderForSource(c, srcPos); });
     ranked.sort(function(a,b){
       if (a.assignTick !== b.assignTick) return a.assignTick - b.assignTick;
       if (a.dist !== b.dist) return a.dist - b.dist;
       return a.creep.name < b.creep.name ? -1 : 1;
     });
-    var winners = ranked.slice(0, maxSlots).map(function(r){ return r.creep; });
-    var winner = winners[0];
-    var entry = ensureMiningAssignment(memAssign[sid], winner.memory.targetRoom||null);
-    entry.owners = winners.map(function(w){ return w.name; });
-    entry.owner = entry.owners[0] || null;
-    entry.count = contenders.length;
-    entry.maxSlots = maxSlots;
-    entry.lastAudit = Game.time;
-    memAssign[sid] = entry;
-
-    for (var i=maxSlots; i<ranked.length; i++){
-      var loser = ranked[i].creep;
-      if (loser && loser.memory && loser.memory.sourceId === sid){
-        loser.memory._forceYield = true;
-      }
-    }
-
-    return winner.name;
+    return ranked[0].creep;
   }
-
-  // Audits all sids once per tick: recompute counts, scrub dead owners, and prune flags
-  function auditRemoteAssignments(){
-    // Once-per-tick cleanup for Memory.remoteAssignments. It recomputes counts
-    // from live creeps, clears dead owners, and prunes old source/controller
-    // flags so stale assignment memory does not block new Veinseeker creeps forever.
-    var memAssign = ensureAssignmentsMem();
-
-    for (var sid in memAssign){
-      memAssign[sid] = ensureMiningAssignment(memAssign[sid], memAssign[sid].roomName||null);
-      memAssign[sid].count = 0;
+  function getActiveSourceEnergyOwnerForSource(sid, roomName) {
+    var root = Memory.__BHM && Memory.__BHM.sourceEnergy;
+    var homes = root && root.homes ? root.homes : null;
+    if (!homes || !sid) return null;
+    for (var homeName in homes) {
+      if (!Object.prototype.hasOwnProperty.call(homes, homeName)) continue;
+      var home = homes[homeName];
+      var rec = home && home.sources ? home.sources[sid] : null;
+      if (!rec) continue;
+      if (roomName && rec.remoteRoom && rec.remoteRoom !== roomName) continue;
+      if (rec.assignedVeinseeker && Game.creeps[rec.assignedVeinseeker]) return rec.assignedVeinseeker;
     }
-
+    return null;
+  }
+  function getLiveVeinseekerRoomCounts() {
     var roomCounts = {};
-    for (var name in Game.creeps){
+    for (var name in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
       var c = Game.creeps[name];
-      if (!c || !c.memory) continue;
-      if (c.memory.task === 'veinseeker') {
-        if (c.memory.sourceId){
-          var sid2 = c.memory.sourceId;
-          var e2 = ensureMiningAssignment(memAssign[sid2], c.memory.targetRoom||null);
-          var currentCount = typeof e2.count === 'number' ? e2.count : 0;
-          e2.count = currentCount + 1;
-          memAssign[sid2] = e2;
-        }
-        if (c.memory.targetRoom){
-          var rn = c.memory.targetRoom;
-          var roomCurrent = roomCounts[rn] || 0;
-          roomCounts[rn] = roomCurrent + 1;
-        }
-      }
+      if (!isLiveVeinseekerCreep(c) || !c.memory.targetRoom) continue;
+      var rn = c.memory.targetRoom;
+      roomCounts[rn] = (roomCounts[rn] || 0) + 1;
     }
-
-    for (var sid3 in memAssign){
-      var entry = ensureMiningAssignment(memAssign[sid3], null);
-      var cap = getSourceMaxSlots(sid3);
-      var contenders = getLiveVeinseekerContendersForSource(sid3);
-      if (!contenders.length) {
-        maClearOwner(memAssign, sid3);
-        continue;
-      }
-      if (entry.count > cap || !ownersMatchLiveContenders(entry, contenders, sid3)) {
-        resolveOwnershipForSid(sid3);
-      }
-    }
-
+    return roomCounts;
+  }
+  function auditVeinseekerRemoteState(){
     if ((Game.time % FLAG_PRUNE_PERIOD) === 0) pruneUnusedSourceFlags();
 
+    var roomCounts = getLiveVeinseekerRoomCounts();
     var rooms = Memory.rooms || {};
     for (var roomName in rooms) {
       if (!rooms.hasOwnProperty(roomName)) continue;
@@ -865,9 +752,9 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
   }
 
   function auditOncePerTick(){
-    if (Memory._auditRemoteAssignmentsTick !== Game.time){
-      auditRemoteAssignments();
-      Memory._auditRemoteAssignmentsTick = Game.time;
+    if (Memory._auditVeinseekerRemoteTick !== Game.time){
+      auditVeinseekerRemoteState();
+      Memory._auditVeinseekerRemoteTick = Game.time;
     }
   }
 
@@ -875,7 +762,6 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
   // Flag pruning (sources)
   // ============================
   function pruneUnusedSourceFlags(){
-    var memAssign = ensureAssignmentsMem();
     var now = Game.time;
 
     var rooms = Memory.rooms || {};
@@ -891,9 +777,8 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
         var flagName = srec.flagName;
         if (!flagName) continue;
 
-        var e = ensureMiningAssignment(memAssign[sid], rm.sources[sid].roomName || roomName);
-        var count  = typeof e.count === 'number' ? e.count : 0;
-        var owner  = e.owner || null;
+        var count  = getLiveVeinseekerCountForSource(sid);
+        var owner  = getActiveSourceEnergyOwnerForSource(sid, roomName);
         var last   = typeof srec.lastActive === 'number' ? srec.lastActive : 0;
 
         var inactiveLong = (now - last) > FLAG_RETENTION_TTL;
@@ -1042,7 +927,8 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
   // ============================
   function markValidRemoteSourcesForHome(homeName){
     var anchor=getAnchorPos(homeName);
-    var memAssign=ensureAssignmentsMem();
+    var sourceEnergyPlan = getSourceEnergyHomePlan(homeName);
+    var sourceEnergyHasSources = !!(sourceEnergyPlan && sourceEnergyPlan.sources && Object.keys(sourceEnergyPlan.sources).length);
     var rooms=bfsNeighborRooms(homeName, REMOTE_RADIUS);
 
     for (var i=0;i<rooms.length;i++){
@@ -1061,16 +947,11 @@ function veinseekerTravelToAssigned(creep, target, opts, sourceId, failReason) {
       for (var j=0;j<sources.length;j++){
         var s=sources[j];
         if (isVeinseekerSourceBlocked(rn, s.id)) continue;
-        var e=ensureMiningAssignment(memAssign[s.id], rn);
-        // Teaching note: remember which home owns this remote assignment so
-        // replacements can be spawned even after a wipe.
-        if (!e.homeRoom) e.homeRoom = homeName;
-        e.remoteRoom = rn;
-        if (maCount(memAssign, s.id) >= getSourceMaxSlots(s.id)) continue;
+        if (sourceEnergyHasSources && !sourceEnergyPlan.sources[s.id]) continue;
+        if (getLiveVeinseekerCountForSource(s.id) >= getPlannedSourceMaxSlots(homeName, s.id)) continue;
         var cost = pfCostCached(anchor, s.pos, s.id); if (!isUsablePathCost(cost)) continue;
         ensureSourceFlag(s);
         var srec = getSourceMemory(rn, s.id); srec.x = s.pos.x; srec.y = s.pos.y;
-        memAssign[s.id] = e;
       }
     }
   }
@@ -1398,7 +1279,6 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   // Picking & exclusivity
   // ============================
   function pickRemoteSource(creep){
-    var memAssign = ensureAssignmentsMem();
     var homeName = getHomeName(creep);
     pruneBadPfCostCache();
 
@@ -1564,8 +1444,8 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         }
       }
 
-      var cap = getSourceMaxSlots(sid);
-      var assigned = maCount(memAssign, sid);
+      var cap = getPlannedSourceMaxSlots(homeName, sid);
+      var assigned = getLiveVeinseekerCountForSource(sid);
       if (assigned >= cap) {
         rejectCandidate(roomName, sid, 'source-full', kind);
         return;
@@ -1577,8 +1457,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       var underHarvestBonus = 0;
       if (sourceObj && sourceObj.energy >= VEINSEEKER_UNDERHARVEST_ENERGY_THRESHOLD) underHarvestBonus -= 120;
       if (sourceObj && sourceObj.energyCapacity >= 3000) {
-        var owners = maOwners(memAssign, sid);
-        var primary = owners.length ? Game.creeps[owners[0]] : null;
+        var primary = getPrimaryLiveVeinseekerForSource(sid);
         var workParts = primary ? primary.getActiveBodyparts(WORK) : 0;
         if (workParts < VEINSEEKER_RESERVED_SOURCE_SECOND_MIN_WORK) underHarvestBonus -= 100;
       }
@@ -1756,11 +1635,6 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         }
       }
 
-      // Reserve immediately
-      maInc(memAssign, best.id, best.roomName);
-      maSetOwner(memAssign, best.id, creep.name, best.roomName);
-      resolveOwnershipForSid(best.id);
-
       // Visuals + say:
       var srcObj = Game.getObjectById(best.id);
       if (srcObj) {
@@ -1802,7 +1676,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
           currentAssignment: {
             sourceId: best.id,
             targetRoom: best.roomName,
-            owner: maOwner(memAssign, best.id),
+            liveOwners: getLiveVeinseekerOwnerNamesForSource(best.id),
             sourceEnergyOwner: selectedSourceEnergy ? (selectedSourceEnergy.assignedVeinseeker || null) : null
           }
         };
@@ -1814,17 +1688,10 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function releaseAssignment(creep){
-    // Release both SourceEnergy.Manager's home plan and the legacy
-    // Memory.remoteAssignments model, then put this creep on a retarget
-    // cooldown so it does not immediately reclaim the same bad source.
     SourceEnergyManager.releaseSource(creep);
-    var memAssign = ensureAssignmentsMem();
     var sid = creep.memory.sourceId;
 
     if (sid){
-      maDec(memAssign, sid);
-      var owner = maOwner(memAssign, sid);
-      if (owner === creep.name) maClearOwner(memAssign, sid);
       markAvoid(creep, sid, AVOID_TTL);
     }
 
@@ -1836,38 +1703,74 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     debugSay(creep, 'YIELD');
   }
 
+  function clearUnclaimedAssignment(creep, sid, reason) {
+    if (!creep || !creep.memory) return;
+    if (!creep.memory._lastSourceEnergyClaimFailLog ||
+        (Game.time - creep.memory._lastSourceEnergyClaimFailLog) >= 25) {
+      console.log('Veinseeker ' + creep.name + ' clearing unclaimed source ' +
+        (sid ? sid.slice(-6) : 'none') + ' reason=' + (reason || 'sourceEnergy-claim-failed'));
+      creep.memory._lastSourceEnergyClaimFailLog = Game.time;
+    }
+    creep.memory.sourceId = null;
+    creep.memory.targetRoom = null;
+    creep.memory.assigned = false;
+    creep.memory._retargetAt = Game.time + RETARGET_COOLDOWN;
+    debugSay(creep, 'PLAN');
+  }
+
+  function claimPlannedSource(creep, sid, roomName) {
+    if (SourceEnergyManager.claimSource(creep, sid, roomName)) return true;
+    clearUnclaimedAssignment(creep, sid, 'sourceEnergy-claim-failed');
+    return false;
+  }
+
   function validateExclusiveSource(creep){
-    // Final ownership guard before harvesting. If another Veinseeker has a stronger
-    // claim to this source, this creep yields and clears its assignment rather
-    // than competing on the same tile forever.
+    // Final duplicate guard before mining. SourceEnergy owns the persistent
+    // assignment; this scan only resolves live same-source contention.
     if (!creep.memory || !creep.memory.sourceId) return true;
 
     var sid = creep.memory.sourceId;
-    var memAssign = ensureAssignmentsMem();
-    var owners = maOwners(memAssign, sid);
-    var winners = getLiveVeinseekerContendersForSource(sid);
-    var cap = getSourceMaxSlots(sid);
-    if (owners.length && owners.indexOf(creep.name) === -1 && winners.length <= cap){
-      resolveOwnershipForSid(sid);
-      owners = maOwners(memAssign, sid);
-    }
-    if (owners.length && owners.indexOf(creep.name) === -1){
-      creep.memory._forceYield = true;
+    var sourceEnergyRec = getSourceEnergySourceRecord(getHomeName(creep), sid);
+    if (sourceEnergyRec && sourceEnergyRec.assignedVeinseeker &&
+        sourceEnergyRec.assignedVeinseeker !== creep.name &&
+        Game.creeps[sourceEnergyRec.assignedVeinseeker]) {
+      console.log('Veinseeker '+creep.name+' yielding SourceEnergy-owned source '+sid.slice(-6)+' owner='+sourceEnergyRec.assignedVeinseeker+'.');
       releaseAssignment(creep);
       return false;
     }
-    if (winners.length <= cap){
-      if (!owners.length) maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom||null);
-      return true;
+
+    var contenders = getLiveVeinseekerContendersForSource(sid);
+    var cap = getPlannedSourceMaxSlots(getHomeName(creep), sid);
+    if (contenders.length <= cap){
+      return claimPlannedSource(creep, sid, creep.memory.targetRoom);
     }
-    resolveOwnershipForSid(sid);
-    var refreshed = maOwners(memAssign, sid);
-    if (refreshed.indexOf(creep.name) === -1){
+
+    var src = Game.getObjectById(sid);
+    var srcPos = src && src.pos ? src.pos : null;
+    var ranked = contenders.map(function(c){ return rankContenderForSource(c, srcPos); });
+    ranked.sort(function(a,b){
+      if (a.assignTick !== b.assignTick) return a.assignTick - b.assignTick;
+      if (a.dist !== b.dist) return a.dist - b.dist;
+      return a.creep.name < b.creep.name ? -1 : 1;
+    });
+
+    var currentWins = false;
+    for (var i = 0; i < ranked.length; i++) {
+      var rankedCreep = ranked[i].creep;
+      var wins = i < cap;
+      if (!wins && rankedCreep && rankedCreep.memory && rankedCreep.memory.sourceId === sid) {
+        rankedCreep.memory._forceYield = true;
+      }
+      if (wins && rankedCreep && rankedCreep.name === creep.name) currentWins = true;
+    }
+
+    if (!currentWins){
       console.log('Veinseeker '+creep.name+' yielding duplicate source '+sid.slice(-6)+' (backing off).');
       releaseAssignment(creep);
       return false;
     }
-    return true;
+
+    return claimPlannedSource(creep, sid, creep.memory.targetRoom);
   }
 
 
@@ -1987,13 +1890,12 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
     Memory.rooms[homeName] = Memory.rooms[homeName] || {};
     var sid = creep.memory.sourceId || null;
     var sourceEnergyRec = sid ? getSourceEnergySourceRecord(homeName, sid) : null;
-    var memAssign = ensureAssignmentsMem();
     Memory.rooms[homeName].lastVeinseekerCurrentAssignment = {
       tick: Game.time,
       creep: creep.name,
       sourceId: sid,
       targetRoom: creep.memory.targetRoom || null,
-      owner: sid ? maOwner(memAssign, sid) : null,
+      liveOwners: sid ? getLiveVeinseekerOwnerNamesForSource(sid) : [],
       sourceEnergyOwner: sourceEnergyRec ? (sourceEnergyRec.assignedVeinseeker || null) : null,
       sourceEnergyStatus: sourceEnergyRec ? (sourceEnergyRec.status || null) : null,
       valid: !!(validation && validation.ok),
@@ -2020,8 +1922,6 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         releaseAssignment(creep);
         return false;
       }
-      SourceEnergyManager.claimSource(creep, creep.memory.sourceId, creep.memory.targetRoom);
-      maSetOwner(ensureAssignmentsMem(), creep.memory.sourceId, creep.name, creep.memory.targetRoom);
       clearRemoteUnassignedTimeout(creep);
       return true;
     }
@@ -2033,8 +1933,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       creep.memory.assigned   = true;
       creep.memory._assignTick = Game.time;
       clearRemoteUnassignedTimeout(creep);
-      SourceEnergyManager.claimSource(creep, pick.id, pick.roomName);
-      return true;
+      return claimPlannedSource(creep, pick.id, pick.roomName);
     }
 
     if (maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment')) return false;
@@ -2278,7 +2177,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
     };
   }
 
-  function chooseRemoteHarvestSeat(creep, source, anchorPos) {
+  function chooseRemoteMiningSeat(creep, source, anchorPos) {
     var reserved = collectRemoteReservedSeats(source.id, source.pos.roomName, creep.name);
     var current = getRemoteSeatPosFromMemory(creep);
     if (current && remoteSeatBelongsToSource(current, source)) {
@@ -2422,7 +2321,6 @@ function upsertRemoteContainerStatus(creep, source, container) {
     buildNoSafeAssignmentReport: function(creep) {
       var homeName = getHomeName(creep);
       var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
-      var memAssign = ensureAssignmentsMem();
       var blocked = 0, staleIntel = 0, noSources = 0, fullSources = 0, noRoute = 0;
       var localOwnedRooms = 0, homeRooms = 0, ownedSpawnRooms = 0;
       for (var i = 0; i < ring.length; i++) {
@@ -2448,7 +2346,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
           var sid = sids[si];
           var rec = rm.sources[sid] || {};
           if (typeof rec.lastSeen === 'number' && (Game.time - rec.lastSeen) <= 2000) freshSeen = true;
-          if (maCount(memAssign, sid) < getSourceMaxSlots(sid)) hasOpen = true;
+          if (getLiveVeinseekerCountForSource(sid) < getPlannedSourceMaxSlots(homeName, sid)) hasOpen = true;
         }
         if (!freshSeen) staleIntel++;
         if (!hasOpen) fullSources++;
@@ -2585,7 +2483,7 @@ function upsertRemoteContainerStatus(creep, source, container) {
       debugRing(creep.room, src.pos, CFG.DRAW.SRC_COLOR, 'SRC');
 
       var anchorPos = (container && container.pos) || (site && site.pos) || plannedPos || null;
-      var seatPos = anchorPos ? chooseRemoteHarvestSeat(creep, src, anchorPos) : chooseRemoteHarvestSeat(creep, src, null);
+      var seatPos = anchorPos ? chooseRemoteMiningSeat(creep, src, anchorPos) : chooseRemoteMiningSeat(creep, src, null);
       var usingFallbackSeat = false;
       if (!seatPos && anchorPos) {
         usingFallbackSeat = true;

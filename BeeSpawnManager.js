@@ -2353,13 +2353,13 @@ function writeRemoteSourcePlanSchedule(roomName, schedule, refreshed) {
 // extending the manager later is painless.
 function prepareRoomQueues(C) {
   // Per-room queue preparation runs before any spawn tries to dequeue. Remote
-  // harvest discovery and assignment audits happen here so the spawn queue sees
+  // mining discovery and assignment audits happen here so the spawn queue sees
   // the same Veinseeker plan that diagnostics report at the end of the function.
   var rooms = C.roomsOwned;
   for (var i = 0; i < rooms.length; i++) {
     var room = rooms[i];
     if (!roomHasOwnedSpawn(C, room.name)) continue;
-    // Remote harvest setup has three separate phases:
+    // Remote mining setup has three separate phases:
     // 1) discover which rooms are possible remotes,
     // 2) update the Veinseeker source plan/audit used by existing queue behavior,
     // 3) after queue prep, write a read-only economics report for humans.

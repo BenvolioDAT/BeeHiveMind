@@ -8,7 +8,7 @@
 //   writes into Memory.rooms[roomName].repairTargets.
 // Memory paths read/written:
 // * Memory.creeps, Memory.rooms[*], Memory.recentlyCleanedRooms.
-// * Memory.remoteAssignments and Memory.rooms[*].sourceContainers.
+// * Memory.rooms[*].sourceContainers.
 // * Memory.__BHM.remoteContainerStatus, preserving Veinseeker/Repair critical data
 //   longer than ordinary status snapshots.
 // Usually called by:
@@ -224,31 +224,6 @@ function cleanStaleRooms() {
 // Creep + assignment cleanup
 // -----------------------------
 
-function _releaseRemoteAssignment(creepName, creepMem) {
-  if (!creepMem || !creepMem.sourceId) return;
-  if (!Memory.remoteAssignments) return;
-
-  var entry = Memory.remoteAssignments[creepMem.sourceId];
-  if (entry == null) return;
-
-  // Backwards compatibility: legacy entries may just be numbers (count).
-  if (typeof entry === 'number') {
-    var nextCount = Math.max(0, entry - 1);
-    if (nextCount === 0) delete Memory.remoteAssignments[creepMem.sourceId];
-    else Memory.remoteAssignments[creepMem.sourceId] = nextCount;
-    return;
-  }
-
-  if (typeof entry.count === 'number' && entry.count > 0) {
-    entry.count = Math.max(0, entry.count - 1);
-  }
-  if (entry.owner === creepName) {
-    entry.owner = null;
-    entry.since = null;
-  }
-  Memory.remoteAssignments[creepMem.sourceId] = entry;
-}
-
 function _releaseContainerAssignment(creepName, creepMem) {
   if (!creepMem || !creepMem.assignedContainer) return;
   if (!Memory.rooms) return;
@@ -265,15 +240,14 @@ function _releaseContainerAssignment(creepName, creepMem) {
 }
 
 function _removeDeadCreepMemory() {
-  // Dead creep cleanup also releases old remote/source/container assignments so
-  // new creeps are not blocked by dead owners.
+  // Dead creep cleanup also releases old source/container assignments so new
+  // creeps are not blocked by dead owners.
   if (!Memory.creeps) return;
   for (var name in Memory.creeps) {
     if (!Memory.creeps.hasOwnProperty(name)) continue;
     if (Game.creeps[name]) continue;
 
     var creepMem = Memory.creeps[name];
-    _releaseRemoteAssignment(name, creepMem);
     _releaseContainerAssignment(name, creepMem);
 
     delete Memory.creeps[name];
