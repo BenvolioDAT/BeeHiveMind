@@ -61,7 +61,7 @@ function getRemoteEconomicsConfig() {
 }
 
 function ensureMemory() {
-  // Root Memory bucket for remote-harvest planning. This is not creep memory;
+  // Root Memory bucket for remote mining planning. This is not creep memory;
   // it is the home-room plan BeeSpawnManager reads before queuing Veinseeker creeps.
   var root = MemoryUtils.ensureBhmRoot('sourceEnergy', function () {
     return { tick: Game.time, homes: {} };
@@ -72,7 +72,7 @@ function ensureMemory() {
 }
 
 function ensureHomeMemory(homeRoom) {
-  // One home owns one remote-harvest plan. Source records here are the source
+  // One home owns one remote mining plan. Source records here are the source
   // of truth for desiredVeinseeker, live/queued counts, and queue reservations.
   var root = ensureMemory();
   if (!root.homes[homeRoom]) {

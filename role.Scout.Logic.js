@@ -18,7 +18,7 @@
 // * Combat.Squads/SquadFlagIntel receive threat observations from Scouts.
 // Do not casually change:
 // * Intel field names, target bad-target TTL, or remoteVisionRequests fields;
-//   those are shared with spawn, remote harvest, and repair systems.
+//   those are shared with spawn, remote mining, and repair systems.
 // -----------------------------------------------------------------------------
 const CombatSquads = require('Combat.Squads');
 const BeeToolbox = require('BeeToolbox');

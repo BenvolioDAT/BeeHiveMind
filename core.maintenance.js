@@ -18,7 +18,7 @@
 //   source metadata surviving cleanup.
 // Do not casually change:
 // * The distinction between assignment maps and source metadata. Deleting
-//   Memory.rooms[remote].sources metadata can break remote harvest planning.
+//   Memory.rooms[remote].sources metadata can break remote mining planning.
 // -----------------------------------------------------------------------------
 
 var CoreConfig = require('core.config');

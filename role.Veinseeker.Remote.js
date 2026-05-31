@@ -1437,7 +1437,7 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
         approvedSources[ap.targetRoom + ':' + ap.sourceId] = true;
       }
     }
-    var baseRooms = scoutPlanUsed ? scoutPlan.approvedRooms.slice(0) : bfsNeighborRooms(homeName, REMOTE_RADIUS);
+    var baseRooms = sourceEnergyPlanUsed ? sourceEnergyRooms.slice(0) : (scoutPlanUsed ? scoutPlan.approvedRooms.slice(0) : bfsNeighborRooms(homeName, REMOTE_RADIUS));
     var neighborRooms = [];
     var neighborSeen = Object.create(null);
     function addNeighborRoom(roomName) {
@@ -1612,55 +1612,59 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       }
     }
 
-    // 1) Visible candidates
-    for (i=0;i<neighborRooms.length;i++){
-      rn=neighborRooms[i];
-      var localOwnedReasonVisible = getVeinseekerLocalOwnedRoomBlockReason(homeName, rn);
-      if (localOwnedReasonVisible) { rejectCandidate(rn, null, localOwnedReasonVisible, 'visible-room'); continue; }
-      if (isVeinseekerRoomUnsafe(rn)) { rejectCandidate(rn, null, 'unsafe-room', 'visible-room'); continue; }
-      var room=Game.rooms[rn]; if (!room) continue;
+    if (!sourceEnergyPlanUsed) {
+      // 1) Visible candidates. This only runs when SourceEnergy has not built a
+      // home plan yet; otherwise the plan remains the assignment authority.
+      for (i=0;i<neighborRooms.length;i++){
+        rn=neighborRooms[i];
+        var localOwnedReasonVisible = getVeinseekerLocalOwnedRoomBlockReason(homeName, rn);
+        if (localOwnedReasonVisible) { rejectCandidate(rn, null, localOwnedReasonVisible, 'visible-room'); continue; }
+        if (isVeinseekerRoomUnsafe(rn)) { rejectCandidate(rn, null, 'unsafe-room', 'visible-room'); continue; }
+        var room=Game.rooms[rn]; if (!room) continue;
 
-      var sources = room.find(FIND_SOURCES);
-      var roomInaccessible = 0;
-      for (var j=0;j<sources.length;j++){
-        var s=sources[j];
-        var access = evaluateVisibleSourceAccessibility(homeName, rn, s);
-        recordVeinseekerAccessibility(rn, s.id, access.accessible, access.reason);
-        if (!access.accessible) {
-          inaccessibleSources++;
-          roomInaccessible++;
-          markVeinseekerSourceBlocked(rn, s.id, 'source-inaccessible-blocked-by-structures', VEINSEEKER_INACCESSIBLE_BLOCK_TTL);
-          rejectCandidate(rn, s.id, access.reason || 'source-inaccessible', 'visible');
-          continue;
+        var sources = room.find(FIND_SOURCES);
+        var roomInaccessible = 0;
+        for (var j=0;j<sources.length;j++){
+          var s=sources[j];
+          var access = evaluateVisibleSourceAccessibility(homeName, rn, s);
+          recordVeinseekerAccessibility(rn, s.id, access.accessible, access.reason);
+          if (!access.accessible) {
+            inaccessibleSources++;
+            roomInaccessible++;
+            markVeinseekerSourceBlocked(rn, s.id, 'source-inaccessible-blocked-by-structures', VEINSEEKER_INACCESSIBLE_BLOCK_TTL);
+            rejectCandidate(rn, s.id, access.reason || 'source-inaccessible', 'visible');
+            continue;
+          }
+          var visibleKind = candidateKindFor(rn, s.id, 'visible');
+          addCandidate(rn, s.id, visibleKind, s, getSourceMemory(rn, s.id));
         }
-        var visibleKind = candidateKindFor(rn, s.id, 'visible');
-        addCandidate(rn, s.id, visibleKind, s, getSourceMemory(rn, s.id));
+        if (sources.length > 0 && roomInaccessible >= sources.length) {
+          markVeinseekerRoomBlocked(rn, 'all-sources-inaccessible', VEINSEEKER_INACCESSIBLE_BLOCK_TTL);
+        }
       }
-      if (sources.length > 0 && roomInaccessible >= sources.length) {
-        markVeinseekerRoomBlocked(rn, 'all-sources-inaccessible', VEINSEEKER_INACCESSIBLE_BLOCK_TTL);
-      }
-    }
 
-    // 2) Memory-known candidates (always merged with visible list)
-    for (i=0;i<neighborRooms.length;i++){
-      rn=neighborRooms[i];
-      var localOwnedReasonMem = getVeinseekerLocalOwnedRoomBlockReason(homeName, rn);
-      if (localOwnedReasonMem) { rejectCandidate(rn, null, localOwnedReasonMem, 'memory-room'); continue; }
-      if (isVeinseekerRoomUnsafe(rn)) { rejectCandidate(rn, null, 'unsafe-room', 'memory-room'); continue; }
-      var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
-      var roomVisible = Game.rooms[rn];
-      var intelTick = null;
-      if (rm.intel) {
-        if (typeof rm.intel.lastScanAt === 'number') intelTick = rm.intel.lastScanAt;
-        if (typeof rm.intel.lastVisited === 'number') intelTick = Math.max(intelTick || 0, rm.intel.lastVisited);
-        if (typeof rm.intel.t === 'number') intelTick = Math.max(intelTick || 0, rm.intel.t);
-      }
-      if (rm.scout && typeof rm.scout.lastVisited === 'number') intelTick = Math.max(intelTick || 0, rm.scout.lastVisited);
-      if (!roomVisible && (intelTick == null || (Game.time - intelTick) > VEINSEEKER_REMOTE_INTEL_TTL)) { rejectCandidate(rn, null, 'stale-room-intel', 'memory-room'); continue; }
-      for (var sid in rm.sources){
-        if (candidateBySid[sid]) continue;
-        var memoryKind = candidateKindFor(rn, sid, 'memory');
-        addCandidate(rn, sid, memoryKind, null, rm.sources[sid]);
+      // 2) Memory-known candidates. This is a bootstrap path only when there is
+      // no SourceEnergy home plan to claim from yet.
+      for (i=0;i<neighborRooms.length;i++){
+        rn=neighborRooms[i];
+        var localOwnedReasonMem = getVeinseekerLocalOwnedRoomBlockReason(homeName, rn);
+        if (localOwnedReasonMem) { rejectCandidate(rn, null, localOwnedReasonMem, 'memory-room'); continue; }
+        if (isVeinseekerRoomUnsafe(rn)) { rejectCandidate(rn, null, 'unsafe-room', 'memory-room'); continue; }
+        var rm = getRoomMemoryBucket(rn); if (!rm || !rm.sources) continue;
+        var roomVisible = Game.rooms[rn];
+        var intelTick = null;
+        if (rm.intel) {
+          if (typeof rm.intel.lastScanAt === 'number') intelTick = rm.intel.lastScanAt;
+          if (typeof rm.intel.lastVisited === 'number') intelTick = Math.max(intelTick || 0, rm.intel.lastVisited);
+          if (typeof rm.intel.t === 'number') intelTick = Math.max(intelTick || 0, rm.intel.t);
+        }
+        if (rm.scout && typeof rm.scout.lastVisited === 'number') intelTick = Math.max(intelTick || 0, rm.scout.lastVisited);
+        if (!roomVisible && (intelTick == null || (Game.time - intelTick) > VEINSEEKER_REMOTE_INTEL_TTL)) { rejectCandidate(rn, null, 'stale-room-intel', 'memory-room'); continue; }
+        for (var sid in rm.sources){
+          if (candidateBySid[sid]) continue;
+          var memoryKind = candidateKindFor(rn, sid, 'memory');
+          addCandidate(rn, sid, memoryKind, null, rm.sources[sid]);
+        }
       }
     }
 
@@ -2002,9 +2006,9 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
   }
 
   function ensureActiveAssignment(creep) {
-    // Primary Veinseeker assignment flow. Prefer the scored remote-source picker,
-    // mirror the claim into SourceEnergy.Manager, and fall back to legacy room
-    // selection only when the scored picker cannot find a safe source.
+    // Primary Veinseeker assignment flow. Prefer the SourceEnergy/BeeSpawnManager
+    // source plan, then the scored remote-source picker. Do not run the old
+    // room-level fallback here; it can fight planned source ownership.
     if (creep.memory.sourceId && creep.memory.targetRoom) {
       var validation = validateCurrentVeinseekerAssignment(creep);
       recordCurrentAssignmentDiag(creep, validation);
@@ -2033,15 +2037,9 @@ function evaluateVisibleSourceAccessibility(homeName, remoteRoomName, sourceObj)
       return true;
     }
 
-    roleVeinseeker.initializeAndAssign(creep);
-    if (!creep.memory.targetRoom || !creep.memory.sourceId){
-      if (maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment')) return false;
-      idleAtAnchor(creep, 'IDLE');
-      return false;
-    }
-    creep.memory._assignTick = creep.memory._assignTick || Game.time;
-    clearRemoteUnassignedTimeout(creep);
-    return true;
+    if (maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment')) return false;
+    idleAtAnchor(creep, 'IDLE');
+    return false;
   }
 
 function getAssignedRemoteSourceTravelPos(creep) {
@@ -2344,7 +2342,8 @@ function upsertRemoteContainerStatus(creep, source, container) {
 
       state = determineVeinseekerState(creep);
       if (state === 'UNASSIGNED') {
-        roleVeinseeker.initializeAndAssign(creep);
+        if (maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment')) return;
+        idleAtAnchor(creep, 'IDLE');
         return;
       }
 
@@ -2377,12 +2376,10 @@ function upsertRemoteContainerStatus(creep, source, container) {
       }
 
       if (state === 'UNASSIGNED') {
-        roleVeinseeker.initializeAndAssign(creep);
-        if (!creep.memory.targetRoom || !creep.memory.sourceId){
-          if (maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment')) return;
-          if (Game.time % 25 === 0) console.log('Veinseeker '+creep.name+' could not be assigned a room/source.');
-          return;
-        }
+        if (maybeSuicideIfRemoteUnassignedTooLong(creep, creep.memory._lastNoSafeAssignDetails || 'no-safe-remote-assignment')) return;
+        if (Game.time % 25 === 0) console.log('Veinseeker '+creep.name+' could not be assigned a room/source.');
+        idleAtAnchor(creep, 'IDLE');
+        return;
       }
 
       clearRemoteUnassignedTimeout(creep);
@@ -2420,146 +2417,6 @@ function upsertRemoteContainerStatus(creep, source, container) {
         return;
       }
       idleAtAnchor(creep, 'IDLE');
-    },
-
-    // ---- Legacy fallback (no vision) - now radius-bounded ----
-    getNearbyRoomsWithSources: function(creep){
-      var homeName = getHomeName(creep);
-
-      var inRadius = {};
-      var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
-      for (var i=0; i<ring.length; i++) inRadius[ring[i]] = true;
-
-      var all = Object.keys(Memory.rooms||{});
-      var filtered = all.filter(function(roomName){
-        var rm = Memory.rooms[roomName];
-        if (!rm || !rm.sources) return false;
-        if (!inRadius[roomName]) return false;
-        if (shouldAvoidRoom(creep, roomName)) return false;
-        if (!isUsableRouteDistance(getRouteDistanceBetweenRooms(homeName, roomName))) return false;
-        var localOwnedReason = getVeinseekerLocalOwnedRoomBlockReason(homeName, roomName);
-        if (localOwnedReason) return false;
-        if (rm.hostile) return false;
-        if (isVeinseekerRoomUnsafe(roomName)) return false;
-        if (isRoomLockedByInvaderCore(roomName)) return false;
-        return roomName !== Memory.firstSpawnRoom;
-      });
-
-      return filtered.sort(function(a,b){
-        return Game.map.getRoomLinearDistance(homeName, a) - Game.map.getRoomLinearDistance(homeName, b);
-      });
-    },
-
-    findRoomWithLeastVeinseekers: function(creep,rooms, homeName){
-      if (!rooms || !rooms.length) return null;
-
-      var inRadius = {};
-      var ring = bfsNeighborRooms(homeName, REMOTE_RADIUS);
-      for (var i=0; i<ring.length; i++) inRadius[ring[i]] = true;
-
-      var best=null, lowest=Infinity;
-      for (var j=0;j<rooms.length;j++){
-        var rn=rooms[j];
-
-        // If this creep recently failed room travel to this remote room,
-        // skip it for a short time instead of picking it again immediately.
-        if (shouldAvoidRoom(creep, rn)) continue;
-
-        if (!inRadius[rn]) continue;
-        if (!isUsableRouteDistance(getRouteDistanceBetweenRooms(homeName, rn))) continue;
-        if (isVeinseekerLocalOwnedRoom(homeName, rn)) continue;
-        if (isVeinseekerRoomUnsafe(rn)) continue;
-        if (isRoomLockedByInvaderCore(rn)) continue;
-
-        var rm=getRoomMemoryBucket(rn), sources = rm.sources?Object.keys(rm.sources):[]; if (!sources.length) continue;
-
-        var count=0;
-        for (var name in Game.creeps){
-          var c=Game.creeps[name];
-          if (c && c.memory && c.memory.task==='veinseeker' && c.memory.targetRoom===rn) count++;
-        }
-        var avg = count / Math.max(1,sources.length);
-        if (avg < lowest){ lowest=avg; best=rn; }
-      }
-      return best;
-    },
-
-    initializeAndAssign: function(creep){
-      // Legacy fallback assignment path. The newer SourceEnergy/BeeSpawnManager
-      // flow normally preassigns sourceId/targetRoom; this path still helps old
-      // or manually spawned Veinseeker creeps find a safe source from room Memory.
-      var targetRooms = roleVeinseeker.getNearbyRoomsWithSources(creep);
-      if (!creep.memory.targetRoom || !creep.memory.sourceId){
-        var least = roleVeinseeker.findRoomWithLeastVeinseekers(creep, targetRooms, getHomeName(creep));
-        if (!least){
-          var report = roleVeinseeker.buildNoSafeAssignmentReport(creep);
-          logVeinseekerNoSafeSource(creep, report);
-          delete creep.memory.targetRoom;
-          delete creep.memory.sourceId;
-          delete creep.memory.assigned;
-          return;
-        }
-        creep.memory.targetRoom = least;
-
-        var roomMemory = getRoomMemoryBucket(creep.memory.targetRoom);
-        var sid = roleVeinseeker.assignSource(creep, roomMemory);
-        if (sid){
-          creep.memory.sourceId = sid;
-          creep.memory.assigned = true;
-          creep.memory._assignTick = Game.time;
-
-          var memAssign = ensureAssignmentsMem();
-          maInc(memAssign, sid, creep.memory.targetRoom);
-          maSetOwner(memAssign, sid, creep.name, creep.memory.targetRoom);
-          SourceEnergyManager.claimSource(creep, sid, creep.memory.targetRoom);
-
-          debugSay(creep, 'PICK');
-          var srcObj = Game.getObjectById(sid);
-          if (srcObj) { debugDrawLine(creep, srcObj, CFG.DRAW.PICK_COLOR, "ASSIGN"); debugRing(creep.room, srcObj.pos, CFG.DRAW.PICK_COLOR, shortSid(sid)); }
-          else { var center = new RoomPosition(25,25,creep.memory.targetRoom); debugDrawLine(creep, center, CFG.DRAW.TRAVEL_COLOR, "ASSIGN"); }
-
-          if (creep.memory._lastLogSid !== sid){
-            console.log('Veinseeker '+creep.name+' assigned by legacy fallback to source '+sid+' in '+creep.memory.targetRoom);
-            creep.memory._lastLogSid = sid;
-          }
-          var homeName = getHomeName(creep);
-          if (Memory.rooms && Memory.rooms[homeName]) {
-            Memory.rooms[homeName].lastVeinseekerSelection = {
-              tick: Game.time,
-              creep: creep.name,
-              homeRoom: homeName,
-              selectedRoom: creep.memory.targetRoom,
-              selectedSourceId: sid,
-              selectedDistance: getRouteDistanceBetweenRooms(homeName, creep.memory.targetRoom),
-              selectedPathCost: null,
-              selectedCandidateKind: 'legacy-fallback',
-              selectedSourcePositionKnown: !!getKnownSourcePosition(creep.memory.targetRoom, sid),
-              selectedTravelTargetKind: getKnownSourcePosition(creep.memory.targetRoom, sid) ? 'source' : 'room-center',
-              candidateRoomsSorted: targetRooms.slice(0),
-              scoutPlanUsed: false,
-              sourceEnergyPlanUsed: !!getSourceEnergySourceRecord(homeName, sid),
-              approvedSourceFilterUsed: false,
-              approvedSourcesCount: 0,
-              rejectedCloserRooms: [],
-              rejectedCandidates: [],
-              avoidedRooms: summarizeVeinseekerAvoids(creep).rooms,
-              avoidedSources: summarizeVeinseekerAvoids(creep).sources,
-              avoidedCandidates: [],
-              topCandidates: [],
-              lastPathFailure: creep.memory.lastVeinseekerPathFailure || null,
-              currentAssignment: {
-                sourceId: sid,
-                targetRoom: creep.memory.targetRoom,
-                owner: maOwner(memAssign, sid),
-                sourceEnergyOwner: null
-              }
-            };
-          }
-        }else{
-          logVeinseekerNoSafeSource(creep, 'room=' + creep.memory.targetRoom + ' has no safe/open sources');
-          creep.memory.targetRoom=null; creep.memory.sourceId=null;
-        }
-      }
     },
 
     buildNoSafeAssignmentReport: function(creep) {
@@ -2643,51 +2500,6 @@ function upsertRemoteContainerStatus(creep, source, container) {
         ' approvedSourceFilterUsed=' + (lastSel ? !!lastSel.approvedSourceFilterUsed : false) +
         ' scoutPlanUsed=' + (lastSel ? !!lastSel.scoutPlanUsed : false) +
         ' topRejectedRooms=' + (topRejectedStr || 'none');
-    },
-
-    assignSource: function(creep, roomMemory){
-      // Pick a source inside an already-selected target room, preferring totally
-      // free sources, then this creep's sticky source, then partially occupied
-      // sources that still have capacity.
-      if (!roomMemory || !roomMemory.sources) return null;
-      var homeName = getHomeName(creep);
-      var targetRoom = creep.memory && creep.memory.targetRoom;
-      if (creep.memory && targetRoom && isVeinseekerLocalOwnedRoom(homeName, targetRoom)) return null;
-      if (creep.memory && targetRoom && isVeinseekerRoomUnsafe(targetRoom)) return null;
-      if (creep.memory && targetRoom && shouldAvoidRoom(creep, targetRoom)) return null;
-      if (!isUsableRouteDistance(getRouteDistanceBetweenRooms(homeName, targetRoom))) return null;
-      var sids = Object.keys(roomMemory.sources); if (!sids.length) return null;
-
-      var memAssign = ensureAssignmentsMem();
-      var free=[], sticky=[], rest=[];
-      for (var i=0;i<sids.length;i++){
-        var sid=sids[i];
-        if (shouldAvoid(creep, sid)) continue;
-        if (isVeinseekerSourceBlocked(targetRoom, sid)) continue;
-        if (!hasFreshSourceIntel(targetRoom, sid)) continue;
-        if (!getSafeRoomTravelTarget(homeName, targetRoom, sid)) continue;
-        var sourceEnergyRec = getSourceEnergySourceRecord(homeName, sid);
-        if (sourceEnergyRec) {
-          if (sourceEnergyRec.remoteRoom && sourceEnergyRec.remoteRoom !== targetRoom) continue;
-          if (sourceEnergyRec.status === 'blocked') continue;
-          if (sourceEnergyRec.assignedVeinseeker && sourceEnergyRec.assignedVeinseeker !== creep.name && Game.creeps[sourceEnergyRec.assignedVeinseeker]) continue;
-          if (sourceEnergyRec.reservedBy && sourceEnergyRec.reservedUntil > Game.time && creep.memory.sourceId !== sid) continue;
-        }
-        var owners = maOwners(memAssign, sid);
-        var cnt   = maCount(memAssign, sid);
-        var cap = getSourceMaxSlots(sid);
-        if (cnt >= cap) continue;
-
-        if (creep.memory.sourceId===sid) sticky.push(sid);
-        else if (!owners.length) free.push(sid);
-        else rest.push(sid);
-      }
-
-      var pick = free[0] || sticky[0] || rest[0] || null;
-      if (!pick) return null;
-
-      if (!tryClaimSourceForTick(creep, pick)) return null;
-      return pick;
     },
 
 
