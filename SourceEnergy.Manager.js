@@ -16,6 +16,23 @@ var REMOTE_RADIUS = (VeinseekerConfig && VeinseekerConfig.REMOTE_RADIUS) || 3;
 var MAX_PF_OPS = (VeinseekerConfig && VeinseekerConfig.MAX_PF_OPS) || 1000;
 var PLAIN_COST = (VeinseekerConfig && VeinseekerConfig.PLAIN_COST) || 2;
 var SWAMP_COST = (VeinseekerConfig && VeinseekerConfig.SWAMP_COST) || 10;
+var SOURCE_REGEN_TICKS = (typeof ENERGY_REGEN_TIME !== 'undefined') ? ENERGY_REGEN_TIME : 300;
+var SOURCE_CAPACITY = (typeof SOURCE_ENERGY_CAPACITY !== 'undefined') ? SOURCE_ENERGY_CAPACITY : 3000;
+var HARVEST_RATE = (typeof HARVEST_POWER !== 'undefined') ? HARVEST_POWER : 2;
+var CARRY_SIZE = (typeof CARRY_CAPACITY !== 'undefined') ? CARRY_CAPACITY : 50;
+var CREEP_LIFETIME = (typeof CREEP_LIFE_TIME !== 'undefined') ? CREEP_LIFE_TIME : 1500;
+var CLAIM_LIFETIME = (typeof CREEP_CLAIM_LIFE_TIME !== 'undefined') ? CREEP_CLAIM_LIFE_TIME : 600;
+var SPAWN_TICKS_PER_PART = (typeof CREEP_SPAWN_TIME !== 'undefined') ? CREEP_SPAWN_TIME : 3;
+var PART_COST = (typeof BODYPART_COST !== 'undefined') ? BODYPART_COST : {
+  work: 100,
+  carry: 50,
+  move: 50,
+  claim: 600
+};
+var WORK_PART = (typeof WORK !== 'undefined') ? WORK : 'work';
+var CARRY_PART = (typeof CARRY !== 'undefined') ? CARRY : 'carry';
+var MOVE_PART = (typeof MOVE !== 'undefined') ? MOVE : 'move';
+var CLAIM_PART = (typeof CLAIM !== 'undefined') ? CLAIM : 'claim';
 
 function ensureMemory() {
   var root = MemoryUtils.ensureBhmRoot('sourceEnergy', function () {
@@ -43,6 +60,14 @@ function createHomePlan(homeRoom) {
     inactiveSources: 0,
     homeSources: 0,
     remoteSources: 0,
+    activeRemoteSources: 0,
+    inactiveRemoteSources: 0,
+    remoteSpawnBudget: 0,
+    remoteSpawnUsed: 0,
+    estimatedEnergyPerTick: 0,
+    estimatedNetIncome: 0,
+    estimatedSpawnUsage: 0,
+    remoteSelection: null,
     desiredHomeVeinseekers: 0,
     desiredRemoteVeinseekers: 0,
     liveAssignedHomeVeinseekers: 0,
@@ -92,6 +117,26 @@ function refreshVisibleRemoteSafety(room) {
 
 function finiteOrNull(value) {
   return (typeof value === 'number' && isFinite(value)) ? value : null;
+}
+
+function cfgNumber(name, fallback) {
+  var value = VeinseekerConfig && VeinseekerConfig[name];
+  return (typeof value === 'number' && isFinite(value)) ? value : fallback;
+}
+
+function cfgBool(name, fallback) {
+  if (!VeinseekerConfig || VeinseekerConfig[name] === undefined) return fallback;
+  return VeinseekerConfig[name] !== false;
+}
+
+function bodyPartCost(part) {
+  return PART_COST && typeof PART_COST[part] === 'number' ? PART_COST[part] : 0;
+}
+
+function roundMetric(value, digits) {
+  if (typeof value !== 'number' || !isFinite(value)) return null;
+  var factor = Math.pow(10, typeof digits === 'number' ? digits : 2);
+  return Math.round(value * factor) / factor;
 }
 
 function isFiniteDistance(value) {
@@ -326,7 +371,15 @@ function getVisiblePathCost(homeRoom, targetPos) {
       swampCost: SWAMP_COST
     });
     if (result && !result.incomplete && result.path) return result.path.length;
-  } catch (e) {}
+  } catch (e) {
+    var root = ensureMemory();
+    root.lastPathFinderError = {
+      tick: Game.time,
+      homeRoom: homeRoom,
+      targetRoom: targetPos.roomName,
+      reason: e && e.message ? e.message : String(e)
+    };
+  }
   return null;
 }
 
@@ -364,6 +417,167 @@ function sourceAccessReason(sourceObj, sourceMem, scoutSource) {
   return null;
 }
 
+function getHomeSpawnCount(homeRoom) {
+  var count = 0;
+  var room = Game.rooms && Game.rooms[homeRoom];
+  if (room && room.find) {
+    var roomSpawns = room.find(FIND_MY_SPAWNS) || [];
+    count += roomSpawns.length;
+  }
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (!spawn || !spawn.pos || spawn.pos.roomName !== homeRoom) continue;
+    if (room && room.find) continue;
+    count++;
+  }
+  return Math.max(1, count);
+}
+
+function getRemoteSpawnBudget(homeRoom) {
+  var perSpawn = Math.max(0, cfgNumber('REMOTE_MAX_SPAWN_USAGE_PER_HOME', 0.45));
+  return getHomeSpawnCount(homeRoom) * perSpawn;
+}
+
+function getRemoteRoadSummary(homeRoom, remoteRoom, sourceId, pathCost) {
+  var key = remoteRoom && sourceId ? (remoteRoom + ':' + sourceId) : null;
+  var rec = null;
+  var mem = null;
+  var homeObj = Game.rooms && Game.rooms[homeRoom];
+  if (RoadPlanner && typeof RoadPlanner._memory === 'function' && homeObj) mem = RoadPlanner._memory(homeObj);
+  else if (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].roadPlanner) mem = Memory.rooms[homeRoom].roadPlanner;
+  if (mem && mem.paths && key && mem.paths[key]) rec = mem.paths[key];
+  var pathLength = rec && Array.isArray(rec.path) ? rec.path.length : finiteOrNull(pathCost);
+  var placedIndex = rec && typeof rec.i === 'number' ? rec.i : null;
+  return {
+    key: key,
+    status: rec ? (rec.done ? 'complete' : 'planned') : 'unknown',
+    done: !!(rec && rec.done),
+    pathLength: finiteOrNull(pathLength),
+    placedIndex: placedIndex,
+    roadCoveragePct: (rec && pathLength > 0 && typeof placedIndex === 'number') ? roundMetric(Math.min(1, placedIndex / pathLength), 3) : null
+  };
+}
+
+function getReservationStatus(homeRoom, remoteRoom) {
+  var myName = getMyUsername();
+  var room = Game.rooms && Game.rooms[remoteRoom];
+  var username = null;
+  var ticksToEnd = null;
+  if (room && room.controller && room.controller.reservation) {
+    username = room.controller.reservation.username || null;
+    ticksToEnd = room.controller.reservation.ticksToEnd || null;
+  } else {
+    var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+    var intel = mem.intel || {};
+    var scout = getScoutRoomRecord(homeRoom, remoteRoom);
+    var scoutController = scout && scout.controller ? scout.controller : null;
+    var reservation = scoutController && scoutController.reservation !== undefined ? scoutController.reservation : intel.reservation;
+    if (reservation && typeof reservation === 'object') {
+      username = reservation.username || reservation.owner || reservation.name || null;
+      ticksToEnd = reservation.ticksToEnd || reservation.ticks || null;
+    } else if (typeof reservation === 'string') {
+      username = reservation;
+    }
+  }
+  if (username && myName && username === myName) {
+    return { reserved: true, planned: false, username: username, ticksToEnd: ticksToEnd, reason: 'own-reservation' };
+  }
+  if (cfgBool('REMOTE_ASSUME_RESERVED', false)) {
+    return { reserved: false, planned: true, username: myName || null, ticksToEnd: null, reason: 'config-assume-reserved' };
+  }
+  return { reserved: false, planned: false, username: username, ticksToEnd: ticksToEnd, reason: username ? 'reserved-by-other' : 'unreserved' };
+}
+
+function estimateRemoteSourceEconomics(homeRoom, remoteRoom, sourceId, routeDistance, pathCost, container, sourceObj, sourceMem, scoutSource, openTiles) {
+  var oneWay = finiteOrNull(pathCost);
+  if (oneWay === null && isFiniteDistance(routeDistance)) oneWay = Math.max(1, routeDistance) * 50;
+  if (oneWay === null) oneWay = 100;
+
+  var sourceCapacity = SOURCE_CAPACITY;
+  if (sourceObj && typeof sourceObj.energyCapacity === 'number') sourceCapacity = sourceObj.energyCapacity;
+  else if (scoutSource && typeof scoutSource.energyCapacity === 'number') sourceCapacity = scoutSource.energyCapacity;
+  else if (sourceMem && typeof sourceMem.energyCapacity === 'number') sourceCapacity = sourceMem.energyCapacity;
+
+  var fullEnergyPerTick = sourceCapacity / SOURCE_REGEN_TICKS;
+  var reservation = getReservationStatus(homeRoom, remoteRoom);
+  var reservedRate = reservation.reserved || reservation.planned;
+  var energyMultiplier = reservedRate ? 1 : Math.max(0, cfgNumber('REMOTE_UNRESERVED_ENERGY_MULTIPLIER', 0.5));
+  var energyPerTick = fullEnergyPerTick * energyMultiplier;
+
+  var harvestTiles = Math.max(1, openTiles || 1);
+  var desiredWork = Math.max(1, Math.ceil(energyPerTick / HARVEST_RATE));
+  if (harvestTiles <= 0) desiredWork = 0;
+  var minerCarry = 1;
+  var minerMove = Math.max(1, Math.ceil((desiredWork + minerCarry) / 2));
+  var minerParts = desiredWork + minerCarry + minerMove;
+  var minerBodyCost = desiredWork * bodyPartCost(WORK_PART) + minerCarry * bodyPartCost(CARRY_PART) + minerMove * bodyPartCost(MOVE_PART);
+  var minerLifetime = Math.max(300, CREEP_LIFETIME - oneWay);
+  var minerCostPerTick = minerBodyCost / minerLifetime;
+  var minerSpawnUsage = (minerParts * SPAWN_TICKS_PER_PART) / minerLifetime;
+
+  var arrivalMultiplier = cfgNumber('REMOTE_HAUL_EXPECTED_ARRIVAL_MULTIPLIER', 1.15);
+  var roundTripTicks = Math.max(1, oneWay * 2 * arrivalMultiplier);
+  var carryParts = Math.max(1, Math.ceil((energyPerTick * roundTripTicks) / CARRY_SIZE));
+  var roadComplete = container && container.status === 'built' && getRemoteRoadSummary(homeRoom, remoteRoom, sourceId, pathCost).done;
+  var haulerMove = roadComplete ? Math.max(1, Math.ceil(carryParts / 2)) : carryParts;
+  var haulerParts = carryParts + haulerMove;
+  var haulerBodyCost = carryParts * bodyPartCost(CARRY_PART) + haulerMove * bodyPartCost(MOVE_PART);
+  var haulerCostPerTick = haulerBodyCost / CREEP_LIFETIME;
+  var haulerSpawnUsage = (haulerParts * SPAWN_TICKS_PER_PART) / CREEP_LIFETIME;
+
+  var reservationCostPerTick = 0;
+  var reservationSpawnUsage = 0;
+  if (reservation.reserved || reservation.planned) {
+    var reserverLifetime = Math.max(100, CLAIM_LIFETIME - oneWay);
+    var reserverParts = 2;
+    reservationCostPerTick = (bodyPartCost(CLAIM_PART) + bodyPartCost(MOVE_PART)) / reserverLifetime;
+    reservationSpawnUsage = (reserverParts * SPAWN_TICKS_PER_PART) / reserverLifetime;
+  }
+
+  var road = getRemoteRoadSummary(homeRoom, remoteRoom, sourceId, pathCost);
+  var containerBuilt = container && container.status === 'built';
+  var containerRepairLoss = containerBuilt ? cfgNumber('REMOTE_CONTAINER_REPAIR_LOSS', 0.10) : cfgNumber('REMOTE_UNBUILT_CONTAINER_PENALTY', 0.25);
+  var roadUnits = Math.max(1, (finiteOrNull(road.pathLength) || oneWay) / 50);
+  var roadMaintenanceLoss = roadUnits * cfgNumber('REMOTE_ROAD_MAINTENANCE_LOSS', 0.03);
+  var maintenanceLoss = containerRepairLoss + roadMaintenanceLoss;
+  var netIncome = energyPerTick - minerCostPerTick - haulerCostPerTick - reservationCostPerTick - maintenanceLoss;
+  var spawnUsage = minerSpawnUsage + haulerSpawnUsage + reservationSpawnUsage;
+  var value = spawnUsage > 0 ? (netIncome / spawnUsage) : netIncome;
+
+  return {
+    sourceId: sourceId,
+    roomName: remoteRoom,
+    pathCost: finiteOrNull(pathCost),
+    routeDistance: finiteOrNull(routeDistance),
+    oneWayTicks: roundMetric(oneWay, 1),
+    roundTripTicks: roundMetric(roundTripTicks, 1),
+    reservation: reservation,
+    sourceCapacity: sourceCapacity,
+    fullEnergyPerTick: roundMetric(fullEnergyPerTick, 3),
+    energyMultiplier: roundMetric(energyMultiplier, 3),
+    energyPerTick: roundMetric(energyPerTick, 3),
+    desiredWork: desiredWork,
+    minerBodyCost: roundMetric(minerBodyCost, 1),
+    minerCostPerTick: roundMetric(minerCostPerTick, 3),
+    minerSpawnUsage: roundMetric(minerSpawnUsage, 4),
+    haulerCarryParts: carryParts,
+    haulerMoveParts: haulerMove,
+    haulerBodyCost: roundMetric(haulerBodyCost, 1),
+    haulerCostPerTick: roundMetric(haulerCostPerTick, 3),
+    haulerSpawnUsage: roundMetric(haulerSpawnUsage, 4),
+    reservationCostPerTick: roundMetric(reservationCostPerTick, 3),
+    reservationSpawnUsage: roundMetric(reservationSpawnUsage, 4),
+    containerRepairLoss: roundMetric(containerRepairLoss, 3),
+    roadMaintenanceLoss: roundMetric(roadMaintenanceLoss, 3),
+    maintenanceLoss: roundMetric(maintenanceLoss, 3),
+    netIncome: roundMetric(netIncome, 3),
+    spawnUsage: roundMetric(spawnUsage, 4),
+    spawnWeight: roundMetric(spawnUsage, 4),
+    value: roundMetric(value, 3)
+  };
+}
+
 function makeSourceRecord(fields) {
   var container = fields.container || {};
   return {
@@ -380,6 +594,15 @@ function makeSourceRecord(fields) {
     containerId: fields.containerId || container.containerId || null,
     container: container,
     containerStatus: container.status || null,
+    road: fields.road || null,
+    economics: fields.economics || null,
+    energyPerTick: fields.energyPerTick !== undefined ? finiteOrNull(fields.energyPerTick) : (fields.economics ? finiteOrNull(fields.economics.energyPerTick) : null),
+    netIncome: fields.netIncome !== undefined ? finiteOrNull(fields.netIncome) : (fields.economics ? finiteOrNull(fields.economics.netIncome) : null),
+    spawnUsage: fields.spawnUsage !== undefined ? finiteOrNull(fields.spawnUsage) : (fields.economics ? finiteOrNull(fields.economics.spawnUsage) : null),
+    spawnWeight: fields.spawnWeight !== undefined ? finiteOrNull(fields.spawnWeight) : (fields.economics ? finiteOrNull(fields.economics.spawnWeight) : null),
+    activationReason: fields.activationReason || null,
+    rejectionReason: fields.rejectionReason || null,
+    activeHaulPressure: fields.activeHaulPressure || null,
     status: fields.status || 'open',
     reason: fields.reason || 'planned',
     assignedVeinseeker: fields.assignedVeinseeker || null,
@@ -540,6 +763,7 @@ function makeInactiveRemoteRecord(plan, remoteRoom, sourceId, pos, reason, oldRe
     active: false,
     status: reason === 'unsafe' ? 'unsafe' : (reason === 'stale-intel' ? 'stale' : 'blocked'),
     reason: reason,
+    rejectionReason: reason,
     lastSeen: (sourceMem && sourceMem.lastSeen) || (scoutSource && scoutSource.lastSeen) || 0,
     lastValidated: Game.time,
     assignedVeinseeker: oldRecord && oldRecord.assignedVeinseeker || null,
@@ -617,6 +841,8 @@ function buildRemoteSources(plan, remoteRooms, oldSources) {
 
       var container = getContainerSummary(sourceId, remoteRoom, sourceObj, sourceMem);
       var openTiles = countKnownOpenTiles(sourceObj, sourceMem, scoutSource);
+      var road = getRemoteRoadSummary(homeRoom, remoteRoom, sourceId, pathCost);
+      var economics = estimateRemoteSourceEconomics(homeRoom, remoteRoom, sourceId, routeDistance, pathCost, container, sourceObj, sourceMem, scoutSource, openTiles);
       addRecord(plan, makeSourceRecord({
         sourceId: sourceId,
         homeRoom: homeRoom,
@@ -629,9 +855,15 @@ function buildRemoteSources(plan, remoteRooms, oldSources) {
         routeDistance: routeDistance,
         pathCost: pathCost,
         container: container,
+        road: road,
+        economics: economics,
+        energyPerTick: economics && economics.energyPerTick,
+        netIncome: economics && economics.netIncome,
+        spawnUsage: economics && economics.spawnUsage,
+        spawnWeight: economics && economics.spawnWeight,
         active: true,
         status: 'open',
-        reason: 'planned-remote-source',
+        reason: 'remote-source-candidate',
         assignedVeinseeker: old.assignedVeinseeker || null,
         queuedVeinseeker: old.queuedVeinseeker || null,
         queuedUntil: old.queuedUntil || 0,
@@ -643,6 +875,153 @@ function buildRemoteSources(plan, remoteRooms, oldSources) {
       }));
     }
   }
+}
+
+function rebuildPlanIndexes(plan, keepSkipped) {
+  keepSkipped = keepSkipped || [];
+  plan.activeSourceIds = [];
+  plan.inactiveSourceIds = [];
+  plan.skippedSources = keepSkipped.slice(0);
+  plan.activeSources = 0;
+  plan.inactiveSources = 0;
+  plan.homeSources = 0;
+  plan.remoteSources = 0;
+  plan.activeRemoteSources = 0;
+  plan.inactiveRemoteSources = 0;
+  var seen = {};
+  var ordered = [];
+  for (var i = 0; i < plan.sourceOrder.length; i++) {
+    var sourceId = plan.sourceOrder[i];
+    if (!sourceId || seen[sourceId]) continue;
+    var rec = plan.sources[sourceId];
+    if (!rec) continue;
+    seen[sourceId] = true;
+    ordered.push(sourceId);
+    if (rec.active) {
+      plan.activeSourceIds.push(sourceId);
+      plan.activeSources++;
+      if (rec.mode === 'home') plan.homeSources++;
+      if (rec.mode === 'remote') {
+        plan.remoteSources++;
+        plan.activeRemoteSources++;
+      }
+    } else {
+      plan.inactiveSourceIds.push(sourceId);
+      plan.inactiveSources++;
+      if (rec.mode === 'remote') plan.inactiveRemoteSources++;
+      plan.skippedSources.push({
+        sourceId: rec.sourceId,
+        roomName: rec.roomName,
+        mode: rec.mode,
+        status: rec.status,
+        reason: rec.rejectionReason || rec.reason
+      });
+    }
+  }
+  plan.sourceOrder = ordered;
+}
+
+function selectProfitableRemoteSources(homeRoom, plan) {
+  var keepSkipped = [];
+  for (var s = 0; s < plan.skippedSources.length; s++) {
+    var skip = plan.skippedSources[s];
+    if (!skip || !skip.sourceId || !plan.sources[skip.sourceId]) keepSkipped.push(skip);
+  }
+
+  var enabled = cfgBool('REMOTE_PROFITABILITY_ENABLED', true);
+  var allowUnprofitable = cfgBool('REMOTE_ALLOW_UNPROFITABLE', false);
+  var minNetIncome = cfgNumber('REMOTE_MIN_NET_INCOME', 0.25);
+  var maxActive = Math.max(0, Math.floor(cfgNumber('REMOTE_MAX_ACTIVE_SOURCES_PER_HOME', 4)));
+  var spawnBudget = getRemoteSpawnBudget(homeRoom);
+  var used = 0;
+  var candidates = [];
+  var selected = [];
+  var rejected = [];
+
+  for (var i = 0; i < plan.sourceOrder.length; i++) {
+    var rec = plan.sources[plan.sourceOrder[i]];
+    if (!rec || rec.mode !== 'remote') continue;
+    if (!rec.active) {
+      rec.rejectionReason = rec.rejectionReason || rec.reason || 'inactive-before-selection';
+      rejected.push({ sourceId: rec.sourceId, roomName: rec.roomName, reason: rec.rejectionReason, netIncome: rec.netIncome, spawnUsage: rec.spawnUsage });
+      continue;
+    }
+    candidates.push(rec);
+  }
+
+  candidates.sort(function (a, b) {
+    var av = a.economics && typeof a.economics.value === 'number' ? a.economics.value : -99999;
+    var bv = b.economics && typeof b.economics.value === 'number' ? b.economics.value : -99999;
+    if (bv !== av) return bv - av;
+    var an = typeof a.netIncome === 'number' ? a.netIncome : -99999;
+    var bn = typeof b.netIncome === 'number' ? b.netIncome : -99999;
+    if (bn !== an) return bn - an;
+    var ap = typeof a.pathCost === 'number' ? a.pathCost : 99999;
+    var bp = typeof b.pathCost === 'number' ? b.pathCost : 99999;
+    if (ap !== bp) return ap - bp;
+    return a.sourceId < b.sourceId ? -1 : (a.sourceId > b.sourceId ? 1 : 0);
+  });
+
+  for (var c = 0; c < candidates.length; c++) {
+    var candidate = candidates[c];
+    var economics = candidate.economics || null;
+    var spawnUsage = economics && typeof economics.spawnUsage === 'number' ? economics.spawnUsage : null;
+    var netIncome = economics && typeof economics.netIncome === 'number' ? economics.netIncome : null;
+    var reason = null;
+    if (!enabled) reason = null;
+    else if (!economics) reason = 'missing-economics';
+    else if (!allowUnprofitable && netIncome !== null && netIncome < minNetIncome) reason = 'low-net-income';
+    else if (selected.length >= maxActive) reason = 'max-active-sources';
+    else if (spawnUsage !== null && used + spawnUsage > spawnBudget) reason = 'spawn-budget-exhausted';
+
+    if (reason) {
+      candidate.active = false;
+      candidate.status = 'inactive';
+      candidate.reason = reason;
+      candidate.rejectionReason = reason;
+      candidate.activationReason = null;
+      rejected.push({ sourceId: candidate.sourceId, roomName: candidate.roomName, reason: reason, netIncome: candidate.netIncome, spawnUsage: candidate.spawnUsage });
+      continue;
+    }
+
+    candidate.active = true;
+    candidate.status = candidate.status === 'assigned' || candidate.status === 'queued' ? candidate.status : 'open';
+    candidate.reason = enabled ? 'active-profitable-remote-source' : 'profitability-disabled';
+    candidate.activationReason = enabled ? 'selected-net-income-spawn-budget' : 'profitability-disabled';
+    candidate.rejectionReason = null;
+    used += spawnUsage || 0;
+    selected.push({ sourceId: candidate.sourceId, roomName: candidate.roomName, netIncome: candidate.netIncome, spawnUsage: candidate.spawnUsage, value: economics && economics.value });
+  }
+
+  plan.remoteSpawnBudget = roundMetric(spawnBudget, 4) || 0;
+  plan.remoteSpawnUsed = roundMetric(used, 4) || 0;
+  plan.estimatedEnergyPerTick = 0;
+  plan.estimatedNetIncome = 0;
+  plan.estimatedSpawnUsage = 0;
+  for (var o = 0; o < plan.sourceOrder.length; o++) {
+    var src = plan.sources[plan.sourceOrder[o]];
+    if (!src || src.mode !== 'remote' || !src.active || !src.economics) continue;
+    plan.estimatedEnergyPerTick += src.economics.energyPerTick || 0;
+    plan.estimatedNetIncome += src.economics.netIncome || 0;
+    plan.estimatedSpawnUsage += src.economics.spawnUsage || 0;
+  }
+  plan.estimatedEnergyPerTick = roundMetric(plan.estimatedEnergyPerTick, 3) || 0;
+  plan.estimatedNetIncome = roundMetric(plan.estimatedNetIncome, 3) || 0;
+  plan.estimatedSpawnUsage = roundMetric(plan.estimatedSpawnUsage, 4) || 0;
+  plan.remoteSelection = {
+    tick: Game.time,
+    enabled: enabled,
+    allowUnprofitable: allowUnprofitable,
+    minNetIncome: minNetIncome,
+    spawnBudget: plan.remoteSpawnBudget,
+    spawnUsed: plan.remoteSpawnUsed,
+    maxActiveSources: maxActive,
+    candidates: candidates.length,
+    selected: selected,
+    rejected: rejected
+  };
+  rebuildPlanIndexes(plan, keepSkipped);
+  return plan.remoteSelection;
 }
 
 function gatherCandidateRemoteRoomsForHome(homeRoom) {
@@ -754,6 +1133,7 @@ function buildSourcePlanForHome(homeRoom, remoteDiscovery) {
 
   buildHomeSources(plan, oldSources);
   buildRemoteSources(plan, plan.acceptedRemoteRooms, oldSources);
+  selectProfitableRemoteSources(homeName, plan);
 
   ensureMemory().homes[homeName] = plan;
   writePlanDiagnostics(homeName);
@@ -1021,6 +1401,15 @@ function summarizeSourceRecord(rec) {
     pathCost: finiteOrNull(rec.pathCost),
     distance: finiteOrNull(rec.distance),
     routeDistance: finiteOrNull(rec.routeDistance),
+    energyPerTick: finiteOrNull(rec.energyPerTick),
+    netIncome: finiteOrNull(rec.netIncome),
+    spawnUsage: finiteOrNull(rec.spawnUsage),
+    spawnWeight: finiteOrNull(rec.spawnWeight),
+    activationReason: rec.activationReason || null,
+    rejectionReason: rec.rejectionReason || null,
+    road: rec.road || null,
+    economics: rec.economics || null,
+    activeHaulPressure: rec.activeHaulPressure || null,
     container: rec.container ? {
       status: rec.container.status || null,
       containerId: rec.container.containerId || null,
@@ -1047,6 +1436,14 @@ function writePlanDiagnostics(homeRoom) {
     inactiveSources: plan.inactiveSources || 0,
     homeSources: plan.homeSources || 0,
     remoteSources: plan.remoteSources || 0,
+    activeRemoteSources: plan.activeRemoteSources || 0,
+    inactiveRemoteSources: plan.inactiveRemoteSources || 0,
+    remoteSpawnBudget: plan.remoteSpawnBudget || 0,
+    remoteSpawnUsed: plan.remoteSpawnUsed || 0,
+    estimatedEnergyPerTick: plan.estimatedEnergyPerTick || 0,
+    estimatedNetIncome: plan.estimatedNetIncome || 0,
+    estimatedSpawnUsage: plan.estimatedSpawnUsage || 0,
+    remoteSelection: plan.remoteSelection || null,
     desiredHomeVeinseekers: plan.desiredHomeVeinseekers || 0,
     desiredRemoteVeinseekers: plan.desiredRemoteVeinseekers || 0,
     liveAssignedHomeVeinseekers: plan.liveAssignedHomeVeinseekers || 0,
@@ -1095,6 +1492,14 @@ function getSourcesNeedingVeinseeker(homeRoom, mode) {
   }
   out.sort(function (a, b) {
     if (a.mode !== b.mode) return a.mode === 'home' ? -1 : 1;
+    if (a.mode === 'remote' && b.mode === 'remote') {
+      var av = a.economics && typeof a.economics.value === 'number' ? a.economics.value : -99999;
+      var bv = b.economics && typeof b.economics.value === 'number' ? b.economics.value : -99999;
+      if (bv !== av) return bv - av;
+      var an = typeof a.netIncome === 'number' ? a.netIncome : -99999;
+      var bn = typeof b.netIncome === 'number' ? b.netIncome : -99999;
+      if (bn !== an) return bn - an;
+    }
     var da = typeof a.routeDistance === 'number' ? a.routeDistance : 9999;
     var db = typeof b.routeDistance === 'number' ? b.routeDistance : 9999;
     if (da !== db) return da - db;
@@ -1127,7 +1532,11 @@ function reserveSourceForQueue(homeRoom, sourceId) {
     roomName: rec.roomName,
     mode: rec.mode,
     pathCost: rec.pathCost,
-    routeDistance: rec.routeDistance
+    routeDistance: rec.routeDistance,
+    netIncome: rec.netIncome,
+    spawnUsage: rec.spawnUsage,
+    activationReason: rec.activationReason,
+    economics: rec.economics || null
   };
 }
 
@@ -1231,6 +1640,17 @@ function attachTruckerRemoteHaulDecision(homeRoom, audit) {
   writePlanDiagnostics(homeRoom);
 }
 
+function getActiveRemoteSourceRecords(homeRoom) {
+  var plan = ensureHomeMemory(homeRoom);
+  var out = [];
+  for (var i = 0; i < plan.sourceOrder.length; i++) {
+    var rec = plan.sources[plan.sourceOrder[i]];
+    if (!rec || rec.mode !== 'remote' || !rec.active) continue;
+    out.push(rec);
+  }
+  return out;
+}
+
 function buildRemoteSourceEconomicsReport(homeRoom) {
   var plan = ensureHomeMemory(homeRoom);
   var sources = [];
@@ -1243,18 +1663,32 @@ function buildRemoteSourceEconomicsReport(homeRoom) {
       active: !!rec.active,
       status: rec.status,
       reason: rec.reason,
+      activationReason: rec.activationReason || null,
+      rejectionReason: rec.rejectionReason || null,
       routeDistance: finiteOrNull(rec.routeDistance),
       pathCost: finiteOrNull(rec.pathCost),
-      containerStatus: rec.containerStatus || null
+      containerStatus: rec.containerStatus || null,
+      road: rec.road || null,
+      economics: rec.economics || null,
+      energyPerTick: finiteOrNull(rec.energyPerTick),
+      netIncome: finiteOrNull(rec.netIncome),
+      spawnUsage: finiteOrNull(rec.spawnUsage),
+      spawnWeight: finiteOrNull(rec.spawnWeight)
     });
   }
   var report = {
     tick: Game.time,
     recalculated: true,
-    activeRemoteSources: plan.remoteSources || 0,
-    inactiveRemoteSources: sources.length - (plan.remoteSources || 0),
+    activeRemoteSources: plan.activeRemoteSources || plan.remoteSources || 0,
+    inactiveRemoteSources: plan.inactiveRemoteSources || (sources.length - (plan.remoteSources || 0)),
+    remoteSpawnBudget: plan.remoteSpawnBudget || 0,
+    remoteSpawnUsed: plan.remoteSpawnUsed || 0,
+    estimatedEnergyPerTick: plan.estimatedEnergyPerTick || 0,
+    estimatedNetIncome: plan.estimatedNetIncome || 0,
+    estimatedSpawnUsage: plan.estimatedSpawnUsage || 0,
+    remoteSelection: plan.remoteSelection || null,
     sources: sources,
-    notes: 'diagnostic estimate; SourceEnergy plan owns actual activation'
+    notes: 'SourceEnergy owns source-level remote activation; Trucker quota reads active source records for haul prediction'
   };
   getRoomMemoryBucket(homeRoom).lastRemoteSourceEconomics = report;
   return report;
@@ -1427,6 +1861,8 @@ module.exports = {
   buildSourcePlanForHome: buildSourcePlanForHome,
   auditAssignmentsForHome: auditAssignmentsForHome,
   buildRemoteSourceEconomicsReport: buildRemoteSourceEconomicsReport,
+  selectProfitableRemoteSources: selectProfitableRemoteSources,
+  getActiveRemoteSourceRecords: getActiveRemoteSourceRecords,
   reserveSourceForQueue: reserveSourceForQueue,
   unreserveSourceForQueue: unreserveSourceForQueue,
   claimSource: claimSource,

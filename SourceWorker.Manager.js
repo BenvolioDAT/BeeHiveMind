@@ -1201,6 +1201,13 @@ function upsertRemoteHaulRequest(creep, source, container, opts) {
     assignedTo = prev.assignedTo;
     assignedUntil = prev.assignedUntil;
   }
+  var assignedTruckers = {};
+  if (prev.assignedTruckers) {
+    for (var name in prev.assignedTruckers) {
+      if (!Object.prototype.hasOwnProperty.call(prev.assignedTruckers, name)) continue;
+      if (prev.assignedTruckers[name] && prev.assignedTruckers[name] > Game.time && Game.creeps[name]) assignedTruckers[name] = prev.assignedTruckers[name];
+    }
+  }
   requests[id] = {
     id: id,
     homeRoom: homeName,
@@ -1222,6 +1229,7 @@ function upsertRemoteHaulRequest(creep, source, container, opts) {
     containerHitsPct: container.hitsMax > 0 ? (container.hits / container.hitsMax) : 1,
     assignedTo: assignedTo,
     assignedUntil: assignedUntil,
+    assignedTruckers: assignedTruckers,
     maintenanceUntil: prev.maintenanceUntil || 0,
     maintenanceBy: prev.maintenanceBy || null,
     maintenanceReason: prev.maintenanceReason || null
@@ -1251,6 +1259,13 @@ function upsertRemoteLooseHaulRequest(creep, source, target, targetType, opts) {
     assignedTo = prev.assignedTo;
     assignedUntil = prev.assignedUntil;
   }
+  var assignedTruckers = {};
+  if (prev.assignedTruckers) {
+    for (var name in prev.assignedTruckers) {
+      if (!Object.prototype.hasOwnProperty.call(prev.assignedTruckers, name)) continue;
+      if (prev.assignedTruckers[name] && prev.assignedTruckers[name] > Game.time && Game.creeps[name]) assignedTruckers[name] = prev.assignedTruckers[name];
+    }
+  }
   requests[id] = {
     id: id,
     homeRoom: homeName,
@@ -1270,6 +1285,7 @@ function upsertRemoteLooseHaulRequest(creep, source, target, targetType, opts) {
     updated: Game.time,
     assignedTo: assignedTo,
     assignedUntil: assignedUntil,
+    assignedTruckers: assignedTruckers,
     maintenanceUntil: prev.maintenanceUntil || 0,
     maintenanceBy: prev.maintenanceBy || null,
     maintenanceReason: prev.maintenanceReason || null

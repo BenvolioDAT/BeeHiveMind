@@ -931,6 +931,7 @@ function queueRemoteVeinseekerNeeds(C, roomName) {
       diag.decisions.push({ sourceId: need.sourceId, targetRoom: need.targetRoom, action: 'skip', reason: 'source-no-longer-open' });
       continue;
     }
+    var desiredRemotePlan = spawnLogic.getBestBodyPlanForRoomCapacity('Veinseeker', Game.rooms[roomName], { mode: 'remote' });
     var ok = enqueue(roomName, 'Veinseeker', {
       task: 'veinseeker',
       mode: 'remote',
@@ -938,11 +939,27 @@ function queueRemoteVeinseekerNeeds(C, roomName) {
       sourceId: pick.sourceId,
       targetRoom: pick.targetRoom,
       roomName: pick.targetRoom,
+      pathCost: pick.pathCost,
+      routeDistance: pick.routeDistance,
+      netIncome: pick.netIncome,
+      spawnUsage: pick.spawnUsage,
+      activationReason: pick.activationReason,
+      desiredBodyCost: desiredRemotePlan && desiredRemotePlan.cost,
+      desiredBodySignature: desiredRemotePlan && desiredRemotePlan.signature,
+      desiredBodySummary: desiredRemotePlan && desiredRemotePlan.summary,
       priority: ROLE_PRIORITY.Veinseeker || 70
     }, C);
     if (ok) {
       diag.enqueued++;
-      diag.decisions.push({ sourceId: pick.sourceId, targetRoom: pick.targetRoom, action: 'enqueue', reason: 'active-remote-source-open' });
+      diag.decisions.push({
+        sourceId: pick.sourceId,
+        targetRoom: pick.targetRoom,
+        action: 'enqueue',
+        reason: 'active-remote-source-open',
+        netIncome: pick.netIncome,
+        spawnUsage: pick.spawnUsage,
+        desiredBodyCost: desiredRemotePlan && desiredRemotePlan.cost
+      });
       SourceEnergyManager.recordSpawnDecision(roomName, {
         sourceId: pick.sourceId,
         targetRoom: pick.targetRoom,
@@ -950,7 +967,13 @@ function queueRemoteVeinseekerNeeds(C, roomName) {
         action: 'enqueue',
         reason: 'active-remote-source-open',
         pathCost: pick.pathCost,
-        routeDistance: pick.routeDistance
+        routeDistance: pick.routeDistance,
+        netIncome: pick.netIncome,
+        spawnUsage: pick.spawnUsage,
+        activationReason: pick.activationReason,
+        desiredBodyCost: desiredRemotePlan && desiredRemotePlan.cost,
+        desiredBodySignature: desiredRemotePlan && desiredRemotePlan.signature,
+        desiredBodySummary: desiredRemotePlan && desiredRemotePlan.summary
       });
     } else {
       SourceEnergyManager.unreserveSourceForQueue(roomName, pick.sourceId);
@@ -1371,6 +1394,92 @@ function estimateRemoteRoundTripTicks(homeRoom, remoteRoom) {
   return BeeToolbox.estimateRemoteRoundTripTicks(homeRoom, remoteRoom);
 }
 
+function countBodyPart(body, partType) {
+  if (!Array.isArray(body)) return 0;
+  var count = 0;
+  for (var i = 0; i < body.length; i++) {
+    if (body[i] === partType) count++;
+  }
+  return count;
+}
+
+function estimateTruckerCapacityForRoom(roomName) {
+  var plan = spawnLogic.getBestBodyPlanForRoomCapacity('Trucker', Game.rooms[roomName]);
+  var carryParts = plan && plan.body ? countBodyPart(plan.body, CARRY) : 0;
+  return Math.max(50, carryParts * CARRY_CAPACITY || 500);
+}
+
+function getRemoteContainerStatusForSource(sourceId) {
+  var status = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : {};
+  for (var key in status) {
+    if (!Object.prototype.hasOwnProperty.call(status, key)) continue;
+    if (status[key] && status[key].sourceId === sourceId) return status[key];
+  }
+  return null;
+}
+
+function buildRemoteSourceHaulPrediction(roomName) {
+  var records = SourceEnergyManager.getActiveRemoteSourceRecords(roomName) || [];
+  var averageCapacity = estimateTruckerCapacityForRoom(roomName);
+  var minExpected = Math.max(0, TruckerConfig.REMOTE_HAUL_MIN_EXPECTED_ENERGY || TruckerConfig.MIN_HAUL_REQUEST_ENERGY || 300);
+  var arrivalMultiplier = Math.max(0.1, TruckerConfig.REMOTE_HAUL_EXPECTED_ARRIVAL_MULTIPLIER || 1.15);
+  var maxPerSource = Math.max(1, TruckerConfig.MAX_TRUCKERS_PER_REMOTE || 1);
+  var totalPipelineEnergy = 0;
+  var expectedEnergy = 0;
+  var readySources = 0;
+  var urgentSources = 0;
+  var sources = [];
+  for (var i = 0; i < records.length; i++) {
+    var rec = records[i];
+    var ept = rec && rec.economics && typeof rec.economics.energyPerTick === 'number' ? rec.economics.energyPerTick : (rec.energyPerTick || 0);
+    var oneWay = rec && rec.economics && typeof rec.economics.oneWayTicks === 'number' ? rec.economics.oneWayTicks : (rec.pathCost || ((rec.routeDistance || 1) * 50));
+    var containerStatus = getRemoteContainerStatusForSource(rec.sourceId);
+    var container = containerStatus || rec.container || {};
+    var amount = Math.max(0, container.amount || 0);
+    var capacity = Math.max(1, container.capacity || 2000);
+    var arrivalTicks = Math.max(1, oneWay * arrivalMultiplier);
+    var projected = Math.min(capacity, amount + (ept * arrivalTicks));
+    var fillPct = capacity > 0 ? projected / capacity : 0;
+    var pipelineEnergy = Math.max(0, ept * oneWay * 2);
+    var desiredForSource = 0;
+    if (projected >= minExpected || fillPct >= 0.65) {
+      desiredForSource = Math.min(maxPerSource, Math.max(1, Math.ceil(pipelineEnergy / averageCapacity)));
+      readySources++;
+      if (fillPct >= 0.8 || projected >= (TruckerConfig.URGENT_HAUL_REQUEST_ENERGY || 1600)) urgentSources++;
+    }
+    totalPipelineEnergy += pipelineEnergy;
+    expectedEnergy += projected;
+    var prediction = {
+      sourceId: rec.sourceId,
+      roomName: rec.roomName,
+      energyPerTick: ept,
+      oneWayTicks: oneWay,
+      arrivalTicks: Math.round(arrivalTicks),
+      currentEnergy: amount,
+      expectedEnergy: Math.round(projected),
+      fillPct: Math.round(fillPct * 1000) / 1000,
+      desiredTruckers: desiredForSource
+    };
+    rec.activeHaulPressure = prediction;
+    sources.push(prediction);
+  }
+  var predicted = readySources > 0 ? Math.max(1, Math.ceil(totalPipelineEnergy / averageCapacity)) : 0;
+  predicted = Math.max(predicted, urgentSources);
+  predicted = Math.min(Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0), predicted);
+  return {
+    enabled: TruckerConfig.REMOTE_HAUL_PREDICTION_ENABLED !== false,
+    activeRemoteSources: records.length,
+    averageTruckerCapacity: averageCapacity,
+    minExpectedEnergy: minExpected,
+    expectedRemoteEnergy: Math.round(expectedEnergy),
+    totalPipelineEnergy: Math.round(totalPipelineEnergy),
+    readySources: readySources,
+    urgentSources: urgentSources,
+    predictedRemoteTruckersNeeded: predicted,
+    sources: sources
+  };
+}
+
 function countHomeTruckersByAssignment(C, roomName) {
   var local = 0;
   var remote = 0;
@@ -1483,6 +1592,12 @@ function computeTruckerQuotaForHome(roomName, C) {
   var remoteDesired = 0;
   if (active > 0) remoteDesired = Math.max(1, remoteByEnergy + remoteByRooms + remoteByUrgency);
   remoteDesired = Math.min(remoteDesired, Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0));
+  var requestDrivenRemoteDesired = remoteDesired;
+  var prediction = buildRemoteSourceHaulPrediction(roomName);
+  if (prediction.enabled) {
+    remoteDesired = Math.max(remoteDesired, prediction.predictedRemoteTruckersNeeded || 0);
+    remoteDesired = Math.min(remoteDesired, Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0));
+  }
 
   var finalTruckerQuota = localDesiredTruckers + remoteDesired;
   if (maxTotalTruckers > 0) finalTruckerQuota = Math.min(finalTruckerQuota, maxTotalTruckers);
@@ -1495,6 +1610,9 @@ function computeTruckerQuotaForHome(roomName, C) {
     activeRemoteRooms: activeRemoteRooms,
     localDesiredTruckers: localDesiredTruckers,
     remoteDesiredTruckers: remoteDesired,
+    requestDrivenRemoteTruckers: requestDrivenRemoteDesired,
+    predictedRemoteTruckersNeeded: prediction.predictedRemoteTruckersNeeded || 0,
+    remoteSourcePrediction: prediction,
     desiredTruckers: remoteDesired,
     finalTruckerQuota: finalTruckerQuota,
     skipped: {
@@ -1882,6 +2000,9 @@ function fillQueueForRoom(C, room) {
     localTruckerQuota: localTruckerBaseQuota,
     localDesiredTruckers: truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota,
     remoteDesiredTruckers: remoteTruckerQuota,
+    requestDrivenRemoteTruckers: truckerQuotaMeta.requestDrivenRemoteTruckers || 0,
+    predictedRemoteTruckersNeeded: truckerQuotaMeta.predictedRemoteTruckersNeeded || 0,
+    remoteSourcePrediction: truckerQuotaMeta.remoteSourcePrediction || null,
     finalTruckerQuota: truckerQuotaMeta.finalTruckerQuota || (quotas.Trucker || 0),
     maxTotalTruckers: maxTotalTruckers,
     liveTruckers: liveTruckers,
@@ -1900,8 +2021,13 @@ function fillQueueForRoom(C, room) {
     urgentRequests: truckerQuotaMeta.urgentRequests,
     remoteEnergyWaiting: truckerQuotaMeta.remoteEnergyWaiting || 0,
     activeRemoteRooms: truckerQuotaMeta.activeRemoteRooms || 0,
+    activeRemoteSources: truckerQuotaMeta.remoteSourcePrediction ? truckerQuotaMeta.remoteSourcePrediction.activeRemoteSources : 0,
+    expectedRemoteEnergy: truckerQuotaMeta.remoteSourcePrediction ? truckerQuotaMeta.remoteSourcePrediction.expectedRemoteEnergy : 0,
     localDesiredTruckers: truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota,
     remoteDesiredTruckers: truckerQuotaMeta.remoteDesiredTruckers || 0,
+    requestDrivenRemoteTruckers: truckerQuotaMeta.requestDrivenRemoteTruckers || 0,
+    predictedRemoteTruckersNeeded: truckerQuotaMeta.predictedRemoteTruckersNeeded || 0,
+    remoteSourcePrediction: truckerQuotaMeta.remoteSourcePrediction || null,
     finalTruckerQuota: truckerQuotaMeta.finalTruckerQuota || (quotas.Trucker || 0),
     desiredTruckers: truckerQuotaMeta.desiredTruckers,
     liveTruckers: liveTruckers,
@@ -1913,7 +2039,7 @@ function fillQueueForRoom(C, room) {
     remoteCapableTruckers: assignmentCounts.remoteCapableTruckers,
     effectiveActiveTruckers: effectiveActiveTruckers,
     skipped: truckerQuotaMeta.skipped || {},
-    reasons: (truckerQuotaMeta.remoteDesiredTruckers || 0) > 0 ? "workload-based remote demand" : "no active remote haul workload"
+    reasons: (truckerQuotaMeta.remoteDesiredTruckers || 0) > 0 ? "workload-based or predicted remote demand" : "no active remote haul workload"
   };
 
   pruneOverfilledQueue(roomName, quotas, C);

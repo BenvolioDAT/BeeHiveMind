@@ -30,6 +30,7 @@ var Handoff = require('role.EnergyHandoff');
 var CoreSelectors = require('core.selectors');
 var SourceEconomy = require('Source.Economy');
 var BeeToolbox = require('BeeToolbox');
+var SourceEnergyManager = require('SourceEnergy.Manager');
 
 function ensureIdentity(creep) {
   // Normalize old or manually spawned haulers into the Trucker contract before
@@ -377,16 +378,45 @@ function clearRemoteRequestAssignment(creep) {
   // location fields from creep memory so the dispatcher can select fresh work.
   var requests = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
   var id = creep.memory.requestId;
-  if (id && requests[id] && requests[id].assignedTo === creep.name) {
-    requests[id].assignedTo = null;
-    requests[id].assignedUntil = 0;
+  if (id && requests[id]) {
+    if (requests[id].assignedTo === creep.name) {
+      requests[id].assignedTo = null;
+      requests[id].assignedUntil = 0;
+    }
+    if (requests[id].assignedTruckers && requests[id].assignedTruckers[creep.name]) {
+      delete requests[id].assignedTruckers[creep.name];
+    }
   }
   delete creep.memory.requestId; delete creep.memory.containerId; delete creep.memory.sourceId;
   delete creep.memory.targetType; delete creep.memory.targetId; delete creep.memory.resourceId;
   delete creep.memory.requestRoom; delete creep.memory.requestX; delete creep.memory.requestY; delete creep.memory.targetRoom;
 }
 
-function isActiveRemoteRequest(req, homeName) { /* unchanged */
+function recordRemoteHaulRun(creep, action, extra) {
+  if (!creep || !creep.memory) return;
+  var home = creep.memory.home || (creep.room && creep.room.name);
+  if (!home) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[home]) Memory.rooms[home] = {};
+  var entry = {
+    tick: Game.time,
+    creepName: creep.name,
+    action: action || 'unknown',
+    requestId: creep.memory.requestId || null,
+    sourceId: creep.memory.sourceId || null,
+    targetType: creep.memory.targetType || null,
+    targetRoom: creep.memory.requestRoom || creep.memory.targetRoom || null,
+    carried: creep.store ? (creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0) : 0
+  };
+  if (extra) {
+    for (var key in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, key)) entry[key] = extra[key];
+    }
+  }
+  Memory.rooms[home].lastTruckerRemoteRun = entry;
+}
+
+function isActiveRemoteRequest(req, homeName) {
   // Remote requests are valid only while fresh, large enough, same-home, and
   // not under maintenance or unsafe. The dispatcher and runner intentionally
   // share this predicate so claimed jobs can be dropped when Memory changes.
@@ -397,9 +427,42 @@ function isActiveRemoteRequest(req, homeName) { /* unchanged */
   if ((Game.time - (req.updated || 0)) > CFG.REQUEST_STALE_TICKS) return false;
   var remoteRoom = req.roomName || req.remoteRoom;
   if (remoteRoom && BeeToolbox.isRemoteRoomUnsafe(remoteRoom)) return false;
+  if (req.sourceId && SourceEnergyManager && typeof SourceEnergyManager.getSourceRecord === 'function') {
+    var rec = SourceEnergyManager.getSourceRecord(homeName, req.sourceId);
+    if (rec && rec.mode === 'remote' && !rec.active) return false;
+  }
   return true;
 }
-function isRemoteRequestReservedByOther(req, creepName) { if (!req) return false; return !!(req.assignedTo && req.assignedTo !== creepName && (req.assignedUntil || 0) > Game.time); }
+function getRemoteRequestMaxAssignments(req) {
+  if (!req) return 1;
+  if ((req.targetType || 'container') !== 'container') return 1;
+  return Math.max(1, CFG.REMOTE_HAUL_MAX_ASSIGNMENTS_PER_REQUEST || 1);
+}
+function countLiveRemoteRequestAssignments(req) {
+  if (!req) return 0;
+  if (!req.assignedTruckers) req.assignedTruckers = {};
+  var count = 0;
+  for (var name in req.assignedTruckers) {
+    if (!Object.prototype.hasOwnProperty.call(req.assignedTruckers, name)) continue;
+    if (!req.assignedTruckers[name] || req.assignedTruckers[name] <= Game.time || !Game.creeps[name]) {
+      delete req.assignedTruckers[name];
+      continue;
+    }
+    count++;
+  }
+  if (req.assignedTo && req.assignedUntil && req.assignedUntil > Game.time && Game.creeps[req.assignedTo] && !req.assignedTruckers[req.assignedTo]) {
+    req.assignedTruckers[req.assignedTo] = req.assignedUntil;
+    count++;
+  }
+  return count;
+}
+function isRemoteRequestReservedByOther(req, creepName) {
+  if (!req) return false;
+  var count = countLiveRemoteRequestAssignments(req);
+  if (req.assignedTruckers && req.assignedTruckers[creepName] && req.assignedTruckers[creepName] > Game.time) return false;
+  if (req.assignedTo && req.assignedTo === creepName && (req.assignedUntil || 0) > Game.time) return false;
+  return count >= getRemoteRequestMaxAssignments(req);
+}
 
 function hasUrgentLocalDeliveryTarget(creep) {
   var room = creep.room;
@@ -430,7 +493,7 @@ function isNonUrgentStorageLikeTarget(target) {
     target.structureType === STRUCTURE_LINK;
 }
 
-function claimRemoteRequestForJob(creep, job) { /* unchanged */
+function claimRemoteRequestForJob(creep, job) {
   // Convert a dispatcher job into a live Memory.__BHM.remoteHaulRequests claim
   // plus creep memory route fields used by runRemote().
   var reqs = (Memory.__BHM && Memory.__BHM.remoteHaulRequests) || {};
@@ -438,6 +501,8 @@ function claimRemoteRequestForJob(creep, job) { /* unchanged */
   if (!req) return null;
   if (isRemoteRequestReservedByOther(req, creep.name)) return null;
   req.assignedTo = creep.name; req.assignedUntil = Game.time + CFG.RESERVATION_TTL;
+  if (!req.assignedTruckers) req.assignedTruckers = {};
+  req.assignedTruckers[creep.name] = Game.time + CFG.RESERVATION_TTL;
   creep.memory.requestId = job.requestId;
   creep.memory.targetType = req.targetType || job.targetType || 'container';
   creep.memory.targetId = req.targetId || job.targetId || req.resourceId || job.resourceId || req.containerId || job.containerId || null;
@@ -447,6 +512,11 @@ function claimRemoteRequestForJob(creep, job) { /* unchanged */
   creep.memory.requestRoom = req.roomName || req.remoteRoom || job.roomName || null;
   creep.memory.requestX = (typeof req.x === 'number') ? req.x : job.x; creep.memory.requestY = (typeof req.y === 'number') ? req.y : job.y;
   creep.memory.targetRoom = creep.memory.requestRoom;
+  recordRemoteHaulRun(creep, 'claim-request', {
+    expectedEnergy: job.expectedEnergy || req.amount || 0,
+    arrivalTicks: job.arrivalTicks || 0,
+    dispatchScore: job.score || 0
+  });
   return req;
 }
 
@@ -459,7 +529,10 @@ function drawHaulIntent(creep, target, color) {
       width: 1.2,
       lineStyle: 'dashed'
     });
-  } catch (err) {}
+  } catch (err) {
+    if (!Memory.__BHM) Memory.__BHM = {};
+    Memory.__BHM.lastTruckerDrawError = { tick: Game.time, creepName: creep.name, reason: err && err.message ? err.message : String(err) };
+  }
 }
 
 function getLargestEnergyDropNear(pos, range, minAmount) {
@@ -723,9 +796,16 @@ function runRemote(creep, job) {
   // Remote pickup mode claims a Veinseeker-produced haul request, services the
   // requested target type, and leaves return/delivery to REMOTE_RETURN.
   var req = claimRemoteRequestForJob(creep, job);
-  if (!req) { clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; return; }
+  if (!req) {
+    recordRemoteHaulRun(creep, 'claim-missing', { jobId: job && job.id });
+    clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; return;
+  }
   if (!isActiveRemoteRequest(req, creep.memory.home)) {
-    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) { creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home }; return; }
+    if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      recordRemoteHaulRun(creep, 'inactive-request-return');
+      creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home }; return;
+    }
+    recordRemoteHaulRun(creep, 'inactive-request-clear');
     clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; return;
   }
   var targetType = creep.memory.targetType || req.targetType || job.targetType || 'container';
@@ -736,6 +816,7 @@ function runRemote(creep, job) {
   if (source) drawHaulIntent(creep, source, '#4deeea');
   if (directTarget && targetType !== 'container') {
     var directResult = collectEnergyTarget(creep, directTarget);
+    recordRemoteHaulRun(creep, 'direct-pickup', { result: directResult, targetId: directTarget.id });
     if (directResult === ERR_NOT_ENOUGH_RESOURCES && creep.store.getUsedCapacity(RESOURCE_ENERGY) <= 0) {
       clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob;
     }
@@ -744,31 +825,41 @@ function runRemote(creep, job) {
   if (!container) {
     var loose = findRemoteLooseEnergy(creep, req, source, null);
     if (loose) {
-      collectEnergyTarget(creep, loose);
+      var looseResult = collectEnergyTarget(creep, loose);
+      recordRemoteHaulRun(creep, 'fallback-loose', { result: looseResult, targetId: loose.id, amount: loose.amount || 0 });
       return;
     }
     var reqRoom = creep.memory.requestRoom, reqX = creep.memory.requestX, reqY = creep.memory.requestY;
     if (reqRoom && typeof reqX === 'number' && typeof reqY === 'number') {
-      if (creep.room.name !== reqRoom) creep.travelTo(new RoomPosition(reqX, reqY, reqRoom), { range: 1, reusePath: CFG.PATH_REUSE });
-      else { clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob; }
+      if (creep.room.name !== reqRoom) {
+        recordRemoteHaulRun(creep, 'travel-request-pos');
+        creep.travelTo(new RoomPosition(reqX, reqY, reqRoom), { range: 1, reusePath: CFG.PATH_REUSE });
+      } else {
+        recordRemoteHaulRun(creep, 'missing-container-clear');
+        clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob;
+      }
     }
     return;
   }
-  if (creep.pos.roomName !== container.pos.roomName) { creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE }); return; }
+  if (creep.pos.roomName !== container.pos.roomName) { recordRemoteHaulRun(creep, 'travel-container-room'); creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE }); return; }
   var looseEnergy = findRemoteLooseEnergy(creep, req, source, container);
   if (looseEnergy) {
-    collectEnergyTarget(creep, looseEnergy);
+    var nearLooseResult = collectEnergyTarget(creep, looseEnergy);
+    recordRemoteHaulRun(creep, 'near-container-loose', { result: nearLooseResult, targetId: looseEnergy.id, amount: looseEnergy.amount || 0 });
     return;
   }
   var wr = creep.withdraw(container, RESOURCE_ENERGY);
-  if (wr === ERR_NOT_IN_RANGE) creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE });
+  if (wr === ERR_NOT_IN_RANGE) { recordRemoteHaulRun(creep, 'withdraw-move', { containerId: container.id, amount: container.store[RESOURCE_ENERGY] || 0 }); creep.travelTo(container, { range: 1, reusePath: CFG.PATH_REUSE }); }
   if (wr === OK && creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
+    recordRemoteHaulRun(creep, 'withdraw-full', { containerId: container.id });
     creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home };
   }
   if (wr === ERR_NOT_ENOUGH_RESOURCES) {
     if (creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) {
+      recordRemoteHaulRun(creep, 'empty-container-return', { containerId: container.id });
       creep.memory.dispatchJob = { id: 'return:' + creep.name, type: 'REMOTE_RETURN', homeRoom: creep.memory.home };
     } else {
+      recordRemoteHaulRun(creep, 'empty-container-clear', { containerId: container.id });
       clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, job.id); delete creep.memory.dispatchJob;
     }
   }
@@ -801,18 +892,19 @@ function run(creep) {
   if (active.type === 'REMOTE_PICKUP') return runRemote(creep, active);
 
   if (active.type === 'REMOTE_RETURN') {
-    if (creep.room.name !== creep.memory.home) { creep.travelTo(new RoomPosition(25, 25, creep.memory.home), { range: 20, reusePath: CFG.PATH_REUSE }); return; }
+    if (creep.room.name !== creep.memory.home) { recordRemoteHaulRun(creep, 'return-travel-home'); creep.travelTo(new RoomPosition(25, 25, creep.memory.home), { range: 20, reusePath: CFG.PATH_REUSE }); return; }
     var sink = findLocalDeliverTarget(creep, diag) || creep.room.storage || creep.room.terminal;
     if (!sink) {
+      recordRemoteHaulRun(creep, 'return-no-sink');
       if (tryTruckerEnergyHandoff(creep, diag)) return;
       return;
     }
     recordExistingDeliveryTarget(creep, diag, sink);
     var reserveAmt = reserveFill(creep, sink, creep.store.getUsedCapacity(RESOURCE_ENERGY), RESOURCE_ENERGY);
-    if (reserveAmt <= 0) { clearDeliveryReservation(creep, sink); return; }
+    if (reserveAmt <= 0) { recordRemoteHaulRun(creep, 'return-no-capacity', { sinkId: sink.id }); clearDeliveryReservation(creep, sink); return; }
     var rc = creep.transfer(sink, RESOURCE_ENERGY);
-    if (rc === ERR_NOT_IN_RANGE) creep.travelTo(sink, { range: 1, reusePath: CFG.PATH_REUSE });
-    if (rc === OK || rc === ERR_FULL) clearDeliveryReservation(creep, sink);
+    if (rc === ERR_NOT_IN_RANGE) { recordRemoteHaulRun(creep, 'return-move-sink', { sinkId: sink.id }); creep.travelTo(sink, { range: 1, reusePath: CFG.PATH_REUSE }); }
+    if (rc === OK || rc === ERR_FULL) { recordRemoteHaulRun(creep, 'return-transfer', { sinkId: sink.id, result: rc }); clearDeliveryReservation(creep, sink); }
     if (rc === OK && creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) { clearRemoteRequestAssignment(creep); Dispatcher.releaseJob(creep, active.id); delete creep.memory.dispatchJob; }
     return;
   }

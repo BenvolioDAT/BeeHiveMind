@@ -46,3 +46,12 @@ and combat creeps:
 Combat roles use the same shared module for threat filtering and combat memory.
 Archers now keep range 3, flee if too close, and prefer hostile creeps with real
 combat parts; melee and medic roles use the same target/movement rule set.
+
+## Remote Source Roles
+
+Remote mining is source-centric:
+
+- `SourceEnergy.Manager.js` decides whether each remote source is active using safety, intel freshness, path/container state, estimated net income, and spawn budget.
+- Remote `Veinseeker` creeps are spawned only for active source records and keep validating that source assignment while they travel, build/repair the source container, harvest, and publish haul requests.
+- `Trucker` quota now combines live haul requests with predicted energy from active source records, so a trucker can be spawned before the remote container is already full.
+- `role.Trucker.Dispatcher.js` skips haul requests from inactive sources and chooses remote jobs by expected pickup amount at arrival, distance, urgency, and TTL margin.
