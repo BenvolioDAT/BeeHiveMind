@@ -7,6 +7,8 @@ var CFG = require('role.Veinseeker.Config');
 var BeeToolbox = require('BeeToolbox');
 var SourceWorkerManager = require('SourceWorker.Manager');
 
+var HOME_SURPLUS_IDLE_RETIRE_TICKS = 50;
+
 function debugOptions() {
   return {
     enabled: CFG.DEBUG_DRAW,
@@ -65,9 +67,15 @@ function clearCurrentSourceAssignment(creep) {
   creep.memory.waitingForSeat = false;
 }
 
+function clearHomeUnassignedTimer(creep) {
+  if (!creep || !creep.memory) return;
+  delete creep.memory.homeUnassignedSince;
+}
+
 function pinAssignedSource(creep, sourceId) {
   creep.memory.assignedSource = sourceId;
   creep.memory.sourceId = sourceId;
+  clearHomeUnassignedTimer(creep);
   return sourceId;
 }
 
@@ -437,6 +445,142 @@ function writeVeinseekerSlotDiag(roomName, sourceId, rec) {
   };
 }
 
+function getCoverageSummaryFromReport(report) {
+  var summary = {
+    allCovered: false,
+    sources: [],
+    uncoveredSources: []
+  };
+  var sources = report && report.diag && report.diag.sources ? report.diag.sources : {};
+  var hasMineableSource = false;
+
+  for (var sourceId in sources) {
+    if (!Object.prototype.hasOwnProperty.call(sources, sourceId)) continue;
+    var rec = sources[sourceId];
+    if (!rec) continue;
+    var mineable = (rec.seats || 0) > 0 && (rec.desiredWork || 0) > 0;
+    var covered = !mineable || (rec.liveWork || 0) > 0;
+    if (mineable) hasMineableSource = true;
+    if (mineable && !covered) summary.uncoveredSources.push(sourceId);
+    summary.sources.push({
+      sourceId: sourceId,
+      rawSeats: rec.rawSeats || 0,
+      seats: rec.seats || 0,
+      live: rec.live || 0,
+      queued: rec.queued || 0,
+      liveWork: rec.liveWork || 0,
+      queuedWork: rec.queuedWork || 0,
+      desiredSourceWork: rec.desiredSourceWork || 0,
+      desiredWork: rec.desiredWork || 0,
+      freeWork: rec.freeWork || 0,
+      plannedWorkPerMiner: rec.plannedWorkPerMiner || 0,
+      covered: covered,
+      reason: rec.reason || null
+    });
+  }
+
+  summary.allCovered = hasMineableSource && summary.uncoveredSources.length === 0;
+  return summary;
+}
+
+function writeHomeVeinseekerSurplusAudit(room, coverageSummary) {
+  if (!room || !room.name) return null;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+  var existing = Memory.rooms[room.name].lastVeinseekerSurplusAudit;
+  if (existing && existing.tick === Game.time) return existing;
+
+  var creeps = [];
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var other = Game.creeps[name];
+    if (!other || !other.my || !other.memory) continue;
+    if (other.memory.mode === 'remote') continue;
+    if (!matchesRole(other, 'Veinseeker', 'veinseeker')) continue;
+    if (getCreepHomeRoomName(other) !== room.name) continue;
+
+    var assignedSource = getAssignedSourceId(other);
+    var carried = other.store ? (other.store.getUsedCapacity(RESOURCE_ENERGY) || 0) : 0;
+    var since = other.memory.homeUnassignedSince || null;
+    var idleTicks = since ? Math.max(0, Game.time - since) : 0;
+    var surplus = !assignedSource && carried <= 0 && !!(coverageSummary && coverageSummary.allCovered);
+    creeps.push({
+      name: other.name,
+      assignedSource: assignedSource,
+      activeWork: countCreepWorkParts(other),
+      state: other.memory.state || null,
+      carried: carried,
+      homeUnassignedSince: since,
+      homeUnassignedTicks: idleTicks,
+      surplus: surplus,
+      wouldRetire: surplus && idleTicks >= HOME_SURPLUS_IDLE_RETIRE_TICKS
+    });
+  }
+
+  Memory.rooms[room.name].lastVeinseekerSurplusAudit = {
+    tick: Game.time,
+    retireAfterTicks: HOME_SURPLUS_IDLE_RETIRE_TICKS,
+    allSourcesCovered: !!(coverageSummary && coverageSummary.allCovered),
+    uncoveredSources: coverageSummary ? coverageSummary.uncoveredSources : [],
+    sources: coverageSummary ? coverageSummary.sources : [],
+    creeps: creeps
+  };
+  return Memory.rooms[room.name].lastVeinseekerSurplusAudit;
+}
+
+function writeHomeVeinseekerSurplusRetire(creep, coverageSummary, idleTicks) {
+  if (!creep || !creep.room || !creep.room.name) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[creep.room.name]) Memory.rooms[creep.room.name] = {};
+  Memory.rooms[creep.room.name].lastVeinseekerSurplusRetire = {
+    tick: Game.time,
+    creepName: creep.name,
+    homeUnassignedSince: creep.memory.homeUnassignedSince || null,
+    homeUnassignedTicks: idleTicks,
+    activeWork: countCreepWorkParts(creep),
+    carried: creep.store ? (creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0) : 0,
+    state: creep.memory.state || null,
+    sourceCoverage: coverageSummary
+  };
+}
+
+function handleUnassignedHomeVeinseeker(creep) {
+  if (!creep || !creep.memory || creep.memory.mode === 'remote') return false;
+
+  var carried = creep.store ? (creep.store.getUsedCapacity(RESOURCE_ENERGY) || 0) : 0;
+  if (carried > 0) {
+    clearHomeUnassignedTimer(creep);
+    runOffloadPhase(creep);
+    return true;
+  }
+
+  var report = SourceWorkerManager.buildHomeCoverageReport(creep.room, { writeDiag: false });
+  var coverage = getCoverageSummaryFromReport(report);
+  writeHomeVeinseekerSurplusAudit(creep.room, coverage);
+
+  if (!coverage.allCovered) {
+    clearHomeUnassignedTimer(creep);
+    debugSay(creep, 'IDLE');
+    return true;
+  }
+
+  if (!creep.memory.homeUnassignedSince) {
+    creep.memory.homeUnassignedSince = Game.time;
+  }
+
+  var idleTicks = Game.time - creep.memory.homeUnassignedSince;
+  if (idleTicks >= HOME_SURPLUS_IDLE_RETIRE_TICKS) {
+    writeHomeVeinseekerSurplusRetire(creep, coverage, idleTicks);
+    debugSay(creep, 'YIELD');
+    creep.suicide();
+    return true;
+  }
+
+  debugSay(creep, 'IDLE');
+  debugRing(creep.room, creep.pos, CFG.DRAW.IDLE, 'IDLE');
+  return true;
+}
+
 function assignSource(creep) {
   if (!creep || creep.spawning) return null;
   if (creep.memory._reassignCooldown && Game.time < creep.memory._reassignCooldown) {
@@ -685,7 +829,7 @@ function harvestWhileWaiting(creep, source, seatPos) {
 function runHarvestPhase(creep) {
   var sourceId = assignSource(creep);
   if (!sourceId) {
-    debugSay(creep, 'IDLE');
+    handleUnassignedHomeVeinseeker(creep);
     return;
   }
 
@@ -694,6 +838,7 @@ function runHarvestPhase(creep) {
     clearCurrentSourceAssignment(creep);
     return;
   }
+  clearHomeUnassignedTimer(creep);
 
   if (handleRetirementHandoff(creep, source)) return;
   if (resolveSourceConflict(creep, source)) return;
