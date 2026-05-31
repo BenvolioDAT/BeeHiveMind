@@ -1,68 +1,23 @@
 'use strict';
 
-// -----------------------------------------------------------------------------
-// SourceEnergy.Manager.js - remote mining planning and diagnostics authority
-// Owns:
-// * Memory.__BHM.sourceEnergy.homes[homeRoom], including source records,
-//   desiredVeinseeker, liveVeinseeker, queuedVeinseeker, missing/stale/unsafe source lists, and
-//   queue reservations.
-// * Memory.rooms[homeRoom].lastSourceEnergyPlan and
-//   Memory.rooms[homeRoom].lastRemoteSourceEconomics for human-readable audits.
-// Reads:
-// * Memory.rooms[remoteRoom].sources/intel/scout data written by Scouts, Veinseeker,
-//   BeeToolbox, and maintenance.
-// * Memory.__BHM.scoutIntel.homes from role.Scout.Logic.js.
-// * Memory.rooms[homeRoom].spawnQueue to count queued Veinseeker reservations.
-// Usually called by:
-// * BeeSpawnManager.prepareRoomQueues(), before it computes Veinseeker quota and
-//   enqueues role jobs.
-// Used by:
-// * role.Veinseeker.Remote.js to claim/release live source ownership.
-// * BeeSpawnManager.js to reserve/unreserve a source for a queued Veinseeker.
-// Do not casually change:
-// * Reservation TTLs, source status names, or the distinction between
-//   diagnostic reports and behavior-changing queue/assignment state.
-// -----------------------------------------------------------------------------
+// SourceEnergy.Manager is the source-first planner for both home and remote
+// mining. It owns the per-home source plan that BeeSpawnManager turns into
+// source-bound Veinseeker queue items.
 
 var VeinseekerConfig = require('role.Veinseeker.Config');
 var RoadPlanner = require('Planner.Road');
 var BeeToolbox = require('BeeToolbox');
-var BodyUtils = require('core.body');
-var BodyConfig = require('Spawn.BodyConfig');
 var MemoryUtils = require('core.memory');
-var CoreConfig = require('core.config');
-var CpuBudget = require('core.cpuBudget');
+var SourceWorkerManager = require('SourceWorker.Manager');
 
-var RESERVE_TTL = 100;
-// Economics diagnostics are intentionally estimates. They explain "why this
-// source looks good/bad" without changing source selection, spawn queues, or
-// remote hauling behavior.
-var REMOTE_SOURCE_ENERGY_REGEN_TICKS = 300;
-var DEFAULT_NEUTRAL_SOURCE_ENERGY_CAPACITY = 1500;
-var DEFAULT_RESERVED_SOURCE_ENERGY_CAPACITY = 3000;
-var DEFAULT_KEEPER_SOURCE_ENERGY_CAPACITY = 4000;
-var DEFAULT_CONTAINER_REPAIR_ENERGY_PER_TICK = 0.10;
-var ROLE_CONFIGS = BodyConfig && BodyConfig.ROLE_CONFIGS ? BodyConfig.ROLE_CONFIGS : {};
-
-function getSourceEnergySettings() {
-  var settings = CoreConfig && CoreConfig.settings;
-  return settings && settings.sourceEnergy ? settings.sourceEnergy : {};
-}
-
-function getRemoteEconomicsConfig() {
-  var cfg = getSourceEnergySettings();
-  return {
-    enabled: cfg.remoteEconomicsEnabled !== false,
-    interval: Math.max(1, Number(cfg.remoteEconomicsInterval) || 250),
-    pathCacheTtl: Math.max(1, Number(cfg.remoteEconomicsPathCacheTtl) || 1500),
-    minBucket: Math.max(0, Number(cfg.remoteEconomicsMinBucket) || 0),
-    maxCpuUsed: Math.max(0, Number(cfg.remoteEconomicsMaxCpuUsed) || 0)
-  };
-}
+var RESERVE_TTL = 75;
+var REMOTE_INTEL_TTL = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 500;
+var REMOTE_RADIUS = (VeinseekerConfig && VeinseekerConfig.REMOTE_RADIUS) || 3;
+var MAX_PF_OPS = (VeinseekerConfig && VeinseekerConfig.MAX_PF_OPS) || 1000;
+var PLAIN_COST = (VeinseekerConfig && VeinseekerConfig.PLAIN_COST) || 2;
+var SWAMP_COST = (VeinseekerConfig && VeinseekerConfig.SWAMP_COST) || 10;
 
 function ensureMemory() {
-  // Root Memory bucket for remote mining planning. This is not creep memory;
-  // it is the home-room plan BeeSpawnManager reads before queuing Veinseeker creeps.
   var root = MemoryUtils.ensureBhmRoot('sourceEnergy', function () {
     return { tick: Game.time, homes: {} };
   });
@@ -71,825 +26,690 @@ function ensureMemory() {
   return root;
 }
 
+function createHomePlan(homeRoom) {
+  return {
+    tick: Game.time,
+    homeRoom: homeRoom,
+    sources: {},
+    sourceOrder: [],
+    activeSourceIds: [],
+    inactiveSourceIds: [],
+    skippedSources: [],
+    spawnDecisions: [],
+    candidateRemoteRooms: [],
+    acceptedRemoteRooms: [],
+    rejectedRemoteRooms: [],
+    activeSources: 0,
+    inactiveSources: 0,
+    homeSources: 0,
+    remoteSources: 0,
+    desiredHomeVeinseekers: 0,
+    desiredRemoteVeinseekers: 0,
+    liveAssignedHomeVeinseekers: 0,
+    liveAssignedRemoteVeinseekers: 0,
+    liveIdleRemoteVeinseekers: 0,
+    queuedHomeVeinseekers: 0,
+    queuedRemoteVeinseekers: 0,
+    lastAudit: 0
+  };
+}
+
 function ensureHomeMemory(homeRoom) {
-  // One home owns one remote mining plan. Source records here are the source
-  // of truth for desiredVeinseeker, live/queued counts, and queue reservations.
   var root = ensureMemory();
-  if (!root.homes[homeRoom]) {
-    root.homes[homeRoom] = {
-      sources: {}, desiredVeinseeker: 0, liveVeinseeker: 0, queuedVeinseeker: 0,
-      missingSources: [], unsafeSources: [], staleSources: [], duplicateSources: [], lastAudit: Game.time
-    };
-  }
-  var rec = root.homes[homeRoom];
-  if (!rec.sources) rec.sources = {};
-  if (!rec.missingSources) rec.missingSources = [];
-  if (!rec.unsafeSources) rec.unsafeSources = [];
-  if (!rec.staleSources) rec.staleSources = [];
-  if (!rec.duplicateSources) rec.duplicateSources = [];
-  return rec;
+  if (!root.homes[homeRoom]) root.homes[homeRoom] = createHomePlan(homeRoom);
+  var plan = root.homes[homeRoom];
+  if (!plan.sources) plan.sources = {};
+  if (!plan.sourceOrder) plan.sourceOrder = Object.keys(plan.sources);
+  if (!plan.activeSourceIds) plan.activeSourceIds = [];
+  if (!plan.inactiveSourceIds) plan.inactiveSourceIds = [];
+  if (!plan.skippedSources) plan.skippedSources = [];
+  if (!plan.spawnDecisions) plan.spawnDecisions = [];
+  return plan;
 }
 
 function getRoomMemoryBucket(roomName) {
   return BeeToolbox.getRoomMemoryBucket(roomName);
 }
 
-function refreshVisibleRemoteSafety(room) {
-  return BeeToolbox.refreshVisibleRemoteSafety(room);
+function getMyUsername() {
+  return BeeToolbox.myUsername();
 }
 
-function isRemoteUnsafe(remoteName) {
-  // Candidate filtering handles intel owner/reservation gates explicitly.
-  // Keep this wrapper aligned with prior behavior by ignoring intel ownership
-  // inside the shared helper used for generic room-level danger checks.
-  return BeeToolbox.isRemoteRoomUnsafe(remoteName, {
+function getRemoteIntelTick(roomName) {
+  return BeeToolbox.getBestRemoteIntelTick(roomName);
+}
+
+function isRemoteUnsafe(roomName) {
+  return BeeToolbox.isRemoteRoomUnsafe(roomName, {
     invaderLockTtl: (VeinseekerConfig && VeinseekerConfig.INVADER_LOCK_MEMO_TTL) || 1500,
     ignoreIntelOwnership: true
   });
 }
 
-function getMyUsername() {
-  return BeeToolbox.myUsername();
-}
-
-function getRemoteIntelTick(remoteName) {
-  return BeeToolbox.getBestRemoteIntelTick(remoteName);
-}
-
-
-
-
-
-function isLocalOwnedRoomForVeinseeker(homeRoom, roomName) {
-  // Prevent Veinseeker from treating the home room or another owned spawn room as a
-  // remote. This guard is shared by discovery, queue pruning, and live Veinseeker
-  // assignment release.
-  if (!roomName) return false;
-  var homeName = null;
-  if (typeof homeRoom === 'string') homeName = homeRoom;
-  else if (homeRoom && homeRoom.name) homeName = homeRoom.name;
-
-  if (homeName && roomName === homeName) return { blocked: true, reason: 'home-room' };
-
-  var room = Game.rooms[roomName];
-  if (room && room.controller && room.controller.my) return { blocked: true, reason: 'local-owned-room' };
-
-  if (room) {
-    var mySpawnsVisible = room.find(FIND_MY_SPAWNS) || [];
-    if (mySpawnsVisible.length > 0) return { blocked: true, reason: 'owned-spawn-room' };
-  }
-
-  for (var spawnName in Game.spawns) {
-    if (!Object.prototype.hasOwnProperty.call(Game.spawns, spawnName)) continue;
-    var spawn = Game.spawns[spawnName];
-    if (!spawn || !spawn.pos) continue;
-    if (spawn.pos.roomName === roomName) return { blocked: true, reason: 'owned-spawn-room' };
-  }
-
-  var myName = getMyUsername();
-  var roomMem = (Memory.rooms && Memory.rooms[roomName]) || {};
-  var intel = roomMem.intel || {};
-  if (intel.owner && myName && intel.owner === myName) return { blocked: true, reason: 'local-owned-room' };
-
-  return { blocked: false, reason: null };
-}
-
-function getRouteDistanceBetweenRooms(homeName, remoteName) {
-  return BeeToolbox.getRouteDistanceBetweenRooms(homeName, remoteName);
-}
-
-// --- Diagnostics formatting helpers ----------------------------------------
-// Memory reports are easier to read when numbers are rounded and Infinity is
-// written as null. Screeps Memory serializes to JSON, so null is clearer for
-// "unknown/unavailable" than a special JavaScript value.
-function roundNumber(value, places) {
-  if (typeof value !== 'number' || !isFinite(value)) return null;
-  var factor = Math.pow(10, places || 2);
-  return Math.round(value * factor) / factor;
+function refreshVisibleRemoteSafety(room) {
+  return BeeToolbox.refreshVisibleRemoteSafety(room);
 }
 
 function finiteOrNull(value) {
   return (typeof value === 'number' && isFinite(value)) ? value : null;
 }
 
-function isFinitePositiveDistance(value) {
-  return typeof value === 'number' && isFinite(value) && value > 0;
+function isFiniteDistance(value) {
+  return typeof value === 'number' && isFinite(value);
 }
 
-// --- Diagnostics body helpers ------------------------------------------------
-// These helpers read the existing body config and summarize what the room could
-// spawn. They do not ask BeeSpawnManager to enqueue anything.
-function calculateBodyCost(body) {
-  return BodyUtils.calculateBodyCost(body);
+function addUnique(list, seen, value) {
+  if (!value || seen[value]) return;
+  seen[value] = true;
+  list.push(value);
 }
 
-function countBodyParts(body, part) {
-  return BodyUtils.countBodyParts(body, part);
+function getHomeName(homeRoom) {
+  if (!homeRoom) return null;
+  if (typeof homeRoom === 'string') return homeRoom;
+  return homeRoom.name || null;
 }
 
-function cloneBody(body) {
-  return BodyUtils.cloneBody(body);
+function getRouteDistanceBetweenRooms(homeName, remoteName) {
+  return BeeToolbox.getRouteDistanceBetweenRooms(homeName, remoteName);
 }
 
-function chooseDiagnosticBody(roleName, energyCapacity, context) {
-  var entry = ROLE_CONFIGS[roleName];
-  var list = entry;
-  if (entry && !Array.isArray(entry)) {
-    var mode = context && context.mode === 'home' ? 'home' : 'remote';
-    list = entry[mode] || entry.remote || entry.home || [];
-  }
-  if (!list || !list.length) return [];
-  var energy = typeof energyCapacity === 'number' && energyCapacity > 0 ? energyCapacity : 300;
-  // Body lists are ordered largest-to-smallest elsewhere in the codebase, so
-  // the first affordable body matches the spawn system's normal body choice.
-  for (var i = 0; i < list.length; i++) {
-    if (calculateBodyCost(list[i]) <= energy) return cloneBody(list[i]);
-  }
-  // If the room cannot afford even the smallest body, still report the smallest
-  // configured body so the diagnostic shows the intended role shape.
-  return cloneBody(list[list.length - 1]);
-}
-
-function bodyPartSummary(body) {
-  return {
-    work: countBodyParts(body, WORK),
-    carry: countBodyParts(body, CARRY),
-    move: countBodyParts(body, MOVE),
-    claim: countBodyParts(body, CLAIM),
-    total: body ? body.length : 0,
-    cost: calculateBodyCost(body)
-  };
-}
-
-function getHomeEnergyCapacity(homeRoom) {
-  var room = Game.rooms && Game.rooms[homeRoom];
-  if (!room) return 300;
-  if (typeof room.energyCapacityAvailable === 'number' && room.energyCapacityAvailable > 0) return room.energyCapacityAvailable;
-  if (typeof room.energyAvailable === 'number' && room.energyAvailable > 0) return room.energyAvailable;
-  return 300;
-}
-
-// Pick the same practical "home anchor" used by Veinseeker travel: storage first,
-// then spawn, then controller, then room center as a last-resort estimate.
 function getHomeAnchorPos(homeRoom) {
   var room = Game.rooms && Game.rooms[homeRoom];
   if (room) {
     if (room.storage) return room.storage.pos;
     var spawns = room.find(FIND_MY_SPAWNS) || [];
     if (spawns.length) return spawns[0].pos;
-    if (room.controller && room.controller.my) return room.controller.pos;
+    if (room.controller) return room.controller.pos;
   }
   return new RoomPosition(25, 25, homeRoom);
 }
 
-function posSignature(pos) {
+function hasRemoteSpawnCapacity(homeRoom) {
+  var room = Game.rooms && Game.rooms[homeRoom];
+  if (!room) return false;
+  return (room.energyCapacityAvailable || room.energyAvailable || 0) >= 200;
+}
+
+function serializePos(pos) {
   if (!pos) return null;
-  return [pos.roomName, pos.x, pos.y].join(':');
+  return { x: pos.x, y: pos.y, roomName: pos.roomName };
 }
 
-function getSourcePosFromMemory(sourceMem) {
+function makeRoomPosition(posLike, fallbackRoom) {
+  if (!posLike) return null;
+  var roomName = posLike.roomName || fallbackRoom || null;
+  if (!roomName) return null;
+  if (typeof posLike.x !== 'number' || typeof posLike.y !== 'number') return null;
+  return new RoomPosition(posLike.x, posLike.y, roomName);
+}
+
+function getSourcePosFromMemory(sourceMem, roomName) {
   if (!sourceMem) return null;
-  if (sourceMem.pos && typeof sourceMem.pos.x === 'number' && typeof sourceMem.pos.y === 'number') {
-    return sourceMem.pos;
-  }
-  if (typeof sourceMem.x === 'number' && typeof sourceMem.y === 'number') {
-    return { x: sourceMem.x, y: sourceMem.y, roomName: sourceMem.roomName || sourceMem.remoteRoom || null };
-  }
-  return null;
+  if (sourceMem.pos) return makeRoomPosition(sourceMem.pos, roomName);
+  return makeRoomPosition(sourceMem, roomName);
 }
 
-function getRemoteEconomicsPathCache() {
-  var root = ensureMemory();
-  if (!root.remoteEconomicsPathCache) root.remoteEconomicsPathCache = {};
-  return root.remoteEconomicsPathCache;
+function isLocalOwnedRoomForVeinseeker(homeRoom, roomName) {
+  if (!roomName) return { blocked: true, reason: 'missing-room' };
+  var homeName = getHomeName(homeRoom);
+  if (homeName && roomName === homeName) return { blocked: true, reason: 'home-room' };
+
+  var room = Game.rooms[roomName];
+  if (room && room.controller && room.controller.my) return { blocked: true, reason: 'local-owned-room' };
+  if (room) {
+    var visibleSpawns = room.find(FIND_MY_SPAWNS) || [];
+    if (visibleSpawns.length > 0) return { blocked: true, reason: 'owned-spawn-room' };
+  }
+
+  for (var name in Game.spawns) {
+    if (!Object.prototype.hasOwnProperty.call(Game.spawns, name)) continue;
+    var spawn = Game.spawns[name];
+    if (spawn && spawn.pos && spawn.pos.roomName === roomName) return { blocked: true, reason: 'owned-spawn-room' };
+  }
+
+  var myName = getMyUsername();
+  var mem = (Memory.rooms && Memory.rooms[roomName]) || {};
+  var intel = mem.intel || {};
+  if (intel.owner && myName && intel.owner === myName) return { blocked: true, reason: 'local-owned-room' };
+  return { blocked: false, reason: null };
 }
 
-function getPathCacheKey(homeRoom, remoteRoom, sourceId) {
-  return [homeRoom, remoteRoom, sourceId || 'unknown'].join('|');
+function getScoutHome(homeRoom) {
+  return Memory.__BHM &&
+    Memory.__BHM.scoutIntel &&
+    Memory.__BHM.scoutIntel.homes &&
+    Memory.__BHM.scoutIntel.homes[homeRoom]
+    ? Memory.__BHM.scoutIntel.homes[homeRoom]
+    : null;
 }
 
-// Cost matrix used only for the visible-path estimate in this report. It keeps
-// the same broad idea as Veinseeker movement: roads are cheap, blocking structures are
-// impassable, containers are allowed because Veinseeker wants to sit on/near them.
-function buildDiagnosticCostMatrix(roomName) {
-  var room = Game.rooms && Game.rooms[roomName];
-  if (!room) return;
-  var matrix = new PathFinder.CostMatrix();
-  var structures = room.find(FIND_STRUCTURES) || [];
-  for (var i = 0; i < structures.length; i++) {
-    var structure = structures[i];
-    if (structure.structureType === STRUCTURE_ROAD) matrix.set(structure.pos.x, structure.pos.y, 1);
-    else if (structure.structureType !== STRUCTURE_CONTAINER && (structure.structureType !== STRUCTURE_RAMPART || !structure.my)) {
-      matrix.set(structure.pos.x, structure.pos.y, 0xff);
-    }
-  }
-  var sites = room.find(FIND_CONSTRUCTION_SITES) || [];
-  for (var j = 0; j < sites.length; j++) {
-    var site = sites[j];
-    if (site.structureType !== STRUCTURE_ROAD && site.structureType !== STRUCTURE_CONTAINER) matrix.set(site.pos.x, site.pos.y, 0xff);
-  }
-  return matrix;
-}
-
-// Path distance has three quality levels:
-// 1) best: a fresh PathFinder result when the source room is visible;
-// 2) good: cached distance fields from Memory if prior code recorded them;
-// 3) unknown: null, with the economics calculation falling back to route range.
-function estimatePathDistance(homeRoom, remoteRoom, sourceId, sourceObj, sourceMem, routeDistance, stats) {
-  stats = stats || { pathCacheHits: 0, pathCacheMisses: 0 };
-  var cfg = getRemoteEconomicsConfig();
-  var anchorPos = getHomeAnchorPos(homeRoom);
-  var sourcePos = sourceObj && sourceObj.pos ? sourceObj.pos : getSourcePosFromMemory(sourceMem);
-  var anchorSig = posSignature(anchorPos);
-  var sourceSig = posSignature(sourcePos);
-  var cache = sourceId ? getRemoteEconomicsPathCache() : null;
-  var cacheKey = cache ? getPathCacheKey(homeRoom, remoteRoom, sourceId) : null;
-  var cached = cacheKey ? cache[cacheKey] : null;
-
-  if (cached && cached.tick && (Game.time - cached.tick) <= cfg.pathCacheTtl &&
-      cached.anchorSig === anchorSig && cached.sourceSig === sourceSig &&
-      typeof cached.distance === 'number') {
-    stats.pathCacheHits++;
-    return { distance: cached.distance, source: 'remote-economics-path-cache' };
-  }
-
-  if (sourceObj && sourceObj.pos && Game.rooms && Game.rooms[homeRoom] && Game.rooms[remoteRoom]) {
-    stats.pathCacheMisses++;
-    try {
-      var ret = PathFinder.search(anchorPos, { pos: sourceObj.pos, range: 1 }, {
-        maxOps: (VeinseekerConfig && VeinseekerConfig.MAX_PF_OPS) || 3000,
-        plainCost: (VeinseekerConfig && VeinseekerConfig.PLAIN_COST) || 2,
-        swampCost: (VeinseekerConfig && VeinseekerConfig.SWAMP_COST) || 10,
-        roomCallback: buildDiagnosticCostMatrix
-      });
-      if (!ret.incomplete && ret.path && typeof ret.path.length === 'number') {
-        if (cacheKey && anchorSig && sourceSig) {
-          cache[cacheKey] = {
-            tick: Game.time,
-            distance: ret.path.length,
-            anchorSig: anchorSig,
-            sourceSig: sourceSig
-          };
-        }
-        return { distance: ret.path.length, source: 'visible-pathfinder' };
-      }
-    } catch (e) {}
-  }
-
-  // These fields are optional because other parts of the bot may or may not
-  // have seen this remote source recently enough to cache path details.
-  if (sourceMem) {
-    if (typeof sourceMem.pathDistance === 'number') return { distance: sourceMem.pathDistance, source: 'cached-pathDistance' };
-    if (typeof sourceMem.remotePathDistance === 'number') return { distance: sourceMem.remotePathDistance, source: 'cached-remotePathDistance' };
-    if (typeof sourceMem.entrySteps === 'number' && isFinite(routeDistance)) {
-      return { distance: (routeDistance * 50) + sourceMem.entrySteps, source: 'route-plus-entrySteps' };
-    }
-  }
-
-  return { distance: null, source: null };
-}
-
-// Scout intel is separate from room Memory. These accessors keep the report
-// readable and avoid duplicating the long Memory.__BHM path everywhere.
 function getScoutRoomRecord(homeRoom, remoteRoom) {
-  var scout = Memory.__BHM && Memory.__BHM.scoutIntel && Memory.__BHM.scoutIntel.homes &&
-    Memory.__BHM.scoutIntel.homes[homeRoom] && Memory.__BHM.scoutIntel.homes[homeRoom].rooms;
-  return scout && scout[remoteRoom] ? scout[remoteRoom] : null;
+  var home = getScoutHome(homeRoom);
+  return home && home.rooms && home.rooms[remoteRoom] ? home.rooms[remoteRoom] : null;
 }
 
 function getScoutSourceRecord(homeRoom, remoteRoom, sourceId) {
-  if (!sourceId) return null;
-  var rec = getScoutRoomRecord(homeRoom, remoteRoom);
-  if (!rec || !rec.sources) return null;
-  for (var i = 0; i < rec.sources.length; i++) {
-    if (rec.sources[i] && rec.sources[i].id === sourceId) return rec.sources[i];
+  var roomRec = getScoutRoomRecord(homeRoom, remoteRoom);
+  var sources = roomRec && roomRec.sources ? roomRec.sources : [];
+  for (var i = 0; i < sources.length; i++) {
+    if (sources[i] && sources[i].id === sourceId) return sources[i];
   }
   return null;
 }
 
-// Controller state matters because a reserved/owned room has larger source
-// capacity than an unreserved neutral room. This helper records both the status
-// and which intel source produced that status.
-function getControllerEstimate(homeRoom, remoteRoom) {
+function getControllerBlockReason(homeRoom, remoteRoom) {
   var myName = getMyUsername();
-  var room = Game.rooms && Game.rooms[remoteRoom];
+  var room = Game.rooms[remoteRoom];
   var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
   var intel = mem.intel || {};
   var scout = getScoutRoomRecord(homeRoom, remoteRoom);
   var scoutController = scout && scout.controller ? scout.controller : null;
-
   var owner = null;
   var reservation = null;
-  var reservationTicks = null;
-  var hasController = false;
-  var source = 'unknown';
 
   if (room && room.controller) {
-    hasController = true;
     owner = room.controller.owner && room.controller.owner.username || null;
     reservation = room.controller.reservation && room.controller.reservation.username || null;
-    reservationTicks = room.controller.reservation && room.controller.reservation.ticksToEnd || null;
-    source = 'visible';
   } else if (scoutController) {
-    hasController = true;
     owner = scoutController.owner || null;
     reservation = scoutController.reservation || null;
-    source = 'scout';
-  } else if (intel.owner || intel.reservation || typeof intel.rcl === 'number') {
-    hasController = true;
+  } else {
     owner = intel.owner || null;
     reservation = intel.reservation || null;
-    source = 'room-intel';
   }
 
-  var ownedByMe = !!(owner && myName && owner === myName);
-  var reservedByMe = !!(reservation && myName && reservation === myName);
-  var ownedByOther = !!(owner && (!myName || owner !== myName));
-  var reservedByOther = !!(reservation && (!myName || reservation !== myName));
-  var status = 'unknown';
-  if (!hasController) status = 'no-controller';
-  else if (ownedByMe) status = 'owned-by-me';
-  else if (ownedByOther) status = 'owned-by-other';
-  else if (reservedByMe) status = 'reserved-by-me';
-  else if (reservedByOther) status = 'reserved-by-other';
-  else status = 'unreserved';
-
-  return {
-    status: status,
-    hasController: hasController,
-    owner: owner,
-    reservation: reservation,
-    reservationTicks: reservationTicks,
-    ownedByMe: ownedByMe,
-    reservedByMe: reservedByMe,
-    ownedByOther: ownedByOther,
-    reservedByOther: reservedByOther,
-    source: source
-  };
-}
-
-// Source energy is energy regenerated per tick. Visible sources give the most
-// accurate number. If the room is not visible, fall back to Screeps defaults:
-// neutral 1500, reserved/owned 3000, keeper 4000 energy per 300 ticks.
-function estimateSourceEnergyPerTick(remoteRoom, sourceObj, sourceMem, controllerEstimate) {
-  if (sourceObj && typeof sourceObj.energyCapacity === 'number' && sourceObj.energyCapacity > 0) {
-    return sourceObj.energyCapacity / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
-  }
-  if (sourceMem && typeof sourceMem.energyCapacity === 'number' && sourceMem.energyCapacity > 0) {
-    return sourceMem.energyCapacity / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
-  }
-
-  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
-  var intel = mem.intel || {};
-  if (intel.keeperLairs && intel.keeperLairs > 0) {
-    return DEFAULT_KEEPER_SOURCE_ENERGY_CAPACITY / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
-  }
-  if (controllerEstimate && (controllerEstimate.ownedByMe || controllerEstimate.reservedByMe ||
-      controllerEstimate.ownedByOther || controllerEstimate.reservedByOther)) {
-    return DEFAULT_RESERVED_SOURCE_ENERGY_CAPACITY / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
-  }
-  return DEFAULT_NEUTRAL_SOURCE_ENERGY_CAPACITY / REMOTE_SOURCE_ENERGY_REGEN_TICKS;
-}
-
-// Used to split one reserver's spawn/energy cost across the sources in the room.
-// A two-source room should not charge the full reserver cost to both sources.
-function getRemoteSourceCountEstimate(homeRoom, remoteRoom) {
-  var count = 0;
-  var room = Game.rooms && Game.rooms[remoteRoom];
-  if (room) {
-    var liveSources = room.find(FIND_SOURCES) || [];
-    if (liveSources.length) return liveSources.length;
-  }
-  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
-  if (mem.sources) {
-    for (var sid in mem.sources) {
-      if (Object.prototype.hasOwnProperty.call(mem.sources, sid)) count++;
-    }
-    if (count > 0) return count;
-  }
-  var scout = getScoutRoomRecord(homeRoom, remoteRoom);
-  if (scout && scout.sources && scout.sources.length) return scout.sources.length;
-  if (mem.intel && typeof mem.intel.sources === 'number') return Math.max(1, mem.intel.sources);
-  return 1;
-}
-
-// Reserver cost is included only as diagnostics. The bot currently does not
-// spawn remote reservers from this report; this just answers "what would that
-// controller reservation cost per source?"
-function estimateReserverEconomics(homeRoom, remoteRoom, controllerEstimate, sourcesInRoom, energyCapacity) {
-  if (!controllerEstimate || !controllerEstimate.hasController) return { spawnUsage: 0, energyCost: 0 };
-  if (controllerEstimate.ownedByMe || controllerEstimate.ownedByOther || controllerEstimate.reservedByOther) {
-    return { spawnUsage: 0, energyCost: 0 };
-  }
-  var body = chooseDiagnosticBody('Claimer', energyCapacity);
-  if (!body.length) return { spawnUsage: 0, energyCost: 0 };
-  var sourceDivisor = Math.max(1, sourcesInRoom || getRemoteSourceCountEstimate(homeRoom, remoteRoom));
-  var claimLifeTime = (typeof CREEP_CLAIM_LIFE_TIME === 'number') ? CREEP_CLAIM_LIFE_TIME : 600;
-  return {
-    spawnUsage: ((body.length * CREEP_SPAWN_TIME) / claimLifeTime) / sourceDivisor,
-    energyCost: (calculateBodyCost(body) / claimLifeTime) / sourceDivisor
-  };
-}
-
-// Source records can come from live objects, Memory.rooms[remote].sources, or
-// scout intel. Normalize all of those shapes into one {x, y, roomName} style.
-function sourceRecordPosition(rec) {
-  if (!rec) return null;
-  if (rec.pos && typeof rec.pos.x === 'number') return rec.pos;
-  if (typeof rec.x === 'number' && typeof rec.y === 'number') return { x: rec.x, y: rec.y, roomName: rec.roomName || null };
+  if (owner && (!myName || owner !== myName)) return 'owned-by-other';
+  if (reservation && (!myName || reservation !== myName)) return 'reserved-by-other';
   return null;
 }
 
-// Build the per-source list for a remote room. The order of preference is live
-// vision, room memory, then scout memory. The seen map prevents duplicate source
-// IDs when the same source appears in more than one intel source.
-function collectDiagnosticSourcesForRemote(homeRoom, remoteRoom) {
-  var out = [];
-  var seen = Object.create(null);
-  var room = Game.rooms && Game.rooms[remoteRoom];
-  var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+function getFreshIntelTick(homeRoom, remoteRoom) {
+  var best = getRemoteIntelTick(remoteRoom);
+  var scout = getScoutRoomRecord(homeRoom, remoteRoom);
+  if (scout && typeof scout.lastSeen === 'number') best = Math.max(best || 0, scout.lastSeen);
+  if (Game.rooms[remoteRoom]) best = Game.time;
+  return best;
+}
 
-  function add(sourceId, sourceObj, sourceMem, scoutRec, sourceTag) {
-    var key = sourceId || ('unknown:' + out.length);
-    if (sourceId && seen[key]) return;
-    if (sourceId) seen[key] = true;
-    var pos = sourceObj && sourceObj.pos ? sourceObj.pos : sourceRecordPosition(sourceMem) || sourceRecordPosition(scoutRec);
-    out.push({
-      sourceId: sourceId || null,
-      sourceObj: sourceObj || null,
-      sourceMem: sourceMem || null,
-      scoutRec: scoutRec || null,
-      sourceTag: sourceTag || 'unknown',
-      x: pos && typeof pos.x === 'number' ? pos.x : null,
-      y: pos && typeof pos.y === 'number' ? pos.y : null
+function getRemoteContainerStatusBySource(sourceId) {
+  var status = Memory.__BHM && Memory.__BHM.remoteContainerStatus ? Memory.__BHM.remoteContainerStatus : {};
+  for (var key in status) {
+    if (!Object.prototype.hasOwnProperty.call(status, key)) continue;
+    if (status[key] && status[key].sourceId === sourceId) return status[key];
+  }
+  return null;
+}
+
+function getContainerSummary(sourceId, roomName, sourceObj, sourceMem) {
+  var container = sourceObj ? SourceWorkerManager.findSourceContainer(sourceObj) : null;
+  if (container && container.structureType === STRUCTURE_CONTAINER) {
+    return {
+      status: 'built',
+      containerId: container.id,
+      x: container.pos.x,
+      y: container.pos.y,
+      roomName: container.pos.roomName,
+      amount: container.store ? (container.store[RESOURCE_ENERGY] || 0) : 0,
+      capacity: container.store ? (container.store.getCapacity(RESOURCE_ENERGY) || 2000) : 2000,
+      updated: Game.time
+    };
+  }
+
+  var builds = Memory.__BHM && Memory.__BHM.remoteContainerBuilds ? Memory.__BHM.remoteContainerBuilds : {};
+  var build = builds[sourceId] || null;
+  if (build) {
+    return {
+      status: build.status || 'unknown',
+      containerId: build.containerId || null,
+      siteId: build.siteId || null,
+      x: typeof build.x === 'number' ? build.x : null,
+      y: typeof build.y === 'number' ? build.y : null,
+      roomName: build.roomName || build.remoteRoom || roomName,
+      progress: build.progress || 0,
+      progressTotal: build.progressTotal || 0,
+      progressPct: build.progressPct || 0,
+      updated: build.updated || build.lastSeen || 0
+    };
+  }
+
+  var status = getRemoteContainerStatusBySource(sourceId);
+  if (status) {
+    return {
+      status: status.status || 'built',
+      containerId: status.containerId || status.id || null,
+      x: typeof status.x === 'number' ? status.x : null,
+      y: typeof status.y === 'number' ? status.y : null,
+      roomName: status.roomName || status.remoteRoom || roomName,
+      amount: status.amount || 0,
+      capacity: status.capacity || 2000,
+      updated: status.updated || status.lastSeen || 0
+    };
+  }
+
+  var sourceContainer = sourceMem && sourceMem.container ? sourceMem.container : null;
+  if (sourceContainer) {
+    return {
+      status: sourceContainer.status || 'unknown',
+      containerId: sourceContainer.containerId || sourceMem.containerId || null,
+      siteId: sourceContainer.siteId || null,
+      x: typeof sourceContainer.x === 'number' ? sourceContainer.x : null,
+      y: typeof sourceContainer.y === 'number' ? sourceContainer.y : null,
+      roomName: sourceContainer.roomName || roomName,
+      progress: sourceContainer.progress || 0,
+      progressTotal: sourceContainer.progressTotal || 0,
+      progressPct: sourceContainer.progressPct || 0,
+      updated: sourceContainer.updated || 0
+    };
+  }
+
+  if (sourceMem && sourceMem.containerId) {
+    return {
+      status: 'known-id',
+      containerId: sourceMem.containerId,
+      x: null,
+      y: null,
+      roomName: roomName,
+      updated: sourceMem.lastSeen || 0
+    };
+  }
+
+  return { status: 'unknown', containerId: null, x: null, y: null, roomName: roomName, updated: 0 };
+}
+
+function getVisiblePathCost(homeRoom, targetPos) {
+  if (!targetPos || !Game.rooms[homeRoom] || !Game.rooms[targetPos.roomName]) return null;
+  try {
+    var result = PathFinder.search(getHomeAnchorPos(homeRoom), { pos: targetPos, range: 1 }, {
+      maxOps: MAX_PF_OPS,
+      plainCost: PLAIN_COST,
+      swampCost: SWAMP_COST
+    });
+    if (result && !result.incomplete && result.path) return result.path.length;
+  } catch (e) {}
+  return null;
+}
+
+function estimatePathCost(homeRoom, remoteRoom, sourceId, sourceObj, sourceMem, scoutSource, routeDistance, pos) {
+  var visible = sourceObj && sourceObj.pos ? getVisiblePathCost(homeRoom, sourceObj.pos) : null;
+  if (visible !== null) return visible;
+  if (scoutSource && typeof scoutSource.pathCost === 'number') return scoutSource.pathCost;
+  if (sourceMem && typeof sourceMem.pathCost === 'number') return sourceMem.pathCost;
+  if (sourceMem && typeof sourceMem.pathDistance === 'number') return sourceMem.pathDistance;
+  if (sourceMem && typeof sourceMem.remotePathDistance === 'number') return sourceMem.remotePathDistance;
+  if (sourceMem && typeof sourceMem.entrySteps === 'number' && isFiniteDistance(routeDistance)) {
+    return (routeDistance * 50) + sourceMem.entrySteps;
+  }
+  if (isFiniteDistance(routeDistance)) return Math.max(1, routeDistance) * 50;
+  return null;
+}
+
+function countKnownOpenTiles(sourceObj, sourceMem, scoutSource) {
+  if (sourceObj && sourceObj.pos && sourceObj.room) {
+    return SourceWorkerManager.countOpenHarvestTiles(sourceObj);
+  }
+  if (scoutSource && typeof scoutSource.openTiles === 'number') return scoutSource.openTiles;
+  if (sourceMem && typeof sourceMem.openTiles === 'number') return sourceMem.openTiles;
+  if (sourceMem && typeof sourceMem.seats === 'number') return sourceMem.seats;
+  return null;
+}
+
+function sourceAccessReason(sourceObj, sourceMem, scoutSource) {
+  var openTiles = countKnownOpenTiles(sourceObj, sourceMem, scoutSource);
+  if (sourceObj && sourceObj.pos && openTiles > 0) return null;
+  if (scoutSource && scoutSource.accessible === false) return scoutSource.blockedReason || 'source-inaccessible';
+  if (sourceMem && sourceMem.accessible === false) return sourceMem.blockedReason || 'source-inaccessible';
+  if (openTiles === 0) return 'no-harvest-tile';
+  if (!sourceObj && openTiles === null) return 'unknown-access';
+  return null;
+}
+
+function makeSourceRecord(fields) {
+  var container = fields.container || {};
+  return {
+    sourceId: fields.sourceId,
+    homeRoom: fields.homeRoom,
+    roomName: fields.roomName || fields.targetRoom,
+    targetRoom: fields.targetRoom || fields.roomName,
+    mode: fields.mode,
+    x: typeof fields.x === 'number' ? fields.x : null,
+    y: typeof fields.y === 'number' ? fields.y : null,
+    distance: finiteOrNull(fields.distance),
+    routeDistance: finiteOrNull(fields.routeDistance),
+    pathCost: finiteOrNull(fields.pathCost),
+    containerId: fields.containerId || container.containerId || null,
+    container: container,
+    containerStatus: container.status || null,
+    status: fields.status || 'open',
+    reason: fields.reason || 'planned',
+    assignedVeinseeker: fields.assignedVeinseeker || null,
+    queuedVeinseeker: fields.queuedVeinseeker || null,
+    queuedUntil: fields.queuedUntil || 0,
+    lastSeen: fields.lastSeen || 0,
+    lastValidated: fields.lastValidated || Game.time,
+    active: !!fields.active,
+    desiredWork: fields.desiredWork || 0,
+    liveWork: fields.liveWork || 0,
+    queuedWork: fields.queuedWork || 0,
+    seats: fields.seats || 0,
+    openSeats: fields.openSeats || 0,
+    live: fields.live || 0,
+    queued: fields.queued || 0,
+    activeLive: fields.activeLive || 0
+  };
+}
+
+function addRecord(plan, record) {
+  if (!record || !record.sourceId) return;
+  plan.sources[record.sourceId] = record;
+  plan.sourceOrder.push(record.sourceId);
+  if (record.active) {
+    plan.activeSourceIds.push(record.sourceId);
+    plan.activeSources++;
+    if (record.mode === 'home') plan.homeSources++;
+    if (record.mode === 'remote') plan.remoteSources++;
+  } else {
+    plan.inactiveSourceIds.push(record.sourceId);
+    plan.inactiveSources++;
+    plan.skippedSources.push({
+      sourceId: record.sourceId,
+      roomName: record.roomName,
+      mode: record.mode,
+      status: record.status,
+      reason: record.reason
     });
   }
+}
+
+function buildHomeSources(plan, oldSources) {
+  var homeRoom = plan.homeRoom;
+  var room = Game.rooms[homeRoom];
+  if (!room) {
+    plan.skippedSources.push({ roomName: homeRoom, mode: 'home', status: 'stale', reason: 'home-room-not-visible' });
+    return;
+  }
+
+  var sources = room.find(FIND_SOURCES) || [];
+  for (var i = 0; i < sources.length; i++) {
+    var source = sources[i];
+    var prev = oldSources[source.id] || {};
+    var seats = SourceWorkerManager.buildHarvestSeatList(source).length;
+    var status = SourceWorkerManager.getSourceMiningStatus(room.name, source, null, {});
+    var container = getContainerSummary(source.id, room.name, source, (Memory.rooms[room.name] && Memory.rooms[room.name].sources && Memory.rooms[room.name].sources[source.id]) || {});
+    var active = seats > 0;
+    addRecord(plan, makeSourceRecord({
+      sourceId: source.id,
+      homeRoom: homeRoom,
+      roomName: room.name,
+      targetRoom: room.name,
+      mode: 'home',
+      x: source.pos.x,
+      y: source.pos.y,
+      distance: getHomeAnchorPos(homeRoom).getRangeTo(source.pos),
+      routeDistance: 0,
+      pathCost: null,
+      container: container,
+      active: active,
+      status: active ? 'open' : 'blocked',
+      reason: active ? 'planned-home-source' : 'no-harvest-tile',
+      lastSeen: Game.time,
+      lastValidated: Game.time,
+      assignedVeinseeker: prev.assignedVeinseeker || null,
+      queuedVeinseeker: prev.queuedVeinseeker || null,
+      queuedUntil: prev.queuedUntil || 0,
+      desiredWork: status.desiredWork || SourceWorkerManager.getDesiredWorkForSource(source),
+      liveWork: status.liveWork || 0,
+      queuedWork: status.queuedWork || 0,
+      seats: seats,
+      openSeats: Math.max(0, seats - ((status.live || 0) + (status.queued || 0))),
+      live: status.live || 0,
+      queued: status.queued || 0,
+      activeLive: status.activeLive || 0
+    }));
+  }
+}
+
+function listRemoteSourceCandidates(homeRoom, remoteRoom) {
+  var out = [];
+  var room = Game.rooms[remoteRoom];
+  var roomMem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
+  var sourceMemMap = roomMem.sources || {};
+  var scout = getScoutRoomRecord(homeRoom, remoteRoom);
+  var seen = {};
 
   if (room) {
     var liveSources = room.find(FIND_SOURCES) || [];
     for (var i = 0; i < liveSources.length; i++) {
-      var liveSource = liveSources[i];
-      add(liveSource.id, liveSource, mem.sources && mem.sources[liveSource.id], getScoutSourceRecord(homeRoom, remoteRoom, liveSource.id), 'visible');
-    }
-  }
-
-  if (mem.sources) {
-    for (var sid in mem.sources) {
-      if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
-      add(sid, null, mem.sources[sid], getScoutSourceRecord(homeRoom, remoteRoom, sid), 'memory');
-    }
-  }
-
-  var scout = getScoutRoomRecord(homeRoom, remoteRoom);
-  if (scout && scout.sources) {
-    for (var s = 0; s < scout.sources.length; s++) {
-      var scoutSource = scout.sources[s];
-      if (!scoutSource) continue;
-      add(scoutSource.id || null, null, mem.sources && scoutSource.id ? mem.sources[scoutSource.id] : null, scoutSource, 'scout');
-    }
-  }
-
-  if (!out.length && mem.intel && typeof mem.intel.sources === 'number' && mem.intel.sources > 0) {
-    for (var n = 0; n < mem.intel.sources; n++) add(null, null, null, null, 'room-intel-count');
-  }
-
-  return out;
-}
-
-// Remote discovery already rejects whole rooms for reasons like unsafe/no-route.
-// Keep those reasons so every source inside that room inherits the same reject.
-function indexRemoteRejectReasons(remoteDiscovery) {
-  var out = Object.create(null);
-  var rejected = remoteDiscovery && remoteDiscovery.rejectedRemoteRooms ? remoteDiscovery.rejectedRemoteRooms : [];
-  for (var i = 0; i < rejected.length; i++) {
-    var rec = rejected[i];
-    if (rec && rec.room) out[rec.room] = rec.reason || 'rejected';
-  }
-  return out;
-}
-
-// This is a diagnostics mirror of the existing safety gates. It labels a source
-// as rejected but never blocks assignment or queueing itself.
-function sourceRejectReason(homeRoom, remoteRoom, sourceRec, roomRejectReason, routeDistance) {
-  if (roomRejectReason) return roomRejectReason;
-  var localOwnedCheck = isLocalOwnedRoomForVeinseeker(homeRoom, remoteRoom);
-  if (localOwnedCheck && localOwnedCheck.blocked) return localOwnedCheck.reason || 'local-owned-room';
-  if (!isFinite(routeDistance)) return 'no-route';
-  if (isRemoteUnsafe(remoteRoom)) return 'unsafe';
-
-  var ttl = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 3000;
-  var intelTick = getRemoteIntelTick(remoteRoom);
-  if (!Game.rooms[remoteRoom] && (intelTick == null || (Game.time - intelTick) > ttl)) return 'stale-intel';
-
-  var sourceMem = sourceRec && sourceRec.sourceMem;
-  if (sourceMem && sourceMem.sourceWorkerBlockedUntil && sourceMem.sourceWorkerBlockedUntil > Game.time) {
-    return sourceMem.sourceWorkerBlockedReason || 'source-blocked';
-  }
-  var scoutRec = sourceRec && sourceRec.scoutRec;
-  if (scoutRec && scoutRec.accessible === false) return scoutRec.blockedReason || 'source-inaccessible';
-  if (!sourceRec || !sourceRec.sourceId) return 'missing-source-id';
-  return null;
-}
-
-// Recount live and queued Veinseeker directly at report time. This makes the report
-// match the final queue after BeeSpawnManager has finished preparing the room.
-function countLiveVeinseekerForHome(homeRoom) {
-  var C = global.__BHM;
-  if (C && C.liveCountsByHomeRoleMode && C.liveCountsByHomeRoleMode[homeRoom] &&
-      C.liveCountsByHomeRoleMode[homeRoom].Veinseeker) {
-    return C.liveCountsByHomeRoleMode[homeRoom].Veinseeker.remote || 0;
-  }
-  var count = 0;
-  for (var name in Game.creeps) {
-    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
-    var creep = Game.creeps[name];
-    if (!creep || !creep.memory) continue;
-    if (creep.memory.role !== 'Veinseeker' && creep.memory.task !== 'veinseeker') continue;
-    if (creep.memory.mode !== 'remote') continue;
-    var creepHome = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
-    if (creepHome === homeRoom) count++;
-  }
-  return count;
-}
-
-function countQueuedVeinseekerForHome(homeRoom) {
-  var C = global.__BHM;
-  if (C && C.queueCountsByRoomRoleMode && C.queueCountsByRoomRoleMode[homeRoom] &&
-      C.queueCountsByRoomRoleMode[homeRoom].Veinseeker) {
-    return C.queueCountsByRoomRoleMode[homeRoom].Veinseeker.remote || 0;
-  }
-  var queue = (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].spawnQueue) || [];
-  var count = 0;
-  for (var i = 0; i < queue.length; i++) {
-    if (queue[i] && queue[i].role === 'Veinseeker' && queue[i].mode === 'remote') count++;
-  }
-  return count;
-}
-
-// Main entry point for the economics report. It intentionally writes only to
-// Memory.rooms[homeRoom].lastRemoteSourceEconomics and returns the report.
-// Nothing here reserves a source, queues a creep, clears Memory, or changes
-// remote haul/repair behavior.
-function buildRemoteSourceEconomicsReport(homeRoom, remoteDiscovery) {
-  // Human-facing diagnostics only. This report explains profitability and
-  // rejection reasons, but must not enqueue, reserve, release, or block sources.
-  if (!homeRoom) return null;
-  var cfg = getRemoteEconomicsConfig();
-  var roomMem = getRoomMemoryBucket(homeRoom);
-  var previousReport = roomMem.lastRemoteSourceEconomics || null;
-  if (!cfg.enabled) {
-    if (previousReport) {
-      previousReport.recalculated = false;
-      previousReport.reusedFromTick = previousReport.tick || previousReport.reusedFromTick || null;
-      previousReport.lastCheckedTick = Game.time;
-      previousReport.disabled = true;
-    }
-    return previousReport;
-  }
-  if (previousReport && typeof previousReport.tick === 'number' && (Game.time - previousReport.tick) < cfg.interval) {
-    previousReport.recalculated = false;
-    previousReport.reusedFromTick = previousReport.tick;
-    previousReport.lastCheckedTick = Game.time;
-    delete previousReport.disabled;
-    previousReport.pathCacheHits = previousReport.pathCacheHits || 0;
-    previousReport.pathCacheMisses = previousReport.pathCacheMisses || 0;
-    return previousReport;
-  }
-  if (previousReport && !CpuBudget.canSpend({ minBucket: cfg.minBucket, maxCpuUsed: cfg.maxCpuUsed })) {
-    previousReport.recalculated = false;
-    previousReport.reusedFromTick = previousReport.tick || previousReport.reusedFromTick || null;
-    previousReport.lastCheckedTick = Game.time;
-    previousReport.deferredReason = 'cpu-budget';
-    previousReport.pathCacheHits = previousReport.pathCacheHits || 0;
-    previousReport.pathCacheMisses = previousReport.pathCacheMisses || 0;
-    return previousReport;
-  }
-  // Reuse the discovery result from queue prep when available, so the report
-  // explains the same candidate set BeeSpawnManager just evaluated.
-  if (!remoteDiscovery) remoteDiscovery = gatherCandidateRemoteRoomsForHome(homeRoom);
-  var home = ensureHomeMemory(homeRoom);
-  var energyCapacity = getHomeEnergyCapacity(homeRoom);
-  var pathStats = { pathCacheHits: 0, pathCacheMisses: 0 };
-  // Miner body is estimated once per home because all candidate sources use the
-  // same room energy capacity and Veinseeker body table.
-  var minerBody = chooseDiagnosticBody('Veinseeker', energyCapacity, { mode: 'remote' });
-  var minerSummary = bodyPartSummary(minerBody);
-  var rejectedByRoom = indexRemoteRejectReasons(remoteDiscovery);
-  var remoteRooms = [];
-  var seenRooms = Object.create(null);
-  var candidates = remoteDiscovery && remoteDiscovery.candidateRemoteRooms ? remoteDiscovery.candidateRemoteRooms : [];
-  var accepted = remoteDiscovery && remoteDiscovery.acceptedRemoteRooms ? remoteDiscovery.acceptedRemoteRooms : [];
-  var rejected = remoteDiscovery && remoteDiscovery.rejectedRemoteRooms ? remoteDiscovery.rejectedRemoteRooms : [];
-
-  function addRoom(roomName) {
-    if (!roomName || seenRooms[roomName]) return;
-    seenRooms[roomName] = true;
-    remoteRooms.push(roomName);
-  }
-
-  for (var c = 0; c < candidates.length; c++) addRoom(candidates[c]);
-  for (var a = 0; a < accepted.length; a++) addRoom(accepted[a]);
-  for (var r = 0; r < rejected.length; r++) if (rejected[r]) addRoom(rejected[r].room);
-
-  var sourceReports = [];
-  var profitableSources = 0;
-  var totalEstimatedSpawnUsage = 0;
-  var totalEstimatedNetEnergy = 0;
-
-  for (var i = 0; i < remoteRooms.length; i++) {
-    var remoteRoom = remoteRooms[i];
-    var routeDistance = getRouteDistanceBetweenRooms(homeRoom, remoteRoom);
-    var controllerEstimate = getControllerEstimate(homeRoom, remoteRoom);
-    var sources = collectDiagnosticSourcesForRemote(homeRoom, remoteRoom);
-    var sourcesInRoom = Math.max(1, sources.length || getRemoteSourceCountEstimate(homeRoom, remoteRoom));
-    var reserverEconomics = estimateReserverEconomics(homeRoom, remoteRoom, controllerEstimate, sourcesInRoom, energyCapacity);
-
-    for (var j = 0; j < sources.length; j++) {
-      var sourceRec = sources[j];
-      var pathEstimate = estimatePathDistance(homeRoom, remoteRoom, sourceRec.sourceId, sourceRec.sourceObj, sourceRec.sourceMem, routeDistance, pathStats);
-      var pathDistance = pathEstimate.distance;
-      // Haulers need to make a round trip. If exact pathing is unavailable, use
-      // route rooms * 50 tiles as a conservative rough distance.
-      var fallbackOneWayDistance = pathDistance != null ? pathDistance : (isFinite(routeDistance) ? Math.max(50, routeDistance * 50) : null);
-      var roundTripDistance = fallbackOneWayDistance != null ? Math.max(1, fallbackOneWayDistance * 2) : null;
-      var sourceEnergyPerTick = estimateSourceEnergyPerTick(remoteRoom, sourceRec.sourceObj, sourceRec.sourceMem, controllerEstimate);
-      // A source may produce more than this Veinseeker body can harvest. Cap income by
-      // WORK parts so the estimate reflects the chosen miner body.
-      var harvestEnergyPerTick = Math.min(sourceEnergyPerTick, Math.max(0, minerSummary.work * HARVEST_POWER));
-      var haulerCarryPartsNeeded = roundTripDistance != null
-        ? Math.max(0, Math.ceil((harvestEnergyPerTick * roundTripDistance) / CARRY_CAPACITY))
-        : 0;
-      // Spawn usage is "fraction of one spawn kept busy forever". Example:
-      // 0.10 means this source consumes about 10% of a spawn over time.
-      var minerSpawnUsage = minerBody.length ? (minerBody.length * CREEP_SPAWN_TIME) / CREEP_LIFE_TIME : 0;
-      var minerEnergyCost = minerBody.length ? calculateBodyCost(minerBody) / CREEP_LIFE_TIME : 0;
-      var haulerSpawnUsage = (haulerCarryPartsNeeded * 2 * CREEP_SPAWN_TIME) / CREEP_LIFE_TIME;
-      var haulerEnergyCost = (haulerCarryPartsNeeded * (BODYPART_COST[CARRY] + BODYPART_COST[MOVE])) / CREEP_LIFE_TIME;
-      var containerRepairCost = DEFAULT_CONTAINER_REPAIR_ENERGY_PER_TICK;
-      var rejectReason = sourceRejectReason(homeRoom, remoteRoom, sourceRec, rejectedByRoom[remoteRoom] || null, routeDistance);
-      var estimatedTotalSpawnUsage = minerSpawnUsage + haulerSpawnUsage + reserverEconomics.spawnUsage;
-      // Net energy subtracts ongoing creep replacement energy and estimated
-      // container repair energy from harvested energy.
-      var estimatedNetEnergyPerTick = harvestEnergyPerTick - minerEnergyCost - haulerEnergyCost - reserverEconomics.energyCost - containerRepairCost;
-      var profitable = !rejectReason && estimatedNetEnergyPerTick > 0;
-
-      if (profitable) {
-        profitableSources++;
-        totalEstimatedSpawnUsage += estimatedTotalSpawnUsage;
-        totalEstimatedNetEnergy += estimatedNetEnergyPerTick;
-      }
-
-      sourceReports.push({
-        homeRoom: homeRoom,
-        remoteRoom: remoteRoom,
-        sourceId: sourceRec.sourceId,
-        routeDistance: finiteOrNull(routeDistance),
-        pathDistance: pathDistance,
-        pathDistanceSource: pathEstimate.source,
-        sourceEnergyPerTick: roundNumber(sourceEnergyPerTick, 2),
-        reservedOwnedEstimate: controllerEstimate,
-        minerBodyParts: minerSummary,
-        minerSpawnUsage: roundNumber(minerSpawnUsage, 4),
-        haulerCarryPartsNeeded: haulerCarryPartsNeeded,
-        haulerSpawnUsage: roundNumber(haulerSpawnUsage, 4),
-        reserverSpawnUsage: roundNumber(reserverEconomics.spawnUsage, 4),
-        containerRepairCost: roundNumber(containerRepairCost, 3),
-        estimatedNetEnergyPerTick: roundNumber(estimatedNetEnergyPerTick, 2),
-        estimatedTotalSpawnUsage: roundNumber(estimatedTotalSpawnUsage, 4),
-        selectedCandidate: false,
-        rejectReason: rejectReason
+      var source = liveSources[i];
+      seen[source.id] = true;
+      out.push({
+        sourceId: source.id,
+        sourceObj: source,
+        sourceMem: sourceMemMap[source.id] || {},
+        scoutSource: getScoutSourceRecord(homeRoom, remoteRoom, source.id),
+        pos: source.pos
       });
     }
   }
 
-  sourceReports.sort(function (a, b) {
-    var ar = a.routeDistance == null ? 999999 : a.routeDistance;
-    var br = b.routeDistance == null ? 999999 : b.routeDistance;
-    if (ar !== br) return ar - br;
-    if (a.remoteRoom !== b.remoteRoom) return a.remoteRoom < b.remoteRoom ? -1 : 1;
-    var asid = a.sourceId || '';
-    var bsid = b.sourceId || '';
-    return asid < bsid ? -1 : (asid > bsid ? 1 : 0);
-  });
-
-  var warning = null;
-  if ((home.desiredVeinseeker || 0) > profitableSources) {
-    warning = 'currentDesiredVeinseeker exceeds profitable source count';
-  }
-  var currentLiveVeinseeker = countLiveVeinseekerForHome(homeRoom);
-  var currentQueuedVeinseeker = countQueuedVeinseekerForHome(homeRoom);
-
-  roomMem.lastRemoteSourceEconomics = {
-    tick: Game.time,
-    homeRoom: homeRoom,
-    recalculated: true,
-    reusedFromTick: previousReport && typeof previousReport.tick === 'number' ? previousReport.tick : null,
-    pathCacheHits: pathStats.pathCacheHits,
-    pathCacheMisses: pathStats.pathCacheMisses,
-    candidateSources: sourceReports.length,
-    profitableSources: profitableSources,
-    totalEstimatedSpawnUsage: roundNumber(totalEstimatedSpawnUsage, 4),
-    totalEstimatedNetEnergy: roundNumber(totalEstimatedNetEnergy, 2),
-    currentDesiredVeinseeker: home.desiredVeinseeker || 0,
-    currentLiveVeinseeker: currentLiveVeinseeker,
-    currentQueuedVeinseeker: currentQueuedVeinseeker,
-    warning: warning,
-    sources: sourceReports,
-    // Assumptions are included in Memory so a novice can trace where the math
-    // came from without hunting through constants at the top of the file.
-    assumptions: {
-      creepLifeTime: CREEP_LIFE_TIME,
-      claimCreepLifeTime: (typeof CREEP_CLAIM_LIFE_TIME === 'number') ? CREEP_CLAIM_LIFE_TIME : 600,
-      creepSpawnTime: CREEP_SPAWN_TIME,
-      neutralSourceEnergyCapacity: DEFAULT_NEUTRAL_SOURCE_ENERGY_CAPACITY,
-      reservedSourceEnergyCapacity: DEFAULT_RESERVED_SOURCE_ENERGY_CAPACITY,
-      keeperSourceEnergyCapacity: DEFAULT_KEEPER_SOURCE_ENERGY_CAPACITY,
-      containerRepairCostEnergyPerTick: DEFAULT_CONTAINER_REPAIR_ENERGY_PER_TICK
+  if (scout && scout.sources) {
+    for (var s = 0; s < scout.sources.length; s++) {
+      var scoutSource = scout.sources[s];
+      if (!scoutSource || !scoutSource.id || seen[scoutSource.id]) continue;
+      seen[scoutSource.id] = true;
+      out.push({
+        sourceId: scoutSource.id,
+        sourceObj: null,
+        sourceMem: sourceMemMap[scoutSource.id] || {},
+        scoutSource: scoutSource,
+        pos: makeRoomPosition(scoutSource, remoteRoom)
+      });
     }
-  };
+  }
 
-  return roomMem.lastRemoteSourceEconomics;
+  for (var sid in sourceMemMap) {
+    if (!Object.prototype.hasOwnProperty.call(sourceMemMap, sid)) continue;
+    if (seen[sid]) continue;
+    var mem = sourceMemMap[sid] || {};
+    seen[sid] = true;
+    out.push({
+      sourceId: sid,
+      sourceObj: null,
+      sourceMem: mem,
+      scoutSource: getScoutSourceRecord(homeRoom, remoteRoom, sid),
+      pos: getSourcePosFromMemory(mem, remoteRoom)
+    });
+  }
+
+  return out;
 }
 
-function addUniqueRoomName(list, seen, roomName) {
-  if (!roomName || seen[roomName]) return;
-  seen[roomName] = true;
-  list.push(roomName);
+function makeInactiveRemoteRecord(plan, remoteRoom, sourceId, pos, reason, oldRecord, sourceMem, scoutSource) {
+  var container = getContainerSummary(sourceId, remoteRoom, null, sourceMem || {});
+  addRecord(plan, makeSourceRecord({
+    sourceId: sourceId || (remoteRoom + ':unknown:' + plan.skippedSources.length),
+    homeRoom: plan.homeRoom,
+    roomName: remoteRoom,
+    targetRoom: remoteRoom,
+    mode: 'remote',
+    x: pos && typeof pos.x === 'number' ? pos.x : null,
+    y: pos && typeof pos.y === 'number' ? pos.y : null,
+    routeDistance: getRouteDistanceBetweenRooms(plan.homeRoom, remoteRoom),
+    pathCost: null,
+    container: container,
+    active: false,
+    status: reason === 'unsafe' ? 'unsafe' : (reason === 'stale-intel' ? 'stale' : 'blocked'),
+    reason: reason,
+    lastSeen: (sourceMem && sourceMem.lastSeen) || (scoutSource && scoutSource.lastSeen) || 0,
+    lastValidated: Game.time,
+    assignedVeinseeker: oldRecord && oldRecord.assignedVeinseeker || null,
+    queuedVeinseeker: oldRecord && oldRecord.queuedVeinseeker || null,
+    queuedUntil: oldRecord && oldRecord.queuedUntil || 0
+  }));
+}
+
+function buildRemoteSources(plan, remoteRooms, oldSources) {
+  var homeRoom = plan.homeRoom;
+  for (var i = 0; i < remoteRooms.length; i++) {
+    var remoteRoom = remoteRooms[i];
+    if (!remoteRoom) continue;
+
+    var roomLevelReason = null;
+    var localOwned = isLocalOwnedRoomForVeinseeker(homeRoom, remoteRoom);
+    var routeDistance = getRouteDistanceBetweenRooms(homeRoom, remoteRoom);
+    var intelTick = getFreshIntelTick(homeRoom, remoteRoom);
+    var controllerReason = getControllerBlockReason(homeRoom, remoteRoom);
+    if (localOwned.blocked) roomLevelReason = localOwned.reason;
+    else if (!hasRemoteSpawnCapacity(homeRoom)) roomLevelReason = 'insufficient-spawn-capacity';
+    else if (!isFiniteDistance(routeDistance)) roomLevelReason = 'no-route';
+    else if (isRemoteUnsafe(remoteRoom)) roomLevelReason = 'unsafe';
+    else if (controllerReason) roomLevelReason = controllerReason;
+    else if (!Game.rooms[remoteRoom] && (intelTick === null || (Game.time - intelTick) > REMOTE_INTEL_TTL)) roomLevelReason = 'stale-intel';
+
+    var candidates = listRemoteSourceCandidates(homeRoom, remoteRoom);
+    if (!candidates.length) {
+      plan.skippedSources.push({
+        roomName: remoteRoom,
+        mode: 'remote',
+        status: roomLevelReason ? 'blocked' : 'stale',
+        reason: roomLevelReason || 'no-known-sources'
+      });
+      continue;
+    }
+
+    for (var c = 0; c < candidates.length; c++) {
+      var item = candidates[c];
+      var sourceId = item.sourceId;
+      var sourceMem = item.sourceMem || {};
+      var scoutSource = item.scoutSource || null;
+      var sourceObj = item.sourceObj || null;
+      var pos = sourceObj && sourceObj.pos ? sourceObj.pos : item.pos;
+      var old = oldSources[sourceId] || {};
+
+      if (roomLevelReason) {
+        makeInactiveRemoteRecord(plan, remoteRoom, sourceId, pos, roomLevelReason, old, sourceMem, scoutSource);
+        continue;
+      }
+      if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') {
+        makeInactiveRemoteRecord(plan, remoteRoom, sourceId, pos, 'missing-source-position', old, sourceMem, scoutSource);
+        continue;
+      }
+      if (sourceMem.disabled === true) {
+        makeInactiveRemoteRecord(plan, remoteRoom, sourceId, pos, sourceMem.disabledReason || 'disabled', old, sourceMem, scoutSource);
+        continue;
+      }
+      if (sourceMem.sourceWorkerBlockedUntil && sourceMem.sourceWorkerBlockedUntil > Game.time) {
+        makeInactiveRemoteRecord(plan, remoteRoom, sourceId, pos, sourceMem.sourceWorkerBlockedReason || 'source-blocked', old, sourceMem, scoutSource);
+        continue;
+      }
+
+      var accessReason = sourceAccessReason(sourceObj, sourceMem, scoutSource);
+      if (accessReason) {
+        makeInactiveRemoteRecord(plan, remoteRoom, sourceId, pos, accessReason, old, sourceMem, scoutSource);
+        continue;
+      }
+
+      var pathCost = estimatePathCost(homeRoom, remoteRoom, sourceId, sourceObj, sourceMem, scoutSource, routeDistance, pos);
+      if (pathCost === null && sourceObj && Game.rooms[homeRoom] && Game.rooms[remoteRoom]) {
+        makeInactiveRemoteRecord(plan, remoteRoom, sourceId, pos, 'no-path', old, sourceMem, scoutSource);
+        continue;
+      }
+
+      var container = getContainerSummary(sourceId, remoteRoom, sourceObj, sourceMem);
+      var openTiles = countKnownOpenTiles(sourceObj, sourceMem, scoutSource);
+      addRecord(plan, makeSourceRecord({
+        sourceId: sourceId,
+        homeRoom: homeRoom,
+        roomName: remoteRoom,
+        targetRoom: remoteRoom,
+        mode: 'remote',
+        x: pos.x,
+        y: pos.y,
+        distance: pathCost,
+        routeDistance: routeDistance,
+        pathCost: pathCost,
+        container: container,
+        active: true,
+        status: 'open',
+        reason: 'planned-remote-source',
+        assignedVeinseeker: old.assignedVeinseeker || null,
+        queuedVeinseeker: old.queuedVeinseeker || null,
+        queuedUntil: old.queuedUntil || 0,
+        lastSeen: sourceObj ? Game.time : (sourceMem.lastSeen || (scoutSource && scoutSource.lastSeen) || intelTick || 0),
+        lastValidated: Game.time,
+        desiredWork: 1,
+        seats: Math.max(1, openTiles || 1),
+        openSeats: Math.max(1, openTiles || 1)
+      }));
+    }
+  }
 }
 
 function gatherCandidateRemoteRoomsForHome(homeRoom) {
-  // Remote discovery merges three signals: RoadPlanner active remotes, existing
-  // Memory.rooms source/intel records, and currently visible rooms. The accepted
-  // list is the only set buildSourcePlanForHome should turn into source records.
-  var out = { candidateRemoteRooms: [], acceptedRemoteRooms: [], rejectedRemoteRooms: [] };
-  if (!homeRoom) return out;
-  var homeName = typeof homeRoom === 'string' ? homeRoom : homeRoom.name;
+  var homeName = getHomeName(homeRoom);
   var homeObj = typeof homeRoom === 'string' ? Game.rooms[homeRoom] : homeRoom;
+  var out = { candidateRemoteRooms: [], acceptedRemoteRooms: [], rejectedRemoteRooms: [] };
   if (!homeName) return out;
 
-  var ttl = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 3000;
-  var radius = (VeinseekerConfig && VeinseekerConfig.REMOTE_RADIUS) || 3;
-  var myName = getMyUsername();
   var discovered = [];
-  var seen = Object.create(null);
-  var sourceTags = Object.create(null);
+  var seen = {};
+  var sourceTags = {};
 
   if (RoadPlanner && typeof RoadPlanner.getActiveRemoteRooms === 'function' && homeObj) {
     var active = RoadPlanner.getActiveRemoteRooms(homeObj) || [];
     for (var i = 0; i < active.length; i++) {
-      addUniqueRoomName(discovered, seen, active[i]);
+      addUnique(discovered, seen, active[i]);
       sourceTags[active[i]] = 'roadPlanner';
+    }
+  }
+
+  var scoutHome = getScoutHome(homeName);
+  if (scoutHome && scoutHome.rooms) {
+    for (var scoutRoom in scoutHome.rooms) {
+      if (!Object.prototype.hasOwnProperty.call(scoutHome.rooms, scoutRoom)) continue;
+      addUnique(discovered, seen, scoutRoom);
+      if (!sourceTags[scoutRoom]) sourceTags[scoutRoom] = 'scout';
     }
   }
 
   var memRooms = Memory.rooms || {};
   for (var rn in memRooms) {
     if (!Object.prototype.hasOwnProperty.call(memRooms, rn)) continue;
+    if (rn === homeName) continue;
     var mem = memRooms[rn] || {};
-    var hasMemSources = false;
-    if (mem.sources) for (var sid in mem.sources) { if (Object.prototype.hasOwnProperty.call(mem.sources, sid)) { hasMemSources = true; break; } }
-    if (!hasMemSources && !(mem.intel && typeof mem.intel.sources === 'number' && mem.intel.sources > 0)) continue;
-    if (Game.map.getRoomLinearDistance(homeName, rn) > radius) continue;
-    addUniqueRoomName(discovered, seen, rn);
+    var hasSources = !!(mem.sources && Object.keys(mem.sources).length > 0);
+    if (!hasSources && !(mem.intel && mem.intel.sources > 0)) continue;
+    if (Game.map.getRoomLinearDistance(homeName, rn) > REMOTE_RADIUS) continue;
+    addUnique(discovered, seen, rn);
     if (!sourceTags[rn]) sourceTags[rn] = 'memory';
   }
 
   for (var visibleName in Game.rooms) {
     if (!Object.prototype.hasOwnProperty.call(Game.rooms, visibleName)) continue;
+    if (visibleName === homeName) continue;
+    if (Game.map.getRoomLinearDistance(homeName, visibleName) > REMOTE_RADIUS) continue;
     var visible = Game.rooms[visibleName];
-    if (!visible || !visible.find) continue;
-    if (Game.map.getRoomLinearDistance(homeName, visibleName) > radius) continue;
-    var foundSources = visible.find(FIND_SOURCES) || [];
-    if (!foundSources.length) continue;
-    addUniqueRoomName(discovered, seen, visibleName);
+    if (!visible || !visible.find || !(visible.find(FIND_SOURCES) || []).length) continue;
+    addUnique(discovered, seen, visibleName);
     if (!sourceTags[visibleName]) sourceTags[visibleName] = 'visible';
   }
 
   out.candidateRemoteRooms = discovered.slice(0);
-  for (var j = 0; j < discovered.length; j++) {
-    var remoteName = discovered[j];
+  for (var d = 0; d < discovered.length; d++) {
+    var remoteName = discovered[d];
     var reason = null;
-    var remoteMem = (Memory.rooms && Memory.rooms[remoteName]) || {};
-    var remoteVisible = Game.rooms[remoteName];
-    var intel = remoteMem.intel || {};
+    var localOwned = isLocalOwnedRoomForVeinseeker(homeName, remoteName);
+    var routeDistance = getRouteDistanceBetweenRooms(homeName, remoteName);
+    var intelTick = getFreshIntelTick(homeName, remoteName);
+    var controllerReason = getControllerBlockReason(homeName, remoteName);
 
-    var localOwnedCheck = isLocalOwnedRoomForVeinseeker(homeName, remoteName);
-    if (localOwnedCheck.blocked) reason = localOwnedCheck.reason;
-    else if (Game.map.getRoomLinearDistance(homeName, remoteName) > radius) reason = 'beyond-radius';
-    else if (getRouteDistanceBetweenRooms(homeName, remoteName) === Infinity) reason = 'no-route';
-    else if (isRemoteUnsafe(remoteName)) {
-      if (remoteMem.sourceWorkerBlockedReason === 'all-sources-inaccessible') reason = 'all-sources-inaccessible';
-      else reason = 'unsafe';
-    }
-    else if (remoteMem.sourceWorkerBlocked) reason = 'veinseeker-blocked';
-    else if (remoteVisible && remoteVisible.controller && remoteVisible.controller.owner && (!myName || remoteVisible.controller.owner.username !== myName)) reason = 'owned-by-other';
-    else if (remoteVisible && remoteVisible.controller && remoteVisible.controller.reservation && (!myName || remoteVisible.controller.reservation.username !== myName)) reason = 'reserved-by-other';
-    else if (intel.owner && (!myName || intel.owner !== myName)) reason = 'intel-owned-by-other';
-    else if (intel.reservation && (!myName || intel.reservation !== myName)) reason = 'intel-reserved-by-other';
-    else {
-      var intelTick = getRemoteIntelTick(remoteName);
-      if (!remoteVisible && (intelTick == null || (Game.time - intelTick) > ttl)) reason = 'stale-intel';
-    }
+    if (localOwned.blocked) reason = localOwned.reason;
+    else if (!hasRemoteSpawnCapacity(homeName)) reason = 'insufficient-spawn-capacity';
+    else if (Game.map.getRoomLinearDistance(homeName, remoteName) > REMOTE_RADIUS) reason = 'beyond-radius';
+    else if (!isFiniteDistance(routeDistance)) reason = 'no-route';
+    else if (isRemoteUnsafe(remoteName)) reason = 'unsafe';
+    else if (controllerReason) reason = controllerReason;
+    else if (!Game.rooms[remoteName] && (intelTick === null || (Game.time - intelTick) > REMOTE_INTEL_TTL)) reason = 'stale-intel';
 
     if (reason) out.rejectedRemoteRooms.push({ room: remoteName, reason: reason, source: sourceTags[remoteName] || 'unknown' });
     else out.acceptedRemoteRooms.push(remoteName);
@@ -899,419 +719,724 @@ function gatherCandidateRemoteRoomsForHome(homeRoom) {
     var routeA = getRouteDistanceBetweenRooms(homeName, a);
     var routeB = getRouteDistanceBetweenRooms(homeName, b);
     if (routeA !== routeB) return routeA - routeB;
-    var linA = Game.map.getRoomLinearDistance(homeName, a);
-    var linB = Game.map.getRoomLinearDistance(homeName, b);
-    if (linA !== linB) return linA - linB;
+    var linearA = Game.map.getRoomLinearDistance(homeName, a);
+    var linearB = Game.map.getRoomLinearDistance(homeName, b);
+    if (linearA !== linearB) return linearA - linearB;
     return a < b ? -1 : (a > b ? 1 : 0);
   });
 
   return out;
 }
 
-
-function getApprovedRemotesFromScout(homeRoom) {
-  // Scout-focused approval path used by Veinseeker fallback selection. It reads
-  // Memory.__BHM.scoutIntel and returns source-level candidates with route
-  // ordering plus explicit rejection reasons for diagnostics.
-  var out = { approvedRooms: [], approvedSources: [], rejected: [] };
-  var ttl = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 3000;
-  var intel = Memory.__BHM && Memory.__BHM.scoutIntel && Memory.__BHM.scoutIntel.homes && Memory.__BHM.scoutIntel.homes[homeRoom];
-  var rooms = intel && intel.rooms ? intel.rooms : null;
-  if (!rooms) return out;
-  for (var rn in rooms) {
-    if (!Object.prototype.hasOwnProperty.call(rooms, rn)) continue;
-    var rec = rooms[rn]; if (!rec) continue;
-    var reason = null;
-    if (rn === homeRoom) reason = 'home-room';
-    else if (!isFinitePositiveDistance(rec.routeDistance)) reason = 'no-route';
-    else if (!rec.lastSeen || (Game.time - rec.lastSeen) > ttl) reason = 'stale-scout-intel';
-    else if (!rec.sources || rec.sources.length <= 0) reason = 'no-sources';
-    else if (!rec.remoteEligible) reason = rec.remoteBlockedReason || 'blocked';
-    else if (isRemoteUnsafe(rn)) reason = 'unsafe';
-    if (reason) { out.rejected.push({ room: rn, reason: reason }); continue; }
-
-    out.approvedRooms.push(rn);
-    var linearDistance = (typeof rec.linearDistance === 'number' && isFinite(rec.linearDistance))
-      ? rec.linearDistance
-      : Game.map.getRoomLinearDistance(homeRoom, rn);
-    for (var i = 0; i < rec.sources.length; i++) {
-      var src = rec.sources[i];
-      if (!src || !src.id || src.accessible === false) continue;
-      out.approvedSources.push({ sourceId: src.id, targetRoom: rn, routeDistance: rec.routeDistance, linearDistance: linearDistance, roomName: rn });
-    }
+function normalizeRemoteDiscovery(homeRoom, remoteDiscovery) {
+  if (Array.isArray(remoteDiscovery)) {
+    return {
+      candidateRemoteRooms: remoteDiscovery.slice(0),
+      acceptedRemoteRooms: remoteDiscovery.slice(0),
+      rejectedRemoteRooms: []
+    };
   }
-  out.approvedRooms.sort(function(a,b){
-    var ra = getRouteDistanceBetweenRooms(homeRoom,a), rb = getRouteDistanceBetweenRooms(homeRoom,b);
-    if (ra !== rb) return ra-rb;
-    var la = Game.map.getRoomLinearDistance(homeRoom,a), lb = Game.map.getRoomLinearDistance(homeRoom,b);
-    if (la !== lb) return la-lb;
-    return a < b ? -1 : (a > b ? 1 : 0);
-  });
-  out.approvedSources.sort(function(a,b){
-    if (a.routeDistance!==b.routeDistance) return a.routeDistance-b.routeDistance;
-    if (a.linearDistance!==b.linearDistance) return a.linearDistance-b.linearDistance;
-    if (a.roomName!==b.roomName) return a.roomName < b.roomName ? -1 : 1;
-    return a.sourceId < b.sourceId ? -1 : (a.sourceId > b.sourceId ? 1 : 0);
-  });
-  return out;
+  if (remoteDiscovery && remoteDiscovery.acceptedRemoteRooms) return remoteDiscovery;
+  return gatherCandidateRemoteRoomsForHome(homeRoom);
 }
 
+function buildSourcePlanForHome(homeRoom, remoteDiscovery) {
+  var homeName = getHomeName(homeRoom);
+  if (!homeName) return null;
+  var old = ensureHomeMemory(homeName);
+  var oldSources = old.sources || {};
+  var discovery = normalizeRemoteDiscovery(homeName, remoteDiscovery);
+  var plan = createHomePlan(homeName);
+  plan.truckerRemoteHaulDecisions = old.truckerRemoteHaulDecisions || (Memory.rooms && Memory.rooms[homeName] && Memory.rooms[homeName].lastRemoteHaulRequestAudit) || null;
+  plan.candidateRemoteRooms = discovery.candidateRemoteRooms || [];
+  plan.acceptedRemoteRooms = discovery.acceptedRemoteRooms || [];
+  plan.rejectedRemoteRooms = discovery.rejectedRemoteRooms || [];
 
-function ensureRemoteContainerBuildsMemory() {
-  // Shared with role.Veinseeker.Remote.js. Build records tell the planner/spawner that
-  // a source may still need a Veinseeker to create or finish its remote container.
-  if (!Memory.__BHM) Memory.__BHM = {};
-  if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
-  return Memory.__BHM.remoteContainerBuilds;
+  buildHomeSources(plan, oldSources);
+  buildRemoteSources(plan, plan.acceptedRemoteRooms, oldSources);
+
+  ensureMemory().homes[homeName] = plan;
+  writePlanDiagnostics(homeName);
+  return plan;
 }
 
-function isUnfinishedContainerBuild(sourceRec) {
-  // Used to prefer queueing Veinseeker for sources whose container is not built yet.
-  // Unsafe rooms are ignored so the queue does not chase blocked infrastructure.
-  if (!sourceRec || !sourceRec.sourceId) return false;
-  if (sourceRec.remoteRoom && isRemoteUnsafe(sourceRec.remoteRoom)) return false;
-
-  var containerRec = sourceRec.container;
-  if (containerRec && (containerRec.status === 'planned' || containerRec.status === 'building' || containerRec.status === 'missing')) {
-    return true;
-  }
-
-  var builds = ensureRemoteContainerBuildsMemory();
-  var buildRec = builds[sourceRec.sourceId];
-  if (!buildRec) return false;
-  if (buildRec.remoteRoom && isRemoteUnsafe(buildRec.remoteRoom)) return false;
-  return buildRec.status !== 'built';
+function isVeinseekerMemory(mem) {
+  return SourceWorkerManager.isVeinseekerMemory(mem);
 }
-function buildSourcePlanForHome(homeRoom, remoteRooms) {
-  // Rebuild the per-home source plan from approved remote rooms. The function
-  // preserves selected per-source fields from the previous plan, then refreshes
-  // safety/stale/source status for this tick.
-  var home = ensureHomeMemory(homeRoom);
-  var oldSources = home.sources || {};
-  home.sources = {};
-  home.unsafeSources = [];
-  home.staleSources = [];
 
-  var ttl = (VeinseekerConfig && VeinseekerConfig.VEINSEEKER_REMOTE_INTEL_TTL) || 3000;
-  for (var i = 0; i < (remoteRooms || []).length; i++) {
-    var remoteRoom = remoteRooms[i];
-    if (!remoteRoom) continue;
-    if (isLocalOwnedRoomForVeinseeker(homeRoom, remoteRoom).blocked) continue;
-    if (isRemoteUnsafe(remoteRoom)) { home.unsafeSources.push(remoteRoom); continue; }
+function isVeinseekerQueueItem(item) {
+  return item && item.role === 'Veinseeker';
+}
 
-    var intelTick = getRemoteIntelTick(remoteRoom);
-    if (!Game.rooms[remoteRoom] && (intelTick == null || (Game.time - intelTick) > ttl)) {
-      home.staleSources.push(remoteRoom);
+function queueItemSourceId(item) {
+  return SourceWorkerManager.getQueueSourceId(item);
+}
+
+function creepSourceId(creep) {
+  return SourceWorkerManager.getSourceIdFromMemory(creep && creep.memory);
+}
+
+function getCreepHome(creep) {
+  return SourceWorkerManager.getCreepHomeRoomName(creep);
+}
+
+function removeQueuedVeinseekerForSource(homeRoom, sourceId, mode) {
+  var roomMem = getRoomMemoryBucket(homeRoom);
+  var q = roomMem.spawnQueue || [];
+  var kept = [];
+  var removed = 0;
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (isVeinseekerQueueItem(item) &&
+        queueItemSourceId(item) === sourceId &&
+        (!mode || item.mode === mode)) {
+      removed++;
       continue;
     }
-
-    var list = [];
-    var live = Game.rooms[remoteRoom];
-    if (live) {
-      var found = live.find(FIND_SOURCES) || [];
-      for (var f = 0; f < found.length; f++) list.push(found[f]);
-    } else {
-      var mem = (Memory.rooms && Memory.rooms[remoteRoom]) || {};
-      if (mem.sources) {
-        for (var sid in mem.sources) {
-          if (!Object.prototype.hasOwnProperty.call(mem.sources, sid)) continue;
-          list.push({ id: sid, pos: mem.sources[sid].pos || mem.sources[sid] });
-        }
-      }
-    }
-
-    var blockedInRoom = 0;
-    var totalInRoom = 0;
-    for (var j = 0; j < list.length; j++) {
-      var src = list[j];
-      if (!src || !src.id) continue;
-      totalInRoom++;
-      var srcMem = (Memory.rooms && Memory.rooms[remoteRoom] && Memory.rooms[remoteRoom].sources && Memory.rooms[remoteRoom].sources[src.id]) || {};
-      if (srcMem.sourceWorkerBlockedUntil && srcMem.sourceWorkerBlockedUntil > Game.time) {
-        blockedInRoom++;
-        continue;
-      }
-      var prev = oldSources[src.id] || {};
-      var x = src.pos && typeof src.pos.x === 'number' ? src.pos.x : (typeof prev.x === 'number' ? prev.x : null);
-      var y = src.pos && typeof src.pos.y === 'number' ? src.pos.y : (typeof prev.y === 'number' ? prev.y : null);
-      home.sources[src.id] = {
-        sourceId: src.id, homeRoom: homeRoom, remoteRoom: remoteRoom,
-        x: x, y: y,
-        containerId: prev.containerId || null,
-        container: prev.container || null,
-        assignedVeinseeker: prev.assignedVeinseeker || null,
-        reservedBy: prev.reservedBy || null,
-        reservedUntil: prev.reservedUntil || 0,
-        lastSeen: Game.time,
-        lastActive: prev.lastActive || 0,
-        status: 'open',
-        reason: 'planned'
-      };
-    }
-    if (totalInRoom > 0 && blockedInRoom >= totalInRoom) home.unsafeSources.push(remoteRoom + ':all-sources-blocked');
+    kept.push(item);
   }
-
-  return home;
+  roomMem.spawnQueue = kept;
+  return removed;
 }
 
-function getRemoteVeinseekerCreepsForHome(homeRoom, C) {
-  if (C && C.creepsByHomeRoleMode && C.creepsByHomeRoleMode[homeRoom] &&
-      C.creepsByHomeRoleMode[homeRoom].Veinseeker &&
-      C.creepsByHomeRoleMode[homeRoom].Veinseeker.remote) {
-    return C.creepsByHomeRoleMode[homeRoom].Veinseeker.remote;
+function assignCreepToRemoteSource(creep, rec, reason) {
+  if (!creep || !creep.memory || !rec || !rec.sourceId || rec.mode !== 'remote' || !rec.active) return false;
+  creep.memory.role = 'Veinseeker';
+  creep.memory.task = 'veinseeker';
+  creep.memory.mode = 'remote';
+  creep.memory.home = rec.homeRoom;
+  creep.memory.sourceId = rec.sourceId;
+  creep.memory.assignedSource = rec.sourceId;
+  creep.memory.targetRoom = rec.targetRoom || rec.roomName;
+  creep.memory.roomName = rec.targetRoom || rec.roomName;
+  creep.memory._assignTick = Game.time;
+  creep.memory._sourcePlanAssignReason = reason || 'source-plan';
+  rec.assignedVeinseeker = creep.name;
+  rec.queuedVeinseeker = null;
+  rec.queuedUntil = 0;
+  rec.status = 'assigned';
+  rec.reason = 'live-idle-veinseeker-assigned';
+  removeQueuedVeinseekerForSource(rec.homeRoom, rec.sourceId, 'remote');
+  return true;
+}
+
+function assignIdleRemoteVeinseeker(creep) {
+  if (!creep || !creep.memory) return null;
+  var homeRoom = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
+  if (!homeRoom) return null;
+  var plan = ensureHomeMemory(homeRoom);
+  var liveBySource = countLiveAssignments(plan).bySource;
+  var ordered = [];
+  for (var i = 0; i < plan.sourceOrder.length; i++) {
+    var rec = plan.sources[plan.sourceOrder[i]];
+    if (rec && rec.active && rec.mode === 'remote' && !liveBySource[rec.sourceId]) ordered.push(rec);
   }
-  var out = [];
+  ordered.sort(function (a, b) {
+    var da = typeof a.routeDistance === 'number' ? a.routeDistance : 9999;
+    var db = typeof b.routeDistance === 'number' ? b.routeDistance : 9999;
+    if (da !== db) return da - db;
+    var pa = typeof a.pathCost === 'number' ? a.pathCost : 9999;
+    var pb = typeof b.pathCost === 'number' ? b.pathCost : 9999;
+    if (pa !== pb) return pa - pb;
+    return a.sourceId < b.sourceId ? -1 : (a.sourceId > b.sourceId ? 1 : 0);
+  });
+  for (var j = 0; j < ordered.length; j++) {
+    var rec = ordered[j];
+    if (!rec || liveBySource[rec.sourceId]) continue;
+    if (assignCreepToRemoteSource(creep, rec, 'idle-remote-reused')) {
+      recordSpawnDecision(homeRoom, {
+        sourceId: rec.sourceId,
+        roomName: rec.roomName,
+        mode: 'remote',
+        action: 'assign-live-idle',
+        creepName: creep.name,
+        reason: 'live-unassigned-before-queue'
+      });
+      writePlanDiagnostics(homeRoom);
+      return rec;
+    }
+  }
+  return null;
+}
+
+function countLiveAssignments(plan) {
+  var bySource = {};
+  var homeAssigned = 0;
+  var remoteAssigned = 0;
+  var idleRemote = [];
   for (var name in Game.creeps) {
     if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
     var creep = Game.creeps[name];
-    if (!creep || !creep.memory) continue;
-    if (creep.memory.role !== 'Veinseeker' && creep.memory.task !== 'veinseeker') continue;
-    if (creep.memory.mode !== 'remote') continue;
-    var chome = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
-    if (chome !== homeRoom) continue;
-    out.push(creep);
-  }
-  return out;
-}
-
-function auditAssignmentsForHome(homeRoom, C) {
-  // Reconcile the plan with reality: live Veinseeker creeps, queued Veinseeker spawn items,
-  // expired queue reservations, blocked source Memory, duplicate assignments,
-  // and unfinished container work all converge into lastSourceEnergyPlan.
-  var home = ensureHomeMemory(homeRoom);
-  var bySource = {};
-  var liveCount = 0;
-  var remoteCreeps = getRemoteVeinseekerCreepsForHome(homeRoom, C);
-  for (var i = 0; i < remoteCreeps.length; i++) {
-    var c = remoteCreeps[i];
-    if (!c || !c.memory) continue;
-    liveCount++;
-    if (!c.memory.sourceId) continue;
-    if (!bySource[c.memory.sourceId]) bySource[c.memory.sourceId] = [];
-    bySource[c.memory.sourceId].push(c);
-  }
-
-  home.liveVeinseeker = liveCount;
-  home.duplicateSources = [];
-  home.missingSources = [];
-  var queuedSources = [];
-  var queuedBySource = {};
-  var duplicateQueuedSources = [];
-  var assignedSources = [];
-  var unfinishedContainerSources = [];
-  var sourceQueueDecisions = {};
-  var queued = 0;
-  var spawnQueue = (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].spawnQueue) || [];
-  for (var q = 0; q < spawnQueue.length; q++) {
-    var item = spawnQueue[q];
-    if (!item || item.role !== 'Veinseeker' || item.mode !== 'remote' || !item.sourceId) continue;
-    queuedBySource[item.sourceId] = (queuedBySource[item.sourceId] || 0) + 1;
-  }
-
-  for (var sid in home.sources) {
-    if (!Object.prototype.hasOwnProperty.call(home.sources, sid)) continue;
-    var rec = home.sources[sid];
-    if (!rec) continue;
-    var rmem = (Memory.rooms && Memory.rooms[rec.remoteRoom] && Memory.rooms[rec.remoteRoom].sources && Memory.rooms[rec.remoteRoom].sources[sid]) || {};
-    if (rmem.sourceWorkerBlockedUntil && rmem.sourceWorkerBlockedUntil > Game.time) {
-      rec.status = 'blocked';
-      rec.reason = rmem.sourceWorkerBlockedReason || 'source-blocked';
+    if (!creep || !creep.my || !creep.memory || !isVeinseekerMemory(creep.memory)) continue;
+    if (getCreepHome(creep) !== plan.homeRoom) continue;
+    if (creep.spawning) continue;
+    var mode = creep.memory.mode === 'remote' ? 'remote' : 'home';
+    var sid = creepSourceId(creep);
+    if (mode === 'remote' && !sid) {
+      idleRemote.push(creep);
       continue;
     }
+    if (!sid) continue;
+    if (!bySource[sid]) bySource[sid] = [];
+    bySource[sid].push(creep);
+    if (mode === 'remote') remoteAssigned++;
+    else homeAssigned++;
+  }
+  return {
+    bySource: bySource,
+    homeAssigned: homeAssigned,
+    remoteAssigned: remoteAssigned,
+    idleRemote: idleRemote
+  };
+}
 
-    if (rec.reservedUntil && rec.reservedUntil <= Game.time) {
-      rec.reservedBy = null;
-      rec.reservedUntil = 0;
+function countQueuedAssignments(plan) {
+  var bySource = {};
+  var homeQueued = 0;
+  var remoteQueued = 0;
+  var invalid = [];
+  var q = (Memory.rooms && Memory.rooms[plan.homeRoom] && Memory.rooms[plan.homeRoom].spawnQueue) || [];
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (!isVeinseekerQueueItem(item)) continue;
+    var sid = queueItemSourceId(item);
+    if (!sid) {
+      invalid.push({ index: i, role: item.role, mode: item.mode || null, reason: 'missing-source-id' });
+      continue;
     }
-    var hasQueueItemsForSource = queuedBySource[sid] > 0;
-    if (rec.reservedBy && rec.reservedUntil > Game.time && !hasQueueItemsForSource && String(rec.reservedBy).indexOf('queue:') === 0) {
-      rec.reservedBy = null;
-      rec.reservedUntil = 0;
-      sourceQueueDecisions[sid] = 'cleared-stale-reservation-no-queue-item';
+    if (item.mode === 'remote' && !item.targetRoom) {
+      invalid.push({ index: i, role: item.role, mode: item.mode, sourceId: sid, reason: 'missing-target-room' });
+      continue;
     }
-    if (rec.reservedBy && rec.reservedUntil > Game.time && !hasQueueItemsForSource) queued++;
-    if (hasQueueItemsForSource) {
-      rec.reservedBy = rec.reservedBy || ('queue:spawnQueue:' + sid);
-      rec.reservedUntil = Math.max(rec.reservedUntil || 0, Game.time + RESERVE_TTL);
-      queued += queuedBySource[sid];
-      queuedSources.push(sid);
-      if (hasQueueItemsForSource && queuedBySource[sid] > 1) duplicateQueuedSources.push(sid);
+    if (!bySource[sid]) bySource[sid] = [];
+    bySource[sid].push(item);
+    if (item.mode === 'remote') remoteQueued++;
+    else homeQueued++;
+  }
+  return {
+    bySource: bySource,
+    homeQueued: homeQueued,
+    remoteQueued: remoteQueued,
+    invalid: invalid
+  };
+}
+
+function auditAssignmentsForHome(homeRoom) {
+  var plan = ensureHomeMemory(homeRoom);
+  var live = countLiveAssignments(plan);
+
+  for (var idle = 0; idle < live.idleRemote.length; idle++) {
+    var idleCreep = live.idleRemote[idle];
+    assignIdleRemoteVeinseeker(idleCreep);
+  }
+
+  live = countLiveAssignments(plan);
+  var queued = countQueuedAssignments(plan);
+  plan.liveAssignedHomeVeinseekers = live.homeAssigned;
+  plan.liveAssignedRemoteVeinseekers = live.remoteAssigned;
+  plan.liveIdleRemoteVeinseekers = live.idleRemote.length;
+  plan.queuedHomeVeinseekers = queued.homeQueued;
+  plan.queuedRemoteVeinseekers = queued.remoteQueued;
+  plan.desiredHomeVeinseekers = 0;
+  plan.desiredRemoteVeinseekers = 0;
+
+  var duplicateSources = [];
+  for (var i = 0; i < plan.sourceOrder.length; i++) {
+    var sid = plan.sourceOrder[i];
+    var rec = plan.sources[sid];
+    if (!rec) continue;
+
+    if (rec.queuedUntil && rec.queuedUntil <= Game.time) {
+      rec.queuedUntil = 0;
+      rec.queuedVeinseeker = null;
     }
 
-    if (rec.assignedVeinseeker && !Game.creeps[rec.assignedVeinseeker]) rec.assignedVeinseeker = null;
+    rec.live = 0;
+    rec.queued = 0;
+    rec.assignedVeinseeker = null;
+    if (!rec.queuedUntil) rec.queuedVeinseeker = null;
 
-    var contenders = bySource[sid] || [];
-    if (contenders.length > 1) {
-      contenders.sort(function (a, b) {
+    var liveList = live.bySource[sid] || [];
+    if (liveList.length > 1) {
+      duplicateSources.push(sid);
+      liveList.sort(function (a, b) {
         var at = a.memory && typeof a.memory._assignTick === 'number' ? a.memory._assignTick : 99999999;
         var bt = b.memory && typeof b.memory._assignTick === 'number' ? b.memory._assignTick : 99999999;
         if (at !== bt) return at - bt;
         return a.name < b.name ? -1 : 1;
       });
-      for (var d = 1; d < contenders.length; d++) contenders[d].memory._forceYield = true;
-      home.duplicateSources.push(sid);
+      for (var d = 1; d < liveList.length; d++) liveList[d].memory._forceYield = true;
     }
 
-    if (contenders.length > 0) {
-      rec.assignedVeinseeker = contenders[0].name;
+    var queueList = queued.bySource[sid] || [];
+    rec.live = liveList.length;
+    rec.queued = queueList.length;
+
+    if (rec.active) {
+      if (rec.mode === 'home') plan.desiredHomeVeinseekers++;
+      if (rec.mode === 'remote') plan.desiredRemoteVeinseekers++;
+    }
+
+    if (!rec.active) {
+      rec.assignedVeinseeker = liveList[0] ? liveList[0].name : null;
+      rec.queuedVeinseeker = queueList[0] ? 'spawnQueue' : null;
+      continue;
+    }
+
+    if (liveList.length > 0) {
+      rec.assignedVeinseeker = liveList[0].name;
+      rec.queuedVeinseeker = null;
+      rec.queuedUntil = 0;
       rec.status = 'assigned';
       rec.reason = 'live-veinseeker';
-      rec.lastActive = Game.time;
-      assignedSources.push(sid);
-      rec.reservedBy = null;
-      rec.reservedUntil = 0;
-      sourceQueueDecisions[sid] = 'assigned-live-veinseeker';
-    } else if ((rec.reservedBy && rec.reservedUntil > Game.time) || hasQueueItemsForSource) {
+    } else if (queueList.length > 0 || (rec.queuedVeinseeker && rec.queuedUntil > Game.time)) {
+      rec.queuedVeinseeker = queueList[0] && queueList[0].name ? queueList[0].name : (rec.queuedVeinseeker || 'spawnQueue');
+      rec.queuedUntil = Math.max(rec.queuedUntil || 0, Game.time + RESERVE_TTL);
       rec.status = 'queued';
-      rec.reason = rec.reservedBy;
-      sourceQueueDecisions[sid] = hasQueueItemsForSource ? 'queued-spawnQueue' : 'queued-reserved';
+      rec.reason = 'queued-veinseeker';
     } else {
       rec.status = 'open';
-      rec.reason = 'missing-veinseeker';
-      if (isUnfinishedContainerBuild(rec)) {
-        rec.reason = 'unfinished-container';
-        if (rec.container) rec.container.status = rec.container.status || 'missing';
-        unfinishedContainerSources.push(sid);
-        sourceQueueDecisions[sid] = 'missing-veinseeker-unfinished-container';
-      } else {
-        sourceQueueDecisions[sid] = 'missing-veinseeker';
-      }
-      home.missingSources.push(sid);
+      rec.reason = rec.mode === 'remote' ? 'missing-remote-veinseeker' : 'home-source-open';
     }
   }
 
-  home.desiredVeinseeker = Object.keys(home.sources).length;
-  home.queuedVeinseeker = queued;
-  home.lastAudit = Game.time;
+  plan.duplicateSources = duplicateSources;
+  plan.invalidQueueItems = queued.invalid;
+  plan.lastAudit = Game.time;
+  writePlanDiagnostics(homeRoom);
+  return plan;
+}
 
-  if (!Memory.rooms) Memory.rooms = {};
-  if (!Memory.rooms[homeRoom]) Memory.rooms[homeRoom] = {};
-  Memory.rooms[homeRoom].lastSourceEnergyPlan = {
-    tick: Game.time,
-    desiredVeinseeker: home.desiredVeinseeker,
-    liveVeinseeker: home.liveVeinseeker,
-    queuedVeinseeker: home.queuedVeinseeker,
-    queuedSources: queuedSources,
-    duplicateQueuedSources: duplicateQueuedSources,
-    missingSources: home.missingSources.slice(0),
-    unfinishedContainerSources: unfinishedContainerSources,
-    assignedSources: assignedSources,
-    unsafeSources: home.unsafeSources.slice(0),
-    staleSources: home.staleSources.slice(0),
-    duplicateSources: home.duplicateSources.slice(0),
-    blockedSources: Object.keys(home.sources).filter(function (sid) {
-      var src = home.sources[sid];
-      var rs = src && Memory.rooms && Memory.rooms[src.remoteRoom] && Memory.rooms[src.remoteRoom].sources && Memory.rooms[src.remoteRoom].sources[sid];
-      return !!(rs && rs.sourceWorkerBlockedUntil && rs.sourceWorkerBlockedUntil > Game.time);
-    }),
-    sourceQueueDecisions: sourceQueueDecisions,
-    notes: 'one Veinseeker per approved source'
+function summarizeSourceRecord(rec) {
+  return {
+    sourceId: rec.sourceId,
+    roomName: rec.roomName,
+    targetRoom: rec.targetRoom,
+    mode: rec.mode,
+    active: !!rec.active,
+    status: rec.status,
+    reason: rec.reason,
+    assignedVeinseeker: rec.assignedVeinseeker || null,
+    queuedVeinseeker: rec.queuedVeinseeker || null,
+    pathCost: finiteOrNull(rec.pathCost),
+    distance: finiteOrNull(rec.distance),
+    routeDistance: finiteOrNull(rec.routeDistance),
+    container: rec.container ? {
+      status: rec.container.status || null,
+      containerId: rec.container.containerId || null,
+      siteId: rec.container.siteId || null,
+      x: typeof rec.container.x === 'number' ? rec.container.x : null,
+      y: typeof rec.container.y === 'number' ? rec.container.y : null,
+      amount: typeof rec.container.amount === 'number' ? rec.container.amount : null,
+      updated: rec.container.updated || null
+    } : null
   };
+}
 
-  return home;
+function writePlanDiagnostics(homeRoom) {
+  var plan = ensureHomeMemory(homeRoom);
+  var roomMem = getRoomMemoryBucket(homeRoom);
+  var summaries = [];
+  for (var i = 0; i < plan.sourceOrder.length; i++) {
+    var rec = plan.sources[plan.sourceOrder[i]];
+    if (rec) summaries.push(summarizeSourceRecord(rec));
+  }
+  roomMem.lastSourceEnergyPlan = {
+    tick: Game.time,
+    activeSources: plan.activeSources || 0,
+    inactiveSources: plan.inactiveSources || 0,
+    homeSources: plan.homeSources || 0,
+    remoteSources: plan.remoteSources || 0,
+    desiredHomeVeinseekers: plan.desiredHomeVeinseekers || 0,
+    desiredRemoteVeinseekers: plan.desiredRemoteVeinseekers || 0,
+    liveAssignedHomeVeinseekers: plan.liveAssignedHomeVeinseekers || 0,
+    liveAssignedRemoteVeinseekers: plan.liveAssignedRemoteVeinseekers || 0,
+    liveIdleRemoteVeinseekers: plan.liveIdleRemoteVeinseekers || 0,
+    queuedHomeVeinseekers: plan.queuedHomeVeinseekers || 0,
+    queuedRemoteVeinseekers: plan.queuedRemoteVeinseekers || 0,
+    candidateRemoteRooms: plan.candidateRemoteRooms || [],
+    acceptedRemoteRooms: plan.acceptedRemoteRooms || [],
+    rejectedRemoteRooms: plan.rejectedRemoteRooms || [],
+    skippedSources: plan.skippedSources || [],
+    invalidQueueItems: plan.invalidQueueItems || [],
+    duplicateSources: plan.duplicateSources || [],
+    sourceRecords: summaries,
+    spawnDecisions: plan.spawnDecisions || [],
+    truckerRemoteHaulDecisions: plan.truckerRemoteHaulDecisions || null
+  };
+  return roomMem.lastSourceEnergyPlan;
+}
+
+function getPlanForHome(homeRoom) {
+  return ensureHomeMemory(homeRoom);
+}
+
+function getSourceRecord(homeRoom, sourceId) {
+  var plan = ensureHomeMemory(homeRoom);
+  return plan.sources && plan.sources[sourceId] ? plan.sources[sourceId] : null;
+}
+
+function getSourcesNeedingVeinseeker(homeRoom, mode) {
+  var plan = ensureHomeMemory(homeRoom);
+  var out = [];
+  for (var i = 0; i < plan.sourceOrder.length; i++) {
+    var rec = plan.sources[plan.sourceOrder[i]];
+    if (!rec || !rec.active) continue;
+    if (mode && rec.mode !== mode) continue;
+    if (rec.mode === 'remote') {
+      if (rec.status === 'open' && !rec.assignedVeinseeker && !(rec.queuedVeinseeker && rec.queuedUntil > Game.time)) out.push(rec);
+      continue;
+    }
+    if (rec.mode === 'home') {
+      var hasNoCoverage = rec.live <= 0 && rec.queued <= 0;
+      var hasWorkDeficit = (rec.desiredWork || 0) > ((rec.liveWork || 0) + (rec.queuedWork || 0));
+      if (hasNoCoverage || hasWorkDeficit) out.push(rec);
+    }
+  }
+  out.sort(function (a, b) {
+    if (a.mode !== b.mode) return a.mode === 'home' ? -1 : 1;
+    var da = typeof a.routeDistance === 'number' ? a.routeDistance : 9999;
+    var db = typeof b.routeDistance === 'number' ? b.routeDistance : 9999;
+    if (da !== db) return da - db;
+    var pa = typeof a.pathCost === 'number' ? a.pathCost : 9999;
+    var pb = typeof b.pathCost === 'number' ? b.pathCost : 9999;
+    if (pa !== pb) return pa - pb;
+    return a.sourceId < b.sourceId ? -1 : (a.sourceId > b.sourceId ? 1 : 0);
+  });
+  return out;
+}
+
+function reserveSourceForQueue(homeRoom, sourceId) {
+  var plan = ensureHomeMemory(homeRoom);
+  var rec = sourceId ? plan.sources[sourceId] : null;
+  if (!rec) {
+    var needs = getSourcesNeedingVeinseeker(homeRoom, 'remote');
+    rec = needs.length ? needs[0] : null;
+  }
+  if (!rec || !rec.active || rec.assignedVeinseeker) return null;
+  if (rec.mode === 'remote' && (!rec.targetRoom || rec.targetRoom === rec.homeRoom)) return null;
+  if (rec.queuedVeinseeker && rec.queuedUntil > Game.time) return null;
+  rec.queuedVeinseeker = 'queue:' + Game.time + ':' + rec.sourceId;
+  rec.queuedUntil = Game.time + RESERVE_TTL;
+  rec.status = 'queued';
+  rec.reason = 'reserved-for-spawn';
+  writePlanDiagnostics(homeRoom);
+  return {
+    sourceId: rec.sourceId,
+    targetRoom: rec.targetRoom,
+    roomName: rec.roomName,
+    mode: rec.mode,
+    pathCost: rec.pathCost,
+    routeDistance: rec.routeDistance
+  };
 }
 
 function unreserveSourceForQueue(homeRoom, sourceId) {
-  // Called when BeeSpawnManager failed to enqueue a Veinseeker after reserving the
-  // source. It deliberately refuses to clear a source already claimed by a live
-  // Veinseeker.
-  var home = ensureHomeMemory(homeRoom);
-  var rec = home.sources[sourceId];
-  if (!rec) return false;
-  if (rec.assignedVeinseeker) return false;
-  rec.reservedBy = null;
-  rec.reservedUntil = 0;
-  if (rec.status === 'queued') {
+  var rec = getSourceRecord(homeRoom, sourceId);
+  if (!rec || rec.assignedVeinseeker) return false;
+  rec.queuedVeinseeker = null;
+  rec.queuedUntil = 0;
+  if (rec.active) {
     rec.status = 'open';
-    rec.reason = 'enqueue-failed';
+    rec.reason = 'queue-reservation-cleared';
   }
+  writePlanDiagnostics(homeRoom);
   return true;
-}
-
-function reserveSourceForQueue(homeRoom) {
-  // Spawn-queue reservation point. It chooses one missing/open source, marks it
-  // queued for RESERVE_TTL ticks, and returns only the memory needed for the
-  // queued Veinseeker item.
-  var home = ensureHomeMemory(homeRoom);
-  var pick = null;
-  var unfinishedFirst = [];
-  var normalMissing = [];
-  for (var i = 0; i < home.missingSources.length; i++) {
-    var sidList = home.missingSources[i];
-    var recList = home.sources[sidList];
-    if (!recList) continue;
-    if (isUnfinishedContainerBuild(recList)) unfinishedFirst.push(sidList);
-    else normalMissing.push(sidList);
-  }
-  var orderedMissing = unfinishedFirst.concat(normalMissing);
-  for (var i = 0; i < orderedMissing.length; i++) {
-    var sid = orderedMissing[i];
-    var rec = home.sources[sid];
-    if (!rec || rec.assignedVeinseeker) continue;
-    if (isLocalOwnedRoomForVeinseeker(homeRoom, rec.remoteRoom).blocked) continue;
-    if (isRemoteUnsafe(rec.remoteRoom)) continue;
-    var roomSourceMem = (Memory.rooms && Memory.rooms[rec.remoteRoom] && Memory.rooms[rec.remoteRoom].sources && Memory.rooms[rec.remoteRoom].sources[sid]) || {};
-    if (roomSourceMem.sourceWorkerBlockedUntil && roomSourceMem.sourceWorkerBlockedUntil > Game.time) continue;
-    if (rec.reservedBy && rec.reservedUntil > Game.time) continue;
-    pick = rec; break;
-  }
-  if (!pick) return null;
-  pick.reservedBy = 'queue:' + Game.time + ':' + pick.sourceId;
-  pick.reservedUntil = Game.time + RESERVE_TTL;
-  pick.status = 'queued';
-  pick.reason = pick.reservedBy;
-  return { sourceId: pick.sourceId, targetRoom: pick.remoteRoom };
 }
 
 function claimSource(creep, sourceId, targetRoom) {
-  // Live Veinseeker claim point. Once a creep has a sourceId/targetRoom, this clears
-  // any queue reservation and marks the source assigned to that creep.
-  if (!creep || !creep.memory) return false;
+  if (!creep || !creep.memory || !sourceId) return false;
   var homeRoom = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
-  if (!homeRoom || !sourceId) return false;
-  var home = ensureHomeMemory(homeRoom);
-  var rec = home.sources[sourceId];
-  if (!rec) return false;
-  if (isLocalOwnedRoomForVeinseeker(homeRoom, targetRoom || rec.remoteRoom).blocked) return false;
+  if (!homeRoom) return false;
+  var rec = getSourceRecord(homeRoom, sourceId);
+  if (!rec || !rec.active) return false;
+  if (rec.mode === 'remote' && targetRoom && rec.targetRoom !== targetRoom) return false;
   rec.assignedVeinseeker = creep.name;
-  rec.remoteRoom = targetRoom || rec.remoteRoom;
-  rec.reservedBy = null;
-  rec.reservedUntil = 0;
+  rec.queuedVeinseeker = null;
+  rec.queuedUntil = 0;
   rec.status = 'assigned';
   rec.reason = 'claimed';
-  rec.lastActive = Game.time;
+  removeQueuedVeinseekerForSource(homeRoom, sourceId, rec.mode);
+  writePlanDiagnostics(homeRoom);
   return true;
 }
 
-function releaseSource(creep) {
-  // Live Veinseeker release point. Veinseeker calls this on unsafe rooms, stuck paths, end
-  // of life, or duplicate ownership so the source can be queued again later.
-  if (!creep || !creep.memory || !creep.memory.sourceId) return false;
+function releaseSource(creep, reason) {
+  if (!creep || !creep.memory) return false;
+  var sourceId = creepSourceId(creep);
   var homeRoom = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
-  if (!homeRoom) return false;
-  var home = ensureHomeMemory(homeRoom);
-  var rec = home.sources[creep.memory.sourceId];
+  if (!homeRoom || !sourceId) return false;
+  var rec = getSourceRecord(homeRoom, sourceId);
   if (!rec) return false;
   if (rec.assignedVeinseeker === creep.name) rec.assignedVeinseeker = null;
-  rec.status = 'open';
-  rec.reason = 'released';
-  rec.reservedBy = null;
-  rec.reservedUntil = 0;
+  rec.status = rec.active ? 'open' : rec.status;
+  rec.reason = reason || 'released';
+  writePlanDiagnostics(homeRoom);
   return true;
+}
+
+function validateQueueItem(homeRoom, item) {
+  if (!item || item.role !== 'Veinseeker') return 'not-veinseeker';
+  var sourceId = queueItemSourceId(item);
+  if (!sourceId) return 'missing-source-id';
+  if (item.mode === 'remote' && !item.targetRoom) return 'missing-target-room';
+  var rec = getSourceRecord(homeRoom, sourceId);
+  if (!rec) return 'source-not-in-plan';
+  if (!rec.active) return rec.reason || 'source-inactive';
+  if (item.mode === 'remote') {
+    if (rec.mode !== 'remote') return 'mode-mismatch';
+    if (rec.targetRoom !== item.targetRoom) return 'source-target-mismatch';
+    if (isRemoteUnsafe(item.targetRoom)) return 'room-unsafe';
+    if (rec.assignedVeinseeker && Game.creeps[rec.assignedVeinseeker]) return 'source-already-assigned';
+  }
+  return null;
+}
+
+function isSourceActiveForCreep(creep) {
+  if (!creep || !creep.memory) return false;
+  var sourceId = creepSourceId(creep);
+  var homeRoom = creep.memory.home || creep.memory._home || (creep.room && creep.room.name);
+  if (!homeRoom || !sourceId) return false;
+  var rec = getSourceRecord(homeRoom, sourceId);
+  if (!rec || !rec.active) return false;
+  if (creep.memory.mode === 'remote' && rec.targetRoom !== creep.memory.targetRoom) return false;
+  return true;
+}
+
+function recordSpawnDecision(homeRoom, decision) {
+  if (!homeRoom || !decision) return;
+  var plan = ensureHomeMemory(homeRoom);
+  if (!plan.spawnDecisions) plan.spawnDecisions = [];
+  var entry = {
+    tick: Game.time,
+    sourceId: decision.sourceId || null,
+    roomName: decision.roomName || decision.targetRoom || null,
+    mode: decision.mode || null,
+    action: decision.action || null,
+    reason: decision.reason || null
+  };
+  for (var key in decision) {
+    if (!Object.prototype.hasOwnProperty.call(decision, key)) continue;
+    if (entry[key] === undefined) entry[key] = decision[key];
+  }
+  plan.spawnDecisions.push(entry);
+  if (plan.spawnDecisions.length > 40) plan.spawnDecisions = plan.spawnDecisions.slice(plan.spawnDecisions.length - 40);
+  writePlanDiagnostics(homeRoom);
+}
+
+function attachTruckerRemoteHaulDecision(homeRoom, audit) {
+  if (!homeRoom) return;
+  var plan = ensureHomeMemory(homeRoom);
+  plan.truckerRemoteHaulDecisions = audit || null;
+  writePlanDiagnostics(homeRoom);
+}
+
+function buildRemoteSourceEconomicsReport(homeRoom) {
+  var plan = ensureHomeMemory(homeRoom);
+  var sources = [];
+  for (var i = 0; i < plan.sourceOrder.length; i++) {
+    var rec = plan.sources[plan.sourceOrder[i]];
+    if (!rec || rec.mode !== 'remote') continue;
+    sources.push({
+      sourceId: rec.sourceId,
+      roomName: rec.roomName,
+      active: !!rec.active,
+      status: rec.status,
+      reason: rec.reason,
+      routeDistance: finiteOrNull(rec.routeDistance),
+      pathCost: finiteOrNull(rec.pathCost),
+      containerStatus: rec.containerStatus || null
+    });
+  }
+  var report = {
+    tick: Game.time,
+    recalculated: true,
+    activeRemoteSources: plan.remoteSources || 0,
+    inactiveRemoteSources: sources.length - (plan.remoteSources || 0),
+    sources: sources,
+    notes: 'diagnostic estimate; SourceEnergy plan owns actual activation'
+  };
+  getRoomMemoryBucket(homeRoom).lastRemoteSourceEconomics = report;
+  return report;
+}
+
+function getApprovedRemotesFromScout(homeRoom) {
+  var out = { approvedRooms: [], approvedSources: [], rejected: [] };
+  var scoutHome = getScoutHome(homeRoom);
+  if (!scoutHome || !scoutHome.rooms) return out;
+  for (var roomName in scoutHome.rooms) {
+    if (!Object.prototype.hasOwnProperty.call(scoutHome.rooms, roomName)) continue;
+    var rec = scoutHome.rooms[roomName];
+    var reason = null;
+    if (!rec) reason = 'missing-record';
+    else if (roomName === homeRoom) reason = 'home-room';
+    else if (!isFiniteDistance(rec.routeDistance)) reason = 'no-route';
+    else if (!rec.lastSeen || (Game.time - rec.lastSeen) > REMOTE_INTEL_TTL) reason = 'stale-scout-intel';
+    else if (!rec.sources || !rec.sources.length) reason = 'no-sources';
+    else if (rec.remoteEligible === false) reason = rec.remoteBlockedReason || 'blocked';
+    else if (isRemoteUnsafe(roomName)) reason = 'unsafe';
+    if (reason) {
+      out.rejected.push({ room: roomName, reason: reason });
+      continue;
+    }
+    out.approvedRooms.push(roomName);
+    for (var i = 0; i < rec.sources.length; i++) {
+      var source = rec.sources[i];
+      if (!source || !source.id || source.accessible === false) continue;
+      out.approvedSources.push({
+        sourceId: source.id,
+        targetRoom: roomName,
+        roomName: roomName,
+        routeDistance: rec.routeDistance,
+        pathCost: source.pathCost || null
+      });
+    }
+  }
+  return out;
+}
+
+function resetLegacyMemory(opts) {
+  opts = opts || {};
+  var report = {
+    tick: Game.time,
+    killedRemoteVeinseekers: 0,
+    removedQueueItems: 0,
+    clearedRoomBlocks: 0,
+    clearedSourceBlocks: 0,
+    clearedPaths: 0,
+    clearedBuckets: []
+  };
+
+  if (opts.killRemoteVeinseekers) {
+    for (var name in Game.creeps) {
+      if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+      var creep = Game.creeps[name];
+      if (!creep || !creep.memory || !isVeinseekerMemory(creep.memory)) continue;
+      if (creep.memory.mode === 'remote') {
+        creep.suicide();
+        report.killedRemoteVeinseekers++;
+      }
+    }
+  }
+
+  if (Memory.remoteAssignments) {
+    delete Memory.remoteAssignments;
+    report.clearedBuckets.push('Memory.remoteAssignments');
+  }
+
+  if (Memory.__BHM) {
+    if (Memory.__BHM.sourceEnergy) {
+      delete Memory.__BHM.sourceEnergy;
+      report.clearedBuckets.push('Memory.__BHM.sourceEnergy');
+    }
+    if (Memory.__BHM.remoteHaulRequests) {
+      delete Memory.__BHM.remoteHaulRequests;
+      report.clearedBuckets.push('Memory.__BHM.remoteHaulRequests');
+    }
+    if (Memory.__BHM.remoteContainerStatus) {
+      delete Memory.__BHM.remoteContainerStatus;
+      report.clearedBuckets.push('Memory.__BHM.remoteContainerStatus');
+    }
+    if (Memory.__BHM.remoteContainerBuilds) {
+      delete Memory.__BHM.remoteContainerBuilds;
+      report.clearedBuckets.push('Memory.__BHM.remoteContainerBuilds');
+    }
+    if (Memory.__BHM.remoteEconomicsPathCache) {
+      delete Memory.__BHM.remoteEconomicsPathCache;
+      report.clearedPaths++;
+    }
+  }
+
+  var rooms = Memory.rooms || {};
+  for (var roomName in rooms) {
+    if (!Object.prototype.hasOwnProperty.call(rooms, roomName)) continue;
+    var roomMem = rooms[roomName] || {};
+    var roomBlockFields = [
+      'sourceWorkerBlocked',
+      'sourceWorkerUnsafe',
+      'sourceWorkerBlockedUntil',
+      'sourceWorkerBlockedReason',
+      'sourceWorkerBlockedAt',
+      'sourceWorkerInvaderLockUntil',
+      'sourceWorkerInvaderLockReason',
+      'lastVeinseekerSelection',
+      'lastVeinseekerPathFailure'
+    ];
+    for (var f = 0; f < roomBlockFields.length; f++) {
+      if (roomMem[roomBlockFields[f]] !== undefined) {
+        delete roomMem[roomBlockFields[f]];
+        report.clearedRoomBlocks++;
+      }
+    }
+
+    if (Array.isArray(roomMem.spawnQueue)) {
+      var kept = [];
+      for (var q = 0; q < roomMem.spawnQueue.length; q++) {
+        var item = roomMem.spawnQueue[q];
+        var remove = false;
+        if (isVeinseekerQueueItem(item)) {
+          var sid = queueItemSourceId(item);
+          if (!sid) remove = true;
+          if (item.mode === 'remote' && !item.targetRoom) remove = true;
+        }
+        if (remove) report.removedQueueItems++;
+        else kept.push(item);
+      }
+      roomMem.spawnQueue = kept;
+    }
+
+    if (roomMem.sources) {
+      for (var sourceId in roomMem.sources) {
+        if (!Object.prototype.hasOwnProperty.call(roomMem.sources, sourceId)) continue;
+        var src = roomMem.sources[sourceId] || {};
+        var sourceBlockFields = [
+          'sourceWorkerBlocked',
+          'sourceWorkerBlockedUntil',
+          'sourceWorkerBlockedReason',
+          'sourceWorkerBlockedAt',
+          'reservedBy',
+          'reservedUntil',
+          'assignedVeinseeker',
+          'queuedVeinseeker',
+          'queuedUntil',
+          'pathCache',
+          'pathCostCache'
+        ];
+        for (var sf = 0; sf < sourceBlockFields.length; sf++) {
+          if (src[sourceBlockFields[sf]] !== undefined) {
+            delete src[sourceBlockFields[sf]];
+            report.clearedSourceBlocks++;
+          }
+        }
+      }
+    }
+  }
+
+  Memory.lastSourceEnergyReset = report;
+  return report;
 }
 
 module.exports = {
-  getApprovedRemotesFromScout: getApprovedRemotesFromScout,
   ensureMemory: ensureMemory,
   ensureHomeMemory: ensureHomeMemory,
+  getPlanForHome: getPlanForHome,
+  getSourceRecord: getSourceRecord,
+  getSourcesNeedingVeinseeker: getSourcesNeedingVeinseeker,
   gatherCandidateRemoteRoomsForHome: gatherCandidateRemoteRoomsForHome,
-  buildRemoteSourceEconomicsReport: buildRemoteSourceEconomicsReport,
+  getApprovedRemotesFromScout: getApprovedRemotesFromScout,
   buildSourcePlanForHome: buildSourcePlanForHome,
   auditAssignmentsForHome: auditAssignmentsForHome,
+  buildRemoteSourceEconomicsReport: buildRemoteSourceEconomicsReport,
   reserveSourceForQueue: reserveSourceForQueue,
   unreserveSourceForQueue: unreserveSourceForQueue,
   claimSource: claimSource,
   releaseSource: releaseSource,
+  assignIdleRemoteVeinseeker: assignIdleRemoteVeinseeker,
+  validateQueueItem: validateQueueItem,
+  isSourceActiveForCreep: isSourceActiveForCreep,
+  recordSpawnDecision: recordSpawnDecision,
+  attachTruckerRemoteHaulDecision: attachTruckerRemoteHaulDecision,
+  resetLegacyMemory: resetLegacyMemory,
   isRemoteUnsafe: isRemoteUnsafe,
   refreshVisibleRemoteSafety: refreshVisibleRemoteSafety,
   isLocalOwnedRoomForVeinseeker: isLocalOwnedRoomForVeinseeker

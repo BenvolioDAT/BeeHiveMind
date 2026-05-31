@@ -605,7 +605,11 @@ function removeLegacyVeinseekerQueueItems(roomName) {
   var removed = 0;
   for (var i = 0; i < q.length; i++) {
     var item = q[i];
-    if (isVeinseekerQueueItem(item) && !getVeinseekerQueueSourceId(item)) {
+    if (isVeinseekerRole(item && item.role) && !getVeinseekerQueueSourceId(item)) {
+      removed++;
+      continue;
+    }
+    if (isRemoteVeinseekerQueueItem(item) && !item.targetRoom) {
       removed++;
       continue;
     }
@@ -704,6 +708,13 @@ function refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan) {
 
 function noteVeinseekerSourceSkip(report, sourceId, rec, reason) {
   rec.reason = reason;
+  SourceEnergyManager.recordSpawnDecision(rec.homeRoom || (report && report.diag && report.diag.roomName), {
+    sourceId: sourceId,
+    roomName: rec.selectedSeat && rec.selectedSeat.roomName ? rec.selectedSeat.roomName : null,
+    mode: 'home',
+    action: 'skip',
+    reason: reason
+  });
   report.diag.decisions.push({
     sourceId: sourceId,
     action: 'skip',
@@ -738,6 +749,11 @@ function queueVeinseekerSourceNeeds(room, report, C) {
     var source = sources[i];
     var rec = report.diag.sources[source.id];
     if (!rec) continue;
+    var planRec = SourceEnergyManager.getSourceRecord(roomName, source.id);
+    if (!planRec || !planRec.active) {
+      noteVeinseekerSourceSkip(report, source.id, rec, planRec ? (planRec.reason || 'source-inactive-in-plan') : 'source-not-in-plan');
+      continue;
+    }
 
     refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
     if (rec.desiredWork <= 0) {
@@ -749,6 +765,13 @@ function queueVeinseekerSourceNeeds(room, report, C) {
       if (enqueueVeinseekerForSource(roomName, source.id, 'emergency', desiredPlan, {
         priority: VEINSEEKER_EMERGENCY_PRIORITY
       }, C)) {
+        SourceEnergyManager.recordSpawnDecision(roomName, {
+          sourceId: source.id,
+          roomName: roomName,
+          mode: 'home',
+          action: 'enqueue',
+          reason: 'emergency-source-not-covered'
+        });
         rec.queued++;
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-emergency-no-active-coverage';
@@ -784,6 +807,14 @@ function queueVeinseekerSourceNeeds(room, report, C) {
         replacementFor: rec.lowestTtlName,
         replaceSourceId: source.id
       }, C)) {
+        SourceEnergyManager.recordSpawnDecision(roomName, {
+          sourceId: source.id,
+          roomName: roomName,
+          mode: 'home',
+          action: 'enqueue',
+          reason: 'low-ttl-replacement',
+          replaceCreepName: rec.lowestTtlName
+        });
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-normal-low-ttl-replacement';
         report.diag.decisions.push({
@@ -820,6 +851,13 @@ function queueVeinseekerSourceNeeds(room, report, C) {
       if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
         priority: VEINSEEKER_NORMAL_PRIORITY
       }, C)) {
+        SourceEnergyManager.recordSpawnDecision(roomName, {
+          sourceId: source.id,
+          roomName: roomName,
+          mode: 'home',
+          action: 'enqueue',
+          reason: 'home-source-work-deficit'
+        });
         refreshVeinseekerSourceCapacity(roomName, source, rec, desiredPlan);
         rec.reason = 'queued-normal-source-work-deficit';
         report.diag.decisions.push({
@@ -866,25 +904,31 @@ function queueVeinseekerSourceNeeds(room, report, C) {
 }
 
 function queueRemoteVeinseekerNeeds(C, roomName) {
-  var desired = determineVeinseekerQuota(null, { name: roomName }) || 0;
-  var live = countLiveRemoteVeinseekers(C, roomName);
-  var queued = countQueuedRemoteVeinseekers(C, roomName);
-  var deficit = Math.max(0, desired - live - queued);
+  SourceEnergyManager.auditAssignmentsForHome(roomName, C);
+  var needs = SourceEnergyManager.getSourcesNeedingVeinseeker(roomName, 'remote') || [];
   var diag = {
     tick: Game.time,
-    desired: desired,
-    live: live,
-    queued: queued,
+    desired: needs.length,
+    live: countLiveRemoteVeinseekers(C, roomName),
+    queued: countQueuedRemoteVeinseekers(C, roomName),
     enqueued: 0,
     skipped: 0,
-    reason: null
+    reason: null,
+    decisions: []
   };
-  for (var i = 0; i < deficit; i++) {
-    var pick = SourceEnergyManager.reserveSourceForQueue(roomName);
+  for (var i = 0; i < needs.length; i++) {
+    var need = needs[i];
+    if (!need || !need.sourceId || !need.targetRoom) {
+      diag.skipped++;
+      diag.decisions.push({ action: 'skip', reason: 'missing-source-or-target' });
+      continue;
+    }
+    var pick = SourceEnergyManager.reserveSourceForQueue(roomName, need.sourceId);
     if (!pick) {
       diag.skipped++;
-      diag.reason = 'no-free-source-slots';
-      break;
+      diag.reason = 'source-no-longer-open';
+      diag.decisions.push({ sourceId: need.sourceId, targetRoom: need.targetRoom, action: 'skip', reason: 'source-no-longer-open' });
+      continue;
     }
     var ok = enqueue(roomName, 'Veinseeker', {
       task: 'veinseeker',
@@ -892,14 +936,26 @@ function queueRemoteVeinseekerNeeds(C, roomName) {
       home: roomName,
       sourceId: pick.sourceId,
       targetRoom: pick.targetRoom,
+      roomName: pick.targetRoom,
       priority: ROLE_PRIORITY.Veinseeker || 70
     }, C);
     if (ok) {
       diag.enqueued++;
+      diag.decisions.push({ sourceId: pick.sourceId, targetRoom: pick.targetRoom, action: 'enqueue', reason: 'active-remote-source-open' });
+      SourceEnergyManager.recordSpawnDecision(roomName, {
+        sourceId: pick.sourceId,
+        targetRoom: pick.targetRoom,
+        mode: 'remote',
+        action: 'enqueue',
+        reason: 'active-remote-source-open',
+        pathCost: pick.pathCost,
+        routeDistance: pick.routeDistance
+      });
     } else {
       SourceEnergyManager.unreserveSourceForQueue(roomName, pick.sourceId);
       diag.skipped++;
       diag.reason = 'queue-full';
+      diag.decisions.push({ sourceId: pick.sourceId, targetRoom: pick.targetRoom, action: 'skip', reason: 'queue-full' });
       break;
     }
   }
@@ -1054,11 +1110,11 @@ function getRouteDistanceBetweenRooms(homeName, remoteName) {
 }
 
 function determineVeinseekerQuota(C, room) {
-  // SourceEnergy.Manager owns desiredVeinseeker. BeeSpawnManager only reads that
+  // SourceEnergy.Manager owns source counts. BeeSpawnManager only reads that
   // audited plan and turns deficits into spawn queue items.
   if (!room) return 0;
   var home = SourceEnergyManager.ensureHomeMemory(room.name);
-  return home.desiredVeinseeker || 0;
+  return home.desiredRemoteVeinseekers || 0;
 }
 
 function remoteSourceHasLiveVeinseekerCoverage(homeRoom, sourceId) {
@@ -1086,23 +1142,10 @@ function getRemoteVeinseekerQueuePruneReason(roomName, item, seenQueuedSources) 
   if (!item.targetRoom) return 'missing-target-room';
   if (!item.sourceId) return 'missing-source-id';
 
-  var localOwnedCheck = (SourceEnergyManager && typeof SourceEnergyManager.isLocalOwnedRoomForVeinseeker === 'function')
-    ? SourceEnergyManager.isLocalOwnedRoomForVeinseeker(roomName, item.targetRoom)
-    : { blocked: false };
-  if (localOwnedCheck && localOwnedCheck.blocked) return localOwnedCheck.reason || 'local-owned-room';
-  if (isVeinseekerRemoteRoomUnsafe(item.targetRoom)) return 'room-unsafe';
-
-  var sMem = Memory.rooms && Memory.rooms[item.targetRoom] && Memory.rooms[item.targetRoom].sources && Memory.rooms[item.targetRoom].sources[item.sourceId];
-  if (sMem && sMem.sourceWorkerBlockedUntil && sMem.sourceWorkerBlockedUntil > Game.time) return 'source-blocked';
-
   if (seenQueuedSources && seenQueuedSources[item.sourceId]) return 'duplicate-source-queue';
 
-  var home = SourceEnergyManager.ensureHomeMemory(roomName);
-  var rec = home && home.sources ? home.sources[item.sourceId] : null;
-  if (!rec) return 'source-not-in-plan';
-  if (rec.remoteRoom && item.targetRoom && rec.remoteRoom !== item.targetRoom) return 'source-target-mismatch';
-  if (rec.assignedVeinseeker && Game.creeps[rec.assignedVeinseeker]) return 'source-already-assigned';
-  if (remoteSourceHasLiveVeinseekerCoverage(roomName, item.sourceId)) return 'source-already-covered';
+  var managerReason = SourceEnergyManager.validateQueueItem(roomName, item);
+  if (managerReason) return managerReason;
 
   return null;
 }
@@ -2056,10 +2099,18 @@ function evaluateVeinseekerSpawnGate(room, item, q, itemIndex, C) {
   }
 
   if (!sourceId) {
-    if (energyAvailable >= minEnergy) {
-      return done({ action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'legacy-veinseeker-no-source' });
+    return done({ action: 'skip', minEnergy: minEnergy, reason: 'source-first-veinseeker-requires-source-id' });
+  }
+
+  if (item.mode === 'remote') {
+    var remoteReason = SourceEnergyManager.validateQueueItem(room.name, item);
+    if (remoteReason) {
+      return done({ action: 'skip', minEnergy: minEnergy, reason: remoteReason });
     }
-    return done({ action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-cheapest-veinseeker' });
+    if (energyAvailable >= minEnergy) {
+      return done({ action: 'spawn', energyForSpawn: energyAvailable, minEnergy: minEnergy, reason: 'active-remote-source-ready' });
+    }
+    return done({ action: 'wait', minEnergy: minEnergy, reason: 'not-enough-energy-for-remote-veinseeker' });
   }
 
   var checkedSourceForGate = Game.getObjectById(sourceId);
@@ -2359,34 +2410,16 @@ function prepareRoomQueues(C) {
   for (var i = 0; i < rooms.length; i++) {
     var room = rooms[i];
     if (!roomHasOwnedSpawn(C, room.name)) continue;
-    // Remote mining setup has three separate phases:
-    // 1) discover which rooms are possible remotes,
-    // 2) update the Veinseeker source plan/audit used by existing queue behavior,
-    // 3) after queue prep, write a read-only economics report for humans.
-    var remotePlanSchedule = shouldRefreshRemoteSourcePlan(room.name);
-    var remoteDiscovery = null;
-    if (remotePlanSchedule.refresh) {
-      remoteDiscovery = SourceEnergyManager.gatherCandidateRemoteRoomsForHome(room);
-      SourceEnergyManager.buildSourcePlanForHome(room.name, remoteDiscovery.acceptedRemoteRooms || []);
-      SourceEnergyManager.auditAssignmentsForHome(room.name, C);
-      if (Memory.rooms && Memory.rooms[room.name] && Memory.rooms[room.name].lastSourceEnergyPlan) {
-        Memory.rooms[room.name].lastSourceEnergyPlan.candidateRemoteRooms = remoteDiscovery.candidateRemoteRooms || [];
-        Memory.rooms[room.name].lastSourceEnergyPlan.acceptedRemoteRooms = remoteDiscovery.acceptedRemoteRooms || [];
-        Memory.rooms[room.name].lastSourceEnergyPlan.rejectedRemoteRooms = remoteDiscovery.rejectedRemoteRooms || [];
-      }
-      writeRemoteSourcePlanSchedule(room.name, remotePlanSchedule, true);
-    } else {
-      writeRemoteSourcePlanSchedule(room.name, remotePlanSchedule, false);
-    }
+    var remoteDiscovery = SourceEnergyManager.gatherCandidateRemoteRoomsForHome(room);
+    SourceEnergyManager.buildSourcePlanForHome(room.name, remoteDiscovery);
+    SourceEnergyManager.auditAssignmentsForHome(room.name, C);
+    writeRemoteSourcePlanSchedule(room.name, { reason: 'source-first-refresh', interval: 1, lastTick: Game.time }, true);
     ensureRoomQueue(room.name);
     fillQueueForRoom(C, room);
-    // This call is intentionally last: it observes the final live/queued Veinseeker
-    // counts for the tick, but it does not enqueue, dequeue, reserve, or assign.
-    if (remotePlanSchedule.refresh) {
-      CpuProfiler.measure('SourceEnergy.remoteEconomicsReport', function () {
-        SourceEnergyManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
-      });
-    }
+    SourceEnergyManager.auditAssignmentsForHome(room.name, C);
+    CpuProfiler.measure('SourceEnergy.remoteEconomicsReport', function () {
+      SourceEnergyManager.buildRemoteSourceEconomicsReport(room.name, remoteDiscovery);
+    });
   }
 }
 

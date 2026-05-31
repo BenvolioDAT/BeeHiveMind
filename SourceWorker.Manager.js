@@ -1183,6 +1183,12 @@ function upsertRemoteHaulRequest(creep, source, container, opts) {
   }
   var capacity = container.store.getCapacity(RESOURCE_ENERGY) || 2000;
   var prev = requests[id] || {};
+  var assignedTo = null;
+  var assignedUntil = 0;
+  if (prev.assignedTo && prev.assignedUntil && prev.assignedUntil > Game.time && Game.creeps[prev.assignedTo]) {
+    assignedTo = prev.assignedTo;
+    assignedUntil = prev.assignedUntil;
+  }
   requests[id] = {
     id: id,
     homeRoom: homeName,
@@ -1202,8 +1208,8 @@ function upsertRemoteHaulRequest(creep, source, container, opts) {
     containerHits: container.hits || 0,
     containerHitsMax: container.hitsMax || 0,
     containerHitsPct: container.hitsMax > 0 ? (container.hits / container.hitsMax) : 1,
-    assignedTo: prev.assignedTo || null,
-    assignedUntil: prev.assignedUntil || 0,
+    assignedTo: assignedTo,
+    assignedUntil: assignedUntil,
     maintenanceUntil: prev.maintenanceUntil || 0,
     maintenanceBy: prev.maintenanceBy || null,
     maintenanceReason: prev.maintenanceReason || null
@@ -1227,6 +1233,12 @@ function upsertRemoteLooseHaulRequest(creep, source, target, targetType, opts) {
     return;
   }
   var prev = requests[id] || {};
+  var assignedTo = null;
+  var assignedUntil = 0;
+  if (prev.assignedTo && prev.assignedUntil && prev.assignedUntil > Game.time && Game.creeps[prev.assignedTo]) {
+    assignedTo = prev.assignedTo;
+    assignedUntil = prev.assignedUntil;
+  }
   requests[id] = {
     id: id,
     homeRoom: homeName,
@@ -1244,8 +1256,8 @@ function upsertRemoteLooseHaulRequest(creep, source, target, targetType, opts) {
     y: target.pos.y,
     urgent: amount >= urgentThreshold,
     updated: Game.time,
-    assignedTo: prev.assignedTo || null,
-    assignedUntil: prev.assignedUntil || 0,
+    assignedTo: assignedTo,
+    assignedUntil: assignedUntil,
     maintenanceUntil: prev.maintenanceUntil || 0,
     maintenanceBy: prev.maintenanceBy || null,
     maintenanceReason: prev.maintenanceReason || null

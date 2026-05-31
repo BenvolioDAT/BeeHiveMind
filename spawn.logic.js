@@ -229,6 +229,9 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
     mem.task = 'veinseeker';
     mem.mode = mem.mode === 'remote' ? 'remote' : 'home';
     var targetSourceId = mem.assignedSource || mem.sourceId || mem.replaceSourceId || mem.replacementTargetSourceId || null;
+    if (mem.mode === 'remote' && (!targetSourceId || !mem.targetRoom)) {
+      return false;
+    }
     if (targetSourceId) {
       mem.assignedSource = targetSourceId;
       mem.sourceId = targetSourceId;
