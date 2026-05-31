@@ -433,7 +433,7 @@ function buildHomeSources(plan, oldSources) {
   for (var i = 0; i < sources.length; i++) {
     var source = sources[i];
     var prev = oldSources[source.id] || {};
-    var seats = SourceWorkerManager.buildHarvestSeatList(source).length;
+    var seats = SourceWorkerManager.getSourceSeatCount(source);
     var status = SourceWorkerManager.getSourceMiningStatus(room.name, source, null, {});
     var container = getContainerSummary(source.id, room.name, source, (Memory.rooms[room.name] && Memory.rooms[room.name].sources && Memory.rooms[room.name].sources[source.id]) || {});
     var active = seats > 0;

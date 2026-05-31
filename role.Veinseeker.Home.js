@@ -361,7 +361,7 @@ function resolveSourceConflict(creep, source) {
   if (incumbents.length <= 1) return false;
   if (hasHandoffPartnerForSource(creep, source.id)) return false;
 
-  var seats = SourceWorkerManager.buildHarvestSeatList(source).length;
+  var seats = SourceWorkerManager.getSourceSeatCount(source);
   var mySeat = getSeatPosFromMemory(creep);
   var mySeatKey = mySeat ? SourceWorkerManager.getHarvestSeatKey(mySeat) : null;
   var sameSeatConflict = !mySeatKey;
@@ -673,7 +673,7 @@ function harvestWhileWaiting(creep, source, seatPos) {
   }
 
   if (seatPos && (!SourceWorkerManager.isTileOccupiedByAnyCreep(seatPos, creep.name) ||
-      countAssignedHarvesters(creep.room.name, source.id) < SourceWorkerManager.buildHarvestSeatList(source).length)) {
+      countAssignedHarvesters(creep.room.name, source.id) < SourceWorkerManager.getSourceSeatCount(source))) {
     creep.travelTo(seatPos, { range: 0, reusePath: CFG.TRAVEL_REUSE });
     creep.memory.waitingForSeat = false;
   }
@@ -707,7 +707,7 @@ function runHarvestPhase(creep) {
   }
   if (seatPos) debugRing(creep.room, seatPos, CFG.DRAW.SEAT, 'SEAT');
 
-  var seats = SourceWorkerManager.buildHarvestSeatList(source).length;
+  var seats = SourceWorkerManager.getSourceSeatCount(source);
   var used = countAssignedHarvesters(creep.room.name, source.id);
   if (used < seats) creep.memory.waitingForSeat = false;
 

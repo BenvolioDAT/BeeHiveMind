@@ -126,6 +126,44 @@ function getQueuedItemWorkParts(item, desiredPlan) {
   return 1;
 }
 
+function getPositiveConfigNumber(value) {
+  return (typeof value === 'number' && isFinite(value) && value > 0) ? value : null;
+}
+
+function getHomeSourceSlotLimit(rawSeatCount) {
+  rawSeatCount = Math.max(0, rawSeatCount || 0);
+  if (rawSeatCount <= 0) return 0;
+
+  if (CFG.ALLOW_MULTI_VEINSEEKER_PER_SOURCE === false) {
+    return Math.min(rawSeatCount, 1);
+  }
+
+  var cap = null;
+  var maxHarvesters = getPositiveConfigNumber(CFG.MAX_HARVESTERS_PER_SOURCE);
+  var maxVeinseekers = getPositiveConfigNumber(CFG.MAX_VEINSEEKER_PER_SOURCE);
+  if (maxHarvesters !== null) cap = maxHarvesters;
+  if (maxVeinseekers !== null) cap = cap === null ? maxVeinseekers : Math.min(cap, maxVeinseekers);
+  if (cap !== null) return Math.min(rawSeatCount, cap);
+  return rawSeatCount;
+}
+
+function getPlannedWorkPerHomeMiner(desiredPlan) {
+  var work = getQueuedItemWorkParts(null, desiredPlan);
+  return Math.max(1, work || 1);
+}
+
+function getHomeSourceSeatPolicy(source) {
+  var rawSeats = source ? buildHarvestSeatList(source) : [];
+  var rawSeatCount = rawSeats.length;
+  return {
+    rawSeats: rawSeatCount,
+    seats: getHomeSourceSlotLimit(rawSeatCount),
+    allowMulti: CFG.ALLOW_MULTI_VEINSEEKER_PER_SOURCE !== false,
+    maxHarvestersPerSource: getPositiveConfigNumber(CFG.MAX_HARVESTERS_PER_SOURCE),
+    maxVeinseekersPerSource: getPositiveConfigNumber(CFG.MAX_VEINSEEKER_PER_SOURCE)
+  };
+}
+
 function getDesiredWorkForSource(source) {
   var energyCapacity = null;
   if (source && typeof source.energyCapacity === 'number' && source.energyCapacity > 0) {
@@ -316,10 +354,18 @@ function getSourceMiningStatus(roomName, source, desiredPlan, opts) {
   var sourceId = source && source.id ? source.id : (opts.sourceId || null);
   var rec = createHomeCoverageRecord();
   rec.sourceId = sourceId;
-  rec.desiredWork = getDesiredWorkForSource(source);
-
-  var seats = source ? buildHarvestSeatList(source) : [];
-  rec.seats = seats.length;
+  var seatPolicy = getHomeSourceSeatPolicy(source);
+  rec.rawSeats = seatPolicy.rawSeats;
+  rec.seats = seatPolicy.seats;
+  rec.allowMulti = seatPolicy.allowMulti;
+  rec.maxHarvestersPerSource = seatPolicy.maxHarvestersPerSource;
+  rec.maxVeinseekersPerSource = seatPolicy.maxVeinseekersPerSource;
+  rec.plannedWorkPerMiner = getPlannedWorkPerHomeMiner(desiredPlan);
+  rec.desiredSourceWork = getDesiredWorkForSource(source);
+  rec.desiredWork = Math.min(
+    rec.desiredSourceWork,
+    Math.max(1, rec.seats) * rec.plannedWorkPerMiner
+  );
 
   if (roomName && sourceId) {
     var q = getRoomQueue(roomName, opts);
@@ -919,10 +965,14 @@ function getPreferredSeatPos(source) {
 
 function getSourceSeatCount(source, maxHarvestersPerSource) {
   if (!source || !source.pos) return 0;
-  var seats = buildHarvestSeatList(source).length || countWalkableSeatsAround(source.pos);
+  var policy = getHomeSourceSeatPolicy(source);
+  var seats = policy.seats || 0;
+  if (seats <= 0 && countWalkableSeatsAround(source.pos) > 0) {
+    seats = getHomeSourceSlotLimit(countWalkableSeatsAround(source.pos));
+  }
   var max = typeof maxHarvestersPerSource === 'number'
     ? maxHarvestersPerSource
-    : (CFG.MAX_HARVESTERS_PER_SOURCE || 0);
+    : 0;
   if (max > 0) seats = Math.min(seats, max);
   return seats;
 }
