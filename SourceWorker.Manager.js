@@ -9,6 +9,8 @@ var BeeToolbox = require('BeeToolbox');
 var BodyUtils = require('core.body');
 var Roles = require('core.roles');
 
+var HOME_SOURCE_MAX_VEINSEEKERS_PER_SOURCE = 3;
+
 function getSourceIdFromMemory(mem) {
   if (!mem) return null;
   return mem.assignedSource || mem.sourceId || mem.replaceSourceId || mem.replacementTargetSourceId || null;
@@ -126,25 +128,10 @@ function getQueuedItemWorkParts(item, desiredPlan) {
   return 1;
 }
 
-function getPositiveConfigNumber(value) {
-  return (typeof value === 'number' && isFinite(value) && value > 0) ? value : null;
-}
-
 function getHomeSourceSlotLimit(rawSeatCount) {
   rawSeatCount = Math.max(0, rawSeatCount || 0);
   if (rawSeatCount <= 0) return 0;
-
-  if (CFG.ALLOW_MULTI_VEINSEEKER_PER_SOURCE === false) {
-    return Math.min(rawSeatCount, 1);
-  }
-
-  var cap = null;
-  var maxHarvesters = getPositiveConfigNumber(CFG.MAX_HARVESTERS_PER_SOURCE);
-  var maxVeinseekers = getPositiveConfigNumber(CFG.MAX_VEINSEEKER_PER_SOURCE);
-  if (maxHarvesters !== null) cap = maxHarvesters;
-  if (maxVeinseekers !== null) cap = cap === null ? maxVeinseekers : Math.min(cap, maxVeinseekers);
-  if (cap !== null) return Math.min(rawSeatCount, cap);
-  return rawSeatCount;
+  return Math.min(rawSeatCount, HOME_SOURCE_MAX_VEINSEEKERS_PER_SOURCE);
 }
 
 function getPlannedWorkPerHomeMiner(desiredPlan) {
@@ -157,10 +144,7 @@ function getHomeSourceSeatPolicy(source) {
   var rawSeatCount = rawSeats.length;
   return {
     rawSeats: rawSeatCount,
-    seats: getHomeSourceSlotLimit(rawSeatCount),
-    allowMulti: CFG.ALLOW_MULTI_VEINSEEKER_PER_SOURCE !== false,
-    maxHarvestersPerSource: getPositiveConfigNumber(CFG.MAX_HARVESTERS_PER_SOURCE),
-    maxVeinseekersPerSource: getPositiveConfigNumber(CFG.MAX_VEINSEEKER_PER_SOURCE)
+    seats: getHomeSourceSlotLimit(rawSeatCount)
   };
 }
 
@@ -250,6 +234,7 @@ function isHomeVeinseekerSafelyHarvesting(creep, source, opts) {
 function createHomeCoverageRecord() {
   return {
     sourceId: null,
+    rawSeats: 0,
     seats: 0,
     live: 0,
     queued: 0,
@@ -257,8 +242,10 @@ function createHomeCoverageRecord() {
     queuedWork: 0,
     spawnPending: 0,
     spawnPendingWork: 0,
+    desiredSourceWork: 0,
     desiredWork: 0,
     freeWork: 0,
+    plannedWorkPerMiner: 0,
     saturatedByWork: false,
     saturatedBySeats: false,
     hasOpenSeat: false,
@@ -357,14 +344,11 @@ function getSourceMiningStatus(roomName, source, desiredPlan, opts) {
   var seatPolicy = getHomeSourceSeatPolicy(source);
   rec.rawSeats = seatPolicy.rawSeats;
   rec.seats = seatPolicy.seats;
-  rec.allowMulti = seatPolicy.allowMulti;
-  rec.maxHarvestersPerSource = seatPolicy.maxHarvestersPerSource;
-  rec.maxVeinseekersPerSource = seatPolicy.maxVeinseekersPerSource;
   rec.plannedWorkPerMiner = getPlannedWorkPerHomeMiner(desiredPlan);
   rec.desiredSourceWork = getDesiredWorkForSource(source);
   rec.desiredWork = Math.min(
     rec.desiredSourceWork,
-    Math.max(1, rec.seats) * rec.plannedWorkPerMiner
+    rec.seats * rec.plannedWorkPerMiner
   );
 
   if (roomName && sourceId) {
@@ -1013,28 +997,6 @@ function countOpenHarvestTiles(source) {
   return count;
 }
 
-function getSourceMaxSlots(sourceId, targetRoom, opts) {
-  opts = opts || {};
-  if (!sourceId) return 0;
-  if (targetRoom && opts.isRemoteUnsafe && opts.isRemoteUnsafe(targetRoom)) return 0;
-
-  if (targetRoom && opts.requireFreshIntel) {
-    var intelTick = opts.getRemoteIntelTick ? opts.getRemoteIntelTick(targetRoom) : null;
-    var intelTtl = opts.intelTtl || (CFG.VEINSEEKER_REMOTE_INTEL_TTL || 3000);
-    if (!Game.rooms[targetRoom] && (intelTick == null || (Game.time - intelTick) > intelTtl)) return 0;
-  }
-
-  var allowMulti = opts.allowMulti != null ? opts.allowMulti : !(CFG.ALLOW_MULTI_VEINSEEKER_PER_SOURCE === false);
-  if (!allowMulti) return 1;
-  var maxSlots = Math.max(1, opts.maxPerSource || CFG.MAX_VEINSEEKER_PER_SOURCE || 1);
-  var source = Game.getObjectById(sourceId);
-  if (!source || !source.pos || !source.room) return 1;
-  var minOpenForExtra = opts.minOpenForExtra || CFG.MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER || 2;
-  var openTiles = countOpenHarvestTiles(source);
-  if (openTiles < minOpenForExtra) return 1;
-  return Math.min(maxSlots, openTiles);
-}
-
 function isContainerForSource(container, source) {
   if (!container || !source || !container.pos || !source.pos) return false;
   if (container.structureType !== STRUCTURE_CONTAINER) return false;
@@ -1381,7 +1343,6 @@ module.exports = {
   getPreferredSeatPos: getPreferredSeatPos,
   getSourceSeatCount: getSourceSeatCount,
   countOpenHarvestTiles: countOpenHarvestTiles,
-  getSourceMaxSlots: getSourceMaxSlots,
   isContainerForSource: isContainerForSource,
   findAssignedSourceContainer: findAssignedSourceContainer,
   ensureRemoteHaulRequestsMemory: ensureRemoteHaulRequestsMemory,

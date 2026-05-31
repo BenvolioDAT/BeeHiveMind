@@ -1,7 +1,7 @@
 'use strict';
 
-// Safe tuning knobs for Veinseeker remote-mining behavior and diagnostics.
-// Veinseeker is a seated remote container miner: one Veinseeker per remote source.
+// Small set of Veinseeker debug, visual, and major safety knobs.
+// Home source stacking policy lives in SourceWorker.Manager.js as normal game logic.
 module.exports = Object.freeze({
   DEBUG_SAY: true,
   DEBUG_DRAW: true,
@@ -36,10 +36,8 @@ module.exports = Object.freeze({
   MAX_PF_OPS: 1000,
   PLAIN_COST: 2,
   SWAMP_COST: 10,
-  MAX_HARVESTERS_PER_SOURCE: 1,
   AVOID_TICKS_AFTER_YIELD: 10,
   HANDOFF_TTL: 120,
-  QUEUE_RANGE: 2,
   TRAVEL_REUSE: 12,
   VEINSEEKER_ENABLE_BODY_UPGRADES: false,
   VEINSEEKER_WAIT_FOR_BEST_BODY: false,
@@ -49,46 +47,17 @@ module.exports = Object.freeze({
   VEINSEEKER_CRITICAL_TTL: 60,
   VEINSEEKER_UNASSIGNED_SUICIDE_TICKS: 750,
   VEINSEEKER_HANDOFF_RANGE: 1,
-  MAX_VEINSEEKER_PER_SOURCE: 1, // Veinseeker is one seated remote container miner per source.
   VEINSEEKER_REMOTE_INTEL_TTL: 500,
-  ALLOW_MULTI_VEINSEEKER_PER_SOURCE: false, // Keep strict one-Veinseeker-per-source assignment.
-  MIN_OPEN_HARVEST_TILES_PER_EXTRA_VEINSEEKER: 2,
-  PREFER_EMPTY_SOURCES_BEFORE_STACKING: true,
-  VEINSEEKER_SECONDARY_SOURCE_SCORE_PENALTY: 150,
-  VEINSEEKER_FIRST_OPEN_BONUS: -120,
-  VEINSEEKER_UNDERHARVEST_ENERGY_THRESHOLD: 800,
-  VEINSEEKER_RESERVED_SOURCE_SECOND_MIN_WORK: 4,
-  PF_CACHE_TTL: 150,
   INVADER_LOCK_MEMO_TTL: 1500,
-  UNSAFE_ROOM_TTL: 1500,
-  AVOID_TTL: 30,
-  RETARGET_COOLDOWN: 5,
-  ASSIGN_STICKY_TTL: 50,
-  STUCK_WINDOW: 4,
-  FLAG_PRUNE_PERIOD: 25,
-  FLAG_RETENTION_TTL: 200,
   PATH_REUSE: 40,
-  MAX_OPS_MOVE: 2000,
-  TRAVEL_MAX_OPS: 4000,
-  VEINSEEKER_BLOCKED_SOURCE_TTL: 50,
-  VEINSEEKER_BLOCKED_ROOM_TTL: 50,
-  VEINSEEKER_REJECT_INACCESSIBLE_SOURCES: false,
-  VEINSEEKER_INACCESSIBLE_BLOCK_TTL: 50,
-  VEINSEEKER_PATH_FAIL_LIMIT: 3,
-  VEINSEEKER_STUCK_SOURCE_BLOCK_TICKS: 8,
-  VEINSEEKER_STUCK_SOURCE_BLOCK_TTL: 250,
   REMOTE_CONTAINER_REQUEST_MIN: 300,
   REMOTE_CONTAINER_REQUEST_URGENT: 1600,
-  REMOTE_REQUEST_STALE_TICKS: 50,
-  REMOTE_CONTAINER_BUILD_RANGE: 1,
   VEINSEEKER_RELOCATE_BAD_CONTAINER_SITES: true,
   VEINSEEKER_BAD_CONTAINER_SITE_MAX_PROGRESS: 250,
   VEINSEEKER_MIN_CONTAINER_SEAT_COVERAGE_GAIN_TO_RELOCATE: 2,
-  remoteContainerRepairEnabled: true,
   remoteContainerRepairStartPct: 0.50,
   remoteContainerRepairStopPct: 0.85,
   remoteContainerRepairCriticalPct: 0.25,
-  remoteContainerRepairWithdrawAmount: 50,
   remoteContainerRepairMinContainerEnergy: 100,
   remoteContainerRepairHoldTicks: 25
 });

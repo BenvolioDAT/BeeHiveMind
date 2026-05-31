@@ -403,6 +403,5 @@ function run(creep) {
 }
 
 module.exports = {
-  run: run,
-  MAX_VEINSEEKER_PER_SOURCE: 1
+  run: run
 };

@@ -683,8 +683,9 @@ function enqueueVeinseekerForSource(roomName, sourceId, mode, desiredPlan, extra
 function copyVeinseekerSourceStatus(rec, status) {
   if (!rec || !status) return rec;
   var fields = [
-    'sourceId', 'seats', 'live', 'queued', 'liveWork', 'queuedWork',
-    'spawnPending', 'spawnPendingWork', 'desiredWork', 'freeWork',
+    'sourceId', 'rawSeats', 'seats', 'live', 'queued', 'liveWork', 'queuedWork',
+    'spawnPending', 'spawnPendingWork', 'desiredSourceWork', 'desiredWork', 'freeWork',
+    'plannedWorkPerMiner',
     'saturatedByWork', 'saturatedBySeats', 'hasOpenSeat', 'selectedSeat',
     'hasCoverage', 'emergencyNeeded', 'upgradeNeeded', 'bestLiveCost',
     'bestLiveName', 'replacementQueued', 'reason', 'activeLive',
