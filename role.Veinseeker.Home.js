@@ -395,7 +395,7 @@ function resolveSourceConflict(creep, source) {
   creep.memory._avoidUntil = Game.time + CFG.AVOID_TICKS_AFTER_YIELD;
   creep.memory._reassignCooldown = Game.time + 5;
   clearCurrentSourceAssignment(creep);
-  debugSay(creep, 'yield 🐝');
+  debugSay(creep, 'YIELD');
   debugRing(creep.room, source.pos, CFG.DRAW.YIELD, 'YIELD');
   return true;
 }
@@ -502,7 +502,7 @@ function assignSource(creep) {
   rememberSeat(creep, best.seatPos);
   creep.memory.waitingForSeat = false;
 
-  debugSay(creep, '🎯');
+  debugSay(creep, 'PICK');
   debugRing(creep.room, best.source.pos, CFG.DRAW.SOURCE, 'SRC');
   debugRing(creep.room, best.seatPos, CFG.DRAW.SEAT, 'SEAT');
   return best.source.id;
@@ -626,7 +626,7 @@ function dropSourceOverflowEnergy(creep, source, container, reason) {
   // When the source container is full and no local collector target is valid,
   // drop beside the source/container so hauling can recover the overflow.
   writeSourceOverflowDiag(creep, source, container, 'drop', reason);
-  debugSay(creep, 'overflow');
+  debugSay(creep, 'YIELD');
   debugRing(creep.room, creep.pos, CFG.DRAW.OFFLOAD, 'DROP');
   creep.drop(RESOURCE_ENERGY);
   return true;
@@ -646,10 +646,10 @@ function determineVeinseekerState(creep) {
 
   if (creep.store.getUsedCapacity(RESOURCE_ENERGY) === 0) {
     creep.memory.harvesting = true;
-    debugSay(creep, '⤵️MINE');
+    debugSay(creep, 'PICK');
   } else if (creep.store.getFreeCapacity(RESOURCE_ENERGY) === 0) {
     creep.memory.harvesting = false;
-    debugSay(creep, '⤴️DROP');
+    debugSay(creep, 'YIELD');
   }
 
   var nextState = 'IDLE';
@@ -682,7 +682,7 @@ function harvestWhileWaiting(creep, source, seatPos) {
 function runHarvestPhase(creep) {
   var sourceId = assignSource(creep);
   if (!sourceId) {
-    debugSay(creep, '❓');
+    debugSay(creep, 'IDLE');
     return;
   }
 
@@ -724,7 +724,7 @@ function runHarvestPhase(creep) {
       : (findQueueSpotNearSeat(seatPos, creep.name) || seatPos);
 
     creep.memory.waitingForSeat = true;
-    debugSay(creep, '⏳');
+    debugSay(creep, 'CD');
     debugRing(creep.room, queueSpot, CFG.DRAW.QUEUE, 'QUEUE');
     if (!creep.pos.isEqualTo(queueSpot)) {
       creep.travelTo(queueSpot, { range: 0, reusePath: CFG.TRAVEL_REUSE });
@@ -735,7 +735,7 @@ function runHarvestPhase(creep) {
   }
 
   if (seatPos && !creep.pos.isEqualTo(seatPos)) {
-    moveToExact(creep, seatPos, '🪑', CFG.DRAW.SEAT, 'SEAT');
+    moveToExact(creep, seatPos, 'TRAVEL', CFG.DRAW.SEAT, 'SEAT');
     return;
   }
 
@@ -749,7 +749,7 @@ function runHarvestPhase(creep) {
       if (transferResult === ERR_FULL && creep.pos.isEqualTo(container.pos)) {
         if (dropSourceOverflowEnergy(creep, source, container, 'source-container-full-before-harvest')) return;
         writeSourceOverflowDiag(creep, source, container, 'drop', 'source-container-full-before-harvest');
-        debugSay(creep, '⬇️');
+        debugSay(creep, 'YIELD');
         creep.drop(RESOURCE_ENERGY);
       } else if (transferResult === ERR_NOT_IN_RANGE) {
         creep.travelTo(container.pos, { range: 1, reusePath: CFG.TRAVEL_REUSE });
@@ -757,13 +757,13 @@ function runHarvestPhase(creep) {
       } else if (transferResult === ERR_FULL) {
          if (dropSourceOverflowEnergy(creep, source, container, 'source-container-full-before-harvest')) return;
          writeSourceOverflowDiag(creep, source, container, 'drop', 'source-container-full-before-harvest');
-         debugSay(creep, '⬇️');
+         debugSay(creep, 'YIELD');
          creep.drop(RESOURCE_ENERGY);
       }
     }
   }
 
-  debugSay(creep, '⛏️');
+  debugSay(creep, 'PICK');
   debugDrawLine(creep, source, CFG.DRAW.SOURCE, 'HARV');
   var harvestResult = creep.harvest(source);
   if (harvestResult === ERR_FULL && container) {
@@ -783,7 +783,7 @@ function findClosestEnergyDropoff(creep, structureType) {
 
 function tryTransferToDropoff(creep, target) {
   if (!target) return false;
-  debugSay(creep, '🏠');
+  debugSay(creep, 'TRAVEL');
   debugDrawLine(creep, target, CFG.DRAW.OFFLOAD, 'RETURN');
   var result = creep.transfer(target, RESOURCE_ENERGY);
   if (result === OK) return true;
@@ -810,21 +810,21 @@ function runFallbackOffload(creep) {
   });
   if (tryTransferToDropoff(creep, container)) return;
 
-  debugSay(creep, '⬇️');
+  debugSay(creep, 'YIELD');
   creep.drop(RESOURCE_ENERGY);
 }
 
 function runCollectorOffload(creep) {
   var container = getContainerAtOrAdjacent(creep.pos);
   if (!container) {
-    debugSay(creep, '⬇️');
+    debugSay(creep, 'YIELD');
     debugRing(creep.room, creep.pos, CFG.DRAW.OFFLOAD, 'DROP');
     creep.drop(RESOURCE_ENERGY);
     return;
   }
 
   if (creep.pos.getRangeTo(container) <= 1) {
-    debugSay(creep, '📦');
+    debugSay(creep, 'YIELD');
     var transferResult = creep.transfer(container, RESOURCE_ENERGY);
     if (transferResult === OK) return;
     if (transferResult === ERR_NOT_IN_RANGE) {
@@ -837,7 +837,7 @@ function runCollectorOffload(creep) {
     }
     if (transferResult === ERR_FULL && creep.pos.isEqualTo(container.pos)) {
       if (dropSourceOverflowEnergy(creep, findOverflowSource(creep, container), container, 'source-container-full-offload')) return;
-      debugSay(creep, '⬇️');
+      debugSay(creep, 'YIELD');
       creep.drop(RESOURCE_ENERGY);
       return;
     }
@@ -845,7 +845,7 @@ function runCollectorOffload(creep) {
   }
 
   if (!creep.pos.isEqualTo(container.pos)) {
-    debugSay(creep, '📦→');
+    debugSay(creep, 'TRAVEL');
     debugDrawLine(creep, container, CFG.DRAW.OFFLOAD, 'SEAT');
     creep.travelTo(container.pos, { range: 1, reusePath: CFG.TRAVEL_REUSE });
     return;
@@ -862,7 +862,7 @@ function runOffloadPhase(creep) {
 
 function idleWhenEmpty(creep) {
   if (!creep || creep.store.getUsedCapacity(RESOURCE_ENERGY) > 0) return;
-  debugSay(creep, '🧘');
+  debugSay(creep, 'IDLE');
   debugRing(creep.room, creep.pos, CFG.DRAW.IDLE, 'IDLE');
 }
 

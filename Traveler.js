@@ -538,6 +538,7 @@ class Traveler {
         if (allowedRooms) {
             return Object.keys(allowedRooms).length;
         }
+        return Infinity;
     }
     /**
      * build a cost matrix based on structures in the room. Will be cached for more than one tick. Requires vision.

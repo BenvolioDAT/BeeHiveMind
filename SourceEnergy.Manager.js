@@ -172,6 +172,10 @@ function finiteOrNull(value) {
   return (typeof value === 'number' && isFinite(value)) ? value : null;
 }
 
+function isFinitePositiveDistance(value) {
+  return typeof value === 'number' && isFinite(value) && value > 0;
+}
+
 // --- Diagnostics body helpers ------------------------------------------------
 // These helpers read the existing body config and summarize what the room could
 // spawn. They do not ask BeeSpawnManager to enqueue anything.
@@ -919,7 +923,7 @@ function getApprovedRemotesFromScout(homeRoom) {
     var rec = rooms[rn]; if (!rec) continue;
     var reason = null;
     if (rn === homeRoom) reason = 'home-room';
-    else if (rec.routeDistance === Infinity || rec.routeDistance == null) reason = 'no-route';
+    else if (!isFinitePositiveDistance(rec.routeDistance)) reason = 'no-route';
     else if (!rec.lastSeen || (Game.time - rec.lastSeen) > ttl) reason = 'stale-scout-intel';
     else if (!rec.sources || rec.sources.length <= 0) reason = 'no-sources';
     else if (!rec.remoteEligible) reason = rec.remoteBlockedReason || 'blocked';
@@ -927,10 +931,13 @@ function getApprovedRemotesFromScout(homeRoom) {
     if (reason) { out.rejected.push({ room: rn, reason: reason }); continue; }
 
     out.approvedRooms.push(rn);
+    var linearDistance = (typeof rec.linearDistance === 'number' && isFinite(rec.linearDistance))
+      ? rec.linearDistance
+      : Game.map.getRoomLinearDistance(homeRoom, rn);
     for (var i = 0; i < rec.sources.length; i++) {
       var src = rec.sources[i];
       if (!src || !src.id || src.accessible === false) continue;
-      out.approvedSources.push({ sourceId: src.id, targetRoom: rn, routeDistance: rec.routeDistance, linearDistance: rec.linearDistance, roomName: rn });
+      out.approvedSources.push({ sourceId: src.id, targetRoom: rn, routeDistance: rec.routeDistance, linearDistance: linearDistance, roomName: rn });
     }
   }
   out.approvedRooms.sort(function(a,b){
