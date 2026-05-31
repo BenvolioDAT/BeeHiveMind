@@ -1014,13 +1014,13 @@ function getBuilderNeed(C, room) {
   }
   var totalSites = local + remoteTotal;
   var rcl = (room.controller && room.controller.level) || 0;
-  var maxByRcl = 4;
+  var maxByRcl = 8;
   var need = 0;
 
   if (rcl <= 2) {
-    maxByRcl = 2;
+    maxByRcl = 4;
   } else if (rcl === 3) {
-    maxByRcl = 3;
+    maxByRcl = 6;
   }
 
   if (totalSites <= 0) {
@@ -1780,7 +1780,7 @@ function computeRoomQuotas(C, room) {
 
   var quotas = {
     Queen:        determineQueenQuota(room),
-    Upgrader:     computeEarlyUpgraderQuota(C, room),
+    Upgrader:     4,//computeEarlyUpgraderQuota(C, room),
     Builder:      getBuilderNeed(C, room),
     Scout:        1,
     Repair:       repairQuota,
