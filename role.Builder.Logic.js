@@ -5,6 +5,8 @@ var CFG = require('role.Builder.Config');
 var CoreSelectors = require('core.selectors');
 var BeeToolbox = require('BeeToolbox');
 var Handoff = require('role.EnergyHandoff');
+var SourceEnergyManager = require('SourceEnergy.Manager');
+var RoadPlanner = require('Planner.Road');
 
 // Keep the role-local names because they make the Builder code easy to scan,
 // but delegate the repeated RoomVisual details to BeeToolbox.
@@ -256,8 +258,40 @@ function isRoomUnsafeForRemoteBuild(roomName, homeRoom) {
   return false;
 }
 
+function getActiveRemoteSourceRecord(homeRoom, sourceId) {
+  if (!homeRoom || !sourceId || !SourceEnergyManager || typeof SourceEnergyManager.getSourceRecord !== 'function') return null;
+  var rec = SourceEnergyManager.getSourceRecord(homeRoom, sourceId);
+  return rec && rec.mode === 'remote' && rec.active ? rec : null;
+}
+
+function isRoadPlannerRemoteSite(homeRoom, site) {
+  if (!homeRoom || !site || site.structureType !== STRUCTURE_ROAD) return false;
+  var homeObj = Game.rooms[homeRoom];
+  var mem = RoadPlanner && typeof RoadPlanner._memory === 'function' && homeObj
+    ? RoadPlanner._memory(homeObj)
+    : (Memory.rooms && Memory.rooms[homeRoom] && Memory.rooms[homeRoom].roadPlanner);
+  if (!mem || !mem.paths) return false;
+  for (var key in mem.paths) {
+    if (!Object.prototype.hasOwnProperty.call(mem.paths, key)) continue;
+    var path = mem.paths[key] && mem.paths[key].path;
+    if (!Array.isArray(path)) continue;
+    for (var i = 0; i < path.length; i++) {
+      var step = path[i];
+      if (step && step.roomName === site.pos.roomName && step.x === site.pos.x && step.y === site.pos.y) return true;
+    }
+  }
+  return false;
+}
+
+function isRemoteConstructionAllowed(homeRoom, site, remoteContainerById) {
+  if (!site || site.pos.roomName === homeRoom) return { allowed: true, reason: 'home-room' };
+  if (remoteContainerById && remoteContainerById[site.id]) return { allowed: true, reason: 'active-remote-source-container' };
+  if (site.structureType === STRUCTURE_ROAD && isRoadPlannerRemoteSite(homeRoom, site)) return { allowed: true, reason: 'active-remote-road' };
+  return { allowed: false, reason: 'inactive-remote-site' };
+}
+
 function getRemoteContainerBuildTargets(creep) {
-  var out = { targets: [], skippedUnsafe: 0, remoteContainerMemoryCandidates: 0, visibleRemoteContainerSites: 0 };
+  var out = { targets: [], skippedUnsafe: 0, skippedInactiveRemoteSites: 0, remoteContainerMemoryCandidates: 0, visibleRemoteContainerSites: 0 };
   if (!Memory.__BHM) Memory.__BHM = {};
   if (!Memory.__BHM.remoteContainerBuilds) Memory.__BHM.remoteContainerBuilds = {};
   var root = Memory.__BHM.remoteContainerBuilds;
@@ -269,8 +303,13 @@ function getRemoteContainerBuildTargets(creep) {
     if (rec.homeRoom !== home) continue;
     out.remoteContainerMemoryCandidates++;
     if (rec.containerId && Game.getObjectById(rec.containerId)) continue;
-    var roomName = rec.roomName || rec.remoteRoom;
+    var roomName = rec.targetRoom || rec.roomName || rec.remoteRoom;
     if (!roomName) continue;
+    var activeRecord = getActiveRemoteSourceRecord(home, rec.sourceId || id);
+    if (!activeRecord || ((activeRecord.targetRoom || activeRecord.roomName) !== roomName)) {
+      out.skippedInactiveRemoteSites++;
+      continue;
+    }
     if (isRoomUnsafeForRemoteBuild(roomName, home)) { out.skippedUnsafe++; continue; }
     var site = null;
     if (rec.siteId && Game.constructionSites[rec.siteId]) site = Game.constructionSites[rec.siteId];
@@ -313,7 +352,7 @@ function getRemoteContainerBuildTargets(creep) {
     rec.roomName = site.pos.roomName;
     rec.updated = Game.time;
     rec.lastSeen = Game.time;
-    out.targets.push({ site: site, reason: 'remoteSourceContainer' });
+    out.targets.push({ site: site, reason: 'remoteSourceContainer', sourceId: rec.sourceId || id });
   }
   // Visible fallback: allow builders to discover source-adjacent remote container sites
   // even when remoteContainerBuilds memory is stale or missing for that source.
@@ -326,7 +365,12 @@ function getRemoteContainerBuildTargets(creep) {
       if (!approved) continue;
       for (var sid in approved) {
         if (!Object.prototype.hasOwnProperty.call(approved, sid)) continue;
-        if (!approved[sid] || approved[sid].remoteRoom !== remoteName) continue;
+        var approvedRecord = approved[sid];
+        var approvedRoom = approvedRecord && (approvedRecord.targetRoom || approvedRecord.roomName || approvedRecord.remoteRoom);
+        if (!approvedRecord || !approvedRecord.active || approvedRoom !== remoteName) {
+          out.skippedInactiveRemoteSites++;
+          continue;
+        }
         var src = Game.getObjectById(sid);
         if (!src || !src.pos || src.pos.roomName !== remoteName) continue;
         var nearbySites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: function(s){ return s.structureType === STRUCTURE_CONTAINER; } });
@@ -336,7 +380,7 @@ function getRemoteContainerBuildTargets(creep) {
         for (var t = 0; t < out.targets.length; t++) if (out.targets[t].site && out.targets[t].site.id === nearSite.id) { exists = true; break; }
         if (exists) continue;
         out.visibleRemoteContainerSites++;
-        out.targets.push({ site: nearSite, reason: 'remoteSourceContainerVisibleFallback' });
+        out.targets.push({ site: nearSite, reason: 'remoteSourceContainerVisibleFallback', sourceId: sid });
         var prev = Memory.__BHM.remoteContainerBuilds[sid] || {};
         Memory.__BHM.remoteContainerBuilds[sid] = {
           sourceId: sid,
@@ -375,15 +419,20 @@ function writeBuilderTargetDecision(creep, patch) {
 function getBuilderTarget(creep) {
   var remoteData = getRemoteContainerBuildTargets(creep);
   var remoteContainerById = {};
-  for (var r = 0; r < remoteData.targets.length; r++) remoteContainerById[remoteData.targets[r].site.id] = true;
+  var remoteContainerSourceById = {};
+  for (var r = 0; r < remoteData.targets.length; r++) {
+    remoteContainerById[remoteData.targets[r].site.id] = true;
+    if (remoteData.targets[r].sourceId) remoteContainerSourceById[remoteData.targets[r].site.id] = remoteData.targets[r].sourceId;
+  }
   var cachedId = creep.memory.builderTargetId;
   var cachedType = creep.memory.builderTargetType;
   if (cachedId && cachedType === 'construction') {
-    var cachedSite = Game.constructionSites[cachedId];
+      var cachedSite = Game.constructionSites[cachedId];
     if (cachedSite) {
       var unsafeCachedRoom = isRoomUnsafeForRemoteBuild(cachedSite.pos.roomName, getHomeName(creep));
       var shouldOverrideRoad = cachedSite.structureType === STRUCTURE_ROAD && remoteData.targets.length > 0;
-      if (!unsafeCachedRoom && !shouldOverrideRoad) return { target: cachedSite, type: 'build', reason: 'cached', home: getHomeName(creep) };
+      var cachedAllowed = isRemoteConstructionAllowed(getHomeName(creep), cachedSite, remoteContainerById);
+      if (!unsafeCachedRoom && !shouldOverrideRoad && cachedAllowed.allowed) return { target: cachedSite, type: 'build', reason: 'cached', home: getHomeName(creep) };
       creep.memory.builderTargetId = null;
       creep.memory.builderTargetType = null;
     } else { creep.memory.builderTargetId = null; creep.memory.builderTargetType = null; }
@@ -394,6 +443,11 @@ function getBuilderTarget(creep) {
     if (!Object.prototype.hasOwnProperty.call(Game.constructionSites, sid)) continue;
     var cs = Game.constructionSites[sid];
     if (!cs || isRoomUnsafeForRemoteBuild(cs.pos.roomName, getHomeName(creep))) continue;
+    var allowed = isRemoteConstructionAllowed(getHomeName(creep), cs, remoteContainerById);
+    if (!allowed.allowed) {
+      remoteData.skippedInactiveRemoteSites++;
+      continue;
+    }
     allSites.push(cs);
   }
 
@@ -430,10 +484,15 @@ function getBuilderTarget(creep) {
       selectedStructureType: best.structureType,
       selectedRoom: best.pos.roomName,
       selectedReason: reason,
+      activeRemoteSourceMatched: !!remoteContainerById[best.id],
+      remoteSourceId: remoteContainerSourceById[best.id] || null,
+      targetRoom: best.pos.roomName,
       remoteContainerCandidates: remoteData.targets.length,
       remoteContainerMemoryCandidates: remoteData.remoteContainerMemoryCandidates,
       visibleRemoteContainerSites: remoteData.visibleRemoteContainerSites,
-      skippedUnsafe: remoteData.skippedUnsafe
+      skippedUnsafe: remoteData.skippedUnsafe,
+      skippedUnsafeRemoteSites: remoteData.skippedUnsafe,
+      skippedInactiveRemoteSites: remoteData.skippedInactiveRemoteSites
     });
     return { target: best, type: 'build', reason: reason, home: getHomeName(creep) };
   }
@@ -445,7 +504,9 @@ function getBuilderTarget(creep) {
     remoteContainerCandidates: remoteData.targets.length,
     remoteContainerMemoryCandidates: remoteData.remoteContainerMemoryCandidates,
     visibleRemoteContainerSites: remoteData.visibleRemoteContainerSites,
-    skippedUnsafe: remoteData.skippedUnsafe
+    skippedUnsafe: remoteData.skippedUnsafe,
+    skippedUnsafeRemoteSites: remoteData.skippedUnsafe,
+    skippedInactiveRemoteSites: remoteData.skippedInactiveRemoteSites
   });
   return null;
 }

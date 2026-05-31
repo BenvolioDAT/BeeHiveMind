@@ -1651,6 +1651,170 @@ function getActiveRemoteSourceRecords(homeRoom) {
   return out;
 }
 
+function getRemoteControllerReservationSnapshot(homeRoom, targetRoom) {
+  var myName = getMyUsername();
+  var room = Game.rooms && Game.rooms[targetRoom];
+  var snapshot = {
+    hasController: false,
+    visible: !!room,
+    owner: null,
+    reservationOwner: null,
+    reservationTicks: 0,
+    blocked: false,
+    reason: 'controller-unknown'
+  };
+
+  if (room && room.controller) {
+    snapshot.hasController = true;
+    snapshot.owner = room.controller.owner && room.controller.owner.username || null;
+    snapshot.reservationOwner = room.controller.reservation && room.controller.reservation.username || null;
+    snapshot.reservationTicks = room.controller.reservation && room.controller.reservation.ticksToEnd || 0;
+  } else {
+    var mem = (Memory.rooms && Memory.rooms[targetRoom]) || {};
+    var intel = mem.intel || {};
+    var scout = getScoutRoomRecord(homeRoom, targetRoom);
+    var scoutController = scout && scout.controller ? scout.controller : null;
+    var reserveIntel = Memory.reserveIntel && Memory.reserveIntel[targetRoom] ? Memory.reserveIntel[targetRoom] : null;
+
+    if (scoutController || intel.controller || reserveIntel || intel.reservation !== undefined || intel.owner !== undefined) {
+      snapshot.hasController = true;
+    }
+    snapshot.owner = (scoutController && scoutController.owner) || intel.owner || null;
+    var reservation = scoutController && scoutController.reservation !== undefined ? scoutController.reservation : intel.reservation;
+    if (reservation && typeof reservation === 'object') {
+      snapshot.reservationOwner = reservation.username || reservation.owner || null;
+      snapshot.reservationTicks = reservation.ticksToEnd || reservation.ticks || 0;
+    } else if (typeof reservation === 'string') {
+      snapshot.reservationOwner = reservation;
+    }
+    if (reserveIntel) {
+      snapshot.reservationOwner = reserveIntel.owner === 'me' ? myName : (reserveIntel.owner || snapshot.reservationOwner);
+      snapshot.reservationTicks = reserveIntel.ticks || snapshot.reservationTicks || 0;
+      snapshot.hasController = true;
+    }
+  }
+
+  if (!snapshot.hasController) {
+    snapshot.blocked = true;
+    snapshot.reason = snapshot.visible ? 'no-controller' : 'controller-unknown';
+  } else if (snapshot.owner && (!myName || snapshot.owner !== myName)) {
+    snapshot.blocked = true;
+    snapshot.reason = 'owned-by-other';
+  } else if (snapshot.reservationOwner && (!myName || snapshot.reservationOwner !== myName)) {
+    snapshot.blocked = true;
+    snapshot.reason = 'reserved-by-other';
+  } else {
+    snapshot.blocked = false;
+    snapshot.reason = snapshot.reservationOwner ? 'own-reservation' : 'neutral-controller';
+  }
+  return snapshot;
+}
+
+function getRemoteReservationPlan(homeRoom) {
+  var homeName = getHomeName(homeRoom);
+  var enabled = cfgBool('REMOTE_RESERVATION_ENABLED', true);
+  var targetTicks = Math.max(1, cfgNumber('REMOTE_RESERVATION_TICKS_TARGET', 4000));
+  var refreshAt = Math.max(0, Math.min(targetTicks, cfgNumber('REMOTE_RESERVATION_TICKS_REFRESH_AT', 2500)));
+  var minNetIncome = cfgNumber('REMOTE_RESERVER_MIN_NET_INCOME', 0.5);
+  var maxPerHome = Math.max(0, Math.floor(cfgNumber('REMOTE_RESERVER_MAX_PER_HOME', 1)));
+  var plan = {
+    tick: Game.time,
+    homeRoom: homeName,
+    enabled: enabled,
+    desiredReservationTicks: targetTicks,
+    reserveAt: refreshAt,
+    maxPerHome: maxPerHome,
+    minNetIncome: minNetIncome,
+    targets: [],
+    needed: [],
+    skipped: []
+  };
+  if (!homeName || !enabled || maxPerHome <= 0) {
+    plan.reason = !enabled ? 'disabled' : 'no-capacity';
+    if (homeName) getRoomMemoryBucket(homeName).lastRemoteReservationPlan = plan;
+    return plan;
+  }
+
+  var byRoom = {};
+  var activeSources = getActiveRemoteSourceRecords(homeName);
+  for (var i = 0; i < activeSources.length; i++) {
+    var rec = activeSources[i];
+    var targetRoom = rec.targetRoom || rec.roomName;
+    if (!targetRoom || targetRoom === homeName) continue;
+    if (!byRoom[targetRoom]) {
+      byRoom[targetRoom] = {
+        targetRoom: targetRoom,
+        activeSourceIds: [],
+        routeDistance: rec.routeDistance,
+        pathCost: rec.pathCost,
+        netIncomeProtected: 0
+      };
+    }
+    byRoom[targetRoom].activeSourceIds.push(rec.sourceId);
+    if (typeof rec.pathCost === 'number') byRoom[targetRoom].pathCost = Math.max(byRoom[targetRoom].pathCost || 0, rec.pathCost);
+    if (typeof rec.routeDistance === 'number') byRoom[targetRoom].routeDistance = Math.max(byRoom[targetRoom].routeDistance || 0, rec.routeDistance);
+    var netIncome = typeof rec.netIncome === 'number' ? rec.netIncome : 0;
+    var fullEpt = rec.economics && typeof rec.economics.fullEnergyPerTick === 'number' ? rec.economics.fullEnergyPerTick : 0;
+    var currentEpt = rec.economics && typeof rec.economics.energyPerTick === 'number' ? rec.economics.energyPerTick : 0;
+    byRoom[targetRoom].netIncomeProtected += Math.max(0, netIncome) + Math.max(0, fullEpt - currentEpt);
+  }
+
+  for (var roomName in byRoom) {
+    if (!Object.prototype.hasOwnProperty.call(byRoom, roomName)) continue;
+    var item = byRoom[roomName];
+    var controller = getRemoteControllerReservationSnapshot(homeName, roomName);
+    var unsafe = isRemoteUnsafe(roomName);
+    var needsReservation = false;
+    var reason = 'reservation-current';
+    if (unsafe) reason = 'unsafe';
+    else if (controller.blocked && controller.reason !== 'controller-unknown') reason = controller.reason;
+    else if (item.netIncomeProtected < minNetIncome) reason = 'net-income-too-low';
+    else if (controller.reservationTicks >= refreshAt) reason = 'reservation-above-refresh';
+    else {
+      needsReservation = true;
+      reason = controller.reason === 'controller-unknown'
+        ? 'reserve-controller-unknown'
+        : (controller.reservationTicks > 0 ? 'refresh-low-reservation' : 'reserve-neutral-controller');
+    }
+    var entry = {
+      homeRoom: homeName,
+      targetRoom: roomName,
+      activeSourceIds: item.activeSourceIds,
+      routeDistance: finiteOrNull(item.routeDistance),
+      pathCost: finiteOrNull(item.pathCost),
+      currentReservationOwner: controller.reservationOwner,
+      currentReservationTicks: controller.reservationTicks || 0,
+      desiredReservationTicks: targetTicks,
+      reserveAt: refreshAt,
+      reason: reason,
+      needsReservation: needsReservation,
+      netIncomeProtected: roundMetric(item.netIncomeProtected, 3) || 0,
+      spawnPriority: needsReservation ? Math.max(55, 85 - Math.floor((controller.reservationTicks || 0) / 100)) : 0,
+      controllerVisible: controller.visible,
+      controllerKnown: controller.hasController
+    };
+    plan.targets.push(entry);
+    if (needsReservation) plan.needed.push(entry);
+    else plan.skipped.push(entry);
+  }
+
+  plan.needed.sort(function (a, b) {
+    if ((a.currentReservationTicks || 0) !== (b.currentReservationTicks || 0)) return (a.currentReservationTicks || 0) - (b.currentReservationTicks || 0);
+    if ((b.netIncomeProtected || 0) !== (a.netIncomeProtected || 0)) return (b.netIncomeProtected || 0) - (a.netIncomeProtected || 0);
+    return a.targetRoom < b.targetRoom ? -1 : (a.targetRoom > b.targetRoom ? 1 : 0);
+  });
+  if (plan.needed.length > maxPerHome) plan.needed = plan.needed.slice(0, maxPerHome);
+  getRoomMemoryBucket(homeName).lastRemoteReservationPlan = plan;
+  return plan;
+}
+
+function getRemoteRoomsNeedingReservation(homeRoom) {
+  var plan = getRemoteReservationPlan(homeRoom);
+  var out = [];
+  for (var i = 0; i < plan.needed.length; i++) out.push(plan.needed[i].targetRoom);
+  return out;
+}
+
 function buildRemoteSourceEconomicsReport(homeRoom) {
   var plan = ensureHomeMemory(homeRoom);
   var sources = [];
@@ -1863,6 +2027,8 @@ module.exports = {
   buildRemoteSourceEconomicsReport: buildRemoteSourceEconomicsReport,
   selectProfitableRemoteSources: selectProfitableRemoteSources,
   getActiveRemoteSourceRecords: getActiveRemoteSourceRecords,
+  getRemoteReservationPlan: getRemoteReservationPlan,
+  getRemoteRoomsNeedingReservation: getRemoteRoomsNeedingReservation,
   reserveSourceForQueue: reserveSourceForQueue,
   unreserveSourceForQueue: unreserveSourceForQueue,
   claimSource: claimSource,

@@ -396,9 +396,14 @@ function isRemoteRoomUnsafeForTrucker(remoteRoom) {
 }
 
 function getLocalDesiredTruckers(localContainerPressure) {
-  var base = Math.max(0, CFG.LOCAL_TRUCKER_BASE_QUOTA || 0);
-  var desired = base;
-  if (localContainerPressure && (localContainerPressure.localPressure === 'urgent' || localContainerPressure.localPressure === 'critical')) desired += 1;
+  var minLocal = Math.max(0, CFG.LOCAL_TRUCKER_MIN || 1);
+  var maxLocal = Math.max(minLocal, CFG.LOCAL_TRUCKER_MAX || CFG.LOCAL_TRUCKER_BASE_QUOTA || 3);
+  var desired = minLocal;
+  if (localContainerPressure && localContainerPressure.localPressure === 'pickup') desired = Math.max(desired, 2);
+  if (localContainerPressure && (localContainerPressure.localPressure === 'urgent' || localContainerPressure.localPressure === 'critical')) {
+    desired += Math.max(0, CFG.LOCAL_HAUL_PRESSURE_EXTRA_LIMIT || 1);
+  }
+  desired = Math.min(desired, maxLocal);
   var maxTotal = Math.max(0, CFG.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
   if (maxTotal > 0) desired = Math.min(desired, maxTotal);
   return desired;

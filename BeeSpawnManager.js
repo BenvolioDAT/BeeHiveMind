@@ -31,9 +31,11 @@ var VeinseekerConfig  = require('role.Veinseeker.Config');
 var TruckerConfig = require('role.Trucker.Config');
 var RepairConfig = require('role.Repair.Config');
 var QueenConfig = require('role.Queen.Config');
+var UpgraderConfig = require('role.Upgrader.Config');
 var SourceEnergyManager = require('SourceEnergy.Manager');
 var SourceWorkerManager = require('SourceWorker.Manager');
 var BeeToolbox = require('BeeToolbox');
+var BodyUtils = require('core.body');
 var CombatSquads = require('Combat.Squads');
 var Roles = require('core.roles');
 var SquadFlagIntel = CombatSquads.SquadFlagIntel || null;
@@ -1239,88 +1241,130 @@ function pruneBlockedVeinseekerQueueItems(roomName) {
   };
 }
 
-function computeEarlyUpgraderQuota(C, room) {
-  if (!room) {
-    return 1;
+function countUpgraderWorkForHome(C, roomName, includeQueued) {
+  var liveWork = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory || canonicalRole(creep.memory.role) !== 'Upgrader') continue;
+    if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
+    if (typeof creep.getActiveBodyparts === 'function') liveWork += creep.getActiveBodyparts(WORK) || 0;
   }
+  var queuedWork = 0;
+  if (includeQueued) {
+    var q = ensureRoomQueue(roomName);
+    for (var i = 0; i < q.length; i++) {
+      var item = q[i];
+      if (!item || canonicalRole(item.role) !== 'Upgrader') continue;
+      queuedWork += item.targetWorkParts || 1;
+    }
+  }
+  return { liveWork: liveWork, queuedWork: queuedWork };
+}
 
+function getSourceContainersForRoom(room, snap) {
+  if (snap && snap.sourceContainers && snap.sourceContainers.length) return snap.sourceContainers;
+  if (!room) return [];
+  var out = [];
+  var seen = {};
+  var sources = room.find(FIND_SOURCES);
+  for (var i = 0; i < sources.length; i++) {
+    var container = SourceWorkerManager.findSourceContainer(sources[i]);
+    if (!container || seen[container.id]) continue;
+    seen[container.id] = true;
+    out.push(container);
+  }
+  return out;
+}
+
+function computeUpgradeBudgetForRoom(C, room) {
+  if (!room || !room.controller || !room.controller.my) {
+    return { desiredUpgraderCreeps: 1, reason: 'missing-controller' };
+  }
   var controller = room.controller;
-  if (!controller || !controller.my) return 1;
-
   var rcl = controller.level || 1;
   var ticksToDowngrade = controller.ticksToDowngrade || 0;
-  var downgradeDanger = ticksToDowngrade > 0 && ticksToDowngrade <= 4000;
-  var downgradeWarning = ticksToDowngrade > 0 && ticksToDowngrade <= 8000;
-
+  var downgradeDangerTicks = UpgraderConfig.UPGRADE_DOWNGRADE_DANGER_TICKS || UpgraderConfig.UPGRADE_DOWGRADE_DANGER_TICKS || 4000;
+  var downgradeWarningTicks = UpgraderConfig.UPGRADE_DOWNGRADE_WARNING_TICKS || UpgraderConfig.UPGRADE_DOWGRADE_WARNING_TICKS || 8000;
+  var downgradeDanger = ticksToDowngrade > 0 && ticksToDowngrade <= downgradeDangerTicks;
+  var downgradeWarning = ticksToDowngrade > 0 && ticksToDowngrade <= downgradeWarningTicks;
+  var snap = C && C.roomSnapshots && C.roomSnapshots[room.name] ? C.roomSnapshots[room.name] : null;
   var sourceContainerEnergy = 0;
   var sourceContainerCapacity = 0;
-  var snap = C && C.roomSnapshots && C.roomSnapshots[room.name] ? C.roomSnapshots[room.name] : null;
-  if (snap && snap.sourceContainers) {
-    for (var sc = 0; sc < snap.sourceContainers.length; sc++) {
-      var container = snap.sourceContainers[sc];
-      if (!container || !container.store) continue;
-      sourceContainerEnergy += container.store[RESOURCE_ENERGY] || 0;
-      sourceContainerCapacity += container.store.getCapacity(RESOURCE_ENERGY) || 0;
-    }
-  } else {
-    var sources = room.find(FIND_SOURCES);
-    for (var i = 0; i < sources.length; i++) {
-      var source = sources[i];
-      var nearby = source.pos.findInRange(FIND_STRUCTURES, 1);
-      for (var j = 0; j < nearby.length; j++) {
-        var structure = nearby[j];
-        if (structure.structureType !== STRUCTURE_CONTAINER) continue;
-        if (!structure.store) continue;
-        sourceContainerEnergy += structure.store[RESOURCE_ENERGY] || 0;
-        sourceContainerCapacity += structure.store.getCapacity(RESOURCE_ENERGY) || 0;
-      }
-    }
+  var sourceContainers = getSourceContainersForRoom(room, snap);
+  for (var sc = 0; sc < sourceContainers.length; sc++) {
+    if (!sourceContainers[sc] || !sourceContainers[sc].store) continue;
+    sourceContainerEnergy += sourceContainers[sc].store[RESOURCE_ENERGY] || 0;
+    sourceContainerCapacity += sourceContainers[sc].store.getCapacity(RESOURCE_ENERGY) || 0;
   }
-
-  var sourceContainerFillRatio = 0;
-  if (sourceContainerCapacity > 0) {
-    sourceContainerFillRatio = sourceContainerEnergy / sourceContainerCapacity;
-  }
-
   var droppedEnergy = 0;
   var drops = snap && snap.dropped ? snap.dropped : room.find(FIND_DROPPED_RESOURCES);
-  for (var k = 0; k < drops.length; k++) {
-    var drop = drops[k];
-    if (drop.resourceType === RESOURCE_ENERGY) {
-      droppedEnergy += drop.amount || 0;
-    }
-  }
+  for (var d = 0; d < drops.length; d++) if (drops[d].resourceType === RESOURCE_ENERGY) droppedEnergy += drops[d].amount || 0;
+  var storedEnergy = (room.storage && room.storage.store ? (room.storage.store[RESOURCE_ENERGY] || 0) : 0) +
+    (room.terminal && room.terminal.store ? (room.terminal.store[RESOURCE_ENERGY] || 0) : 0);
+  var remotePlan = SourceEnergyManager.getPlanForHome(room.name);
+  var remoteIncomeEstimate = remotePlan && typeof remotePlan.estimatedNetIncome === 'number' ? remotePlan.estimatedNetIncome : 0;
+  var constructionBacklog = C && C.roomSiteCounts ? (C.roomSiteCounts[room.name] || 0) : 0;
+  var fillRatio = sourceContainerCapacity > 0 ? sourceContainerEnergy / sourceContainerCapacity : 0;
+  var surplus = sourceContainerEnergy + droppedEnergy + storedEnergy;
 
-  var storedEnergy = 0;
-  if (room.storage && room.storage.store) {
-    storedEnergy += room.storage.store[RESOURCE_ENERGY] || 0;
+  var targetWork = 1;
+  if (rcl === 2) targetWork = UpgraderConfig.UPGRADE_RCL2_TARGET_WORK || 2;
+  else if (rcl === 3) targetWork = UpgraderConfig.UPGRADE_RCL3_TARGET_WORK || 3;
+  else if (rcl === 4) targetWork = UpgraderConfig.UPGRADE_RCL4_TARGET_WORK || 4;
+  else targetWork = 3;
+  if (surplus >= 2500 || fillRatio >= 0.70 || remoteIncomeEstimate > 1) targetWork += UpgraderConfig.UPGRADE_SURPLUS_WORK_BONUS || 2;
+  if (storedEnergy >= 10000) targetWork += 2;
+  var throttleReason = null;
+  if (constructionBacklog >= 10 && !downgradeWarning && surplus < 3000) {
+    targetWork = Math.max(1, Math.floor(targetWork / 2));
+    throttleReason = 'construction-backlog';
   }
-  if (room.terminal && room.terminal.store) {
-    storedEnergy += room.terminal.store[RESOURCE_ENERGY] || 0;
-  }
-  var energySurplus = sourceContainerEnergy + droppedEnergy + storedEnergy;
-
-  // Keep RCL 2-4 conservative unless downgrade pressure says otherwise.
-  var quota = 1;
-  if (rcl <= 4) {
-    if (downgradeWarning) quota = 2;
-    if (downgradeDanger) quota = 3;
-    if (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 1500) quota = Math.max(quota, 2);
-    return quota;
-  }
-
   if (downgradeDanger) {
-    return 4;
+    targetWork = Math.max(targetWork, 8);
+    throttleReason = null;
+  } else if (downgradeWarning) {
+    targetWork = Math.max(targetWork, 5);
   }
-  if (downgradeWarning) {
-    quota = 2;
-  }
-  if (energySurplus >= 2000 || sourceContainerFillRatio >= 0.75 || droppedEnergy >= 300) quota = Math.max(quota, 2);
-  if (energySurplus >= 6000 || sourceContainerFillRatio >= 0.90 || droppedEnergy >= 700) quota = Math.max(quota, 3);
-  if (energySurplus >= 12000 || (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 1000)) quota = Math.max(quota, 4);
-  if (energySurplus >= 25000 || (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 2000)) quota = Math.max(quota, 5);
-  if (energySurplus >= 45000 || (sourceContainerFillRatio >= 0.95 && droppedEnergy >= 3500)) quota = Math.max(quota, 6);
-  return quota;
+  if (rcl >= 8) targetWork = Math.min(targetWork, 15);
+
+  var bodyPlan = spawnLogic.getBestBodyPlanForRoomCapacity('Upgrader', room, { targetWorkParts: targetWork, bodyPatternReason: 'upgrade-budget' });
+  var workPerCreep = bodyPlan && bodyPlan.body ? Math.max(1, BodyUtils.countBodyParts(bodyPlan.body, WORK)) : 1;
+  var maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_DEFAULT || 4;
+  if (rcl === 2) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL2 || 2;
+  else if (rcl === 3) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL3 || 3;
+  else if (rcl === 4) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL4 || 4;
+  var desiredCreeps = Math.ceil(targetWork / workPerCreep);
+  desiredCreeps = Math.max(UpgraderConfig.UPGRADE_MIN_CREEPS || 1, Math.min(maxCreeps, desiredCreeps));
+  var workCounts = countUpgraderWorkForHome(C, room.name, true);
+  var budget = {
+    tick: Game.time,
+    rcl: rcl,
+    ticksToDowngrade: ticksToDowngrade,
+    desiredUpgradeEnergyPerTick: targetWork,
+    desiredUpgraderWorkParts: targetWork,
+    targetUpgraderWork: targetWork,
+    liveUpgraderWork: workCounts.liveWork,
+    queuedUpgraderWork: workCounts.queuedWork,
+    desiredUpgraderCreeps: desiredCreeps,
+    maxUpgraderCreeps: maxCreeps,
+    workPerCreep: workPerCreep,
+    storedEnergy: storedEnergy,
+    sourceContainerEnergy: sourceContainerEnergy,
+    sourceContainerCapacity: sourceContainerCapacity,
+    droppedEnergy: droppedEnergy,
+    remoteIncomeEstimate: remoteIncomeEstimate,
+    constructionBacklog: constructionBacklog,
+    throttleReason: throttleReason,
+    reason: downgradeDanger ? 'downgrade-danger' : (downgradeWarning ? 'downgrade-warning' : 'upgrade-budget')
+  };
+  ensureRoomMemory(room.name).lastUpgraderQuota = budget;
+  return budget;
+}
+
+function computeEarlyUpgraderQuota(C, room) {
+  var budget = computeUpgradeBudgetForRoom(C, room);
+  return budget.desiredUpgraderCreeps || 1;
 }
 
 function getLocalDefenseThreat(room) {
@@ -1371,6 +1415,128 @@ function computeLocalDefenseQuotas(room) {
   };
 }
 
+function countLiveRemoteReservers(homeRoom) {
+  var count = 0;
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.my || !creep.memory) continue;
+    if (canonicalRole(creep.memory.role) !== 'Claimer') continue;
+    if ((creep.memory.home || (creep.room && creep.room.name)) !== homeRoom) continue;
+    if ((creep.memory.claimerMode || 'reserve') !== 'reserve') continue;
+    if (creep.spawning) continue;
+    count++;
+  }
+  return count;
+}
+
+function computeClaimerQuotaForHome(C, room) {
+  var roomName = room && room.name;
+  var plan = SourceEnergyManager.getRemoteReservationPlan(roomName);
+  var live = countLiveRemoteReservers(roomName);
+  var queued = queuedCount(C, roomName, 'Claimer', null, 'reserveRemote');
+  var maxPerHome = Math.max(0, VeinseekerConfig.REMOTE_RESERVER_MAX_PER_HOME || 1);
+  var needed = plan && plan.needed ? plan.needed.length : 0;
+  var quota = Math.min(maxPerHome, needed);
+  var roomMem = ensureRoomMemory(roomName);
+  roomMem.lastClaimerQuota = {
+    tick: Game.time,
+    enabled: plan ? plan.enabled : false,
+    neededReservationRooms: needed,
+    liveReservers: live,
+    queuedReservers: queued,
+    maxPerHome: maxPerHome,
+    claimerQuota: quota,
+    selectedTargets: plan && plan.needed ? plan.needed.map(function (entry) { return entry.targetRoom; }) : [],
+    reason: quota > 0 ? 'active-remote-reservation-needed' : 'no-active-remote-reservation-needed'
+  };
+  return quota;
+}
+
+function findReservationPlanForQueue(roomName) {
+  var plan = SourceEnergyManager.getRemoteReservationPlan(roomName);
+  if (!plan || !plan.needed || !plan.needed.length) return null;
+  var q = ensureRoomQueue(roomName);
+  var busy = {};
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (!item || canonicalRole(item.role) !== 'Claimer') continue;
+    if (item.targetRoom) busy[item.targetRoom] = true;
+  }
+  for (var name in Game.creeps) {
+    if (!Object.prototype.hasOwnProperty.call(Game.creeps, name)) continue;
+    var creep = Game.creeps[name];
+    if (!creep || !creep.memory || canonicalRole(creep.memory.role) !== 'Claimer') continue;
+    if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
+    if (creep.memory.targetRoom) busy[creep.memory.targetRoom] = true;
+  }
+  for (var p = 0; p < plan.needed.length; p++) {
+    if (!busy[plan.needed[p].targetRoom]) return plan.needed[p];
+  }
+  return null;
+}
+
+function buildTruckerSpawnOptions(roomName, truckerQuotaMeta, assignmentCounts) {
+  var averageCapacity = estimateTruckerCapacityForRoom(roomName);
+  var remoteCarryDemand = truckerQuotaMeta.remoteCarryDemand || 0;
+  var remoteCarryAvailable = (assignmentCounts.remoteLiveTruckerCarry || 0) + getQueuedTruckerCarry(roomName, 'remote');
+  var needsRemoteCarry = remoteCarryDemand > remoteCarryAvailable;
+  if (needsRemoteCarry) {
+    var shortage = Math.max(CARRY_CAPACITY, remoteCarryDemand - remoteCarryAvailable);
+    var desiredCarry = Math.max(2, Math.ceil(Math.min(shortage, averageCapacity * 2) / CARRY_CAPACITY));
+    var prediction = truckerQuotaMeta.remoteSourcePrediction || {};
+    var roaded = false;
+    var roadCoveragePct = 0;
+    if (prediction.sources && prediction.sources.length) {
+      var bestSource = null;
+      for (var i = 0; i < prediction.sources.length; i++) {
+        var source = prediction.sources[i];
+        if (!source) continue;
+        if (!bestSource || (source.expectedEnergy || 0) > (bestSource.expectedEnergy || 0)) bestSource = source;
+      }
+      roaded = !!(bestSource && bestSource.roaded);
+      roadCoveragePct = bestSource && typeof bestSource.roadCoveragePct === 'number' ? bestSource.roadCoveragePct : 0;
+    }
+    return {
+      task: 'haulUnified',
+      home: roomName,
+      mode: 'remote',
+      desiredCarryParts: desiredCarry,
+      roaded: roaded,
+      roadCoveragePct: roadCoveragePct,
+      bodyPatternReason: roaded ? 'remote-roaded-haul-pressure' : 'remote-offroad-haul-pressure'
+    };
+  }
+  var localDemand = truckerQuotaMeta.localCarryDemand || 0;
+  var localCarryAvailable = (assignmentCounts.localLiveTruckerCarry || 0) + getQueuedTruckerCarry(roomName, 'local');
+  var localShortage = Math.max(CARRY_CAPACITY, localDemand - localCarryAvailable);
+  return {
+    task: 'haulUnified',
+    home: roomName,
+    mode: 'local',
+    desiredCarryParts: Math.max(1, Math.ceil(Math.min(localShortage, averageCapacity) / CARRY_CAPACITY)),
+    roaded: true,
+    bodyPatternReason: 'local-haul-workload'
+  };
+}
+
+function buildUpgraderSpawnOptions(room, budget) {
+  var roomName = room && room.name;
+  var targetWork = budget && budget.targetUpgraderWork ? budget.targetUpgraderWork : 1;
+  var liveAndQueued = budget ? ((budget.liveUpgraderWork || 0) + (budget.queuedUpgraderWork || 0)) : 0;
+  var remainingWork = Math.max(1, targetWork - liveAndQueued);
+  var bodyPlan = spawnLogic.getBestBodyPlanForRoomCapacity('Upgrader', room, { targetWorkParts: remainingWork, bodyPatternReason: 'upgrade-budget-queue' });
+  return {
+    task: 'upgrader',
+    home: roomName,
+    targetWorkParts: remainingWork,
+    desiredBodyCost: bodyPlan && bodyPlan.cost,
+    desiredBodySignature: bodyPlan && bodyPlan.signature,
+    desiredBodySummary: bodyPlan && bodyPlan.summary,
+    bodyPatternReason: 'upgrade-budget-queue'
+  };
+}
+
 function getLocalContainerPressure(roomName, C) {
   var out = { localPressure: 'none', containersOverUrgent: 0, containersOverCritical: 0 };
   var room = Game.rooms[roomName];
@@ -1404,9 +1570,86 @@ function countBodyPart(body, partType) {
 }
 
 function estimateTruckerCapacityForRoom(roomName) {
-  var plan = spawnLogic.getBestBodyPlanForRoomCapacity('Trucker', Game.rooms[roomName]);
+  var room = Game.rooms[roomName];
+  var plan = spawnLogic.getBestBodyPlanForRoomCapacity('Trucker', room, { mode: 'local', desiredCarryParts: 4, bodyPatternReason: 'quota-average-local' });
   var carryParts = plan && plan.body ? countBodyPart(plan.body, CARRY) : 0;
   return Math.max(50, carryParts * CARRY_CAPACITY || 500);
+}
+
+function getCreepCarryCapacity(creep) {
+  if (!creep) return 0;
+  if (creep.store && typeof creep.store.getCapacity === 'function') return creep.store.getCapacity(RESOURCE_ENERGY) || 0;
+  if (typeof creep.getActiveBodyparts === 'function') return (creep.getActiveBodyparts(CARRY) || 0) * CARRY_CAPACITY;
+  return creep.body ? BodyUtils.countBodyParts(creep.body.map(function (part) { return part.type || part; }), CARRY) * CARRY_CAPACITY : 0;
+}
+
+function getQueuedTruckerCarry(roomName, mode) {
+  var q = ensureRoomQueue(roomName);
+  var total = 0;
+  for (var i = 0; i < q.length; i++) {
+    var item = q[i];
+    if (!item || canonicalRole(item.role) !== 'Trucker') continue;
+    if (mode && item.mode !== mode) continue;
+    total += Math.max(50, (item.desiredCarryParts || 0) * CARRY_CAPACITY);
+  }
+  return total;
+}
+
+function computeLocalHaulWorkload(roomName, C, localPressure, averageCapacity) {
+  var room = Game.rooms[roomName];
+  var result = {
+    enabled: TruckerConfig.LOCAL_HAUL_WORKLOAD_ENABLED !== false,
+    sourceContainerEnergy: 0,
+    droppedEnergy: 0,
+    deliveryDemand: 0,
+    localCarryDemand: 0,
+    desiredTruckers: Math.max(0, TruckerConfig.LOCAL_TRUCKER_MIN || 1),
+    reason: 'no-room'
+  };
+  if (!room || !result.enabled) {
+    result.reason = result.enabled ? 'no-room' : 'disabled';
+    result.desiredTruckers = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 1);
+    return result;
+  }
+
+  var snap = C && C.roomSnapshots && C.roomSnapshots[roomName] ? C.roomSnapshots[roomName] : null;
+  var sourceContainers = getSourceContainersForRoom(room, snap);
+  for (var i = 0; i < sourceContainers.length; i++) {
+    if (sourceContainers[i] && sourceContainers[i].store) result.sourceContainerEnergy += sourceContainers[i].store[RESOURCE_ENERGY] || 0;
+  }
+  var drops = snap && snap.dropped ? snap.dropped : room.find(FIND_DROPPED_RESOURCES);
+  for (var d = 0; d < drops.length; d++) {
+    if (drops[d] && drops[d].resourceType === RESOURCE_ENERGY) result.droppedEnergy += drops[d].amount || 0;
+  }
+  var fillTargets = room.find(FIND_MY_STRUCTURES, {
+    filter: function (s) {
+      if (!s || !s.store) return false;
+      if (s.structureType !== STRUCTURE_SPAWN && s.structureType !== STRUCTURE_EXTENSION && s.structureType !== STRUCTURE_TOWER) return false;
+      return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+    }
+  });
+  for (var f = 0; f < fillTargets.length; f++) result.deliveryDemand += fillTargets[f].store.getFreeCapacity(RESOURCE_ENERGY) || 0;
+
+  var queenCount = countLiveLocalRoleDirect(C, roomName, 'Queen');
+  var rcl = room.controller && room.controller.level || 1;
+  var targetEnergyPerTrucker = Math.max(100, TruckerConfig.LOCAL_HAUL_ENERGY_PER_TRUCKER_TARGET || averageCapacity || 500);
+  result.localCarryDemand = result.sourceContainerEnergy + result.droppedEnergy + (queenCount > 0 ? Math.floor(result.deliveryDemand * 0.35) : result.deliveryDemand);
+  var desired = Math.ceil(result.localCarryDemand / targetEnergyPerTrucker);
+  desired = Math.max(desired, Math.max(0, TruckerConfig.LOCAL_TRUCKER_MIN || 1));
+  var maxLocal = Math.max(Math.max(0, TruckerConfig.LOCAL_TRUCKER_MIN || 1), TruckerConfig.LOCAL_TRUCKER_MAX || 3);
+  if (rcl <= 2) maxLocal = Math.min(maxLocal, 2);
+  else if (rcl <= 4 && !room.storage) maxLocal = Math.min(maxLocal, 3);
+  var pressureExtra = 0;
+  if (localPressure && (localPressure.localPressure === 'urgent' || localPressure.localPressure === 'critical')) {
+    pressureExtra = Math.max(0, TruckerConfig.LOCAL_HAUL_PRESSURE_EXTRA_LIMIT || 1);
+  }
+  maxLocal += pressureExtra;
+  desired = Math.min(maxLocal, desired + pressureExtra);
+  result.desiredTruckers = desired;
+  result.reason = 'local-haul-workload';
+  result.queenCount = queenCount;
+  result.rcl = rcl;
+  return result;
 }
 
 function getRemoteContainerStatusForSource(sourceId) {
@@ -1449,6 +1692,7 @@ function buildRemoteSourceHaulPrediction(roomName) {
     }
     totalPipelineEnergy += pipelineEnergy;
     expectedEnergy += projected;
+    var roadCoveragePct = rec.road && typeof rec.road.roadCoveragePct === 'number' ? rec.road.roadCoveragePct : null;
     var prediction = {
       sourceId: rec.sourceId,
       roomName: rec.roomName,
@@ -1458,7 +1702,9 @@ function buildRemoteSourceHaulPrediction(roomName) {
       currentEnergy: amount,
       expectedEnergy: Math.round(projected),
       fillPct: Math.round(fillPct * 1000) / 1000,
-      desiredTruckers: desiredForSource
+      desiredTruckers: desiredForSource,
+      roaded: !!(rec.road && rec.road.done),
+      roadCoveragePct: roadCoveragePct
     };
     rec.activeHaulPressure = prediction;
     sources.push(prediction);
@@ -1486,6 +1732,9 @@ function countHomeTruckersByAssignment(C, roomName) {
   var remotePickup = 0;
   var remoteReturn = 0;
   var remoteCapable = 0;
+  var totalCarry = 0;
+  var localCarry = 0;
+  var remoteCarry = 0;
   var cachedTruckers = C && C.creepsByHomeRole && C.creepsByHomeRole[roomName] && C.creepsByHomeRole[roomName].Trucker;
   if (cachedTruckers) {
     for (var idx = 0; idx < cachedTruckers.length; idx++) {
@@ -1494,6 +1743,7 @@ function countHomeTruckersByAssignment(C, roomName) {
       var cachedJob = cached.memory.dispatchJob;
       if (cachedJob && (cachedJob.type === 'REMOTE_PICKUP' || cachedJob.type === 'REMOTE_RETURN')) {
         remote++;
+        remoteCarry += getCreepCarryCapacity(cached);
         if (cachedJob.type === 'REMOTE_PICKUP') remotePickup++;
         if (cachedJob.type === 'REMOTE_RETURN') remoteReturn++;
         if (cachedJob.type === 'REMOTE_RETURN') {
@@ -1505,14 +1755,19 @@ function countHomeTruckersByAssignment(C, roomName) {
         }
       } else {
         local++;
+        localCarry += getCreepCarryCapacity(cached);
       }
+      totalCarry += getCreepCarryCapacity(cached);
     }
     return {
       truckersOnLocalJobs: local,
       truckersOnRemoteJobs: remote,
       truckersOnRemotePickup: remotePickup,
       truckersOnRemoteReturn: remoteReturn,
-      remoteCapableTruckers: remoteCapable
+      remoteCapableTruckers: remoteCapable,
+      totalLiveTruckerCarry: totalCarry,
+      localLiveTruckerCarry: localCarry,
+      remoteLiveTruckerCarry: remoteCarry
     };
   }
   for (var name in Game.creeps) {
@@ -1524,6 +1779,7 @@ function countHomeTruckersByAssignment(C, roomName) {
     var job = c.memory.dispatchJob;
     if (job && (job.type === 'REMOTE_PICKUP' || job.type === 'REMOTE_RETURN')) {
       remote++;
+      remoteCarry += getCreepCarryCapacity(c);
       if (job.type === 'REMOTE_PICKUP') remotePickup++;
       if (job.type === 'REMOTE_RETURN') remoteReturn++;
       if (job.type === 'REMOTE_RETURN') {
@@ -1537,14 +1793,19 @@ function countHomeTruckersByAssignment(C, roomName) {
       }
     } else {
       local++;
+      localCarry += getCreepCarryCapacity(c);
     }
+    totalCarry += getCreepCarryCapacity(c);
   }
   return {
     truckersOnLocalJobs: local,
     truckersOnRemoteJobs: remote,
     truckersOnRemotePickup: remotePickup,
     truckersOnRemoteReturn: remoteReturn,
-    remoteCapableTruckers: remoteCapable
+    remoteCapableTruckers: remoteCapable,
+    totalLiveTruckerCarry: totalCarry,
+    localLiveTruckerCarry: localCarry,
+    remoteLiveTruckerCarry: remoteCarry
   };
 }
 
@@ -1581,8 +1842,10 @@ function computeTruckerQuotaForHome(roomName, C) {
   }
   var activeRemoteRooms = Object.keys(remoteRoomsSeen).length;
   var localPressure = getLocalContainerPressure(roomName, C);
-  var localDesiredTruckers = Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
-  if (localPressure.localPressure === 'urgent' || localPressure.localPressure === 'critical') localDesiredTruckers += 1;
+  var averageTruckerCapacity = estimateTruckerCapacityForRoom(roomName);
+  var assignmentCountsForQuota = countHomeTruckersByAssignment(C, roomName);
+  var localWorkload = computeLocalHaulWorkload(roomName, C, localPressure, averageTruckerCapacity);
+  var localDesiredTruckers = localWorkload.desiredTruckers || Math.max(0, TruckerConfig.LOCAL_TRUCKER_BASE_QUOTA || 0);
   var maxTotalTruckers = Math.max(0, TruckerConfig.MAX_TOTAL_TRUCKERS_PER_HOME || 0);
   if (maxTotalTruckers > 0) localDesiredTruckers = Math.min(localDesiredTruckers, maxTotalTruckers);
 
@@ -1594,8 +1857,14 @@ function computeTruckerQuotaForHome(roomName, C) {
   remoteDesired = Math.min(remoteDesired, Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0));
   var requestDrivenRemoteDesired = remoteDesired;
   var prediction = buildRemoteSourceHaulPrediction(roomName);
+  var remoteCarryDemand = Math.max(remoteEnergyWaiting, prediction.totalPipelineEnergy || 0);
   if (prediction.enabled) {
     remoteDesired = Math.max(remoteDesired, prediction.predictedRemoteTruckersNeeded || 0);
+    remoteDesired = Math.min(remoteDesired, Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0));
+  }
+  if (remoteCarryDemand > 0 && averageTruckerCapacity > 0) {
+    var carryBasedRemoteDesired = Math.ceil(remoteCarryDemand / averageTruckerCapacity);
+    remoteDesired = Math.max(remoteDesired, carryBasedRemoteDesired);
     remoteDesired = Math.min(remoteDesired, Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0));
   }
 
@@ -1608,6 +1877,14 @@ function computeTruckerQuotaForHome(roomName, C) {
     urgentRequests: urgent,
     remoteEnergyWaiting: remoteEnergyWaiting,
     activeRemoteRooms: activeRemoteRooms,
+    totalLiveTruckerCarry: assignmentCountsForQuota.totalLiveTruckerCarry || 0,
+    localLiveTruckerCarry: assignmentCountsForQuota.localLiveTruckerCarry || 0,
+    remoteLiveTruckerCarry: assignmentCountsForQuota.remoteLiveTruckerCarry || 0,
+    queuedLocalTruckerCarry: getQueuedTruckerCarry(roomName, 'local'),
+    queuedRemoteTruckerCarry: getQueuedTruckerCarry(roomName, 'remote'),
+    localCarryDemand: localWorkload.localCarryDemand || 0,
+    remoteCarryDemand: Math.round(remoteCarryDemand),
+    localWorkload: localWorkload,
     localDesiredTruckers: localDesiredTruckers,
     remoteDesiredTruckers: remoteDesired,
     requestDrivenRemoteTruckers: requestDrivenRemoteDesired,
@@ -1939,6 +2216,7 @@ function computeRoomQuotas(C, room) {
   // (builder need, remote miners, etc.) so every change is a single diff.
   var truckerQuotaMeta = computeTruckerQuotaForHome(room.name, C);
   var truckerQuota = truckerQuotaMeta.finalTruckerQuota || 0;
+  var claimerQuota = computeClaimerQuotaForHome(C, room);
 
   var quotas = {
     Queen:        determineQueenQuota(room),
@@ -1947,7 +2225,7 @@ function computeRoomQuotas(C, room) {
     Scout:        1,
     Repair:       repairQuota,
     Trucker:      truckerQuota,
-    Claimer:      0,
+    Claimer:      claimerQuota,
     CombatMelee:  localDefense.CombatMelee,
     CombatArcher: localDefense.CombatArcher,
     CombatMedic:  localDefense.CombatMedic
@@ -2003,6 +2281,12 @@ function fillQueueForRoom(C, room) {
     requestDrivenRemoteTruckers: truckerQuotaMeta.requestDrivenRemoteTruckers || 0,
     predictedRemoteTruckersNeeded: truckerQuotaMeta.predictedRemoteTruckersNeeded || 0,
     remoteSourcePrediction: truckerQuotaMeta.remoteSourcePrediction || null,
+    totalLiveTruckerCarry: truckerQuotaMeta.totalLiveTruckerCarry || 0,
+    localLiveTruckerCarry: truckerQuotaMeta.localLiveTruckerCarry || 0,
+    remoteLiveTruckerCarry: truckerQuotaMeta.remoteLiveTruckerCarry || 0,
+    localCarryDemand: truckerQuotaMeta.localCarryDemand || 0,
+    remoteCarryDemand: truckerQuotaMeta.remoteCarryDemand || 0,
+    localWorkload: truckerQuotaMeta.localWorkload || null,
     finalTruckerQuota: truckerQuotaMeta.finalTruckerQuota || (quotas.Trucker || 0),
     maxTotalTruckers: maxTotalTruckers,
     liveTruckers: liveTruckers,
@@ -2023,6 +2307,14 @@ function fillQueueForRoom(C, room) {
     activeRemoteRooms: truckerQuotaMeta.activeRemoteRooms || 0,
     activeRemoteSources: truckerQuotaMeta.remoteSourcePrediction ? truckerQuotaMeta.remoteSourcePrediction.activeRemoteSources : 0,
     expectedRemoteEnergy: truckerQuotaMeta.remoteSourcePrediction ? truckerQuotaMeta.remoteSourcePrediction.expectedRemoteEnergy : 0,
+    totalLiveTruckerCarry: truckerQuotaMeta.totalLiveTruckerCarry || 0,
+    localLiveTruckerCarry: truckerQuotaMeta.localLiveTruckerCarry || 0,
+    remoteLiveTruckerCarry: truckerQuotaMeta.remoteLiveTruckerCarry || 0,
+    queuedLocalTruckerCarry: truckerQuotaMeta.queuedLocalTruckerCarry || 0,
+    queuedRemoteTruckerCarry: truckerQuotaMeta.queuedRemoteTruckerCarry || 0,
+    localCarryDemand: truckerQuotaMeta.localCarryDemand || 0,
+    remoteCarryDemand: truckerQuotaMeta.remoteCarryDemand || 0,
+    localWorkload: truckerQuotaMeta.localWorkload || null,
     localDesiredTruckers: truckerQuotaMeta.localDesiredTruckers || localTruckerBaseQuota,
     remoteDesiredTruckers: truckerQuotaMeta.remoteDesiredTruckers || 0,
     requestDrivenRemoteTruckers: truckerQuotaMeta.requestDrivenRemoteTruckers || 0,
@@ -2104,6 +2396,54 @@ function fillQueueForRoom(C, room) {
           }
           continue;
         }
+      }
+      if (role === 'Claimer') {
+        var reservePlan = findReservationPlanForQueue(roomName);
+        if (!reservePlan) {
+          ensureRoomMemory(roomName).lastClaimerSpawnDecision = {
+            tick: Game.time,
+            action: 'skip',
+            reason: 'no-unassigned-reservation-plan'
+          };
+          continue;
+        }
+        enqueue(roomName, role, {
+          task: 'reserveRemote',
+          claimerMode: 'reserve',
+          home: roomName,
+          targetRoom: reservePlan.targetRoom,
+          desiredClaimParts: Math.max(1, Math.min(
+            VeinseekerConfig.REMOTE_RESERVER_BODY_MAX_CLAIM_PARTS || 2,
+            (reservePlan.activeSourceIds && reservePlan.activeSourceIds.length) || 1
+          )),
+          maxClaimParts: VeinseekerConfig.REMOTE_RESERVER_BODY_MAX_CLAIM_PARTS || 2,
+          reservePlanReason: reservePlan.reason,
+          activeSourceIds: reservePlan.activeSourceIds || [],
+          routeDistance: reservePlan.routeDistance,
+          pathCost: reservePlan.pathCost,
+          netIncomeProtected: reservePlan.netIncomeProtected,
+          desiredReservationTicks: reservePlan.desiredReservationTicks,
+          reserveAt: reservePlan.reserveAt,
+          priority: reservePlan.spawnPriority || ROLE_PRIORITY.Claimer || 55
+        }, C);
+        ensureRoomMemory(roomName).lastClaimerSpawnDecision = {
+          tick: Game.time,
+          action: 'enqueue',
+          targetRoom: reservePlan.targetRoom,
+          reason: reservePlan.reason,
+          activeSourceIds: reservePlan.activeSourceIds || [],
+          netIncomeProtected: reservePlan.netIncomeProtected,
+          priority: reservePlan.spawnPriority || ROLE_PRIORITY.Claimer || 55
+        };
+        continue;
+      }
+      if (role === 'Trucker') {
+        enqueue(roomName, role, buildTruckerSpawnOptions(roomName, truckerQuotaMeta, assignmentCounts), C);
+        continue;
+      }
+      if (role === 'Upgrader') {
+        enqueue(roomName, role, buildUpgraderSpawnOptions(room, ensureRoomMemory(roomName).lastUpgraderQuota || null), C);
+        continue;
       }
       enqueue(roomName, role, null, C);
     }

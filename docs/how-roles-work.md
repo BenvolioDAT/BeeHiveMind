@@ -55,3 +55,6 @@ Remote mining is source-centric:
 - Remote `Veinseeker` creeps are spawned only for active source records and keep validating that source assignment while they travel, build/repair the source container, harvest, and publish haul requests.
 - `Trucker` quota now combines live haul requests with predicted energy from active source records, so a trucker can be spawned before the remote container is already full.
 - `role.Trucker.Dispatcher.js` skips haul requests from inactive sources and chooses remote jobs by expected pickup amount at arrival, distance, urgency, and TTL margin.
+- `Claimer` reserves only active remote rooms from `lastRemoteReservationPlan` unless a manual `Reserve` flag is present. It keeps one room lock per reserve target and releases the lock when reservation ticks are healthy.
+- `Builder` ignores remote construction that is not tied to an active remote source container or active RoadPlanner remote road, which prevents builders from walking into stale remote sites.
+- `Upgrader` quota is based on a per-room WORK-part budget, so RCL2-RCL4 rooms can spend surplus energy faster while still backing off for construction backlog.

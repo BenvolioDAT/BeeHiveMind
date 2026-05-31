@@ -81,10 +81,127 @@ function summarizeBody(body) {
   return summary;
 }
 
+function countBodyPartsFromBody(body) {
+  var summary = summarizeBody(body);
+  return {
+    work: summary.work,
+    carry: summary.carry,
+    move: summary.move,
+    claim: summary.claim,
+    attack: summary.attack,
+    ranged_attack: summary.ranged_attack,
+    heal: summary.heal,
+    tough: summary.tough,
+    totalParts: summary.totalParts
+  };
+}
+
+function estimateCarryPartsNeeded(energyPerTick, roundTripTicks) {
+  var ept = Math.max(0, Number(energyPerTick) || 0);
+  var ticks = Math.max(1, Number(roundTripTicks) || 1);
+  return Math.max(1, Math.ceil((ept * ticks) / CARRY_CAPACITY));
+}
+
+function estimateMovePartsNeeded(carryParts, roadCoveragePct) {
+  var carry = Math.max(1, Math.ceil(Number(carryParts) || 1));
+  var coverage = Math.max(0, Math.min(1, Number(roadCoveragePct) || 0));
+  return coverage >= 0.75 ? Math.max(1, Math.ceil(carry / 2)) : carry;
+}
+
+function buildCarryMoveBody(carryParts, moveParts) {
+  var body = [];
+  var carry = Math.max(1, Math.ceil(Number(carryParts) || 1));
+  var move = Math.max(1, Math.ceil(Number(moveParts) || 1));
+  while (carry + move > 50) {
+    if (carry >= move && carry > 1) carry--;
+    else if (move > 1) move--;
+    else break;
+  }
+  for (var c = 0; c < carry; c++) body.push(CARRY);
+  for (var m = 0; m < move; m++) body.push(MOVE);
+  return body;
+}
+
+function estimateHaulerThroughput(body, pathCost, roadCoveragePct) {
+  var parts = countBodyPartsFromBody(body);
+  var coverage = Math.max(0, Math.min(1, Number(roadCoveragePct) || 0));
+  var oneWay = Math.max(1, Number(pathCost) || 50);
+  var fatigueMultiplier = coverage >= 0.75 ? 1 : 1.5;
+  var roundTrip = Math.max(1, oneWay * 2 * fatigueMultiplier);
+  return {
+    carryCapacity: parts.carry * CARRY_CAPACITY,
+    roundTripTicks: roundTrip,
+    energyPerTick: (parts.carry * CARRY_CAPACITY) / roundTrip
+  };
+}
+
+function getBestTruckerBodyPlan(energy, context) {
+  context = context || {};
+  var budget = Math.max(0, Number(context.maxCost || energy) || 0);
+  var available = Math.max(0, Number(energy) || 0);
+  budget = Math.min(budget || available, available);
+  if (budget <= 0) return null;
+
+  var desiredCarry = Math.max(1, Math.ceil(Number(context.desiredCarryParts) || (context.mode === 'remote' ? 6 : 2)));
+  var roadCoverage = context.roaded ? 1 : Math.max(0, Math.min(1, Number(context.roadCoveragePct) || 0));
+  var desiredMove = Math.max(1, Math.ceil(Number(context.desiredMoveParts) || estimateMovePartsNeeded(desiredCarry, roadCoverage)));
+
+  while (desiredCarry >= 1) {
+    var body = buildCarryMoveBody(desiredCarry, desiredMove);
+    var cost = calculateBodyCost(body);
+    if (cost <= budget) {
+      return {
+        body: body,
+        cost: cost,
+        carryParts: countBodyParts(body, CARRY),
+        moveParts: countBodyParts(body, MOVE),
+        reason: context.bodyPatternReason || (roadCoverage >= 0.75 ? 'roaded-carry-carry-move' : 'offroad-carry-move')
+      };
+    }
+    desiredCarry--;
+    desiredMove = Math.max(1, Math.ceil(Number(context.desiredMoveParts) || estimateMovePartsNeeded(desiredCarry, roadCoverage)));
+  }
+  return null;
+}
+
+function getBestUpgraderBodyPlan(energy, targetWork, context) {
+  context = context || {};
+  var budget = Math.min(Math.max(0, Number(energy) || 0), Math.max(0, Number(context.maxCost || energy) || 0));
+  var desiredWork = Math.max(1, Math.ceil(Number(targetWork) || 1));
+  while (desiredWork >= 1) {
+    var carry = Math.max(1, Math.ceil(desiredWork / 3));
+    var move = Math.max(1, Math.ceil((desiredWork + carry) / 2));
+    var body = [];
+    for (var w = 0; w < desiredWork; w++) body.push(WORK);
+    for (var c = 0; c < carry; c++) body.push(CARRY);
+    for (var m = 0; m < move; m++) body.push(MOVE);
+    while (body.length > 50) body.pop();
+    var cost = calculateBodyCost(body);
+    if (cost <= budget) {
+      return {
+        body: body,
+        cost: cost,
+        workParts: countBodyParts(body, WORK),
+        carryParts: countBodyParts(body, CARRY),
+        moveParts: countBodyParts(body, MOVE),
+        reason: context.bodyPatternReason || 'target-upgrade-work'
+      };
+    }
+    desiredWork--;
+  }
+  return null;
+}
+
 module.exports = {
   calculateBodyCost: calculateBodyCost,
   countBodyParts: countBodyParts,
   cloneBody: cloneBody,
   getBodySignature: getBodySignature,
-  summarizeBody: summarizeBody
+  summarizeBody: summarizeBody,
+  countBodyPartsFromBody: countBodyPartsFromBody,
+  estimateCarryPartsNeeded: estimateCarryPartsNeeded,
+  estimateMovePartsNeeded: estimateMovePartsNeeded,
+  estimateHaulerThroughput: estimateHaulerThroughput,
+  getBestTruckerBodyPlan: getBestTruckerBodyPlan,
+  getBestUpgraderBodyPlan: getBestUpgraderBodyPlan
 };

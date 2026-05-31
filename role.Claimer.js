@@ -2,6 +2,7 @@
 
 var BeeToolbox = require('BeeToolbox');
 var HarabiCreep = require('role.HarabiCreep');
+var SourceEnergyManager = require('SourceEnergy.Manager');
 
 // Shared debug + tuning config.
 var CFG = Object.freeze({
@@ -100,7 +101,10 @@ var CFG = Object.freeze({
         color: color || CFG.DRAW.TEXT, font: CFG.DRAW.FONT, opacity: 0.95, align: "center",
         backgroundColor: "#000000", backgroundOpacity: 0.25
       });
-    } catch (e) {}
+    } catch (e) {
+      if (!Memory.__BHM) Memory.__BHM = {};
+      Memory.__BHM.lastClaimerVisualError = { tick: Game.time, reason: e && e.message ? e.message : String(e) };
+    }
   }
 
   // =========================
@@ -116,6 +120,7 @@ var CFG = Object.freeze({
     if (!creep || !creep.memory) return;
     creep.memory.role = 'Claimer';
     if (!creep.memory.task) creep.memory.task = 'claimer';
+    if (!creep.memory.home) creep.memory.home = Memory.firstSpawnRoom || (creep.room && creep.room.name);
   }
 
   // ---- Randomized signing pool ----
@@ -179,7 +184,7 @@ var CFG = Object.freeze({
   var RESERVE_CONFIG = {
     desired: 2500,
     rotateAt: 1000,
-    scanRoleNames: ['veinseeker'],
+    scanRoleNames: ['veinseeker', 'Veinseeker'],
     maxTargets: 8
   };
 
@@ -222,8 +227,15 @@ var CFG = Object.freeze({
   // =========================
   // Target gathering / intel
   // =========================
-  function gatherReserveTargets() {
+  function gatherReserveTargets(homeRoom) {
     var set = {};
+    if (homeRoom && SourceEnergyManager && typeof SourceEnergyManager.getRemoteReservationPlan === 'function') {
+      var reservePlan = SourceEnergyManager.getRemoteReservationPlan(homeRoom);
+      var needed = reservePlan && reservePlan.needed ? reservePlan.needed : [];
+      for (var p = 0; p < needed.length; p++) {
+        if (needed[p] && needed[p].targetRoom) set[needed[p].targetRoom] = true;
+      }
+    }
     for (var fname in Game.flags) {
       if (fname === 'Reserve' || fname.indexOf('Reserve:') === 0) {
         var f = Game.flags[fname];
@@ -301,6 +313,7 @@ var CFG = Object.freeze({
 
   function resolveTargetRoom(creep) {
     var mode = (creep.memory.claimerMode || CONFIG.defaultMode).toLowerCase();
+    if (creep.memory.targetRoom) return creep.memory.targetRoom;
     var exactName = mode === 'claim' ? 'Claim' : (mode === 'attack' ? 'Attack' : 'Reserve');
 
     var chosenFlag = Game.flags[exactName];
@@ -317,8 +330,36 @@ var CFG = Object.freeze({
       }
       return creep.memory.targetRoom;
     }
-    if (creep.memory.targetRoom) return creep.memory.targetRoom;
     return null;
+  }
+
+  function getAssignedReservationEntry(creep, targetRoom) {
+    var home = creep.memory.home || (creep.room && creep.room.name);
+    if (!home || !targetRoom || !SourceEnergyManager || typeof SourceEnergyManager.getRemoteReservationPlan !== 'function') return null;
+    var plan = SourceEnergyManager.getRemoteReservationPlan(home);
+    var targets = plan && plan.targets ? plan.targets : [];
+    for (var i = 0; i < targets.length; i++) {
+      if (targets[i] && targets[i].targetRoom === targetRoom) return targets[i];
+    }
+    return null;
+  }
+
+  function hasReserveFlagForRoom(targetRoom) {
+    for (var fname in Game.flags) {
+      if (!Object.prototype.hasOwnProperty.call(Game.flags, fname)) continue;
+      if (fname !== 'Reserve' && fname.indexOf('Reserve:') !== 0) continue;
+      var flag = Game.flags[fname];
+      if (flag && flag.pos && flag.pos.roomName === targetRoom) return true;
+    }
+    return false;
+  }
+
+  function shouldKeepReserveTarget(creep, targetRoom) {
+    if (!targetRoom) return false;
+    if (SourceEnergyManager && typeof SourceEnergyManager.isRemoteUnsafe === 'function' && SourceEnergyManager.isRemoteUnsafe(targetRoom)) return false;
+    var entry = getAssignedReservationEntry(creep, targetRoom);
+    if (!entry) return hasReserveFlagForRoom(targetRoom) || !creep.memory.reservePlanReason;
+    return !!entry.needsReservation;
   }
 
   // =========================
@@ -335,6 +376,9 @@ var CFG = Object.freeze({
   function ensureReserveRoleScan() {
     if (RESERVE_CONFIG.scanRoleNames.indexOf('veinseeker') === -1) {
       RESERVE_CONFIG.scanRoleNames.push('veinseeker');
+    }
+    if (RESERVE_CONFIG.scanRoleNames.indexOf('Veinseeker') === -1) {
+      RESERVE_CONFIG.scanRoleNames.push('Veinseeker');
     }
   }
 
@@ -357,7 +401,7 @@ var CFG = Object.freeze({
     if (!ctl) return;
     if (ctl.reservation && ctl.reservation.username === creep.owner.username) {
       var ticks = ctl.reservation.ticksToEnd || 0;
-      if (ticks >= RESERVE_CONFIG.rotateAt) {
+      if (ticks >= (creep.memory.desiredReservationTicks || RESERVE_CONFIG.desired)) {
         releaseRoomLock(targetRoom, creep);
         debugSay(creep, '➡');
         creep.memory.targetRoom = null;
@@ -472,6 +516,7 @@ var CFG = Object.freeze({
       debugSay(creep, '👑');
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "CLAIM");
       creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
+      return;
     } else if (res === OK) {
       debugSay(creep, '👑');
       signIfWanted(creep, controller);
@@ -503,12 +548,13 @@ var CFG = Object.freeze({
       debugSay(creep, '📌');
       debugDrawLine(creep, controller, CFG.DRAW.CTRL, "+RES");
       creep.travelTo(controller, { range: 1, reusePath: CONFIG.reusePath });
+      return;
     } else if (res === OK) {
+      signIfWanted(creep, controller);
       debugSay(creep, '📌');
     } else {
       debugSay(creep, '❌' + res);
     }
-    signIfWanted(creep, controller);
   }
 
   function doAttack(creep, controller) {
@@ -536,11 +582,13 @@ var CFG = Object.freeze({
       ensureReserveRoleScan();
 
       // Build the current reserve plan and drop stale locks/targets that fell out of view
-      var plan = gatherReserveTargets();
+      var plan = gatherReserveTargets(creep.memory.home || creep.room.name);
       var targetRoom = creep.memory.targetRoom;
-      if (targetRoom && plan.indexOf(targetRoom) === -1) {
+      if (targetRoom && claimerMode(creep) === 'reserve' && !shouldKeepReserveTarget(creep, targetRoom)) {
         releaseRoomLock(targetRoom, creep);
         targetRoom = creep.memory.targetRoom = null;
+      } else if (targetRoom && plan.indexOf(targetRoom) === -1) {
+        plan.push(targetRoom);
       }
 
       var mode = claimerMode(creep);
@@ -574,7 +622,7 @@ var CFG = Object.freeze({
       }
 
       if (targetRoom && mode === 'reserve') {
-        refreshRoomLock(targetRoom, creep);
+        if (!refreshRoomLock(targetRoom, creep) && !isRoomLocked(targetRoom)) acquireRoomLock(targetRoom, creep);
       }
 
       drawLockVisual(targetRoom);

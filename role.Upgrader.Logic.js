@@ -15,6 +15,24 @@ function debugRing(room, pos, color, text) { BeeToolbox.drawDebugRing(room, pos,
 
 function getRoomOfPos(pos) { return BeeToolbox.getRoomForPosition(pos); }
 
+function writeUpgraderRefuelDiag(creep, reason, extra) {
+  if (!creep || !creep.room) return;
+  if (!Memory.rooms) Memory.rooms = {};
+  if (!Memory.rooms[creep.room.name]) Memory.rooms[creep.room.name] = {};
+  var diag = {
+    tick: Game.time,
+    creepName: creep.name,
+    reason: reason,
+    carried: creep.store ? (creep.store[RESOURCE_ENERGY] || 0) : 0
+  };
+  if (extra) {
+    for (var key in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, key)) diag[key] = extra[key];
+    }
+  }
+  Memory.rooms[creep.room.name].lastUpgraderRefuel = diag;
+}
+
 function checkAndUpdateControllerSign(creep, controller) {
   if (!controller) return;
   var msg = CFG.SIGN_TEXT;
@@ -65,11 +83,12 @@ function runUpgradePhase(creep) {
 function shouldPauseAtSafeRCL8(controller) { if (!CFG.SKIP_RCL8_IF_SAFE) return false; if (controller.level !== 8) return false; var ticksToDowngrade = controller.ticksToDowngrade || 0; return ticksToDowngrade > CFG.RCL8_SAFE_TTL; }
 
 function runRefuelPhase(creep) {
-  if (maybePublishUpgraderRequest(creep)) { debugSay(creep, "\u23f3"); return; }
-  if (tryLinkPull(creep)) return;
-  if (tryCleanupEnergy(creep)) return;
-  if (tryWithdrawHomeWorkerEnergy(creep)) return;
-  if (tryWithdrawContainer(creep)) return;
+  if (maybePublishUpgraderRequest(creep)) { writeUpgraderRefuelDiag(creep, 'waiting-for-handoff'); debugSay(creep, "\u23f3"); return; }
+  if (tryLinkPull(creep)) { writeUpgraderRefuelDiag(creep, 'controller-link'); return; }
+  if (tryCleanupEnergy(creep)) { writeUpgraderRefuelDiag(creep, 'cleanup-energy'); return; }
+  if (tryWithdrawHomeWorkerEnergy(creep)) { writeUpgraderRefuelDiag(creep, 'home-worker-energy'); return; }
+  if (tryWithdrawContainer(creep)) { writeUpgraderRefuelDiag(creep, 'general-container'); return; }
+  writeUpgraderRefuelDiag(creep, 'no-energy-source');
   if (CFG.DEBUG_DRAW) debugSay(creep, "\u2753");
 }
 function tryLinkPull(creep) { var ctrl = creep.room.controller; if (!ctrl) return false; var linkNearController = creep.pos.findClosestByRange(FIND_STRUCTURES, { filter: function (s) { return s.structureType === STRUCTURE_LINK && s.store && (s.store[RESOURCE_ENERGY] || 0) > 0 && s.pos.inRangeTo(ctrl, 3); } }); if (!linkNearController) return false; var lr = creep.withdraw(linkNearController, RESOURCE_ENERGY); var linkRoom = getRoomOfPos(linkNearController.pos); debugRing(linkRoom, linkNearController.pos, CFG.DRAW.LINK, "LINK"); debugDrawLine(creep, linkNearController, CFG.DRAW.LINK, "LINK"); if (lr === ERR_NOT_IN_RANGE) creep.travelTo(linkNearController, { range: 1, reusePath: CFG.PATH_REUSE }); return true; }

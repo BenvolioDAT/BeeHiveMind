@@ -110,12 +110,51 @@ function getBodyListForRole(canonicalRole, context) {
   return entry.default || null;
 }
 
+function getClaimerBodyPlanForEnergy(energy, context) {
+  context = context || {};
+  var available = Math.max(0, Number(energy) || 0);
+  var maxClaimParts = Math.max(1, Math.min(25, Math.ceil(Number(context.maxClaimParts) || 2)));
+  var desiredClaimParts = Math.max(1, Math.min(maxClaimParts, Math.ceil(Number(context.desiredClaimParts) || maxClaimParts)));
+  for (var claims = desiredClaimParts; claims >= 1; claims--) {
+    var body = [];
+    for (var c = 0; c < claims; c++) body.push(CLAIM);
+    for (var m = 0; m < claims; m++) body.push(MOVE);
+    var cost = calculateBodyCost(body);
+    if (cost <= available) {
+      return makeBodyPlan('Claimer', body, cost, -1, available);
+    }
+  }
+  return null;
+}
+
 function getBestBodyPlanForEnergy(roleName, energy, context) {
   // Config arrays are ordered largest-to-smallest. The first affordable entry
   // is the best plan for the supplied energy number.
   var canonicalRole = normalizeRole(roleName);
   if (!canonicalRole) return null;
   var available = typeof energy === 'number' ? energy : 0;
+
+  if (canonicalRole === 'Trucker' && context && (context.mode || context.desiredCarryParts || context.roaded !== undefined)) {
+    var truckerPlan = BodyUtils.getBestTruckerBodyPlan(available, context);
+    if (truckerPlan && truckerPlan.body && truckerPlan.body.length) {
+      return makeBodyPlan(canonicalRole, truckerPlan.body, truckerPlan.cost, -1, available);
+    }
+  }
+
+  if (canonicalRole === 'Upgrader' && context && context.targetWorkParts) {
+    var upgraderPlan = BodyUtils.getBestUpgraderBodyPlan(available, context.targetWorkParts, context);
+    if (upgraderPlan && upgraderPlan.body && upgraderPlan.body.length) {
+      return makeBodyPlan(canonicalRole, upgraderPlan.body, upgraderPlan.cost, -1, available);
+    }
+  }
+
+  if (canonicalRole === 'Claimer' && context && (context.desiredClaimParts || context.maxClaimParts)) {
+    var claimerPlan = getClaimerBodyPlanForEnergy(available, context);
+    if (claimerPlan && claimerPlan.body && claimerPlan.body.length) {
+      return claimerPlan;
+    }
+  }
+
   var list = getBodyListForRole(canonicalRole, context);
   if (!list || !list.length) return null;
 
