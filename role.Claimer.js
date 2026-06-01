@@ -26,6 +26,11 @@ var CFG = Object.freeze({
     DROP_COLOR:  "#ffe66e",  // dropped energy
     GRAVE_COLOR: "#ffb0e0",  // tombstones/ruins
     IDLE_COLOR:  "#bfbfbf",
+    CTRL:        "#8ab6ff",
+    FLAG:        "#ffe66e",
+    LOCK:        "#ff6e6e",
+    SIGN:        "#6effa1",
+    TEXT:        "#ffffff",
     // Shared
     WIDTH:   0.12,
     OPACITY: 0.45,

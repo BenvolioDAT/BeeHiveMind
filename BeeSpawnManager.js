@@ -1307,24 +1307,61 @@ function computeUpgradeBudgetForRoom(C, room) {
   var constructionBacklog = C && C.roomSiteCounts ? (C.roomSiteCounts[room.name] || 0) : 0;
   var fillRatio = sourceContainerCapacity > 0 ? sourceContainerEnergy / sourceContainerCapacity : 0;
   var surplus = sourceContainerEnergy + droppedEnergy + storedEnergy;
+  var repairDiag = ensureRoomMemory(room.name).lastRepairQuota || {};
+  var repairEmergency = (repairDiag.emergencyRepairQuota || 0) > 0 || !!repairDiag.selectedEmergencyRequest;
+  var constructionEmergencySiteCount = UpgraderConfig.UPGRADE_CONSTRUCTION_EMERGENCY_SITE_COUNT || 10;
+  var constructionEmergency = constructionBacklog >= constructionEmergencySiteCount && surplus < 3000;
+  var emergencyThrottle = (repairEmergency || constructionEmergency) && !downgradeWarning;
+  var targetWorkReasons = [];
+  var targetWorkSkippedReasons = [];
 
   var targetWork = 1;
   if (rcl === 2) targetWork = UpgraderConfig.UPGRADE_RCL2_TARGET_WORK || 2;
   else if (rcl === 3) targetWork = UpgraderConfig.UPGRADE_RCL3_TARGET_WORK || 3;
   else if (rcl === 4) targetWork = UpgraderConfig.UPGRADE_RCL4_TARGET_WORK || 4;
+  else if (rcl === 5) targetWork = UpgraderConfig.UPGRADE_RCL5_TARGET_WORK || 4;
   else targetWork = 3;
-  if (surplus >= 2500 || fillRatio >= 0.70 || remoteIncomeEstimate > 1) targetWork += UpgraderConfig.UPGRADE_SURPLUS_WORK_BONUS || 2;
-  if (storedEnergy >= 10000) targetWork += 2;
+  var baseTargetWork = targetWork;
+  targetWorkReasons.push('base-rcl-' + rcl);
+  var hasSurplusSignal = surplus >= 2500 || fillRatio >= 0.70 || remoteIncomeEstimate > 1;
+  if (emergencyThrottle) {
+    targetWorkSkippedReasons.push(repairEmergency ? 'repair-emergency' : 'construction-emergency');
+  } else if (hasSurplusSignal) {
+    var surplusTarget = 0;
+    if (rcl === 4) surplusTarget = UpgraderConfig.UPGRADE_RCL4_SURPLUS_TARGET_WORK || 0;
+    else if (rcl === 5) surplusTarget = UpgraderConfig.UPGRADE_RCL5_SURPLUS_TARGET_WORK || 0;
+    if (surplusTarget > targetWork) {
+      targetWork = surplusTarget;
+      targetWorkReasons.push('rcl-surplus-target');
+    } else {
+      targetWork += UpgraderConfig.UPGRADE_SURPLUS_WORK_BONUS || 2;
+      targetWorkReasons.push('surplus-bonus');
+    }
+  } else {
+    targetWorkSkippedReasons.push('no-surplus-signal');
+  }
+  if (!emergencyThrottle && storedEnergy >= 10000) {
+    targetWork += 2;
+    targetWorkReasons.push('storage-surplus');
+  } else if (storedEnergy >= 10000) {
+    targetWorkSkippedReasons.push('storage-surplus-emergency-throttled');
+  }
   var throttleReason = null;
-  if (constructionBacklog >= 10 && !downgradeWarning && surplus < 3000) {
+  if (constructionEmergency && !downgradeWarning) {
     targetWork = Math.max(1, Math.floor(targetWork / 2));
     throttleReason = 'construction-backlog';
   }
+  if (repairEmergency && !downgradeWarning) {
+    targetWork = Math.min(targetWork, baseTargetWork);
+    throttleReason = 'repair-emergency';
+  }
   if (downgradeDanger) {
     targetWork = Math.max(targetWork, 8);
+    targetWorkReasons.push('downgrade-danger');
     throttleReason = null;
   } else if (downgradeWarning) {
     targetWork = Math.max(targetWork, 5);
+    targetWorkReasons.push('downgrade-warning');
   }
   if (rcl >= 8) targetWork = Math.min(targetWork, 15);
 
@@ -1334,6 +1371,7 @@ function computeUpgradeBudgetForRoom(C, room) {
   if (rcl === 2) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL2 || 2;
   else if (rcl === 3) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL3 || 3;
   else if (rcl === 4) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL4 || 4;
+  if (emergencyThrottle) maxCreeps = Math.min(maxCreeps, UpgraderConfig.UPGRADE_EMERGENCY_MAX_CREEPS || 1);
   var desiredCreeps = Math.ceil(targetWork / workPerCreep);
   desiredCreeps = Math.max(UpgraderConfig.UPGRADE_MIN_CREEPS || 1, Math.min(maxCreeps, desiredCreeps));
   var workCounts = countUpgraderWorkForHome(C, room.name, true);
@@ -1341,6 +1379,7 @@ function computeUpgradeBudgetForRoom(C, room) {
     tick: Game.time,
     rcl: rcl,
     ticksToDowngrade: ticksToDowngrade,
+    baseTargetWork: baseTargetWork,
     desiredUpgradeEnergyPerTick: targetWork,
     desiredUpgraderWorkParts: targetWork,
     targetUpgraderWork: targetWork,
@@ -1355,6 +1394,11 @@ function computeUpgradeBudgetForRoom(C, room) {
     droppedEnergy: droppedEnergy,
     remoteIncomeEstimate: remoteIncomeEstimate,
     constructionBacklog: constructionBacklog,
+    repairEmergency: repairEmergency,
+    constructionEmergency: constructionEmergency,
+    emergencyThrottle: emergencyThrottle,
+    targetWorkReasons: targetWorkReasons,
+    targetWorkSkippedReasons: targetWorkSkippedReasons,
     throttleReason: throttleReason,
     reason: downgradeDanger ? 'downgrade-danger' : (downgradeWarning ? 'downgrade-warning' : 'upgrade-budget')
   };
@@ -1423,7 +1467,7 @@ function countLiveRemoteReservers(homeRoom) {
     if (!creep || !creep.my || !creep.memory) continue;
     if (canonicalRole(creep.memory.role) !== 'Claimer') continue;
     if ((creep.memory.home || (creep.room && creep.room.name)) !== homeRoom) continue;
-    if ((creep.memory.claimerMode || 'reserve') !== 'reserve') continue;
+    if (creep.memory.claimerMode !== 'reserve' && creep.memory.task !== 'reserveRemote') continue;
     if (creep.spawning) continue;
     count++;
   }
@@ -1461,6 +1505,7 @@ function findReservationPlanForQueue(roomName) {
   for (var i = 0; i < q.length; i++) {
     var item = q[i];
     if (!item || canonicalRole(item.role) !== 'Claimer') continue;
+    if (item.claimerMode !== 'reserve' && item.task !== 'reserveRemote') continue;
     if (item.targetRoom) busy[item.targetRoom] = true;
   }
   for (var name in Game.creeps) {
@@ -1468,6 +1513,7 @@ function findReservationPlanForQueue(roomName) {
     var creep = Game.creeps[name];
     if (!creep || !creep.memory || canonicalRole(creep.memory.role) !== 'Claimer') continue;
     if ((creep.memory.home || (creep.room && creep.room.name)) !== roomName) continue;
+    if (creep.memory.claimerMode !== 'reserve' && creep.memory.task !== 'reserveRemote') continue;
     if (creep.memory.targetRoom) busy[creep.memory.targetRoom] = true;
   }
   for (var p = 0; p < plan.needed.length; p++) {
@@ -1661,6 +1707,25 @@ function getRemoteContainerStatusForSource(sourceId) {
   return null;
 }
 
+function getActiveRemoteHaulRequestsBySource(roomName) {
+  var out = {};
+  var requests = Memory.__BHM && Memory.__BHM.remoteHaulRequests ? Memory.__BHM.remoteHaulRequests : {};
+  var staleTicks = TruckerConfig.REQUEST_STALE_TICKS || 50;
+  var minEnergy = Math.max(0, TruckerConfig.MIN_HAUL_REQUEST_ENERGY || 300);
+  for (var id in requests) {
+    if (!Object.prototype.hasOwnProperty.call(requests, id)) continue;
+    var req = requests[id];
+    if (!req || req.homeRoom !== roomName || !req.sourceId) continue;
+    if ((req.amount || 0) < minEnergy) continue;
+    if ((Game.time - (req.updated || 0)) > staleTicks) continue;
+    if (TruckerConfig.shouldBlockRemoteHaulForMaintenance(req)) continue;
+    if (isVeinseekerRemoteRoomUnsafe(req.remoteRoom || req.roomName)) continue;
+    var previous = out[req.sourceId];
+    if (!previous || (req.amount || 0) > (previous.amount || 0)) out[req.sourceId] = req;
+  }
+  return out;
+}
+
 function buildRemoteSourceHaulPrediction(roomName) {
   var records = SourceEnergyManager.getActiveRemoteSourceRecords(roomName) || [];
   var averageCapacity = estimateTruckerCapacityForRoom(roomName);
@@ -1668,10 +1733,13 @@ function buildRemoteSourceHaulPrediction(roomName) {
   var arrivalMultiplier = Math.max(0.1, TruckerConfig.REMOTE_HAUL_EXPECTED_ARRIVAL_MULTIPLIER || 1.15);
   var maxPerSource = Math.max(1, TruckerConfig.MAX_TRUCKERS_PER_REMOTE || 1);
   var totalPipelineEnergy = 0;
+  var readyPipelineEnergy = 0;
   var expectedEnergy = 0;
+  var readyExpectedEnergy = 0;
   var readySources = 0;
   var urgentSources = 0;
   var sources = [];
+  var activeRequestsBySource = getActiveRemoteHaulRequestsBySource(roomName);
   for (var i = 0; i < records.length; i++) {
     var rec = records[i];
     var ept = rec && rec.economics && typeof rec.economics.energyPerTick === 'number' ? rec.economics.energyPerTick : (rec.energyPerTick || 0);
@@ -1685,9 +1753,21 @@ function buildRemoteSourceHaulPrediction(roomName) {
     var fillPct = capacity > 0 ? projected / capacity : 0;
     var pipelineEnergy = Math.max(0, ept * oneWay * 2);
     var desiredForSource = 0;
-    if (projected >= minExpected || fillPct >= 0.65) {
+    var activeRequest = activeRequestsBySource[rec.sourceId] || null;
+    var containerBuilt = !!(container && (container.status === 'built' || container.containerId));
+    var nearReady = containerBuilt && (projected >= Math.max(1, minExpected * 0.5) || fillPct >= 0.50);
+    var readyForPrediction = !!activeRequest || projected >= minExpected || fillPct >= 0.65 || nearReady;
+    var readinessReason = 'expected-low';
+    if (activeRequest) readinessReason = 'request-active';
+    else if (projected >= minExpected || fillPct >= 0.65) readinessReason = 'ready';
+    else if (nearReady) readinessReason = 'container-built';
+    else if (!containerBuilt) readinessReason = 'bootstrap-wait';
+
+    if (readyForPrediction) {
       desiredForSource = Math.min(maxPerSource, Math.max(1, Math.ceil(pipelineEnergy / averageCapacity)));
       readySources++;
+      readyPipelineEnergy += pipelineEnergy;
+      readyExpectedEnergy += projected;
       if (fillPct >= 0.8 || projected >= (TruckerConfig.URGENT_HAUL_REQUEST_ENERGY || 1600)) urgentSources++;
     }
     totalPipelineEnergy += pipelineEnergy;
@@ -1703,13 +1783,16 @@ function buildRemoteSourceHaulPrediction(roomName) {
       expectedEnergy: Math.round(projected),
       fillPct: Math.round(fillPct * 1000) / 1000,
       desiredTruckers: desiredForSource,
+      readinessReason: readinessReason,
+      containerBuilt: containerBuilt,
+      activeRequestAmount: activeRequest ? (activeRequest.amount || 0) : 0,
       roaded: !!(rec.road && rec.road.done),
       roadCoveragePct: roadCoveragePct
     };
     rec.activeHaulPressure = prediction;
     sources.push(prediction);
   }
-  var predicted = readySources > 0 ? Math.max(1, Math.ceil(totalPipelineEnergy / averageCapacity)) : 0;
+  var predicted = readySources > 0 ? Math.max(1, Math.ceil(readyPipelineEnergy / averageCapacity)) : 0;
   predicted = Math.max(predicted, urgentSources);
   predicted = Math.min(Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0), predicted);
   return {
@@ -1719,6 +1802,8 @@ function buildRemoteSourceHaulPrediction(roomName) {
     minExpectedEnergy: minExpected,
     expectedRemoteEnergy: Math.round(expectedEnergy),
     totalPipelineEnergy: Math.round(totalPipelineEnergy),
+    readyPipelineEnergy: Math.round(readyPipelineEnergy),
+    readyExpectedEnergy: Math.round(readyExpectedEnergy),
     readySources: readySources,
     urgentSources: urgentSources,
     predictedRemoteTruckersNeeded: predicted,
@@ -1857,7 +1942,7 @@ function computeTruckerQuotaForHome(roomName, C) {
   remoteDesired = Math.min(remoteDesired, Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0));
   var requestDrivenRemoteDesired = remoteDesired;
   var prediction = buildRemoteSourceHaulPrediction(roomName);
-  var remoteCarryDemand = Math.max(remoteEnergyWaiting, prediction.totalPipelineEnergy || 0);
+  var remoteCarryDemand = Math.max(remoteEnergyWaiting, prediction.readyPipelineEnergy || 0);
   if (prediction.enabled) {
     remoteDesired = Math.max(remoteDesired, prediction.predictedRemoteTruckersNeeded || 0);
     remoteDesired = Math.min(remoteDesired, Math.max(0, TruckerConfig.MAX_TRUCKERS_PER_HOME || 0));
@@ -2349,6 +2434,10 @@ function fillQueueForRoom(C, room) {
     var canonical = canonicalRole(role);
     var active = getRoomLocalLiveCount(C, roomName, canonical);
     var queued = queuedCount(C, roomName, role);
+    if (role === 'Claimer') {
+      active = countLiveRemoteReservers(roomName);
+      queued = queuedCount(C, roomName, 'Claimer', null, 'reserveRemote');
+    }
     if (role === 'Trucker') {
       active = effectiveActiveTruckers;
     }

@@ -501,49 +501,84 @@ function estimateRemoteSourceEconomics(homeRoom, remoteRoom, sourceId, routeDist
 
   var fullEnergyPerTick = sourceCapacity / SOURCE_REGEN_TICKS;
   var reservation = getReservationStatus(homeRoom, remoteRoom);
-  var reservedRate = reservation.reserved || reservation.planned;
-  var energyMultiplier = reservedRate ? 1 : Math.max(0, cfgNumber('REMOTE_UNRESERVED_ENERGY_MULTIPLIER', 0.5));
-  var energyPerTick = fullEnergyPerTick * energyMultiplier;
-
-  var harvestTiles = Math.max(1, openTiles || 1);
-  var desiredWork = Math.max(1, Math.ceil(energyPerTick / HARVEST_RATE));
-  if (harvestTiles <= 0) desiredWork = 0;
-  var minerCarry = 1;
-  var minerMove = Math.max(1, Math.ceil((desiredWork + minerCarry) / 2));
-  var minerParts = desiredWork + minerCarry + minerMove;
-  var minerBodyCost = desiredWork * bodyPartCost(WORK_PART) + minerCarry * bodyPartCost(CARRY_PART) + minerMove * bodyPartCost(MOVE_PART);
-  var minerLifetime = Math.max(300, CREEP_LIFETIME - oneWay);
-  var minerCostPerTick = minerBodyCost / minerLifetime;
-  var minerSpawnUsage = (minerParts * SPAWN_TICKS_PER_PART) / minerLifetime;
-
   var arrivalMultiplier = cfgNumber('REMOTE_HAUL_EXPECTED_ARRIVAL_MULTIPLIER', 1.15);
   var roundTripTicks = Math.max(1, oneWay * 2 * arrivalMultiplier);
-  var carryParts = Math.max(1, Math.ceil((energyPerTick * roundTripTicks) / CARRY_SIZE));
-  var roadComplete = container && container.status === 'built' && getRemoteRoadSummary(homeRoom, remoteRoom, sourceId, pathCost).done;
-  var haulerMove = roadComplete ? Math.max(1, Math.ceil(carryParts / 2)) : carryParts;
-  var haulerParts = carryParts + haulerMove;
-  var haulerBodyCost = carryParts * bodyPartCost(CARRY_PART) + haulerMove * bodyPartCost(MOVE_PART);
-  var haulerCostPerTick = haulerBodyCost / CREEP_LIFETIME;
-  var haulerSpawnUsage = (haulerParts * SPAWN_TICKS_PER_PART) / CREEP_LIFETIME;
-
-  var reservationCostPerTick = 0;
-  var reservationSpawnUsage = 0;
-  if (reservation.reserved || reservation.planned) {
-    var reserverLifetime = Math.max(100, CLAIM_LIFETIME - oneWay);
-    var reserverParts = 2;
-    reservationCostPerTick = (bodyPartCost(CLAIM_PART) + bodyPartCost(MOVE_PART)) / reserverLifetime;
-    reservationSpawnUsage = (reserverParts * SPAWN_TICKS_PER_PART) / reserverLifetime;
-  }
-
   var road = getRemoteRoadSummary(homeRoom, remoteRoom, sourceId, pathCost);
   var containerBuilt = container && container.status === 'built';
   var containerRepairLoss = containerBuilt ? cfgNumber('REMOTE_CONTAINER_REPAIR_LOSS', 0.10) : cfgNumber('REMOTE_UNBUILT_CONTAINER_PENALTY', 0.25);
   var roadUnits = Math.max(1, (finiteOrNull(road.pathLength) || oneWay) / 50);
   var roadMaintenanceLoss = roadUnits * cfgNumber('REMOTE_ROAD_MAINTENANCE_LOSS', 0.03);
   var maintenanceLoss = containerRepairLoss + roadMaintenanceLoss;
-  var netIncome = energyPerTick - minerCostPerTick - haulerCostPerTick - reservationCostPerTick - maintenanceLoss;
-  var spawnUsage = minerSpawnUsage + haulerSpawnUsage + reservationSpawnUsage;
-  var value = spawnUsage > 0 ? (netIncome / spawnUsage) : netIncome;
+  var unreservedEnergyMultiplier = Math.max(0, cfgNumber('REMOTE_UNRESERVED_ENERGY_MULTIPLIER', 0.5));
+  var currentReservedRate = reservation.reserved || reservation.planned;
+
+  function estimateForReservationState(reservedLike) {
+    var energyMultiplier = reservedLike ? 1 : unreservedEnergyMultiplier;
+    var energyPerTick = fullEnergyPerTick * energyMultiplier;
+    var harvestTiles = Math.max(1, openTiles || 1);
+    var desiredWork = Math.max(1, Math.ceil(energyPerTick / HARVEST_RATE));
+    if (harvestTiles <= 0) desiredWork = 0;
+    var minerCarry = 1;
+    var minerMove = Math.max(1, Math.ceil((desiredWork + minerCarry) / 2));
+    var minerParts = desiredWork + minerCarry + minerMove;
+    var minerBodyCost = desiredWork * bodyPartCost(WORK_PART) + minerCarry * bodyPartCost(CARRY_PART) + minerMove * bodyPartCost(MOVE_PART);
+    var minerLifetime = Math.max(300, CREEP_LIFETIME - oneWay);
+    var minerCostPerTick = minerBodyCost / minerLifetime;
+    var minerSpawnUsage = (minerParts * SPAWN_TICKS_PER_PART) / minerLifetime;
+
+    var carryParts = Math.max(1, Math.ceil((energyPerTick * roundTripTicks) / CARRY_SIZE));
+    var roadComplete = containerBuilt && road.done;
+    var haulerMove = roadComplete ? Math.max(1, Math.ceil(carryParts / 2)) : carryParts;
+    var haulerParts = carryParts + haulerMove;
+    var haulerBodyCost = carryParts * bodyPartCost(CARRY_PART) + haulerMove * bodyPartCost(MOVE_PART);
+    var haulerCostPerTick = haulerBodyCost / CREEP_LIFETIME;
+    var haulerSpawnUsage = (haulerParts * SPAWN_TICKS_PER_PART) / CREEP_LIFETIME;
+
+    var reservationCostPerTick = 0;
+    var reservationSpawnUsage = 0;
+    if (reservedLike) {
+      var reserverLifetime = Math.max(100, CLAIM_LIFETIME - oneWay);
+      var reserverParts = 2;
+      reservationCostPerTick = (bodyPartCost(CLAIM_PART) + bodyPartCost(MOVE_PART)) / reserverLifetime;
+      reservationSpawnUsage = (reserverParts * SPAWN_TICKS_PER_PART) / reserverLifetime;
+    }
+
+    var netIncome = energyPerTick - minerCostPerTick - haulerCostPerTick - reservationCostPerTick - maintenanceLoss;
+    var spawnUsage = minerSpawnUsage + haulerSpawnUsage + reservationSpawnUsage;
+    var value = spawnUsage > 0 ? (netIncome / spawnUsage) : netIncome;
+    return {
+      energyMultiplier: energyMultiplier,
+      energyPerTick: energyPerTick,
+      desiredWork: desiredWork,
+      minerBodyCost: minerBodyCost,
+      minerCostPerTick: minerCostPerTick,
+      minerSpawnUsage: minerSpawnUsage,
+      haulerCarryParts: carryParts,
+      haulerMoveParts: haulerMove,
+      haulerBodyCost: haulerBodyCost,
+      haulerCostPerTick: haulerCostPerTick,
+      haulerSpawnUsage: haulerSpawnUsage,
+      reservationCostPerTick: reservationCostPerTick,
+      reservationSpawnUsage: reservationSpawnUsage,
+      netIncome: netIncome,
+      spawnUsage: spawnUsage,
+      value: value
+    };
+  }
+
+  var current = estimateForReservationState(currentReservedRate);
+  var reservedPotential = estimateForReservationState(true);
+  var remoteMinNetIncome = cfgNumber('REMOTE_MIN_NET_INCOME', 0.25);
+  var currentNetIncome = current.netIncome;
+  var reservedNetIncome = reservedPotential.netIncome;
+  var reservationWouldHelp = !currentReservedRate && currentNetIncome < remoteMinNetIncome && reservedNetIncome >= remoteMinNetIncome;
+  var reservationPotentialReason = reservation.reserved
+    ? 'already-reserved'
+    : (reservation.planned
+      ? 'reservation-assumed'
+      : (reservationWouldHelp
+        ? 'reserved-potential-profitable'
+        : (reservedNetIncome > currentNetIncome ? 'reserved-improves-but-still-low' : 'reserved-not-helpful')));
 
   return {
     sourceId: sourceId,
@@ -555,26 +590,43 @@ function estimateRemoteSourceEconomics(homeRoom, remoteRoom, sourceId, routeDist
     reservation: reservation,
     sourceCapacity: sourceCapacity,
     fullEnergyPerTick: roundMetric(fullEnergyPerTick, 3),
-    energyMultiplier: roundMetric(energyMultiplier, 3),
-    energyPerTick: roundMetric(energyPerTick, 3),
-    desiredWork: desiredWork,
-    minerBodyCost: roundMetric(minerBodyCost, 1),
-    minerCostPerTick: roundMetric(minerCostPerTick, 3),
-    minerSpawnUsage: roundMetric(minerSpawnUsage, 4),
-    haulerCarryParts: carryParts,
-    haulerMoveParts: haulerMove,
-    haulerBodyCost: roundMetric(haulerBodyCost, 1),
-    haulerCostPerTick: roundMetric(haulerCostPerTick, 3),
-    haulerSpawnUsage: roundMetric(haulerSpawnUsage, 4),
-    reservationCostPerTick: roundMetric(reservationCostPerTick, 3),
-    reservationSpawnUsage: roundMetric(reservationSpawnUsage, 4),
+    energyMultiplier: roundMetric(current.energyMultiplier, 3),
+    energyPerTick: roundMetric(current.energyPerTick, 3),
+    desiredWork: current.desiredWork,
+    minerBodyCost: roundMetric(current.minerBodyCost, 1),
+    minerCostPerTick: roundMetric(current.minerCostPerTick, 3),
+    minerSpawnUsage: roundMetric(current.minerSpawnUsage, 4),
+    haulerCarryParts: current.haulerCarryParts,
+    haulerMoveParts: current.haulerMoveParts,
+    haulerBodyCost: roundMetric(current.haulerBodyCost, 1),
+    haulerCostPerTick: roundMetric(current.haulerCostPerTick, 3),
+    haulerSpawnUsage: roundMetric(current.haulerSpawnUsage, 4),
+    reservationCostPerTick: roundMetric(current.reservationCostPerTick, 3),
+    reservationSpawnUsage: roundMetric(current.reservationSpawnUsage, 4),
     containerRepairLoss: roundMetric(containerRepairLoss, 3),
     roadMaintenanceLoss: roundMetric(roadMaintenanceLoss, 3),
     maintenanceLoss: roundMetric(maintenanceLoss, 3),
-    netIncome: roundMetric(netIncome, 3),
-    spawnUsage: roundMetric(spawnUsage, 4),
-    spawnWeight: roundMetric(spawnUsage, 4),
-    value: roundMetric(value, 3)
+    currentNetIncome: roundMetric(currentNetIncome, 3),
+    reservedNetIncome: roundMetric(reservedNetIncome, 3),
+    reservationWouldHelp: reservationWouldHelp,
+    reservationPotentialReason: reservationPotentialReason,
+    reservedPotential: {
+      energyMultiplier: roundMetric(reservedPotential.energyMultiplier, 3),
+      energyPerTick: roundMetric(reservedPotential.energyPerTick, 3),
+      desiredWork: reservedPotential.desiredWork,
+      haulerCarryParts: reservedPotential.haulerCarryParts,
+      haulerMoveParts: reservedPotential.haulerMoveParts,
+      reservationCostPerTick: roundMetric(reservedPotential.reservationCostPerTick, 3),
+      reservationSpawnUsage: roundMetric(reservedPotential.reservationSpawnUsage, 4),
+      netIncome: roundMetric(reservedPotential.netIncome, 3),
+      spawnUsage: roundMetric(reservedPotential.spawnUsage, 4),
+      value: roundMetric(reservedPotential.value, 3)
+    },
+    reason: reservationPotentialReason,
+    netIncome: roundMetric(current.netIncome, 3),
+    spawnUsage: roundMetric(current.spawnUsage, 4),
+    spawnWeight: roundMetric(current.spawnUsage, 4),
+    value: roundMetric(current.value, 3)
   };
 }
 
@@ -596,6 +648,7 @@ function makeSourceRecord(fields) {
     containerStatus: container.status || null,
     road: fields.road || null,
     economics: fields.economics || null,
+    reservationCandidate: !!(fields.reservationCandidate || (fields.economics && fields.economics.reservationWouldHelp)),
     energyPerTick: fields.energyPerTick !== undefined ? finiteOrNull(fields.energyPerTick) : (fields.economics ? finiteOrNull(fields.economics.energyPerTick) : null),
     netIncome: fields.netIncome !== undefined ? finiteOrNull(fields.netIncome) : (fields.economics ? finiteOrNull(fields.economics.netIncome) : null),
     spawnUsage: fields.spawnUsage !== undefined ? finiteOrNull(fields.spawnUsage) : (fields.economics ? finiteOrNull(fields.economics.spawnUsage) : null),
@@ -938,12 +991,28 @@ function selectProfitableRemoteSources(homeRoom, plan) {
   var selected = [];
   var rejected = [];
 
+  function makeRemoteSelectionDiagnostic(rec, reason) {
+    var economics = rec && rec.economics ? rec.economics : {};
+    return {
+      sourceId: rec && rec.sourceId,
+      roomName: rec && rec.roomName,
+      reason: reason,
+      netIncome: rec && rec.netIncome,
+      spawnUsage: rec && rec.spawnUsage,
+      value: economics.value,
+      currentNetIncome: economics.currentNetIncome,
+      reservedNetIncome: economics.reservedNetIncome,
+      reservationWouldHelp: !!economics.reservationWouldHelp,
+      reservationPotentialReason: economics.reservationPotentialReason || economics.reason || null
+    };
+  }
+
   for (var i = 0; i < plan.sourceOrder.length; i++) {
     var rec = plan.sources[plan.sourceOrder[i]];
     if (!rec || rec.mode !== 'remote') continue;
     if (!rec.active) {
       rec.rejectionReason = rec.rejectionReason || rec.reason || 'inactive-before-selection';
-      rejected.push({ sourceId: rec.sourceId, roomName: rec.roomName, reason: rec.rejectionReason, netIncome: rec.netIncome, spawnUsage: rec.spawnUsage });
+      rejected.push(makeRemoteSelectionDiagnostic(rec, rec.rejectionReason));
       continue;
     }
     candidates.push(rec);
@@ -980,7 +1049,7 @@ function selectProfitableRemoteSources(homeRoom, plan) {
       candidate.reason = reason;
       candidate.rejectionReason = reason;
       candidate.activationReason = null;
-      rejected.push({ sourceId: candidate.sourceId, roomName: candidate.roomName, reason: reason, netIncome: candidate.netIncome, spawnUsage: candidate.spawnUsage });
+      rejected.push(makeRemoteSelectionDiagnostic(candidate, reason));
       continue;
     }
 
@@ -990,7 +1059,7 @@ function selectProfitableRemoteSources(homeRoom, plan) {
     candidate.activationReason = enabled ? 'selected-net-income-spawn-budget' : 'profitability-disabled';
     candidate.rejectionReason = null;
     used += spawnUsage || 0;
-    selected.push({ sourceId: candidate.sourceId, roomName: candidate.roomName, netIncome: candidate.netIncome, spawnUsage: candidate.spawnUsage, value: economics && economics.value });
+    selected.push(makeRemoteSelectionDiagnostic(candidate, candidate.activationReason));
   }
 
   plan.remoteSpawnBudget = roundMetric(spawnBudget, 4) || 0;
@@ -1736,27 +1805,50 @@ function getRemoteReservationPlan(homeRoom) {
   }
 
   var byRoom = {};
-  var activeSources = getActiveRemoteSourceRecords(homeName);
-  for (var i = 0; i < activeSources.length; i++) {
-    var rec = activeSources[i];
+  var sourcePlan = ensureHomeMemory(homeName);
+  for (var i = 0; i < sourcePlan.sourceOrder.length; i++) {
+    var rec = sourcePlan.sources[sourcePlan.sourceOrder[i]];
+    if (!rec || rec.mode !== 'remote') continue;
+    var economics = rec.economics || {};
+    var reservationCandidate = !!(rec.reservationCandidate || economics.reservationWouldHelp);
+    if (!rec.active && !reservationCandidate) continue;
     var targetRoom = rec.targetRoom || rec.roomName;
     if (!targetRoom || targetRoom === homeName) continue;
     if (!byRoom[targetRoom]) {
       byRoom[targetRoom] = {
         targetRoom: targetRoom,
+        sourceIds: [],
         activeSourceIds: [],
+        reservationCandidateSourceIds: [],
         routeDistance: rec.routeDistance,
         pathCost: rec.pathCost,
-        netIncomeProtected: 0
+        currentNetIncome: 0,
+        reservedNetIncome: 0,
+        reservationWouldHelp: false,
+        sourceDiagnostics: []
       };
     }
-    byRoom[targetRoom].activeSourceIds.push(rec.sourceId);
+    byRoom[targetRoom].sourceIds.push(rec.sourceId);
+    if (rec.active) byRoom[targetRoom].activeSourceIds.push(rec.sourceId);
+    if (reservationCandidate) byRoom[targetRoom].reservationCandidateSourceIds.push(rec.sourceId);
     if (typeof rec.pathCost === 'number') byRoom[targetRoom].pathCost = Math.max(byRoom[targetRoom].pathCost || 0, rec.pathCost);
     if (typeof rec.routeDistance === 'number') byRoom[targetRoom].routeDistance = Math.max(byRoom[targetRoom].routeDistance || 0, rec.routeDistance);
-    var netIncome = typeof rec.netIncome === 'number' ? rec.netIncome : 0;
-    var fullEpt = rec.economics && typeof rec.economics.fullEnergyPerTick === 'number' ? rec.economics.fullEnergyPerTick : 0;
-    var currentEpt = rec.economics && typeof rec.economics.energyPerTick === 'number' ? rec.economics.energyPerTick : 0;
-    byRoom[targetRoom].netIncomeProtected += Math.max(0, netIncome) + Math.max(0, fullEpt - currentEpt);
+    var currentNetIncome = typeof economics.currentNetIncome === 'number'
+      ? economics.currentNetIncome
+      : (typeof rec.netIncome === 'number' ? rec.netIncome : 0);
+    var reservedNetIncome = typeof economics.reservedNetIncome === 'number' ? economics.reservedNetIncome : currentNetIncome;
+    byRoom[targetRoom].currentNetIncome += currentNetIncome;
+    byRoom[targetRoom].reservedNetIncome += reservedNetIncome;
+    byRoom[targetRoom].reservationWouldHelp = byRoom[targetRoom].reservationWouldHelp || reservationCandidate;
+    byRoom[targetRoom].sourceDiagnostics.push({
+      sourceId: rec.sourceId,
+      active: !!rec.active,
+      reason: rec.rejectionReason || rec.reason || null,
+      currentNetIncome: roundMetric(currentNetIncome, 3) || 0,
+      reservedNetIncome: roundMetric(reservedNetIncome, 3) || 0,
+      reservationWouldHelp: reservationCandidate,
+      reservationPotentialReason: economics.reservationPotentialReason || economics.reason || null
+    });
   }
 
   for (var roomName in byRoom) {
@@ -1766,6 +1858,7 @@ function getRemoteReservationPlan(homeRoom) {
     var unsafe = isRemoteUnsafe(roomName);
     var needsReservation = false;
     var reason = 'reservation-current';
+    item.netIncomeProtected = Math.max(0, item.currentNetIncome || 0, item.reservedNetIncome || 0);
     if (unsafe) reason = 'unsafe';
     else if (controller.blocked && controller.reason !== 'controller-unknown') reason = controller.reason;
     else if (item.netIncomeProtected < minNetIncome) reason = 'net-income-too-low';
@@ -1779,7 +1872,9 @@ function getRemoteReservationPlan(homeRoom) {
     var entry = {
       homeRoom: homeName,
       targetRoom: roomName,
+      sourceIds: item.sourceIds,
       activeSourceIds: item.activeSourceIds,
+      reservationCandidateSourceIds: item.reservationCandidateSourceIds,
       routeDistance: finiteOrNull(item.routeDistance),
       pathCost: finiteOrNull(item.pathCost),
       currentReservationOwner: controller.reservationOwner,
@@ -1788,7 +1883,11 @@ function getRemoteReservationPlan(homeRoom) {
       reserveAt: refreshAt,
       reason: reason,
       needsReservation: needsReservation,
+      currentNetIncome: roundMetric(item.currentNetIncome, 3) || 0,
+      reservedNetIncome: roundMetric(item.reservedNetIncome, 3) || 0,
+      reservationWouldHelp: !!item.reservationWouldHelp,
       netIncomeProtected: roundMetric(item.netIncomeProtected, 3) || 0,
+      sourceDiagnostics: item.sourceDiagnostics,
       spawnPriority: needsReservation ? Math.max(55, 85 - Math.floor((controller.reservationTicks || 0) / 100)) : 0,
       controllerVisible: controller.visible,
       controllerKnown: controller.hasController
@@ -1834,6 +1933,7 @@ function buildRemoteSourceEconomicsReport(homeRoom) {
       containerStatus: rec.containerStatus || null,
       road: rec.road || null,
       economics: rec.economics || null,
+      reservationCandidate: !!rec.reservationCandidate,
       energyPerTick: finiteOrNull(rec.energyPerTick),
       netIncome: finiteOrNull(rec.netIncome),
       spawnUsage: finiteOrNull(rec.spawnUsage),
