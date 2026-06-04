@@ -22,6 +22,7 @@ var BeeToolbox = require('BeeToolbox');
 var CoreSelectors = require('core.selectors');
 var CFG = require('role.Repair.Config');
 var CoreConfig = require('core.config');
+var DefensePlanner = require('Planner.Defense');
 
 function _posOf(t){ return t && t.pos ? t.pos : t; }
 function _roomOf(p){ return p && Game.rooms[p.roomName]; }
@@ -215,7 +216,12 @@ function getRepairGoalHits(target, targetInfo){
   if (targetInfo && typeof targetInfo.repairGoalHits === 'number' && targetInfo.repairGoalHits > 0) {
     return Math.min(target.hitsMax, targetInfo.repairGoalHits);
   }
-  if (target.structureType === STRUCTURE_RAMPART) return Math.min(target.hitsMax, maxRampart);
+  if (target.structureType === STRUCTURE_RAMPART) {
+    if (DefensePlanner && typeof DefensePlanner.getRampartTargetHits === 'function') {
+      return Math.min(target.hitsMax, DefensePlanner.getRampartTargetHits(target.room || null));
+    }
+    return Math.min(target.hitsMax, maxRampart);
+  }
   if (target.structureType === STRUCTURE_WALL) return Math.min(target.hitsMax, maxWall);
   return target.hitsMax;
 }

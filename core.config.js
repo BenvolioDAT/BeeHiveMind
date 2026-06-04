@@ -1,13 +1,13 @@
 // Central configuration flags for the bot. Adjust these to tune global behavior.
-const LOG_LEVEL = Object.freeze({
+var LOG_LEVEL = Object.freeze({
   NONE: 0,
   BASIC: 1,
   DEBUG: 2,
 });
 
 // Top-level toggles and shared lists referenced by multiple systems.
-const CoreConfig = {
-  LOG_LEVEL,
+var CoreConfig = {
+  LOG_LEVEL: LOG_LEVEL,
   ALLY_USERNAMES: [
     'walter_bell',
     'sleek',
@@ -94,7 +94,7 @@ CoreConfig.settings = Object.freeze({
   }),
   cpuProfiler: Object.freeze({
     // For a before/after CPU check, set enabled true and reportEvery 500,
-    // let it run for 500 ticks, then compare the named section averages.
+    // allow it to run for 500 ticks, then compare the named section averages.
     enabled: false,
     reportEvery: 100,
     minSectionCpuToReport: 0.05,
@@ -142,6 +142,48 @@ CoreConfig.settings = Object.freeze({
     minBucketForPlanning: 1500,
     lowBucketTickModulo: 9,
     planningSkippedRetryTicks: 15
+  }),
+  defensePlanner: Object.freeze({
+    /** Build safe ramparts in owned rooms without doing heavy work every tick. */
+    enabled: true,
+    /** Ramparts unlock at RCL 2. Raise this if you want to delay defenses. */
+    minRcl: 2,
+    /** Full room defense plan rebuild cadence. Site placement uses the cached plan. */
+    planRefreshTicks: 1500,
+    lowBucketPlanRefreshTicks: 3000,
+    planningSkippedRetryTicks: 50,
+    minBucketForPlanning: 1500,
+    maxCpuUsedBeforePlanning: 16,
+    /** Drip construction so we never flood the 100-site global limit. */
+    sitePlacementInterval: 3,
+    maxSitesPerTick: 2,
+    maxPlacementChecksPerTick: 25,
+    roomSiteSafetyLimit: 40,
+    globalSiteSafetyLimit: 95,
+    /** Important-structure detection ranges. */
+    controllerContainerRange: 3,
+    protectedLinkRange: 3,
+    /** Exit defenses are planned inward from the edge, never on edge tiles. */
+    exitInset: 2,
+    exitFullCoverMaxWidth: 9,
+    exitMaxRampartsPerSegment: 8,
+    exitMaxRampartsPerRoom: 60,
+    exitGateMinWidth: 4,
+    maxPlannedRoadTilesChecked: 600,
+    /** Debug visuals are optional and off by default. */
+    debugVisuals: false,
+    debugVisualRoom: null,
+    debugVisualModulo: 1,
+    /** Staged rampart repair goals. RCL 8 starts at 1M and can be raised. */
+    rampartHitsByRcl: Object.freeze({
+      '2': 10000,
+      '3': 10000,
+      '4': 50000,
+      '5': 50000,
+      '6': 250000,
+      '7': 250000,
+      '8': 1000000
+    })
   }),
   tradeEnergyInterval: 11,
   tradeEnergyMinBucket: 5000,

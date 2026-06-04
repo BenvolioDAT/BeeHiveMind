@@ -24,6 +24,7 @@
 var CoreConfig = require('core.config');
 var Logger = require('core.logger');
 var BeeToolbox = require('BeeToolbox');
+var DefensePlanner = require('Planner.Defense');
 var LOG_LEVEL = Logger.LOG_LEVEL;
 var maintLog = Logger.createLogger('Maintenance', LOG_LEVEL.DEBUG);
 
@@ -43,8 +44,8 @@ var CFG = {
   REMOTE_CONTAINER_STATUS_STALE_TICKS: maintCfg.remoteContainerStatusStaleTicks || 150,
   REMOTE_CONTAINER_STATUS_MEMORY_TTL: maintCfg.remoteContainerStatusMemoryTtl || 20000,
   REMOTE_CONTAINER_STATUS_CRITICAL_MEMORY_TTL: maintCfg.remoteContainerStatusCriticalMemoryTtl || 50000,
-  REPAIR_MAX_RAMPART:      10000,
-  REPAIR_MAX_WALL:         10000,
+  REPAIR_MAX_RAMPART:      maintCfg.repairMaxRampart || 10000,
+  REPAIR_MAX_WALL:         maintCfg.repairMaxWall || 10000,
   LOG: Logger.shouldLog(LOG_LEVEL.DEBUG)
 };
 
@@ -514,22 +515,48 @@ function getRepairPriority(entryOrStructure) {
   return table[type] != null ? table[type] : 50;
 }
 
+function getRepairGoalForStructure(structure, entry) {
+  // Ramparts and walls intentionally stop at staged goals. Everything else can
+  // repair to hitsMax because those structures do not have huge HP ceilings.
+  if (!structure || typeof structure.hitsMax !== 'number') return 0;
+
+  if (entry && typeof entry.repairGoalHits === 'number' && entry.repairGoalHits > 0) {
+    return Math.min(structure.hitsMax, entry.repairGoalHits);
+  }
+
+  if (structure.structureType === STRUCTURE_RAMPART) {
+    var goal = CFG.REPAIR_MAX_RAMPART;
+    if (DefensePlanner && typeof DefensePlanner.getRampartTargetHits === 'function') {
+      goal = DefensePlanner.getRampartTargetHits(structure.room || null);
+    }
+    return Math.min(structure.hitsMax, goal);
+  }
+
+  if (structure.structureType === STRUCTURE_WALL) {
+    return Math.min(structure.hitsMax, CFG.REPAIR_MAX_WALL);
+  }
+
+  return structure.hitsMax;
+}
+
 // Cache entries outlive a single tick, so trim them against current hits to
 // avoid sending creeps to already-healed structures.
 function _trimCachedTargets(bucket) {
   if (!bucket.cachedRepairTargets || !bucket.cachedRepairTargets.length) return [];
   var kept = [];
-  var maxR = CFG.REPAIR_MAX_RAMPART;
-  var maxW = CFG.REPAIR_MAX_WALL;
 
   for (var i = 0; i < bucket.cachedRepairTargets.length; i++) {
     var entry = bucket.cachedRepairTargets[i];
     var obj = Game.getObjectById(entry.id);
     if (!obj) continue;
     if (obj.structureType === STRUCTURE_RAMPART) {
-      if (obj.hits < Math.min(obj.hitsMax, maxR)) kept.push(entry);
+      var rampartGoal = getRepairGoalForStructure(obj, entry);
+      entry.repairGoalHits = rampartGoal;
+      if (obj.hits < rampartGoal) kept.push(entry);
     } else if (obj.structureType === STRUCTURE_WALL) {
-      if (obj.hits < Math.min(obj.hitsMax, maxW)) kept.push(entry);
+      var wallGoal = getRepairGoalForStructure(obj, entry);
+      entry.repairGoalHits = wallGoal;
+      if (obj.hits < wallGoal) kept.push(entry);
     } else if (obj.hits < obj.hitsMax) {
       kept.push(entry);
     }
@@ -548,10 +575,10 @@ function _scanRepairTargets(room, bucket, priorityOrder) {
         return s.hits < (s.hitsMax * 0.60);
       }
       if (s.structureType === STRUCTURE_RAMPART) {
-        return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_RAMPART);
+        return s.hits < getRepairGoalForStructure(s, null);
       }
       if (s.structureType === STRUCTURE_WALL) {
-        return s.hits < Math.min(s.hitsMax, CFG.REPAIR_MAX_WALL);
+        return s.hits < getRepairGoalForStructure(s, null);
       }
       if (s.structureType === STRUCTURE_CONTAINER) {
         return s.hits < (s.hitsMax * 0.80);
@@ -563,7 +590,8 @@ function _scanRepairTargets(room, bucket, priorityOrder) {
   var targets = [];
   for (var i = 0; i < list.length; i++) {
     var s = list[i];
-    targets.push({ id: s.id, hits: s.hits, hitsMax: s.hitsMax, type: s.structureType, priority: getRepairPriority(s) });
+    var repairGoalHits = getRepairGoalForStructure(s, null);
+    targets.push({ id: s.id, hits: s.hits, hitsMax: s.hitsMax, type: s.structureType, priority: getRepairPriority(s), repairGoalHits: repairGoalHits });
   }
 
   if (targets.length > 1) {

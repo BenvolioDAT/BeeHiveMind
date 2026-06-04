@@ -92,23 +92,27 @@ var StructureLogic = {
       // Convert the stored queue into live objects once so towers avoid repeated lookups.
       var validTargets = [];
       var targetById = {};
+      var targetGoals = {};
       for (var i = 0; i < RMem.repairTargets.length; i++) {
         var entry = RMem.repairTargets[i];
         if (!entry || !entry.id) continue;
         var targetObj = Game.getObjectById(entry.id);
-        if (!targetObj || targetObj.hits >= targetObj.hitsMax) continue;
+        if (!targetObj) continue;
+        var targetGoal = getEntryRepairGoal(entry, targetObj);
+        if (targetObj.hits >= targetGoal) continue;
         validTargets.push(targetObj);
         targetById[targetObj.id] = targetObj;
+        targetGoals[targetObj.id] = targetGoal;
       }
       if (!validTargets.length) {
         pruneRepairQueue(RMem);
-        cleanupTowerLocks(RMem, targetById);
+        cleanupTowerLocks(RMem, targetById, targetGoals);
         continue;
       }
 
-      runRepairPhase(towers, RMem, validTargets, targetById);
+      runRepairPhase(towers, RMem, validTargets, targetById, targetGoals);
       pruneRepairQueue(RMem);
-      cleanupTowerLocks(RMem, targetById);
+      cleanupTowerLocks(RMem, targetById, targetGoals);
     }
   },
 
@@ -193,12 +197,28 @@ function pruneRepairQueue(RMem) {
   while (RMem.repairTargets.length) {
     var head = RMem.repairTargets[0];
     var headObj = head && head.id ? Game.getObjectById(head.id) : null;
-    if (headObj && headObj.hits < headObj.hitsMax) break;
+    if (headObj && headObj.hits < getEntryRepairGoal(head, headObj)) break;
     RMem.repairTargets.shift();
   }
 }
 
-function runRepairPhase(towers, RMem, validTargets, targetById) {
+function getEntryRepairGoal(entry, target) {
+  if (!target || typeof target.hitsMax !== 'number') return 0;
+  if (entry && typeof entry.repairGoalHits === 'number' && entry.repairGoalHits > 0) {
+    return Math.min(target.hitsMax, entry.repairGoalHits);
+  }
+  return target.hitsMax;
+}
+
+function getMappedRepairGoal(targetGoals, target) {
+  if (!target || typeof target.hitsMax !== 'number') return 0;
+  if (targetGoals && typeof targetGoals[target.id] === 'number' && targetGoals[target.id] > 0) {
+    return Math.min(target.hitsMax, targetGoals[target.id]);
+  }
+  return target.hitsMax;
+}
+
+function runRepairPhase(towers, RMem, validTargets, targetById, targetGoals) {
   var usedTargetIds = {};
   for (var i = 0; i < towers.length; i++) {
     var tower = towers[i];
@@ -207,7 +227,7 @@ function runRepairPhase(towers, RMem, validTargets, targetById) {
       _tsay(tower, "idle");
       continue;
     }
-    var target = pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds, targetById);
+    var target = pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds, targetById, targetGoals);
     if (!target) {
       _tsay(tower, "idle");
       continue;
@@ -223,11 +243,11 @@ function runRepairPhase(towers, RMem, validTargets, targetById) {
   }
 }
 
-function pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds, targetById) {
+function pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds, targetById, targetGoals) {
   var lock = RMem._towerLocks[tower.id];
   if (lock && lock.id) {
     var lockedObj = targetById && targetById[lock.id] ? targetById[lock.id] : Game.getObjectById(lock.id);
-    if (lockedObj && lockedObj.hits < lockedObj.hitsMax && !usedTargetIds[lock.id]) {
+    if (lockedObj && lockedObj.hits < getMappedRepairGoal(targetGoals, lockedObj) && !usedTargetIds[lock.id]) {
       usedTargetIds[lock.id] = true;
       return lockedObj;
     }
@@ -236,7 +256,7 @@ function pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds, targ
   for (var i = 0; i < validTargets.length; i++) {
     var candidate = validTargets[i];
     if (usedTargetIds[candidate.id]) continue;
-    if (!candidate || candidate.hits >= candidate.hitsMax) continue;
+    if (!candidate || candidate.hits >= getMappedRepairGoal(targetGoals, candidate)) continue;
     usedTargetIds[candidate.id] = true;
     RMem._towerLocks[tower.id] = { id: candidate.id, ttl: CFG.LOCK_TTL };
     return candidate;
@@ -244,7 +264,7 @@ function pickRepairTargetForTower(tower, RMem, validTargets, usedTargetIds, targ
   return null;
 }
 
-function cleanupTowerLocks(RMem, targetById) {
+function cleanupTowerLocks(RMem, targetById, targetGoals) {
   for (var towerId in RMem._towerLocks) {
     if (!RMem._towerLocks.hasOwnProperty(towerId)) continue;
     var lock = RMem._towerLocks[towerId];
@@ -253,7 +273,7 @@ function cleanupTowerLocks(RMem, targetById) {
       continue;
     }
     var obj = targetById && targetById[lock.id] ? targetById[lock.id] : Game.getObjectById(lock.id);
-    if (!obj || obj.hits >= obj.hitsMax) {
+    if (!obj || obj.hits >= getMappedRepairGoal(targetGoals, obj)) {
       delete RMem._towerLocks[towerId];
       continue;
     }

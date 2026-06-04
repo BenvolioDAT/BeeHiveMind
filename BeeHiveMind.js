@@ -45,6 +45,7 @@ var RoleRegistry         = require('role.registry');
 var MemoryUtils          = require('core.memory');
 var RoomPlanner          = require('Planner.Room');
 var RoadPlanner          = require('Planner.Road');
+var DefensePlanner       = require('Planner.Defense');
 var TradeEnergy          = require('Trade.Energy');
 var CpuProfiler         = require('core.cpuProfiler');
 var CoreConfig          = require('core.config');
@@ -591,6 +592,11 @@ var BeeHiveMind = {
     if (RoadPlanner && typeof RoadPlanner.ensureRemoteRoads === 'function') {
       CpuProfiler.measure('RoadPlanner.ensureRemoteRoads', function () {
         RoadPlanner.ensureRemoteRoads(room);
+      });
+    }
+    if (DefensePlanner && typeof DefensePlanner.runDefensePlanner === 'function') {
+      CpuProfiler.measure('DefensePlanner.runDefensePlanner', function () {
+        DefensePlanner.runDefensePlanner(room);
       });
     }
   },
