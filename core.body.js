@@ -192,6 +192,64 @@ function getBestUpgraderBodyPlan(energy, targetWork, context) {
   return null;
 }
 
+function buildWorkCarryMoveBody(workParts, carryParts, moveParts) {
+  var body = [];
+  var work = Math.max(1, Math.ceil(Number(workParts) || 1));
+  var carry = Math.max(1, Math.ceil(Number(carryParts) || 1));
+  var move = Math.max(1, Math.ceil(Number(moveParts) || 1));
+
+  while (work + carry + move > 50) {
+    if (move > 1) move--;
+    else if (work > 1) work--;
+    else if (carry > 1) carry--;
+    else break;
+  }
+
+  for (var w = 0; w < work; w++) body.push(WORK);
+  for (var c = 0; c < carry; c++) body.push(CARRY);
+  for (var m = 0; m < move; m++) body.push(MOVE);
+  return body;
+}
+
+function getBestVeinseekerBodyPlan(energy, targetWork, context) {
+  // Veinseekers are source-bound miners. When a source is short by 2 WORK,
+  // this builder tries to make a 2-WORK miner instead of always waiting for
+  // one oversized creep. That lets several smaller miners cover one source.
+  context = context || {};
+  var available = Math.max(0, Number(energy) || 0);
+  var maxCost = Math.max(0, Number(context.maxCost || available) || 0);
+  var budget = Math.min(available, maxCost || available);
+  var desiredWork = Math.max(1, Math.ceil(Number(targetWork) || 1));
+  var minimumWork = Math.max(1, Math.ceil(Number(context.minimumWorkPartsPerCreep) || 1));
+  var carryParts = Math.max(1, Math.ceil(Number(context.carryParts) || 1));
+  var remote = context.mode === 'remote';
+  var maxWork = Math.min(48, desiredWork);
+  var fallback = null;
+
+  for (var work = maxWork; work >= 1; work--) {
+    var moveParts = remote
+      ? Math.max(1, work + carryParts)
+      : Math.max(1, Math.ceil((work + carryParts) / 2));
+    var body = buildWorkCarryMoveBody(work, carryParts, moveParts);
+    var cost = calculateBodyCost(body);
+    if (cost > budget) continue;
+
+    var plan = {
+      body: body,
+      cost: cost,
+      workParts: countBodyParts(body, WORK),
+      carryParts: countBodyParts(body, CARRY),
+      moveParts: countBodyParts(body, MOVE),
+      reason: context.bodyPatternReason || (remote ? 'remote-source-work-deficit' : 'home-source-work-deficit')
+    };
+
+    if (plan.workParts >= minimumWork) return plan;
+    if (!fallback) fallback = plan;
+  }
+
+  return fallback;
+}
+
 module.exports = {
   calculateBodyCost: calculateBodyCost,
   countBodyParts: countBodyParts,
@@ -203,5 +261,6 @@ module.exports = {
   estimateMovePartsNeeded: estimateMovePartsNeeded,
   estimateHaulerThroughput: estimateHaulerThroughput,
   getBestTruckerBodyPlan: getBestTruckerBodyPlan,
-  getBestUpgraderBodyPlan: getBestUpgraderBodyPlan
+  getBestUpgraderBodyPlan: getBestUpgraderBodyPlan,
+  getBestVeinseekerBodyPlan: getBestVeinseekerBodyPlan
 };

@@ -9,7 +9,10 @@ var BeeToolbox = require('BeeToolbox');
 var BodyUtils = require('core.body');
 var Roles = require('core.roles');
 
-var HOME_SOURCE_MAX_VEINSEEKERS_PER_SOURCE = 3;
+var HOME_SOURCE_MAX_VEINSEEKERS_PER_SOURCE = Math.max(1, CFG.VEINSEEKER_MAX_PER_SOURCE || 4);
+var HOME_SOURCE_TARGET_WORK = Math.max(1, CFG.VEINSEEKER_TARGET_WORK_PARTS_PER_SOURCE || 6);
+var HOME_SOURCE_MIN_WORK_PER_CREEP = Math.max(1, CFG.VEINSEEKER_MINIMUM_WORK_PARTS_PER_CREEP || 2);
+var HOME_SOURCE_IGNORE_TTL_BELOW = Math.max(0, CFG.VEINSEEKER_IGNORE_TTL_BELOW || 100);
 
 function getSourceIdFromMemory(mem) {
   if (!mem) return null;
@@ -125,6 +128,9 @@ function getQueuedItemWorkParts(item, desiredPlan) {
   if (desiredPlan && desiredPlan.body && desiredPlan.body.length) {
     return countWorkPartsInBody(desiredPlan.body);
   }
+  if (item && typeof item.targetWorkParts === 'number' && item.targetWorkParts > 0) {
+    return Math.ceil(item.targetWorkParts);
+  }
   return 1;
 }
 
@@ -136,7 +142,7 @@ function getHomeSourceSlotLimit(rawSeatCount) {
 
 function getPlannedWorkPerHomeMiner(desiredPlan) {
   var work = getQueuedItemWorkParts(null, desiredPlan);
-  return Math.max(1, work || 1);
+  return Math.max(HOME_SOURCE_MIN_WORK_PER_CREEP, work || 1);
 }
 
 function getHomeSourceSeatPolicy(source) {
@@ -149,6 +155,8 @@ function getHomeSourceSeatPolicy(source) {
 }
 
 function getDesiredWorkForSource(source) {
+  if (HOME_SOURCE_TARGET_WORK > 0) return HOME_SOURCE_TARGET_WORK;
+
   var energyCapacity = null;
   if (source && typeof source.energyCapacity === 'number' && source.energyCapacity > 0) {
     energyCapacity = source.energyCapacity;
@@ -163,7 +171,23 @@ function getDesiredWorkForSource(source) {
   return Math.ceil(energyCapacity / regenTime / harvestPower);
 }
 
-function countLiveAssignedWork(roomName, sourceId) {
+function isCreepAtAssignedSource(creep, source) {
+  if (!creep || !source || !creep.pos) return false;
+  if (creep.pos.roomName !== source.pos.roomName) return false;
+  return creep.pos.getRangeTo(source) <= 1;
+}
+
+function shouldCountCreepWorkForSource(creep, source) {
+  // Low-TTL miners that are still travelling should not hide a source deficit.
+  // A low-TTL miner already beside the source still counts because it is
+  // actively harvesting while the replacement is on the way.
+  if (!creep) return false;
+  if (typeof creep.ticksToLive !== 'number') return true;
+  if (creep.ticksToLive >= HOME_SOURCE_IGNORE_TTL_BELOW) return true;
+  return isCreepAtAssignedSource(creep, source);
+}
+
+function countLiveAssignedWork(roomName, sourceId, source) {
   if (!roomName || !sourceId) return 0;
   var total = 0;
   for (var name in Game.creeps) {
@@ -174,6 +198,7 @@ function countLiveAssignedWork(roomName, sourceId) {
     if (creep.spawning) continue;
     if (getCreepHomeRoomName(creep) !== roomName) continue;
     if (getSourceIdFromMemory(creep.memory) !== sourceId) continue;
+    if (!shouldCountCreepWorkForSource(creep, source)) continue;
     total += getCreepActiveWorkParts(creep);
   }
   return total;
@@ -192,8 +217,8 @@ function countQueuedAssignedWork(roomName, sourceId, desiredPlan) {
   return total;
 }
 
-function getLiveAssignedWorkForSource(roomName, sourceId) {
-  return countLiveAssignedWork(roomName, sourceId);
+function getLiveAssignedWorkForSource(roomName, sourceId, source) {
+  return countLiveAssignedWork(roomName, sourceId, source);
 }
 
 function getQueuedAssignedWorkForSource(roomName, sourceId, desiredPlan) {
@@ -346,10 +371,7 @@ function getSourceMiningStatus(roomName, source, desiredPlan, opts) {
   rec.seats = seatPolicy.seats;
   rec.plannedWorkPerMiner = getPlannedWorkPerHomeMiner(desiredPlan);
   rec.desiredSourceWork = getDesiredWorkForSource(source);
-  rec.desiredWork = Math.min(
-    rec.desiredSourceWork,
-    rec.seats * rec.plannedWorkPerMiner
-  );
+  rec.desiredWork = rec.seats > 0 ? rec.desiredSourceWork : 0;
 
   if (roomName && sourceId) {
     var q = getRoomQueue(roomName, opts);
@@ -372,6 +394,7 @@ function getSourceMiningStatus(roomName, source, desiredPlan, opts) {
       if (!isVeinseekerMemory(creep.memory) || creep.memory.mode === 'remote') continue;
       if (getCreepHomeRoomName(creep) !== roomName) continue;
       if (getSourceIdFromMemory(creep.memory) !== sourceId) continue;
+      if (!creep.spawning && !shouldCountCreepWorkForSource(creep, source)) continue;
 
       if (creep.spawning) {
         var pendingWork = getCreepAssignedWorkParts(creep) || getCreepActiveWorkParts(creep);
@@ -1330,6 +1353,9 @@ module.exports = {
   getQueueSourceId: getQueueSourceId,
   getCreepHomeRoomName: getCreepHomeRoomName,
   isVeinseekerMemory: isVeinseekerMemory,
+  getQueuedItemWorkParts: getQueuedItemWorkParts,
+  getCreepActiveWorkParts: getCreepActiveWorkParts,
+  getCreepAssignedWorkParts: getCreepAssignedWorkParts,
   getDesiredWorkForSource: getDesiredWorkForSource,
   countLiveAssignedWork: countLiveAssignedWork,
   countQueuedAssignedWork: countQueuedAssignedWork,

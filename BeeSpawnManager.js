@@ -56,26 +56,30 @@ var VEINSEEKER_UPGRADE_REPLACEMENTS_ENABLED = VeinseekerConfig.VEINSEEKER_UPGRAD
 var VEINSEEKER_MAX_UPGRADE_WAIT_TICKS = VeinseekerConfig.VEINSEEKER_MAX_UPGRADE_WAIT_TICKS || 150;
 var VEINSEEKER_REPLACEMENT_SAFE_TTL = VeinseekerConfig.VEINSEEKER_REPLACEMENT_SAFE_TTL || 120;
 var VEINSEEKER_CRITICAL_TTL = VeinseekerConfig.VEINSEEKER_CRITICAL_TTL || 60;
+var UPGRADER_SPAWN_CONFIG = spawnLogic.UPGRADER_CONFIG || {};
+var VEINSEEKER_SPAWN_CONFIG = spawnLogic.VEINSEEKER_CONFIG || {};
 
 var ROLE_PRIORITY = {
-  Veinseeker: 70,
-  Queen:        90,
+  Veinseeker: 85,
+  Queen:       120,
   CombatMelee:  88,
   CombatArcher: 87,
   CombatMedic:  86,
-  Upgrader:     80,
+  Upgrader:     70,
   Builder:      75,
   Repair:       60,
   Claimer:      55,
   Scout:        40,
-  Trucker:      95,
+  Trucker:     105,
   Dismantler:   30,
   
 };
 
-var VEINSEEKER_EMERGENCY_PRIORITY = 110;
-var VEINSEEKER_NORMAL_PRIORITY = 100;
+var VEINSEEKER_EMERGENCY_PRIORITY = 115;
+var VEINSEEKER_NORMAL_PRIORITY = 85;
 var VEINSEEKER_UPGRADE_PRIORITY = 65;
+var UPGRADER_EMERGENCY_PRIORITY = 100;
+var UPGRADER_SURPLUS_PRIORITY = 50;
 
 var ROLE_MIN_ENERGY = {
   Veinseeker: 200,
@@ -562,9 +566,31 @@ function getCreepHomeRoomName(creep) {
   return null;
 }
 
-function getVeinseekerDesiredPlan(room) {
+function getVeinseekerTargetWorkFromItem(item) {
+  if (!item) return VEINSEEKER_SPAWN_CONFIG.targetWorkPartsPerSource || 6;
+  if (typeof item.targetWorkParts === 'number' && item.targetWorkParts > 0) return item.targetWorkParts;
+  if (typeof item.desiredWorkParts === 'number' && item.desiredWorkParts > 0) return item.desiredWorkParts;
+  return VEINSEEKER_SPAWN_CONFIG.targetWorkPartsPerSource || 6;
+}
+
+function getVeinseekerBodyContext(mode, targetWork, reason) {
+  return {
+    mode: mode === 'remote' ? 'remote' : 'home',
+    targetWorkParts: Math.max(1, Math.ceil(Number(targetWork) || 1)),
+    minimumWorkPartsPerCreep: VEINSEEKER_SPAWN_CONFIG.minimumWorkPartsPerCreep || 2,
+    bodyPatternReason: reason || 'source-work-target'
+  };
+}
+
+function getVeinseekerDesiredPlan(room, item) {
   if (!room || !spawnLogic || typeof spawnLogic.getBestBodyPlanForRoomCapacity !== 'function') return null;
-  return spawnLogic.getBestBodyPlanForRoomCapacity('Veinseeker', room, { mode: 'home' });
+  var mode = item && item.mode === 'remote' ? 'remote' : 'home';
+  var targetWork = getVeinseekerTargetWorkFromItem(item);
+  return spawnLogic.getBestBodyPlanForRoomCapacity(
+    'Veinseeker',
+    room,
+    getVeinseekerBodyContext(mode, targetWork, 'source-work-deficit-plan')
+  );
 }
 
 function makeVeinseekerPlanDiag(plan) {
@@ -633,6 +659,28 @@ function addVeinseekerPlanFields(opts, plan) {
   opts.desiredBodySummary = plan.summary || null;
   opts.desiredBodyTierIndex = typeof plan.tierIndex === 'number' ? plan.tierIndex : -1;
   return opts;
+}
+
+function getVeinseekerPlanForSourceDeficit(room, rec, mode, fallbackPlan) {
+  if (!room || !rec || !spawnLogic || typeof spawnLogic.getBestBodyPlanForRoomCapacity !== 'function') {
+    return fallbackPlan || null;
+  }
+  var missingWork = Math.max(1, Math.ceil(Number(rec.freeWork) || 1));
+  return spawnLogic.getBestBodyPlanForRoomCapacity(
+    'Veinseeker',
+    room,
+    getVeinseekerBodyContext(mode, missingWork, 'source-missing-work')
+  ) || fallbackPlan || null;
+}
+
+function getMaxVeinseekersPerSource() {
+  return Math.max(1, VEINSEEKER_SPAWN_CONFIG.maxVeinseekersPerSource || 4);
+}
+
+function sourceHasVeinseekerSlot(rec) {
+  if (!rec) return false;
+  var maxPerSource = getMaxVeinseekersPerSource();
+  return ((rec.live || 0) + (rec.queued || 0)) < maxPerSource;
 }
 
 function makeQueueSpaceForEmergencyVeinseeker(roomName, C) {
@@ -765,8 +813,11 @@ function queueVeinseekerSourceNeeds(room, report, C) {
     }
 
     if (rec.emergencyNeeded) {
-      if (enqueueVeinseekerForSource(roomName, source.id, 'emergency', desiredPlan, {
-        priority: VEINSEEKER_EMERGENCY_PRIORITY
+      var emergencyPlan = getVeinseekerPlanForSourceDeficit(room, rec, 'home', desiredPlan);
+      if (enqueueVeinseekerForSource(roomName, source.id, 'emergency', emergencyPlan, {
+        priority: VEINSEEKER_EMERGENCY_PRIORITY,
+        targetWorkParts: Math.max(1, rec.freeWork || rec.desiredWork || 1),
+        desiredWorkParts: rec.desiredWork || 0
       }, C)) {
         SourceEnergyManager.recordSpawnDecision(roomName, {
           sourceId: source.id,
@@ -798,14 +849,27 @@ function queueVeinseekerSourceNeeds(room, report, C) {
       continue;
     }
 
-    if (rec.queued > 0 || rec.replacementQueued) {
-      noteVeinseekerSourceSkip(report, source.id, rec, rec.replacementQueued ? 'skip-replacement-already-queued' : 'skip-queued-veinseeker-covers-source');
+    if (rec.replacementQueued) {
+      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-replacement-already-queued');
+      continue;
+    }
+
+    if (rec.queued > 0 && rec.freeWork <= 0) {
+      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-queued-veinseeker-covers-source');
+      continue;
+    }
+
+    if (!sourceHasVeinseekerSlot(rec)) {
+      noteVeinseekerSourceSkip(report, source.id, rec, 'skip-source-max-veinseekers');
       continue;
     }
 
     if (isLowTtlVeinseekerReplacementAllowed(rec)) {
-      if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
+      var replacementPlan = getVeinseekerPlanForSourceDeficit(room, rec, 'home', desiredPlan);
+      if (enqueueVeinseekerForSource(roomName, source.id, 'normal', replacementPlan, {
         priority: VEINSEEKER_NORMAL_PRIORITY,
+        targetWorkParts: Math.max(1, rec.freeWork || rec.desiredWork || 1),
+        desiredWorkParts: rec.desiredWork || 0,
         replaceCreepName: rec.lowestTtlName,
         replacementFor: rec.lowestTtlName,
         replaceSourceId: source.id
@@ -850,9 +914,12 @@ function queueVeinseekerSourceNeeds(room, report, C) {
       continue;
     }
 
-    if (rec.freeWork > 0 && rec.live > 0) {
-      if (enqueueVeinseekerForSource(roomName, source.id, 'normal', desiredPlan, {
-        priority: VEINSEEKER_NORMAL_PRIORITY
+    if (rec.freeWork > 0) {
+      var deficitPlan = getVeinseekerPlanForSourceDeficit(room, rec, 'home', desiredPlan);
+      if (enqueueVeinseekerForSource(roomName, source.id, 'normal', deficitPlan, {
+        priority: VEINSEEKER_NORMAL_PRIORITY,
+        targetWorkParts: Math.max(1, rec.freeWork || 1),
+        desiredWorkParts: rec.desiredWork || 0
       }, C)) {
         SourceEnergyManager.recordSpawnDecision(roomName, {
           sourceId: source.id,
@@ -883,23 +950,23 @@ function queueVeinseekerSourceNeeds(room, report, C) {
       continue;
     }
 
-  if (rec.upgradeNeeded && rec.bestSafeLiveName) {
-    // Proactive Veinseeker body-upgrade replacement is intentionally disabled.
-    //
-    // Why:
-    // The old upgradeReplacement path could spend spawn time replacing a working
-    // miner with the same body tier if room energy was below the desired body cost
-    // when spawn.logic selected the body. That caused pointless replacement churn.
-    //
-    // Normal coverage, emergency miners, and low-TTL replacement still happen above.
-    noteVeinseekerSourceSkip(
-      report,
-      source.id,
-      rec,
-      'skip-upgrade-replacement-disabled'
-    );
-    continue;
-  }
+    if (rec.upgradeNeeded && rec.bestSafeLiveName) {
+      // Proactive Veinseeker body-upgrade replacement is intentionally disabled.
+      //
+      // Why:
+      // The old upgradeReplacement path could spend spawn time replacing a working
+      // miner with the same body tier if room energy was below the desired body cost
+      // when spawn.logic selected the body. That caused pointless replacement churn.
+      //
+      // Normal coverage, emergency miners, and low-TTL replacement still happen above.
+      noteVeinseekerSourceSkip(
+        report,
+        source.id,
+        rec,
+        'skip-upgrade-replacement-disabled'
+      );
+      continue;
+    }
 
     noteVeinseekerSourceSkip(report, source.id, rec, 'skip-no-source-work-deficit');
   }
@@ -933,14 +1000,22 @@ function queueRemoteVeinseekerNeeds(C, roomName) {
       diag.decisions.push({ sourceId: need.sourceId, targetRoom: need.targetRoom, action: 'skip', reason: 'source-no-longer-open' });
       continue;
     }
-    var desiredRemotePlan = spawnLogic.getBestBodyPlanForRoomCapacity('Veinseeker', Game.rooms[roomName], { mode: 'remote' });
+    var remoteMissingWork = Math.max(1, Math.ceil(Number(pick.freeWork || need.freeWork || VEINSEEKER_SPAWN_CONFIG.targetWorkPartsPerSource || 1)));
+    var desiredRemotePlan = spawnLogic.getBestBodyPlanForRoomCapacity(
+      'Veinseeker',
+      Game.rooms[roomName],
+      getVeinseekerBodyContext('remote', remoteMissingWork, 'remote-source-work-deficit')
+    );
     var ok = enqueue(roomName, 'Veinseeker', {
       task: 'veinseeker',
       mode: 'remote',
       home: roomName,
       sourceId: pick.sourceId,
+      assignedSource: pick.sourceId,
       targetRoom: pick.targetRoom,
       roomName: pick.targetRoom,
+      targetWorkParts: remoteMissingWork,
+      desiredWorkParts: need.desiredWork || 0,
       pathCost: pick.pathCost,
       routeDistance: pick.routeDistance,
       netIncome: pick.netIncome,
@@ -957,9 +1032,10 @@ function queueRemoteVeinseekerNeeds(C, roomName) {
         sourceId: pick.sourceId,
         targetRoom: pick.targetRoom,
         action: 'enqueue',
-        reason: 'active-remote-source-open',
+        reason: 'active-remote-source-work-deficit',
         netIncome: pick.netIncome,
         spawnUsage: pick.spawnUsage,
+        freeWork: remoteMissingWork,
         desiredBodyCost: desiredRemotePlan && desiredRemotePlan.cost
       });
       SourceEnergyManager.recordSpawnDecision(roomName, {
@@ -967,12 +1043,13 @@ function queueRemoteVeinseekerNeeds(C, roomName) {
         targetRoom: pick.targetRoom,
         mode: 'remote',
         action: 'enqueue',
-        reason: 'active-remote-source-open',
+        reason: 'active-remote-source-work-deficit',
         pathCost: pick.pathCost,
         routeDistance: pick.routeDistance,
         netIncome: pick.netIncome,
         spawnUsage: pick.spawnUsage,
         activationReason: pick.activationReason,
+        freeWork: remoteMissingWork,
         desiredBodyCost: desiredRemotePlan && desiredRemotePlan.cost,
         desiredBodySignature: desiredRemotePlan && desiredRemotePlan.signature,
         desiredBodySummary: desiredRemotePlan && desiredRemotePlan.summary
@@ -1300,8 +1377,9 @@ function computeUpgradeBudgetForRoom(C, room) {
   var droppedEnergy = 0;
   var drops = snap && snap.dropped ? snap.dropped : room.find(FIND_DROPPED_RESOURCES);
   for (var d = 0; d < drops.length; d++) if (drops[d].resourceType === RESOURCE_ENERGY) droppedEnergy += drops[d].amount || 0;
-  var storedEnergy = (room.storage && room.storage.store ? (room.storage.store[RESOURCE_ENERGY] || 0) : 0) +
-    (room.terminal && room.terminal.store ? (room.terminal.store[RESOURCE_ENERGY] || 0) : 0);
+  var storageEnergy = room.storage && room.storage.store ? (room.storage.store[RESOURCE_ENERGY] || 0) : 0;
+  var terminalEnergy = room.terminal && room.terminal.store ? (room.terminal.store[RESOURCE_ENERGY] || 0) : 0;
+  var storedEnergy = storageEnergy + terminalEnergy;
   var remotePlan = SourceEnergyManager.getPlanForHome(room.name);
   var remoteIncomeEstimate = remotePlan && typeof remotePlan.estimatedNetIncome === 'number' ? remotePlan.estimatedNetIncome : 0;
   var constructionBacklog = C && C.roomSiteCounts ? (C.roomSiteCounts[room.name] || 0) : 0;
@@ -1312,6 +1390,9 @@ function computeUpgradeBudgetForRoom(C, room) {
   var constructionEmergencySiteCount = UpgraderConfig.UPGRADE_CONSTRUCTION_EMERGENCY_SITE_COUNT || 10;
   var constructionEmergency = constructionBacklog >= constructionEmergencySiteCount && surplus < 3000;
   var emergencyThrottle = (repairEmergency || constructionEmergency) && !downgradeWarning;
+  var baseRecoveryDanger = hasBaseRoleDeficit(C, room.name);
+  var extraUpgraderStorage = Math.max(0, UPGRADER_SPAWN_CONFIG.storageEnergyForExtraUpgraders || 50000);
+  var maxUpgraderStorage = Math.max(extraUpgraderStorage, UPGRADER_SPAWN_CONFIG.storageEnergyForMaxUpgraders || 150000);
   var targetWorkReasons = [];
   var targetWorkSkippedReasons = [];
 
@@ -1326,6 +1407,8 @@ function computeUpgradeBudgetForRoom(C, room) {
   var hasSurplusSignal = surplus >= 2500 || fillRatio >= 0.70 || remoteIncomeEstimate > 1;
   if (emergencyThrottle) {
     targetWorkSkippedReasons.push(repairEmergency ? 'repair-emergency' : 'construction-emergency');
+  } else if (baseRecoveryDanger && !downgradeWarning) {
+    targetWorkSkippedReasons.push('base-recovery-danger');
   } else if (hasSurplusSignal) {
     var surplusTarget = 0;
     if (rcl === 4) surplusTarget = UpgraderConfig.UPGRADE_RCL4_SURPLUS_TARGET_WORK || 0;
@@ -1340,11 +1423,15 @@ function computeUpgradeBudgetForRoom(C, room) {
   } else {
     targetWorkSkippedReasons.push('no-surplus-signal');
   }
-  if (!emergencyThrottle && storedEnergy >= 10000) {
+  if (!emergencyThrottle && !baseRecoveryDanger && storageEnergy >= extraUpgraderStorage) {
     targetWork += 2;
-    targetWorkReasons.push('storage-surplus');
-  } else if (storedEnergy >= 10000) {
+    targetWorkReasons.push('storage-extra-upgraders');
+  } else if (storageEnergy >= extraUpgraderStorage) {
     targetWorkSkippedReasons.push('storage-surplus-emergency-throttled');
+  }
+  if (!emergencyThrottle && !baseRecoveryDanger && storageEnergy >= maxUpgraderStorage) {
+    targetWork += 4;
+    targetWorkReasons.push('storage-max-upgraders');
   }
   var throttleReason = null;
   if (constructionEmergency && !downgradeWarning) {
@@ -1368,12 +1455,19 @@ function computeUpgradeBudgetForRoom(C, room) {
   var bodyPlan = spawnLogic.getBestBodyPlanForRoomCapacity('Upgrader', room, { targetWorkParts: targetWork, bodyPatternReason: 'upgrade-budget' });
   var workPerCreep = bodyPlan && bodyPlan.body ? Math.max(1, BodyUtils.countBodyParts(bodyPlan.body, WORK)) : 1;
   var maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_DEFAULT || 4;
+  maxCreeps = Math.max(UPGRADER_SPAWN_CONFIG.maxUpgraders || 4, maxCreeps);
   if (rcl === 2) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL2 || 2;
   else if (rcl === 3) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL3 || 3;
   else if (rcl === 4) maxCreeps = UpgraderConfig.UPGRADE_MAX_CREEPS_RCL4 || 4;
   if (emergencyThrottle) maxCreeps = Math.min(maxCreeps, UpgraderConfig.UPGRADE_EMERGENCY_MAX_CREEPS || 1);
+  if (baseRecoveryDanger && !downgradeWarning) maxCreeps = Math.min(maxCreeps, UPGRADER_SPAWN_CONFIG.minUpgraders || 1);
   var desiredCreeps = Math.ceil(targetWork / workPerCreep);
-  desiredCreeps = Math.max(UpgraderConfig.UPGRADE_MIN_CREEPS || 1, Math.min(maxCreeps, desiredCreeps));
+  var storageDesiredCreeps = UPGRADER_SPAWN_CONFIG.minUpgraders || 1;
+  if (!emergencyThrottle && !baseRecoveryDanger && storageEnergy >= extraUpgraderStorage) storageDesiredCreeps = Math.max(storageDesiredCreeps, 2);
+  if (!emergencyThrottle && !baseRecoveryDanger && storageEnergy >= maxUpgraderStorage) storageDesiredCreeps = Math.max(storageDesiredCreeps, Math.min(maxCreeps, UPGRADER_SPAWN_CONFIG.maxUpgraders || 4));
+  if (downgradeDanger) storageDesiredCreeps = Math.max(storageDesiredCreeps, 2);
+  desiredCreeps = Math.max(UpgraderConfig.UPGRADE_MIN_CREEPS || 1, storageDesiredCreeps, Math.min(maxCreeps, desiredCreeps));
+  desiredCreeps = Math.min(maxCreeps, desiredCreeps);
   var workCounts = countUpgraderWorkForHome(C, room.name, true);
   var budget = {
     tick: Game.time,
@@ -1389,6 +1483,8 @@ function computeUpgradeBudgetForRoom(C, room) {
     maxUpgraderCreeps: maxCreeps,
     workPerCreep: workPerCreep,
     storedEnergy: storedEnergy,
+    storageEnergy: storageEnergy,
+    terminalEnergy: terminalEnergy,
     sourceContainerEnergy: sourceContainerEnergy,
     sourceContainerCapacity: sourceContainerCapacity,
     droppedEnergy: droppedEnergy,
@@ -1397,6 +1493,7 @@ function computeUpgradeBudgetForRoom(C, room) {
     repairEmergency: repairEmergency,
     constructionEmergency: constructionEmergency,
     emergencyThrottle: emergencyThrottle,
+    baseRecoveryDanger: baseRecoveryDanger,
     targetWorkReasons: targetWorkReasons,
     targetWorkSkippedReasons: targetWorkSkippedReasons,
     throttleReason: throttleReason,
@@ -1572,9 +1669,16 @@ function buildUpgraderSpawnOptions(room, budget) {
   var liveAndQueued = budget ? ((budget.liveUpgraderWork || 0) + (budget.queuedUpgraderWork || 0)) : 0;
   var remainingWork = Math.max(1, targetWork - liveAndQueued);
   var bodyPlan = spawnLogic.getBestBodyPlanForRoomCapacity('Upgrader', room, { targetWorkParts: remainingWork, bodyPatternReason: 'upgrade-budget-queue' });
+  var priority = ROLE_PRIORITY.Upgrader || 70;
+  if (budget && (budget.reason === 'downgrade-danger' || budget.reason === 'downgrade-warning')) {
+    priority = UPGRADER_EMERGENCY_PRIORITY;
+  } else if (budget && budget.storageEnergy >= (UPGRADER_SPAWN_CONFIG.storageEnergyForExtraUpgraders || 50000)) {
+    priority = UPGRADER_SURPLUS_PRIORITY;
+  }
   return {
     task: 'upgrader',
     home: roomName,
+    priority: priority,
     targetWorkParts: remainingWork,
     desiredBodyCost: bodyPlan && bodyPlan.cost,
     desiredBodySignature: bodyPlan && bodyPlan.signature,
@@ -2631,7 +2735,7 @@ function writeVeinseekerSpawnGate(room, item, minEnergy, action, reason, status)
 function evaluateVeinseekerSpawnGate(room, item, q, itemIndex, C) {
   var minEnergy = minEnergyFor(item.role, item);
   var energyAvailable = room.energyAvailable || 0;
-  var desiredPlan = getVeinseekerDesiredPlan(room);
+  var desiredPlan = getVeinseekerDesiredPlan(room, item);
   var sourceId = getVeinseekerQueueSourceId(item);
   var mode = item.sourceWorkerSpawnMode || 'normal';
   var age = Game.time - (item.created || Game.time);

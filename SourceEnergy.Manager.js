@@ -33,6 +33,9 @@ var WORK_PART = (typeof WORK !== 'undefined') ? WORK : 'work';
 var CARRY_PART = (typeof CARRY !== 'undefined') ? CARRY : 'carry';
 var MOVE_PART = (typeof MOVE !== 'undefined') ? MOVE : 'move';
 var CLAIM_PART = (typeof CLAIM !== 'undefined') ? CLAIM : 'claim';
+var SOURCE_WORK_TARGET = Math.max(1, cfgNumber('VEINSEEKER_TARGET_WORK_PARTS_PER_SOURCE', 6));
+var MAX_VEINSEEKERS_PER_SOURCE = Math.max(1, cfgNumber('VEINSEEKER_MAX_PER_SOURCE', 4));
+var IGNORE_TTL_BELOW = Math.max(0, cfgNumber('VEINSEEKER_IGNORE_TTL_BELOW', 100));
 
 function ensureMemory() {
   var root = MemoryUtils.ensureBhmRoot('sourceEnergy', function () {
@@ -667,6 +670,7 @@ function makeSourceRecord(fields) {
     desiredWork: fields.desiredWork || 0,
     liveWork: fields.liveWork || 0,
     queuedWork: fields.queuedWork || 0,
+    freeWork: fields.freeWork || 0,
     seats: fields.seats || 0,
     openSeats: fields.openSeats || 0,
     live: fields.live || 0,
@@ -922,7 +926,7 @@ function buildRemoteSources(plan, remoteRooms, oldSources) {
         queuedUntil: old.queuedUntil || 0,
         lastSeen: sourceObj ? Game.time : (sourceMem.lastSeen || (scoutSource && scoutSource.lastSeen) || intelTick || 0),
         lastValidated: Game.time,
-        desiredWork: 1,
+        desiredWork: SOURCE_WORK_TARGET,
         seats: Math.max(1, openTiles || 1),
         openSeats: Math.max(1, openTiles || 1)
       }));
@@ -1229,16 +1233,18 @@ function getCreepHome(creep) {
   return SourceWorkerManager.getCreepHomeRoomName(creep);
 }
 
-function removeQueuedVeinseekerForSource(homeRoom, sourceId, mode) {
+function removeQueuedVeinseekerForSource(homeRoom, sourceId, mode, maxRemove) {
   var roomMem = getRoomMemoryBucket(homeRoom);
   var q = roomMem.spawnQueue || [];
   var kept = [];
   var removed = 0;
+  var limit = Math.max(0, Number(maxRemove) || 0);
   for (var i = 0; i < q.length; i++) {
     var item = q[i];
     if (isVeinseekerQueueItem(item) &&
         queueItemSourceId(item) === sourceId &&
-        (!mode || item.mode === mode)) {
+        (!mode || item.mode === mode) &&
+        (limit <= 0 || removed < limit)) {
       removed++;
       continue;
     }
@@ -1265,7 +1271,7 @@ function assignCreepToRemoteSource(creep, rec, reason) {
   rec.queuedUntil = 0;
   rec.status = 'assigned';
   rec.reason = 'live-idle-veinseeker-assigned';
-  removeQueuedVeinseekerForSource(rec.homeRoom, rec.sourceId, 'remote');
+  removeQueuedVeinseekerForSource(rec.homeRoom, rec.sourceId, 'remote', 1);
   return true;
 }
 
@@ -1322,10 +1328,12 @@ function countLiveAssignments(plan) {
     var mode = creep.memory.mode === 'remote' ? 'remote' : 'home';
     var sid = creepSourceId(creep);
     if (mode === 'remote' && !sid) {
+      if (isLowTtlCreep(creep)) continue;
       idleRemote.push(creep);
       continue;
     }
     if (!sid) continue;
+    if (!shouldCountCreepForPlanSource(creep, plan.sources[sid])) continue;
     if (!bySource[sid]) bySource[sid] = [];
     bySource[sid].push(creep);
     if (mode === 'remote') remoteAssigned++;
@@ -1337,6 +1345,28 @@ function countLiveAssignments(plan) {
     remoteAssigned: remoteAssigned,
     idleRemote: idleRemote
   };
+}
+
+function isLowTtlCreep(creep) {
+  if (!creep || typeof creep.ticksToLive !== 'number') return false;
+  return IGNORE_TTL_BELOW > 0 && creep.ticksToLive < IGNORE_TTL_BELOW;
+}
+
+function getRecordSourcePos(rec) {
+  if (!rec || typeof rec.x !== 'number' || typeof rec.y !== 'number') return null;
+  if (!rec.roomName) return null;
+  return new RoomPosition(rec.x, rec.y, rec.roomName);
+}
+
+function shouldCountCreepForPlanSource(creep, rec) {
+  // Low-TTL miners that are travelling should not hide a source work deficit.
+  // If they are still next to the source, count them because they are still
+  // harvesting while a replacement is being prepared.
+  if (!isLowTtlCreep(creep)) return true;
+  var sourcePos = getRecordSourcePos(rec);
+  if (!sourcePos || !creep.pos) return false;
+  if (creep.pos.roomName !== sourcePos.roomName) return false;
+  return creep.pos.getRangeTo(sourcePos) <= 1;
 }
 
 function countQueuedAssignments(plan) {
@@ -1406,7 +1436,8 @@ function auditAssignmentsForHome(homeRoom) {
     if (!rec.queuedUntil) rec.queuedVeinseeker = null;
 
     var liveList = live.bySource[sid] || [];
-    if (liveList.length > 1) {
+    var sourceSlotLimit = getSourceCreepSlotLimit(rec);
+    if (liveList.length > sourceSlotLimit) {
       duplicateSources.push(sid);
       liveList.sort(function (a, b) {
         var at = a.memory && typeof a.memory._assignTick === 'number' ? a.memory._assignTick : 99999999;
@@ -1414,16 +1445,26 @@ function auditAssignmentsForHome(homeRoom) {
         if (at !== bt) return at - bt;
         return a.name < b.name ? -1 : 1;
       });
-      for (var d = 1; d < liveList.length; d++) liveList[d].memory._forceYield = true;
+      for (var d = sourceSlotLimit; d < liveList.length; d++) liveList[d].memory._forceYield = true;
     }
 
     var queueList = queued.bySource[sid] || [];
     rec.live = liveList.length;
     rec.queued = queueList.length;
+    rec.liveWork = 0;
+    rec.queuedWork = 0;
+    for (var lw = 0; lw < liveList.length; lw++) {
+      rec.liveWork += SourceWorkerManager.getCreepActiveWorkParts(liveList[lw]) || 0;
+    }
+    for (var qw = 0; qw < queueList.length; qw++) {
+      rec.queuedWork += SourceWorkerManager.getQueuedItemWorkParts(queueList[qw], null) || 0;
+    }
+    rec.desiredWork = rec.desiredWork || SOURCE_WORK_TARGET;
+    rec.freeWork = Math.max(0, rec.desiredWork - rec.liveWork - rec.queuedWork);
 
     if (rec.active) {
-      if (rec.mode === 'home') plan.desiredHomeVeinseekers++;
-      if (rec.mode === 'remote') plan.desiredRemoteVeinseekers++;
+      if (rec.mode === 'home') plan.desiredHomeVeinseekers += Math.max(1, rec.live + rec.queued + (rec.freeWork > 0 ? 1 : 0));
+      if (rec.mode === 'remote') plan.desiredRemoteVeinseekers += Math.max(1, rec.live + rec.queued + (rec.freeWork > 0 ? 1 : 0));
     }
 
     if (!rec.active) {
@@ -1432,7 +1473,7 @@ function auditAssignmentsForHome(homeRoom) {
       continue;
     }
 
-    if (liveList.length > 0) {
+    if (liveList.length > 0 && rec.freeWork <= 0) {
       rec.assignedVeinseeker = liveList[0].name;
       rec.queuedVeinseeker = null;
       rec.queuedUntil = 0;
@@ -1442,7 +1483,13 @@ function auditAssignmentsForHome(homeRoom) {
       rec.queuedVeinseeker = queueList[0] && queueList[0].name ? queueList[0].name : (rec.queuedVeinseeker || 'spawnQueue');
       rec.queuedUntil = Math.max(rec.queuedUntil || 0, Game.time + RESERVE_TTL);
       rec.status = 'queued';
-      rec.reason = 'queued-veinseeker';
+      rec.reason = rec.freeWork > 0 ? 'queued-veinseeker-work-deficit' : 'queued-veinseeker';
+    } else if (liveList.length > 0 && rec.freeWork > 0) {
+      rec.assignedVeinseeker = liveList[0].name;
+      rec.queuedVeinseeker = null;
+      rec.queuedUntil = 0;
+      rec.status = 'open';
+      rec.reason = 'source-work-deficit';
     } else {
       rec.status = 'open';
       rec.reason = rec.mode === 'remote' ? 'missing-remote-veinseeker' : 'home-source-open';
@@ -1467,6 +1514,12 @@ function summarizeSourceRecord(rec) {
     reason: rec.reason,
     assignedVeinseeker: rec.assignedVeinseeker || null,
     queuedVeinseeker: rec.queuedVeinseeker || null,
+    desiredWork: rec.desiredWork || 0,
+    liveWork: rec.liveWork || 0,
+    queuedWork: rec.queuedWork || 0,
+    freeWork: rec.freeWork || 0,
+    live: rec.live || 0,
+    queued: rec.queued || 0,
     pathCost: finiteOrNull(rec.pathCost),
     distance: finiteOrNull(rec.distance),
     routeDistance: finiteOrNull(rec.routeDistance),
@@ -1550,7 +1603,9 @@ function getSourcesNeedingVeinseeker(homeRoom, mode) {
     if (!rec || !rec.active) continue;
     if (mode && rec.mode !== mode) continue;
     if (rec.mode === 'remote') {
-      if (rec.status === 'open' && !rec.assignedVeinseeker && !(rec.queuedVeinseeker && rec.queuedUntil > Game.time)) out.push(rec);
+      var remoteWorkDeficit = (rec.desiredWork || SOURCE_WORK_TARGET) > ((rec.liveWork || 0) + (rec.queuedWork || 0));
+      var remoteHasSlot = ((rec.live || 0) + (rec.queued || 0)) < getSourceCreepSlotLimit(rec);
+      if (remoteHasSlot && (rec.status === 'open' || remoteWorkDeficit) && remoteWorkDeficit) out.push(rec);
       continue;
     }
     if (rec.mode === 'home') {
@@ -1580,6 +1635,14 @@ function getSourcesNeedingVeinseeker(homeRoom, mode) {
   return out;
 }
 
+function getSourceCreepSlotLimit(rec) {
+  var limit = MAX_VEINSEEKERS_PER_SOURCE;
+  if (rec && typeof rec.seats === 'number' && rec.seats > 0) {
+    limit = Math.min(limit, rec.seats);
+  }
+  return Math.max(1, limit);
+}
+
 function reserveSourceForQueue(homeRoom, sourceId) {
   var plan = ensureHomeMemory(homeRoom);
   var rec = sourceId ? plan.sources[sourceId] : null;
@@ -1587,9 +1650,11 @@ function reserveSourceForQueue(homeRoom, sourceId) {
     var needs = getSourcesNeedingVeinseeker(homeRoom, 'remote');
     rec = needs.length ? needs[0] : null;
   }
-  if (!rec || !rec.active || rec.assignedVeinseeker) return null;
+  if (!rec || !rec.active) return null;
   if (rec.mode === 'remote' && (!rec.targetRoom || rec.targetRoom === rec.homeRoom)) return null;
-  if (rec.queuedVeinseeker && rec.queuedUntil > Game.time) return null;
+  if (((rec.live || 0) + (rec.queued || 0)) >= getSourceCreepSlotLimit(rec)) return null;
+  if ((rec.desiredWork || SOURCE_WORK_TARGET) <= ((rec.liveWork || 0) + (rec.queuedWork || 0))) return null;
+  if (rec.queuedVeinseeker && rec.queuedUntil > Game.time && (rec.freeWork || 0) <= 0) return null;
   rec.queuedVeinseeker = 'queue:' + Game.time + ':' + rec.sourceId;
   rec.queuedUntil = Game.time + RESERVE_TTL;
   rec.status = 'queued';
@@ -1604,6 +1669,10 @@ function reserveSourceForQueue(homeRoom, sourceId) {
     routeDistance: rec.routeDistance,
     netIncome: rec.netIncome,
     spawnUsage: rec.spawnUsage,
+    desiredWork: rec.desiredWork || SOURCE_WORK_TARGET,
+    liveWork: rec.liveWork || 0,
+    queuedWork: rec.queuedWork || 0,
+    freeWork: rec.freeWork || Math.max(0, (rec.desiredWork || SOURCE_WORK_TARGET) - (rec.liveWork || 0) - (rec.queuedWork || 0)),
     activationReason: rec.activationReason,
     economics: rec.economics || null
   };
@@ -1611,7 +1680,7 @@ function reserveSourceForQueue(homeRoom, sourceId) {
 
 function unreserveSourceForQueue(homeRoom, sourceId) {
   var rec = getSourceRecord(homeRoom, sourceId);
-  if (!rec || rec.assignedVeinseeker) return false;
+  if (!rec) return false;
   rec.queuedVeinseeker = null;
   rec.queuedUntil = 0;
   if (rec.active) {
@@ -1634,7 +1703,6 @@ function claimSource(creep, sourceId, targetRoom) {
   rec.queuedUntil = 0;
   rec.status = 'assigned';
   rec.reason = 'claimed';
-  removeQueuedVeinseekerForSource(homeRoom, sourceId, rec.mode);
   writePlanDiagnostics(homeRoom);
   return true;
 }
@@ -1665,7 +1733,8 @@ function validateQueueItem(homeRoom, item) {
     if (rec.mode !== 'remote') return 'mode-mismatch';
     if (rec.targetRoom !== item.targetRoom) return 'source-target-mismatch';
     if (isRemoteUnsafe(item.targetRoom)) return 'room-unsafe';
-    if (rec.assignedVeinseeker && Game.creeps[rec.assignedVeinseeker]) return 'source-already-assigned';
+    if (((rec.live || 0) + (rec.queued || 0)) > getSourceCreepSlotLimit(rec)) return 'source-max-veinseekers';
+    if ((rec.desiredWork || SOURCE_WORK_TARGET) <= (rec.liveWork || 0)) return 'source-work-covered';
   }
   return null;
 }

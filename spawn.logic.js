@@ -29,8 +29,27 @@ var SquadFlagIntel = CombatSquads.SquadFlagIntel || null;
 var CoreConfig = require('core.config');
 var BodyUtils = require('core.body');
 var Roles = require('core.roles');
+var UpgraderRoleConfig = require('role.Upgrader.Config');
+var VeinseekerRoleConfig = require('role.Veinseeker.Config');
 // Body definitions now live in Spawn.BodyConfig.js (registry of role body lists).
 var BodyConfig = require('Spawn.BodyConfig');
+
+var UPGRADER_CONFIG = {
+  minUpgraders: UpgraderRoleConfig.UPGRADE_MIN_CREEPS || 1,
+  maxUpgraders: UpgraderRoleConfig.UPGRADE_MAX_CREEPS_DEFAULT || 4,
+  storageEnergyForExtraUpgraders: UpgraderRoleConfig.UPGRADE_STORAGE_EXTRA_UPGRADERS_AT || 50000,
+  storageEnergyForMaxUpgraders: UpgraderRoleConfig.UPGRADE_STORAGE_MAX_UPGRADERS_AT || 150000,
+  emergencyTicksToDowngrade: UpgraderRoleConfig.UPGRADE_DOWNGRADE_DANGER_TICKS || 5000,
+  debug: UpgraderRoleConfig.UPGRADE_SPAWN_DEBUG === true
+};
+
+var VEINSEEKER_CONFIG = {
+  targetWorkPartsPerSource: VeinseekerRoleConfig.VEINSEEKER_TARGET_WORK_PARTS_PER_SOURCE || 6,
+  minimumWorkPartsPerCreep: VeinseekerRoleConfig.VEINSEEKER_MINIMUM_WORK_PARTS_PER_CREEP || 2,
+  ignoreCreepWhenTicksToLiveBelow: VeinseekerRoleConfig.VEINSEEKER_IGNORE_TTL_BELOW || 100,
+  maxVeinseekersPerSource: VeinseekerRoleConfig.VEINSEEKER_MAX_PER_SOURCE || 4,
+  debug: VeinseekerRoleConfig.VEINSEEKER_SPAWN_DEBUG === true
+};
 
 function combatDebugEnabled() {
   return Boolean(CoreConfig && CoreConfig.settings && CoreConfig.settings.combat &&
@@ -145,6 +164,21 @@ function getBestBodyPlanForEnergy(roleName, energy, context) {
     var upgraderPlan = BodyUtils.getBestUpgraderBodyPlan(available, context.targetWorkParts, context);
     if (upgraderPlan && upgraderPlan.body && upgraderPlan.body.length) {
       return makeBodyPlan(canonicalRole, upgraderPlan.body, upgraderPlan.cost, -1, available);
+    }
+  }
+
+  if (canonicalRole === 'Veinseeker' && context && (context.targetWorkParts || context.minimumWorkPartsPerCreep)) {
+    var veinseekerPlan = BodyUtils.getBestVeinseekerBodyPlan(
+      available,
+      context.targetWorkParts || VEINSEEKER_CONFIG.targetWorkPartsPerSource,
+      {
+        mode: context.mode === 'remote' ? 'remote' : 'home',
+        minimumWorkPartsPerCreep: context.minimumWorkPartsPerCreep || VEINSEEKER_CONFIG.minimumWorkPartsPerCreep,
+        bodyPatternReason: context.bodyPatternReason || 'source-work-target'
+      }
+    );
+    if (veinseekerPlan && veinseekerPlan.body && veinseekerPlan.body.length) {
+      return makeBodyPlan(canonicalRole, veinseekerPlan.body, veinseekerPlan.cost, -1, available);
     }
   }
 
@@ -325,7 +359,7 @@ function spawnRole(spawn, roleName, availableEnergy, memory) {
       }
     }
     if (Logger.shouldLog(LOG_LEVEL.BASIC)) {
-      spawnLog.info('Spawned', canonicalRole, '=>', creepName);
+      spawnLog.info('Spawned', canonicalRole, '->', creepName);
     }
     return true;
   }
@@ -375,7 +409,7 @@ function normalizeSquadKey(id) {
 }
 
 // Novice tip: hide the boilerplate Memory guards so orchestration logic stays
-// focused on decisions, not on `if (!Memory.foo)` noise.
+// focused on decisions, not on repeated Memory guard noise.
 function ensureSquadMemory(id) {
   // Squad Memory is keyed as "SquadX" even when callers pass "X". This keeps
   // old flags and newer remote-defense buckets pointed at the same record.
@@ -598,6 +632,15 @@ function minEnergyFor(roleName, context) {
   var cacheKey = canonicalRole;
   if (canonicalRole === 'Veinseeker') {
     cacheKey += ':' + (context && context.mode === 'remote' ? 'remote' : 'home');
+    if (context && (context.targetWorkParts || context.minimumWorkPartsPerCreep)) {
+      var minimumWork = context.minimumWorkPartsPerCreep || VEINSEEKER_CONFIG.minimumWorkPartsPerCreep;
+      var minimumPlan = BodyUtils.getBestVeinseekerBodyPlan(10000, minimumWork, {
+        mode: context.mode === 'remote' ? 'remote' : 'home',
+        minimumWorkPartsPerCreep: minimumWork,
+        bodyPatternReason: 'minimum-source-miner'
+      });
+      return minimumPlan && minimumPlan.cost ? minimumPlan.cost : 200;
+    }
   }
   if (Object.prototype.hasOwnProperty.call(MIN_ENERGY_CACHE, cacheKey)) {
     return MIN_ENERGY_CACHE[cacheKey];
@@ -621,6 +664,8 @@ function minEnergyFor(roleName, context) {
 
 module.exports = {
   ROLE_CONFIGS: ROLE_CONFIGS,
+  UPGRADER_CONFIG: UPGRADER_CONFIG,
+  VEINSEEKER_CONFIG: VEINSEEKER_CONFIG,
   normalizeRole: normalizeRole,
   getBodyCost: getBodyCost,
   calculateBodyCost: calculateBodyCost,
