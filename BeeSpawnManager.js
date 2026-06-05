@@ -32,6 +32,7 @@ var TruckerConfig = require('role.Trucker.Config');
 var RepairConfig = require('role.Repair.Config');
 var QueenConfig = require('role.Queen.Config');
 var UpgraderConfig = require('role.Upgrader.Config');
+var BuilderConfig = require('role.Builder.Config');
 var SourceEnergyManager = require('SourceEnergy.Manager');
 var SourceWorkerManager = require('SourceWorker.Manager');
 var BeeToolbox = require('BeeToolbox');
@@ -1162,39 +1163,119 @@ function isVeinseekerRemoteRoomUnsafe(remoteName) {
 
 // Novice tip: keep state lookups tiny helpers so you can audit each role's math.
 // ------------------------------ Signals ---------------------------------
+function builderCfgNumber(name, fallback) {
+  var value = BuilderConfig && BuilderConfig[name];
+  return (typeof value === 'number' && isFinite(value)) ? value : fallback;
+}
+
+function getBuilderMaxByRcl(rcl) {
+  if (rcl <= 2) return builderCfgNumber('BUILDER_MAX_RCL2', 2);
+  if (rcl === 3) return builderCfgNumber('BUILDER_MAX_RCL3', 4);
+  if (rcl === 4) return builderCfgNumber('BUILDER_MAX_RCL4', 6);
+  if (rcl === 5) return builderCfgNumber('BUILDER_MAX_RCL5', 8);
+  return builderCfgNumber('BUILDER_MAX_RCL6_PLUS', 10);
+}
+
+function getStoredEnergyForBuilderQuota(room) {
+  var total = 0;
+  if (room && room.storage && room.storage.store) {
+    total += room.storage.store[RESOURCE_ENERGY] || 0;
+  }
+  if (room && room.terminal && room.terminal.store) {
+    total += room.terminal.store[RESOURCE_ENERGY] || 0;
+  }
+  return total;
+}
+
+function getConstructionProgressLeftForRoom(C, roomName) {
+  var sites = null;
+  var snap = C && C.roomSnapshots ? C.roomSnapshots[roomName] : null;
+  if (snap && snap.sites) sites = snap.sites;
+  else if (Game.rooms[roomName]) sites = Game.rooms[roomName].find(FIND_CONSTRUCTION_SITES);
+  if (!sites || !sites.length) return 0;
+
+  var total = 0;
+  for (var i = 0; i < sites.length; i++) {
+    var site = sites[i];
+    if (!site || site.my === false) continue;
+    total += Math.max(0, (site.progressTotal || 0) - (site.progress || 0));
+  }
+  return total;
+}
+
 function getBuilderNeed(C, room) {
   if (!room) return 0;
-  var local = C.roomSiteCounts[room.name] || 0;
+  var local = C && C.roomSiteCounts ? (C.roomSiteCounts[room.name] || 0) : 0;
   var remoteTotal = 0;
-  var remotes = C.remotesByHome[room.name] || [];
+  var progressLeft = getConstructionProgressLeftForRoom(C, room.name);
+  var remotes = C && C.remotesByHome ? (C.remotesByHome[room.name] || []) : [];
   for (var i = 0; i < remotes.length; i++) {
     var rn = remotes[i];
-    remoteTotal += (C.roomSiteCounts[rn] || 0);
+    remoteTotal += C && C.roomSiteCounts ? (C.roomSiteCounts[rn] || 0) : 0;
+    progressLeft += getConstructionProgressLeftForRoom(C, rn);
   }
   var totalSites = local + remoteTotal;
   var rcl = (room.controller && room.controller.level) || 0;
-  var maxByRcl = 4;
+  var maxByRcl = getBuilderMaxByRcl(rcl);
+  var storedEnergy = getStoredEnergyForBuilderQuota(room);
+  var reasons = [];
   var need = 0;
-
-  if (rcl <= 2) {
-    maxByRcl = 2;
-  } else if (rcl === 3) {
-    maxByRcl = 3;
-  }
 
   if (totalSites <= 0) {
     need = 0;
-  } else if (totalSites >= 15) {
-    need = 6;
-  } else if (totalSites >= 8) {
-    need = 5;
+    reasons.push('no-sites');
   } else {
-    need = 4;
+    need = builderCfgNumber('BUILDER_MIN_WITH_SITES', 4);
+    reasons.push('has-sites');
+
+    if (totalSites >= builderCfgNumber('BUILDER_MEDIUM_SITE_COUNT', 8) ||
+        progressLeft >= builderCfgNumber('BUILDER_MEDIUM_PROGRESS_LEFT', 10000)) {
+      need = Math.max(need, builderCfgNumber('BUILDER_MEDIUM_COUNT', 6));
+      reasons.push('medium-backlog');
+    }
+    if (totalSites >= builderCfgNumber('BUILDER_LARGE_SITE_COUNT', 15) ||
+        progressLeft >= builderCfgNumber('BUILDER_LARGE_PROGRESS_LEFT', 30000)) {
+      need = Math.max(need, builderCfgNumber('BUILDER_LARGE_COUNT', 8));
+      reasons.push('large-backlog');
+    }
+    if (totalSites >= builderCfgNumber('BUILDER_HUGE_SITE_COUNT', 30) ||
+        progressLeft >= builderCfgNumber('BUILDER_HUGE_PROGRESS_LEFT', 80000)) {
+      need = Math.max(need, builderCfgNumber('BUILDER_HUGE_COUNT', 10));
+      reasons.push('huge-backlog');
+    }
+
+    if (local > 0 && remoteTotal > 0) {
+      need += builderCfgNumber('BUILDER_REMOTE_SITE_BONUS', 1);
+      reasons.push('local-and-remote-sites');
+    }
+    if (storedEnergy >= builderCfgNumber('BUILDER_RICH_STORAGE_ENERGY', 50000)) {
+      need += builderCfgNumber('BUILDER_RICH_BONUS', 2);
+      reasons.push('rich-storage');
+    }
+  }
+
+  if (room.storage && storedEnergy < builderCfgNumber('BUILDER_LOW_STORAGE_ENERGY', 5000)) {
+    need = Math.min(need, builderCfgNumber('BUILDER_LOW_STORAGE_CAP', 4));
+    reasons.push('low-storage-cap');
   }
 
   if (need > maxByRcl) {
     need = maxByRcl;
+    reasons.push('rcl-cap');
   }
+
+  ensureRoomMemory(room.name).lastBuilderQuota = {
+    tick: Game.time,
+    localSites: local,
+    remoteSites: remoteTotal,
+    totalSites: totalSites,
+    progressLeft: progressLeft,
+    storedEnergy: storedEnergy,
+    rcl: rcl,
+    maxByRcl: maxByRcl,
+    need: need,
+    reasons: reasons
+  };
 
   if (tickEvery(DBG_EVERY)) {
     dlog('🧱 [Signal] builderNeed', fmt(room),

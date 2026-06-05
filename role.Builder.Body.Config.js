@@ -7,6 +7,8 @@
 
 var BodyParts = require('Spawn.BodyParts');
 module.exports = [
+  BodyParts.WorkBody(6, 12, 12),
+  BodyParts.WorkBody(4, 8, 8),
   BodyParts.WorkBody(3, 6, 9),
   BodyParts.WorkBody(2, 4, 6),
   BodyParts.WorkBody(2, 2, 4),
