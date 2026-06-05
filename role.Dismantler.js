@@ -11,10 +11,15 @@
 
 var BeeToolbox = require('BeeToolbox');
 var HarabiCreep = require('role.HarabiCreep');
+var BeeCombatIntel = require('BeeCombatIntel');
 
 function _isInvaderStruct(s) { return !!(s && s.owner && s.owner.username === 'Invader'); }
 function _isInvaderCore(s)   { return !!(s && s.structureType === STRUCTURE_INVADER_CORE); }
-function _isBashableDoor(s)  { return !!(s && (s.structureType === STRUCTURE_WALL || (s.structureType === STRUCTURE_RAMPART && _isInvaderStruct(s)))); }
+function _isPrimaryStruct(s) { return BeeCombatIntel && BeeCombatIntel.isPrimaryHostileStructure(s); }
+function _isBashableDoor(s)  {
+  return !!(s && (s.structureType === STRUCTURE_WALL ||
+    (s.structureType === STRUCTURE_RAMPART && (_isInvaderStruct(s) || _isPrimaryStruct(s)))));
+}
 
 var CONFIG = {
   reusePath: 12,
@@ -189,12 +194,38 @@ var roleDismantler = {
     if (!t || !t.pos) return false;
     if (_isInvaderCore(t)) return true;
     if (t.hits === undefined) return false; // not damageable
-    return _isInvaderStruct(t); // PvE fence: Invader only
+    if (_isInvaderStruct(t)) return true;
+    if (_isPrimaryStruct(t)) return true;
+    if (t.structureType === STRUCTURE_WALL || t.structureType === STRUCTURE_RAMPART) return true;
+    return false;
   },
 
   _pickNewTarget: function (creep) {
     // helper
     function closest(arr){ return (arr && arr.length) ? creep.pos.findClosestByPath(arr) : null; }
+    function bestByCombatScore(arr) {
+      var picked = BeeCombatIntel.pickBestTarget(creep, arr, { anchorPos: creep.pos });
+      return picked && picked.target ? picked.target : closest(arr);
+    }
+
+    // Player assault priority: disable towers first, then spawn/economy targets.
+    var primaryHigh = creep.room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) {
+        if (!_isPrimaryStruct(s)) return false;
+        return s.structureType === STRUCTURE_TOWER ||
+          s.structureType === STRUCTURE_SPAWN ||
+          s.structureType === STRUCTURE_STORAGE ||
+          s.structureType === STRUCTURE_TERMINAL ||
+          s.structureType === STRUCTURE_EXTENSION;
+      }
+    });
+    if (primaryHigh && primaryHigh.length) {
+      var primaryPick = bestByCombatScore(primaryHigh);
+      if (primaryPick) {
+        debugRing(primaryPick, CONFIG.COLORS.TARGET, "primary", 0.8);
+        return primaryPick;
+      }
+    }
 
     // 1) High-priority threats
     var towers = creep.room.find(FIND_HOSTILE_STRUCTURES, {
@@ -222,7 +253,17 @@ var roleDismantler = {
       }
     });
 
-    var pick = closest(towers) || closest(spawns) || closest(cores) || closest(others);
+    var primaryOther = creep.room.find(FIND_HOSTILE_STRUCTURES, {
+      filter: function (s) {
+        if (!_isPrimaryStruct(s)) return false;
+        if (s.hits === undefined) return false;
+        if (s.structureType === STRUCTURE_CONTROLLER) return false;
+        if (s.structureType === STRUCTURE_ROAD || s.structureType === STRUCTURE_CONTAINER) return false;
+        return true;
+      }
+    });
+
+    var pick = closest(towers) || closest(spawns) || closest(cores) || bestByCombatScore(primaryOther) || closest(others);
     if (pick) debugRing(pick, CONFIG.COLORS.TARGET, "pick", 0.8);
     return pick || null;
   },

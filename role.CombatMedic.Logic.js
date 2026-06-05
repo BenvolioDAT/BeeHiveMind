@@ -4,6 +4,7 @@
 var CFG = require('role.CombatMedic.Config');
 var CombatStaging = require('Combat.Staging');
 var HarabiCreep = require('role.HarabiCreep');
+var CombatSquads = require('Combat.Squads');
 
 function isCombatRole(creep, roleName) { return creep && creep.memory && creep.memory.role === roleName; }
 function wasRecentlyEngaging(creep) {
@@ -41,6 +42,19 @@ function getAssignedTargetRoom(creep) {
   return null;
 }
 
+function followSquadAnchor(creep) {
+  if (!creep || !CombatSquads || typeof CombatSquads.getAnchor !== 'function') return false;
+  var anchor = CombatSquads.getAnchor(creep);
+  if (!anchor) return false;
+  HarabiCreep.recordCombatMemory(creep, 'following', { pos: anchor });
+  HarabiCreep.moveCreep(creep, { pos: anchor, range: 1 }, {
+    intentType: 'combat',
+    range: 1,
+    ignoreCreeps: CFG.IGNORE_CREEPS
+  });
+  return true;
+}
+
 function run(creep) {
   if (!creep) return;
   if (creep.hits < creep.hitsMax) creep.heal(creep);
@@ -59,6 +73,7 @@ function run(creep) {
       });
       return;
     }
+    if (followSquadAnchor(creep)) return;
     setIdleMemory(creep);
     CombatStaging.moveToStaging(creep);
     return;

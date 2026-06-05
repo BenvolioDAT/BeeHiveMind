@@ -31,6 +31,7 @@ var BodyUtils = require('core.body');
 var Roles = require('core.roles');
 var UpgraderRoleConfig = require('role.Upgrader.Config');
 var VeinseekerRoleConfig = require('role.Veinseeker.Config');
+var BeeCombatIntel = require('BeeCombatIntel');
 // Body definitions now live in Spawn.BodyConfig.js (registry of role body lists).
 var BodyConfig = require('Spawn.BodyConfig');
 
@@ -428,6 +429,11 @@ function ensureSquadMemory(id) {
   return Memory.squads[key];
 }
 
+function combatCfgNumber(value, fallback) {
+  if (typeof value === 'number' && !isNaN(value)) return value;
+  return fallback;
+}
+
 // Teaching habit: keep combat math in one helper so adjusting threat levels
 // never requires scrolling through spawn orchestration code.
 /**
@@ -435,7 +441,7 @@ function ensureSquadMemory(id) {
  * ranged, and medic creeps. Spawn_Squad + BeeSpawnManager rely on this so the
  * formation stays consistent with intel scoring.
  */
-function desiredSquadLayout(score) {
+function desiredSquadLayout(score, targetRoom, missionType) {
   var threat = typeof score === 'number' ? score : 0;
   if (threat <= 0) return [];
   var melee = 1;
@@ -446,6 +452,22 @@ function desiredSquadLayout(score) {
   if (threat >= 18) medic = 2;
   if (threat >= 10 && threat < 22) archer = 1;
   else if (threat >= 22) archer = 2;
+
+  var spawnCfg = BeeCombatIntel && typeof BeeCombatIntel.getSpawnConfig === 'function'
+    ? BeeCombatIntel.getSpawnConfig()
+    : null;
+  var roomIntel = BeeCombatIntel && typeof BeeCombatIntel.getRoomCombatIntel === 'function'
+    ? BeeCombatIntel.getRoomCombatIntel(targetRoom)
+    : null;
+  if (spawnCfg && missionType === 'attackPlayer') {
+    melee = Math.max(0, combatCfgNumber(spawnCfg.attackSquadMeleeTarget, melee));
+    archer = Math.max(0, combatCfgNumber(spawnCfg.attackSquadArcherTarget, archer));
+    medic = Math.max(0, combatCfgNumber(spawnCfg.attackSquadMedicTarget, medic));
+  } else if (spawnCfg && roomIntel && roomIntel.primaryHostilePresent) {
+    melee = Math.max(0, combatCfgNumber(spawnCfg.defensiveMeleeTarget, melee));
+    archer = Math.max(0, combatCfgNumber(spawnCfg.defensiveArcherTarget, archer));
+    medic = Math.max(0, combatCfgNumber(spawnCfg.defensiveMedicTarget, medic));
+  }
 
   var order = [{ role: 'CombatMelee', need: melee }];
   if (archer > 0) order.push({ role: 'CombatArcher', need: archer });
@@ -485,7 +507,14 @@ function distanceTooFar(spawnRoomName, targetRoom) {
     console.log('[Spawn][distanceTooFar] unable to compute distance', originRoomName, targetRoomName, dist);
     return true;
   }
-  return dist > 3;
+  var maxDistance = 3;
+  if (BeeCombatIntel && typeof BeeCombatIntel.hasPrimaryHostileInRoom === 'function' &&
+      BeeCombatIntel.hasPrimaryHostileInRoom(targetRoomName) &&
+      typeof BeeCombatIntel.getPlayerConfig === 'function') {
+    var cfg = BeeCombatIntel.getPlayerConfig();
+    maxDistance = Math.max(1, Number(combatCfgNumber(cfg.maxAttackRoomDistance, 3)));
+  }
+  return dist > maxDistance;
 }
 
 function matchesSquadRole(mem, taskName) {
@@ -527,6 +556,16 @@ function stampSquadPlanMemory(S, layout, targetRoom, threatScore, flag) {
     var plan = layout[li];
     var needed = typeof plan.need === 'number' ? plan.need : 0;
     S.desiredCounts[plan.role] = needed;
+  }
+  if (BeeCombatIntel && BeeCombatIntel.hasPrimaryHostileInRoom &&
+      BeeCombatIntel.hasPrimaryHostileInRoom(targetRoom)) {
+    var playerCfg = BeeCombatIntel.getPlayerConfig();
+    S.mission = {
+      type: 'attackPlayer',
+      username: playerCfg.primaryHostileUsername || 'giaco',
+      targetRoom: targetRoom,
+      created: S.mission && S.mission.created ? S.mission.created : Game.time
+    };
   }
   S.lastEvaluated = Game.time;
 }
@@ -603,7 +642,9 @@ function Spawn_Squad(spawn, squadId) {
       'liveScore', live ? live.score : 0);
     return false;
   }
-  var layout = desiredSquadLayout(safeThreatScore);
+  var missionType = S && S.mission && S.mission.type ? S.mission.type : null;
+  if (!missionType && S && S.attackPlayer) missionType = 'attackPlayer';
+  var layout = desiredSquadLayout(safeThreatScore, targetRoom, missionType);
   if (!layout.length) return false;
 
   stampSquadPlanMemory(S, layout, targetRoom, safeThreatScore, flagData.flag);

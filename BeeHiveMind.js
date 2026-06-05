@@ -52,6 +52,7 @@ var CoreConfig          = require('core.config');
 var SourceEconomy       = require('Source.Economy');
 var BeeToolbox          = require('BeeToolbox');
 var CpuBudget           = require('core.cpuBudget');
+var BeeCombatIntel      = require('BeeCombatIntel');
 
 // Keep references to the role modules so validation can check the intended
 // mapping (e.g. a swapped import would surface as a role name mismatch).
@@ -460,6 +461,10 @@ function prepareTickCaches() {
     }
   }
 
+  var combatIntelByRoom = BeeCombatIntel && typeof BeeCombatIntel.scanVisibleRooms === 'function'
+    ? BeeCombatIntel.scanVisibleRooms()
+    : {};
+
   C.tick            = now;
   C.roomsOwned      = ownedRooms;
   C.roomsMap        = ownedMap;
@@ -485,6 +490,7 @@ function prepareTickCaches() {
   C.roomSiteCounts  = byRoom;
   C.totalSites      = totalSites;
   C.remotesByHome   = remotesByHome;
+  C.combatIntelByRoom = combatIntelByRoom;
 
   return C;
 }

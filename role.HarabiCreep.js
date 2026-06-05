@@ -13,6 +13,8 @@
 var MovementManager = require('Movement.Manager');
 var BeeToolbox = require('BeeToolbox');
 var Roles = require('core.roles');
+var CombatSquads = require('Combat.Squads');
+var BeeCombatIntel = require('BeeCombatIntel');
 
 var COMBAT_PART_POWER = {};
 COMBAT_PART_POWER[ATTACK] = ATTACK_POWER;
@@ -253,7 +255,8 @@ var HarabiCreep = {
     if (!room) return [];
     return room.find(FIND_HOSTILE_CREEPS, {
       filter: function (hostile) {
-        return hostile && hostile.owner && !HarabiCreep.isAlly(hostile) && HarabiCreep.isThreat(hostile);
+        return hostile && hostile.owner && !HarabiCreep.isAlly(hostile) &&
+          (HarabiCreep.isThreat(hostile) || BeeCombatIntel.isPrimaryHostileCreep(hostile));
       }
     });
   },
@@ -267,24 +270,32 @@ var HarabiCreep = {
 
   pickCombatTarget: function (creep) {
     if (!creep || !creep.room) return null;
-    var hostiles = HarabiCreep.findHostiles(creep.room);
-    if (!hostiles.length) return null;
-
-    var best = null;
-    var bestScore = -Infinity;
-    var bestRange = Infinity;
-    for (var i = 0; i < hostiles.length; i++) {
-      var hostile = hostiles[i];
-      var stat = HarabiCreep.getCombatStat(hostile);
-      var score = (stat.heal * 2) + stat.ranged + stat.attack;
-      var range = creep.pos.getRangeTo(hostile);
-      if (score > bestScore || (score === bestScore && range < bestRange)) {
-        best = hostile;
-        bestScore = score;
-        bestRange = range;
-      }
+    var shared = CombatSquads && typeof CombatSquads.sharedTarget === 'function'
+      ? CombatSquads.sharedTarget(creep)
+      : null;
+    if (shared && shared.pos && shared.pos.roomName === creep.pos.roomName) {
+      var attackableShared = BeeCombatIntel.getAttackableTargetForCreep(creep, shared);
+      creep.memory.combatTargetScore = BeeCombatIntel.getCombatTargetScore(creep, shared, {
+        anchorPos: creep.pos
+      });
+      BeeCombatIntel.drawTargetDebug(creep, shared, creep.memory.combatTargetScore, 'SQUAD TARGET');
+      return attackableShared;
     }
-    return best || creep.pos.findClosestByRange(hostiles);
+
+    var targets = BeeCombatIntel.collectHostileTargets(creep.room, {
+      includeStructures: true,
+      anchorPos: creep.pos
+    });
+    if (!targets.length) return null;
+
+    var picked = BeeCombatIntel.pickBestTarget(creep, targets, {
+      anchorPos: creep.pos
+    });
+    if (!picked || !picked.target) return creep.pos.findClosestByRange(targets);
+
+    creep.memory.combatTargetScore = picked.score;
+    BeeCombatIntel.drawTargetDebug(creep, picked.target, picked.score, null);
+    return BeeCombatIntel.getAttackableTargetForCreep(creep, picked.target);
   },
 
   recordCombatMemory: function (creep, status, target) {

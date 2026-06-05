@@ -32,6 +32,7 @@ var combatLog = CoreLogger.createLogger('CombatSquads', LOG_LEVEL.DEBUG);
  */
 
 var CoreConfig = require('core.config');
+var BeeCombatIntel = require('BeeCombatIntel');
 
 // --- Squad flag orchestration (ported from SquadFlagManager) ---------------
 var FLAG_CFG = {
@@ -192,6 +193,10 @@ function shouldTargetOwner(owner, avoidMap) {
   if (avoidMap && avoidMap[username]) return false;
   var myName = resolveMyUsername();
   if (myName && username === myName) return false;
+  if (BeeCombatIntel && BeeCombatIntel.isPrimaryHostileUsername &&
+      BeeCombatIntel.isPrimaryHostileUsername(owner.username)) {
+    return BeeCombatIntel.getPlayerConfig().aggressiveMode !== false;
+  }
   var settings = combatSettings();
   if (username === 'invader') {
     return settings.ALLOW_INVADERS_IN_FOREIGN_ROOMS !== false;
@@ -250,7 +255,10 @@ function computeThreatScore(candidates) {
   var creepScore = (candidates.creeps ? candidates.creeps.length : 0) * 5;
   var structScore = (candidates.structures ? candidates.structures.length : 0) * 3;
   var powerScore = (candidates.power ? candidates.power.length : 0) * 7;
-  return creepScore + structScore + powerScore;
+  var scoredThreat = BeeCombatIntel && typeof BeeCombatIntel.getCandidateThreatScore === 'function'
+    ? BeeCombatIntel.getCandidateThreatScore(candidates, null)
+    : 0;
+  return creepScore + structScore + powerScore + scoredThreat;
 }
 
 /**
@@ -574,7 +582,7 @@ function threatScoreForRoom(roomName) {
   var rec = rooms[roomName];
   if (!rec || typeof rec.lastScore !== 'number') return 0;
   var score = rec.lastScore;
-  if (!Number.isFinite(score)) return 0;
+  if (typeof score !== 'number' || isNaN(score)) return 0;
   if (score <= 0) return 0;
   var lastThreatTick = rec.lastThreatAt || rec.lastSeen || 0;
   if (!lastThreatTick) return 0;
@@ -733,6 +741,7 @@ function resolveTargetRoomForSquad(flagName, bucket, intel) {
 function shouldCleanupSquad(flagName, bucket, intel) {
   if (!flagName || !bucket) return false;
   if (bucket.autoDefense) return false;
+  if (bucket.attackPlayer) return false;
   if (squadHasLiveMembers(flagName)) return false;
   var targetRoom = resolveTargetRoomForSquad(flagName, bucket, intel);
   if (targetRoom && threatScoreForRoom(targetRoom) > 0) return false;
@@ -794,8 +803,8 @@ function ensureAutoDefenseForRoom(room) {
   if (candidates.creeps) mobile += candidates.creeps.length;
   if (candidates.power) mobile += candidates.power.length;
 
-  // If no mobile threats remain, reset the auto-defense bookkeeping and let
-  // the squad memory clean itself up once the last defenders expire.
+  // If no mobile threats remain, reset the auto-defense bookkeeping. The squad
+  // memory cleans itself up once the last defenders expire.
   var bucket = Memory.squads ? Memory.squads[flagName] : null;
   if (mobile <= 0) {
     if (bucket && bucket.autoDefense) {
@@ -928,50 +937,16 @@ function pickByRole(creeps, roleName, excludeId) {
 }
 
 function scoreCreep(target, anchorPos) {
-  // Teaching moment: scoring systems are a great way to express intent.
-  // Instead of deeply nested if/else statements we assign weights to traits
-  // and let math pick the winner.
-  if (!target) return -1000000;
-  var score = 0;
-  var heal = target.getActiveBodyparts ? target.getActiveBodyparts(HEAL) : 0;
-  var ranged = target.getActiveBodyparts ? target.getActiveBodyparts(RANGED_ATTACK) : 0;
-  var melee = target.getActiveBodyparts ? target.getActiveBodyparts(ATTACK) : 0;
-  var tough = target.getActiveBodyparts ? target.getActiveBodyparts(TOUGH) : 0;
-  score += heal * 600;
-  score += ranged * 300;
-  score += melee * 150;
-  score -= tough * 25;
-  score += (target.hitsMax || 0) - (target.hits || 0);
-  if (anchorPos) score -= anchorPos.getRangeTo(target) * 5;
-  return score;
+  // Shared scoring keeps melee, archers, towers, and squad focus fire aligned.
+  return BeeCombatIntel.getCombatTargetScore(null, target, { anchorPos: anchorPos });
 }
 
 function scorePowerCreep(powerCreep, anchorPos) {
-  if (!powerCreep) return -1000000;
-  var score = 600;
-  if (powerCreep.powers) {
-    var abilityCount = Object.keys(powerCreep.powers).length;
-    score += abilityCount * 75;
-  }
-  if (powerCreep.hitsMax && powerCreep.hits != null) {
-    score += (powerCreep.hitsMax - powerCreep.hits);
-  }
-  if (anchorPos) score -= anchorPos.getRangeTo(powerCreep) * 5;
-  return score;
+  return BeeCombatIntel.getCombatTargetScore(null, powerCreep, { anchorPos: anchorPos });
 }
 
 function scoreStructure(structure, anchorPos) {
-  if (!structure) return -1000000;
-  var score = 0;
-  var type = structure.structureType || '';
-  if (type === STRUCTURE_INVADER_CORE) score += 1200;
-  if (type === STRUCTURE_TOWER) score += 800;
-  if (type === STRUCTURE_SPAWN) score += 500;
-  if (structure.hitsMax && structure.hits != null) {
-    score += (structure.hitsMax - structure.hits);
-  }
-  if (anchorPos) score -= anchorPos.getRangeTo(structure) * 5;
-  return score;
+  return BeeCombatIntel.getCombatTargetScore(null, structure, { anchorPos: anchorPos });
 }
 
 // --- CombatAPI ------------------------------------------------------------
@@ -1148,14 +1123,26 @@ function focusFireTarget(flagName) {
 
   var nextId = null;
   if (room) {
-    var pick = getAttackTarget(room, avoid);
-    if (pick) {
-      nextId = pick;
+    var anchorPos = null;
+    if (formation) {
+      var anchorLeader = formation.leader ? Game.getObjectById(formation.leader) : null;
+      var anchorBuddy = formation.buddy ? Game.getObjectById(formation.buddy) : null;
+      if (anchorLeader && anchorLeader.pos) anchorPos = anchorLeader.pos;
+      else if (anchorBuddy && anchorBuddy.pos) anchorPos = anchorBuddy.pos;
     }
+    if (!anchorPos && bucket && bucket.rally) anchorPos = deserializePos(bucket.rally);
+    if (!anchorPos && room.controller) anchorPos = room.controller.pos;
+    if (!anchorPos) anchorPos = new RoomPosition(25, 25, room.name);
+
+    var focusCandidates = gatherHostileCandidates(room, avoid);
+    var focusPick = BeeCombatIntel.updateSquadCombatTarget(flagName, room, anchorPos, focusCandidates, {
+      avoidMap: avoid
+    });
+    if (focusPick && focusPick.targetId) nextId = focusPick.targetId;
     bucket.lastSeenTick = Game.time;
   }
 
-  if (!nextId && currentObj) {
+  if (!nextId && currentObj && !room) {
     nextId = currentObj.id;
   }
 

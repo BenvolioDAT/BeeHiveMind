@@ -40,6 +40,7 @@ var BodyUtils = require('core.body');
 var CombatSquads = require('Combat.Squads');
 var Roles = require('core.roles');
 var SquadFlagIntel = CombatSquads.SquadFlagIntel || null;
+var BeeCombatIntel = require('BeeCombatIntel');
 
 // --------------------------- Tunables & Constants ------------------------
 var QUEUE_RETRY_COOLDOWN  = 5;
@@ -225,6 +226,10 @@ function countQueuedRemoteVeinseekers(C, roomName) {
 function isRemoteDefenseTargetAllowed(targetRoom) {
   var myName = getMyUsernameForSpawnManager();
   var allowPvp = Boolean(CoreConfig && CoreConfig.ALLOW_PVP);
+  var combatIntel = BeeCombatIntel && typeof BeeCombatIntel.getRoomCombatIntel === 'function'
+    ? BeeCombatIntel.getRoomCombatIntel(targetRoom)
+    : null;
+  if (combatIntel && combatIntel.primaryHostilePresent) return true;
   var mem = Memory.rooms && Memory.rooms[targetRoom] ? Memory.rooms[targetRoom] : null;
   var intel = mem && mem.intel ? mem.intel : null;
   var owner = intel && intel.owner ? intel.owner : null;
@@ -279,6 +284,72 @@ function gatherRemoteDefensePlans() {
   }
   picks.sort(function (a, b) { return b.score - a.score; });
   return picks;
+}
+
+function serializeRoomPositionForSpawn(pos) {
+  if (!pos) return null;
+  return { x: pos.x, y: pos.y, roomName: pos.roomName };
+}
+
+function getStoredEnergyForCombatSpawn(room) {
+  var total = 0;
+  if (room && room.storage && room.storage.store) total += room.storage.store[RESOURCE_ENERGY] || 0;
+  if (room && room.terminal && room.terminal.store) total += room.terminal.store[RESOURCE_ENERGY] || 0;
+  return total;
+}
+
+function countPrimaryAttackSquads() {
+  if (!Memory.squads) return 0;
+  var count = 0;
+  for (var squadName in Memory.squads) {
+    if (!Object.prototype.hasOwnProperty.call(Memory.squads, squadName)) continue;
+    if (Memory.squads[squadName] && Memory.squads[squadName].attackPlayer) count++;
+  }
+  return count;
+}
+
+function combatCfgNumber(value, fallback) {
+  if (typeof value === 'number' && !isNaN(value)) return value;
+  return fallback;
+}
+
+function ensurePrimaryHostileAttackSquad(room) {
+  if (!room || !BeeCombatIntel || typeof BeeCombatIntel.pickPrimaryHostileTargetRoom !== 'function') return null;
+  var spawnCfg = BeeCombatIntel.getSpawnConfig();
+  if (!spawnCfg || spawnCfg.enableGiacoResponse === false) return null;
+  if (!room.controller || (room.controller.level || 0) < (spawnCfg.minRclForAttackSquad || 4)) return null;
+  if (getStoredEnergyForCombatSpawn(room) < (spawnCfg.minEnergyStorageForAttackSquad || 50000)) return null;
+
+  var picked = BeeCombatIntel.pickPrimaryHostileTargetRoom(room.name);
+  if (!picked || !picked.roomName || picked.roomName === room.name) return null;
+
+  var maxSquads = Math.max(1, spawnCfg.maxCombatSquads || 1);
+  var squadName = 'SquadGiaco';
+  if (countPrimaryAttackSquads() >= maxSquads &&
+      (!Memory.squads || !Memory.squads[squadName] || !Memory.squads[squadName].attackPlayer)) {
+    return null;
+  }
+
+  if (!Memory.squads) Memory.squads = {};
+  if (!Memory.squads[squadName]) Memory.squads[squadName] = {};
+  var bucket = Memory.squads[squadName];
+  var playerCfg = BeeCombatIntel.getPlayerConfig();
+  bucket.remoteDefense = true;
+  bucket.attackPlayer = true;
+  bucket.planType = 'ATTACK_PLAYER';
+  bucket.targetRoom = picked.roomName;
+  bucket.lastKnownScore = Math.max(bucket.lastKnownScore || 0, picked.score || 0);
+  bucket.lastSeenTick = Game.time;
+  bucket.rally = serializeRoomPositionForSpawn(room.controller ? room.controller.pos : new RoomPosition(25, 25, room.name));
+  bucket.target = { x: 25, y: 25, roomName: picked.roomName };
+  bucket.targetPos = bucket.target;
+  bucket.mission = {
+    type: 'attackPlayer',
+    username: playerCfg.primaryHostileUsername || 'giaco',
+    targetRoom: picked.roomName,
+    created: bucket.mission && bucket.mission.created ? bucket.mission.created : Game.time
+  };
+  return bucket;
 }
 
 function writeRemoteDefenseDiag(roomName, diag) {
@@ -1617,6 +1688,12 @@ function computeLocalDefenseQuotas(room) {
   var threat = getLocalDefenseThreat(room);
   var hasThreat = threat > 0;
   var energyCap = (room && room.energyCapacityAvailable) || 0;
+  var spawnCfg = BeeCombatIntel && typeof BeeCombatIntel.getSpawnConfig === 'function'
+    ? BeeCombatIntel.getSpawnConfig()
+    : null;
+  var giacoActive = BeeCombatIntel && typeof BeeCombatIntel.hasPrimaryHostileInRoom === 'function'
+    ? BeeCombatIntel.hasPrimaryHostileInRoom(room.name)
+    : false;
 
   if (!hasThreat) {
     return {
@@ -1629,6 +1706,12 @@ function computeLocalDefenseQuotas(room) {
   var combatMelee = energyCap >= 550 ? 2 : 1;
   var combatArcher = energyCap >= 800 ? 1 : 0;
   var combatMedic = combatMelee > 0 ? (energyCap >= 800 ? 1 : 0) : 0;
+
+  if (giacoActive && spawnCfg && spawnCfg.enableGiacoResponse !== false) {
+    combatMelee = Math.max(combatMelee, combatCfgNumber(spawnCfg.defensiveMeleeTarget, 1));
+    combatArcher = Math.max(combatArcher, combatCfgNumber(spawnCfg.defensiveArcherTarget, 2));
+    combatMedic = Math.max(combatMedic, combatCfgNumber(spawnCfg.defensiveMedicTarget, 1));
+  }
 
   return {
     CombatMelee: combatMelee,
@@ -3272,6 +3355,9 @@ function runSpawnPass(C) {
       } else if (hasBaseRoleDeficit(C, roomName)) {
         diag.skippedReasons.push('baseRoleDeficit');
       } else {
+        // Economy is stable enough for combat. Refresh the giaco attack plan
+        // before ranking remote-defense squads so it can be spawned this tick.
+        ensurePrimaryHostileAttackSquad(spawner.room);
         var remotePlans = gatherRemoteDefensePlans();
         if (!remotePlans.length) {
           diag.skippedReasons.push('noEligiblePlans');

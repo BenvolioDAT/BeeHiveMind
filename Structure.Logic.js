@@ -25,6 +25,7 @@
 // Tower Logic (merged from tower.logic.js)
 // --------------------------------------------------
 var CoreSelectors = require('core.selectors');
+var BeeCombatIntel = require('BeeCombatIntel');
 
 var CFG = Object.freeze({
   DEBUG_SAY: true,
@@ -161,11 +162,23 @@ module.exports = StructureLogic;
 
 // Tower helper functions
 function fireAllTowers(towers, hostiles) {
+  var sharedPick = null;
+  if (towers && towers.length && BeeCombatIntel && typeof BeeCombatIntel.pickBestTarget === 'function') {
+    sharedPick = BeeCombatIntel.pickBestTarget(towers[0], hostiles, {
+      anchorPos: towers[0].pos
+    });
+  }
+  var sharedTarget = sharedPick && sharedPick.target ? sharedPick.target : null;
+  if (!sharedTarget && BeeCombatIntel && typeof BeeCombatIntel.pickBestTarget === 'function') {
+    // If scoring rejected every hostile as an ally/self target, do not fall
+    // back to "closest hostile" and accidentally shoot a friendly player.
+    return;
+  }
   for (var i = 0; i < towers.length; i++) {
     var tower = towers[i];
     var energy = tower.store.getUsedCapacity(RESOURCE_ENERGY) || 0;
     if (energy < CFG.ATTACK_MIN) continue;
-    var foe = tower.pos.findClosestByRange(hostiles);
+    var foe = sharedTarget || tower.pos.findClosestByRange(hostiles);
     if (!foe) continue;
     tower.attack(foe);
     _tsay(tower, "ATK");

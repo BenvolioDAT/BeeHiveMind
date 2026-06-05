@@ -67,6 +67,28 @@ CoreConfig.settings = Object.freeze({
     STAGING_SLOT_RADIUS: 3,
     STAGING_REPLAN_TICKS: 1500,
     STAGING_FAILED_REPLAN_TICKS: 250,
+    COMBAT_PLAYER_CONFIG: Object.freeze({
+      primaryHostileUsername: 'giaco',
+      aggressiveMode: true,
+      debugCombatTargets: false,
+      stickyTargetTicks: 7,
+      primarySwitchScoreBonus: 2500,
+      combatIntelScanInterval: 10,
+      combatIntelTtl: 5000,
+      maxAttackRoomDistance: 3
+    }),
+    COMBAT_SPAWN_CONFIG: Object.freeze({
+      enableGiacoResponse: true,
+      minEnergyStorageForAttackSquad: 50000,
+      minRclForAttackSquad: 4,
+      maxCombatSquads: 1,
+      defensiveMeleeTarget: 1,
+      defensiveArcherTarget: 2,
+      defensiveMedicTarget: 1,
+      attackSquadMeleeTarget: 1,
+      attackSquadArcherTarget: 2,
+      attackSquadMedicTarget: 1
+    }),
   }),
   pixels: Object.freeze({
     /** Toggle CPU bucket based pixel generation. */
